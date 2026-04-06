@@ -4,7 +4,6 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
-	"syscall"
 
 	"github.com/nocktechnologies/nocklock/internal/version"
 	"github.com/spf13/cobra"
@@ -41,12 +40,9 @@ var wrapCmd = &cobra.Command{
 		if exitErr, ok := err.(*exec.ExitError); ok {
 			code := exitErr.ExitCode()
 			if code < 0 {
-				// Preserve signal semantics: use 128 + signal when available.
-				if ws, ok := exitErr.Sys().(syscall.WaitStatus); ok && ws.Signaled() {
-					code = 128 + int(ws.Signal())
-				} else {
-					code = 1
-				}
+				// Negative exit code means signal termination (Unix) or abnormal exit.
+				// Fall back to 1 for cross-platform safety.
+				code = 1
 			}
 			cmd.SilenceErrors = true
 			cmd.SilenceUsage = true
