@@ -4,7 +4,11 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"path/filepath"
+	"strings"
 
+	"github.com/nocktechnologies/nocklock/internal/config"
+	"github.com/nocktechnologies/nocklock/internal/fence/secrets"
 	"github.com/nocktechnologies/nocklock/internal/version"
 	"github.com/spf13/cobra"
 )
@@ -26,29 +30,55 @@ var wrapCmd = &cobra.Command{
 			return fmt.Errorf("no command specified. Usage: nocklock wrap -- <command> [args...]")
 		}
 
-		fmt.Fprintf(os.Stderr, "%s — fences not yet active (coming in PR #3-6)\n", version.BuildInfo())
+		// Attempt to load config for fence setup.
+		configPath := filepath.Join(config.Dir, config.File)
+		cfg, err := config.Load(configPath)
+
+		var childEnv []string
+		if err != nil {
+			// No config or bad config — warn and run passthrough.
+			fmt.Fprintf(os.Stderr, "%s — no config found, running without fences\n", version.BuildInfo())
+			childEnv = os.Environ()
+		} else {
+			// Apply secret fence.
+			fence, fenceErr := secrets.NewFence(cfg.Secrets.Pass, cfg.Secrets.Block)
+			if fenceErr != nil {
+				return fmt.Errorf("invalid secret fence config: %w", fenceErr)
+			}
+			var blocked []string
+			childEnv, blocked = fence.Filter(os.Environ())
+
+			if len(blocked) > 0 {
+				fmt.Fprintf(os.Stderr, "NockLock: secret fence active — blocked %d environment variable(s)\n", len(blocked))
+				if cfg.Logging.Level == "debug" {
+					fmt.Fprintf(os.Stderr, "  blocked: %s\n", strings.Join(blocked, ", "))
+				}
+			} else {
+				fmt.Fprintf(os.Stderr, "NockLock: secret fence active — no variables blocked\n")
+			}
+		}
 
 		child := exec.Command(args[0], args[1:]...)
+		child.Env = childEnv
 		child.Stdin = os.Stdin
 		child.Stdout = os.Stdout
 		child.Stderr = os.Stderr
 
-		err := child.Run()
-		if err == nil {
-			return nil
-		}
-		if exitErr, ok := err.(*exec.ExitError); ok {
-			code := exitErr.ExitCode()
-			if code < 0 {
-				// Negative exit code means signal termination (Unix) or abnormal exit.
-				// Fall back to 1 for cross-platform safety.
-				code = 1
+		if err := child.Run(); err != nil {
+			if exitErr, ok := err.(*exec.ExitError); ok {
+				code := exitErr.ExitCode()
+				if code < 0 {
+					// Negative exit code means signal termination (Unix) or abnormal exit.
+					// Fall back to 1 for cross-platform safety.
+					code = 1
+				}
+				cmd.SilenceErrors = true
+				cmd.SilenceUsage = true
+				return &exitCodeError{code: code}
 			}
-			cmd.SilenceErrors = true
-			cmd.SilenceUsage = true
-			return &exitCodeError{code: code}
+			return fmt.Errorf("failed to run %q: %w", args[0], err)
 		}
-		return fmt.Errorf("failed to run %q: %w", args[0], err)
+		return nil
 	},
 }
 
