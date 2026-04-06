@@ -9,8 +9,8 @@ import (
 	"github.com/spf13/cobra"
 )
 
-// exitCodeError carries a child process exit code through cobra without calling os.Exit
-// inside a RunE handler, which would bypass deferred cleanup.
+// exitCodeError carries a child process exit code through cobra, avoiding os.Exit
+// inside RunE so that any future deferred cleanup in the call chain can run.
 type exitCodeError struct {
 	code int
 }

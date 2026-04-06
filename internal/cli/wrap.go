@@ -38,10 +38,15 @@ var wrapCmd = &cobra.Command{
 			return nil
 		}
 		if exitErr, ok := err.(*exec.ExitError); ok {
-			// Return the exit code to main via cobra; os.Exit is called there.
+			code := exitErr.ExitCode()
+			if code < 0 {
+				// Negative exit code means the child was killed by a signal.
+				fmt.Fprintf(os.Stderr, "nocklock: child process killed by signal\n")
+				code = 1
+			}
 			cmd.SilenceErrors = true
 			cmd.SilenceUsage = true
-			return &exitCodeError{code: exitErr.ExitCode()}
+			return &exitCodeError{code: code}
 		}
 		return fmt.Errorf("failed to run %q: %w", args[0], err)
 	},

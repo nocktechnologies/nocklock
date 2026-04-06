@@ -24,7 +24,9 @@ var configCmd = &cobra.Command{
 			return fmt.Errorf("failed to read config at %s: %w", configPath, err)
 		}
 
-		os.Stdout.Write(data)
+		if _, err := os.Stdout.Write(data); err != nil {
+			return fmt.Errorf("failed to write config to stdout: %w", err)
+		}
 		return nil
 	},
 }

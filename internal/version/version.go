@@ -1,11 +1,12 @@
+// Package version provides build version information for NockLock.
 package version
 
 import "fmt"
 
-// Version is set at build time via ldflags.
+// Version defaults to "0.1.0" and can be overridden at build time via ldflags.
 var Version = "0.1.0"
 
-// BuildInfo returns the formatted version string.
+// BuildInfo returns a human-readable version string in the form "NockLock vX.Y.Z (dev)".
 func BuildInfo() string {
 	return fmt.Sprintf("NockLock v%s (dev)", Version)
 }

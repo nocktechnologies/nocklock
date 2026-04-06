@@ -3,7 +3,10 @@ package config
 import (
 	"os"
 	"path/filepath"
+	"reflect"
 	"testing"
+
+	"github.com/BurntSushi/toml"
 )
 
 func TestParseConfig(t *testing.T) {
@@ -110,5 +113,31 @@ func TestConfigNotFound(t *testing.T) {
 	_, err := Load("/nonexistent/path/config.toml")
 	if err == nil {
 		t.Fatal("expected error for missing config, got nil")
+	}
+}
+
+func TestConfigInvalidTOML(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "bad.toml")
+	if err := os.WriteFile(path, []byte("not [valid toml !!!"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := Load(path)
+	if err == nil {
+		t.Fatal("expected error for invalid TOML, got nil")
+	}
+	if cfg != nil {
+		t.Error("expected nil config on parse error")
+	}
+}
+
+func TestDefaultTOMLMatchesDefaultConfig(t *testing.T) {
+	var parsed Config
+	if err := toml.Unmarshal([]byte(DefaultTOML()), &parsed); err != nil {
+		t.Fatalf("DefaultTOML is invalid TOML: %v", err)
+	}
+	expected := DefaultConfig()
+	if !reflect.DeepEqual(parsed, expected) {
+		t.Error("DefaultTOML() does not produce the same config as DefaultConfig()")
 	}
 }

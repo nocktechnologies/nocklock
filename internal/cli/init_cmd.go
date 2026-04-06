@@ -29,10 +29,14 @@ var initCmd = &cobra.Command{
 			}
 			return fmt.Errorf("failed to create config at %s: %w", configPath, err)
 		}
-		defer f.Close()
-
 		if _, err := f.WriteString(config.DefaultTOML()); err != nil {
+			f.Close()
+			os.Remove(configPath) // best-effort cleanup of partial file
 			return fmt.Errorf("failed to write config at %s: %w", configPath, err)
+		}
+
+		if err := f.Close(); err != nil {
+			return fmt.Errorf("failed to finalize config at %s: %w", configPath, err)
 		}
 
 		fmt.Printf("NockLock initialized. Config at %s\n", configPath)
