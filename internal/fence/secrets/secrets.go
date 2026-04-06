@@ -2,6 +2,7 @@
 package secrets
 
 import (
+	"fmt"
 	"path/filepath"
 	"strings"
 )
@@ -13,8 +14,19 @@ type Fence struct {
 }
 
 // NewFence creates a secret fence from config patterns.
-func NewFence(pass, block []string) *Fence {
-	return &Fence{PassPatterns: pass, BlockPatterns: block}
+// Returns an error if any pattern is an invalid glob (fail closed).
+func NewFence(pass, block []string) (*Fence, error) {
+	for _, p := range pass {
+		if _, err := filepath.Match(p, ""); err != nil {
+			return nil, fmt.Errorf("invalid pass pattern %q: %w", p, err)
+		}
+	}
+	for _, p := range block {
+		if _, err := filepath.Match(p, ""); err != nil {
+			return nil, fmt.Errorf("invalid block pattern %q: %w", p, err)
+		}
+	}
+	return &Fence{PassPatterns: pass, BlockPatterns: block}, nil
 }
 
 // Filter takes the full environment (os.Environ() format: "KEY=VALUE")
