@@ -1,6 +1,7 @@
 package cli
 
 import (
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -17,16 +18,20 @@ var statusCmd = &cobra.Command{
 		configPath := filepath.Join(config.Dir, config.File)
 		cfg, err := config.Load(configPath)
 		if err != nil {
-			fmt.Fprintln(os.Stderr, "No config found. Run 'nocklock init' first.")
-			return nil
+			if errors.Is(err, os.ErrNotExist) {
+				fmt.Fprintln(os.Stderr, "No config found. Run 'nocklock init' first.")
+				return nil
+			}
+			return fmt.Errorf("failed to load config: %w", err)
 		}
 
 		fmt.Println(version.BuildInfo())
 
 		// Secret fence status
+		passCount := len(cfg.Secrets.Pass)
 		blockCount := len(cfg.Secrets.Block)
-		if blockCount > 0 {
-			fmt.Printf("Secret fence: active (blocking %d patterns)\n", blockCount)
+		if passCount > 0 || blockCount > 0 {
+			fmt.Printf("Secret fence: active (pass %d, block %d patterns)\n", passCount, blockCount)
 		} else {
 			fmt.Println("Secret fence: not configured")
 		}

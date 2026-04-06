@@ -1,6 +1,7 @@
 package cli
 
 import (
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
@@ -36,9 +37,14 @@ var wrapCmd = &cobra.Command{
 
 		var childEnv []string
 		if err != nil {
-			// No config or bad config — warn and run passthrough.
-			fmt.Fprintf(os.Stderr, "%s — no config found, running without fences\n", version.BuildInfo())
-			childEnv = os.Environ()
+			if errors.Is(err, os.ErrNotExist) {
+				// No config file — warn and run passthrough.
+				fmt.Fprintf(os.Stderr, "%s — no config found, running without fences\n", version.BuildInfo())
+				childEnv = os.Environ()
+			} else {
+				// Config exists but is invalid — fail closed.
+				return fmt.Errorf("failed to load config: %w", err)
+			}
 		} else {
 			// Apply secret fence.
 			fence, fenceErr := secrets.NewFence(cfg.Secrets.Pass, cfg.Secrets.Block)
@@ -76,6 +82,8 @@ var wrapCmd = &cobra.Command{
 				cmd.SilenceUsage = true
 				return &exitCodeError{code: code}
 			}
+			cmd.SilenceErrors = true
+			cmd.SilenceUsage = true
 			return fmt.Errorf("failed to run %q: %w", args[0], err)
 		}
 		return nil
