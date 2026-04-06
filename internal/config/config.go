@@ -1,4 +1,4 @@
-// Package config handles TOML configuration parsing for NockLock.
+// Package config handles TOML configuration parsing and defaults for NockLock.
 package config
 
 import (

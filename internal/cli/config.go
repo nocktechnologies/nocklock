@@ -20,7 +20,7 @@ var configCmd = &cobra.Command{
 				fmt.Println("No config found. Run `nocklock init` to create one.")
 				return nil
 			}
-			return fmt.Errorf("failed to read config: %w", err)
+			return fmt.Errorf("failed to read config at %s: %w", configPath, err)
 		}
 
 		fmt.Print(string(data))

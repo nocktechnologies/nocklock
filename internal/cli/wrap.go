@@ -13,7 +13,8 @@ var wrapCmd = &cobra.Command{
 	Use:   "wrap -- <command> [args...]",
 	Short: "Wrap a command with NockLock fences",
 	Long:  "Wraps an AI agent command with filesystem, network, and secret isolation.",
-	// Disable flag parsing after -- so child command flags aren't consumed by cobra.
+	// Disable all flag parsing so every token is passed through as a raw argument.
+	// Cobra will not consume any flags; we manually strip the leading "--" below.
 	DisableFlagParsing: true,
 	RunE: func(cmd *cobra.Command, args []string) error {
 		// Strip leading "--" if present
@@ -32,14 +33,17 @@ var wrapCmd = &cobra.Command{
 		child.Stdout = os.Stdout
 		child.Stderr = os.Stderr
 
-		if err := child.Run(); err != nil {
-			if exitErr, ok := err.(*exec.ExitError); ok {
-				os.Exit(exitErr.ExitCode())
-			}
-			return fmt.Errorf("failed to run command: %w", err)
+		err := child.Run()
+		if err == nil {
+			return nil
 		}
-
-		return nil
+		if exitErr, ok := err.(*exec.ExitError); ok {
+			// Return the exit code to main via cobra; os.Exit is called there.
+			cmd.SilenceErrors = true
+			cmd.SilenceUsage = true
+			return &exitCodeError{code: exitErr.ExitCode()}
+		}
+		return fmt.Errorf("failed to run %q: %w", args[0], err)
 	},
 }
 

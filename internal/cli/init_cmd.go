@@ -16,17 +16,23 @@ var initCmd = &cobra.Command{
 		nockDir := ".nock"
 		configPath := filepath.Join(nockDir, "config.toml")
 
-		if _, err := os.Stat(configPath); err == nil {
-			fmt.Printf("Config already exists at %s\n", configPath)
-			return nil
-		}
-
 		if err := os.MkdirAll(nockDir, 0o755); err != nil {
 			return fmt.Errorf("failed to create %s directory: %w", nockDir, err)
 		}
 
-		if err := os.WriteFile(configPath, []byte(config.DefaultTOML()), 0o644); err != nil {
-			return fmt.Errorf("failed to write config: %w", err)
+		// Use O_CREATE|O_EXCL for atomic create-or-fail, avoiding TOCTOU race.
+		f, err := os.OpenFile(configPath, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o644)
+		if err != nil {
+			if os.IsExist(err) {
+				fmt.Printf("Config already exists at %s\n", configPath)
+				return nil
+			}
+			return fmt.Errorf("failed to create config at %s: %w", configPath, err)
+		}
+		defer f.Close()
+
+		if _, err := f.WriteString(config.DefaultTOML()); err != nil {
+			return fmt.Errorf("failed to write config at %s: %w", configPath, err)
 		}
 
 		fmt.Printf("NockLock initialized. Config at %s\n", configPath)

@@ -2,11 +2,22 @@
 package cli
 
 import (
+	"errors"
 	"fmt"
 	"os"
 
 	"github.com/spf13/cobra"
 )
+
+// exitCodeError carries a child process exit code through cobra without calling os.Exit
+// inside a RunE handler, which would bypass deferred cleanup.
+type exitCodeError struct {
+	code int
+}
+
+func (e *exitCodeError) Error() string {
+	return fmt.Sprintf("exit status %d", e.code)
+}
 
 var rootCmd = &cobra.Command{
 	Use:   "nocklock",
@@ -17,6 +28,10 @@ var rootCmd = &cobra.Command{
 // Execute runs the root command.
 func Execute() {
 	if err := rootCmd.Execute(); err != nil {
+		var exitErr *exitCodeError
+		if errors.As(err, &exitErr) {
+			os.Exit(exitErr.code)
+		}
 		fmt.Fprintln(os.Stderr, err)
 		os.Exit(1)
 	}
