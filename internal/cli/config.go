@@ -27,6 +27,18 @@ var configCmd = &cobra.Command{
 		if _, err := os.Stdout.Write(data); err != nil {
 			return fmt.Errorf("failed to write config to stdout: %w", err)
 		}
+
+		// Load parsed config to show fence summary.
+		cfg, err := config.Load(configPath)
+		if err != nil {
+			// Raw TOML was already printed; skip summary on parse error.
+			return nil
+		}
+
+		fmt.Printf("\n# Fence summary:\n")
+		fmt.Printf("#   Secret fence: %d pass patterns, %d block patterns\n",
+			len(cfg.Secrets.Pass), len(cfg.Secrets.Block))
+
 		return nil
 	},
 }
