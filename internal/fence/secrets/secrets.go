@@ -14,19 +14,26 @@ type Fence struct {
 }
 
 // NewFence creates a secret fence from config patterns.
+// Patterns are lowercased at construction for case-insensitive matching.
 // Returns an error if any pattern is an invalid glob (fail closed).
 func NewFence(pass, block []string) (*Fence, error) {
-	for _, p := range pass {
-		if _, err := path.Match(p, ""); err != nil {
+	lowerPass := make([]string, len(pass))
+	for i, p := range pass {
+		lp := strings.ToLower(p)
+		if _, err := path.Match(lp, ""); err != nil {
 			return nil, fmt.Errorf("invalid pass pattern %q: %w", p, err)
 		}
+		lowerPass[i] = lp
 	}
-	for _, p := range block {
-		if _, err := path.Match(p, ""); err != nil {
+	lowerBlock := make([]string, len(block))
+	for i, p := range block {
+		lp := strings.ToLower(p)
+		if _, err := path.Match(lp, ""); err != nil {
 			return nil, fmt.Errorf("invalid block pattern %q: %w", p, err)
 		}
+		lowerBlock[i] = lp
 	}
-	return &Fence{PassPatterns: pass, BlockPatterns: block}, nil
+	return &Fence{PassPatterns: lowerPass, BlockPatterns: lowerBlock}, nil
 }
 
 // Filter takes the full environment (os.Environ() format: "KEY=VALUE")
@@ -71,7 +78,6 @@ func Match(name string, patterns []string) bool {
 	for _, p := range patterns {
 		matched, err := path.Match(strings.ToLower(p), lowerName)
 		if err != nil {
-			// Invalid pattern — skip it rather than crashing.
 			continue
 		}
 		if matched {

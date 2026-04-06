@@ -6,7 +6,7 @@
 
 **Architecture:** New `internal/fence/secrets/` package with a `Fence` struct that filters `[]string` env vars using glob patterns. Block always wins over pass. Integration into the wrap command sets `cmd.Env` on the child process. Status and config commands updated to show fence state.
 
-**Tech Stack:** Go stdlib only (`path/filepath`, `strings`, `os`). No new dependencies.
+**Tech Stack:** Go stdlib only (`path`, `strings`, `os`). No new dependencies.
 
 ---
 
