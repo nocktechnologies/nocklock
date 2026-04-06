@@ -131,6 +131,54 @@ func TestConfigInvalidTOML(t *testing.T) {
 	}
 }
 
+func TestFindConfigWalksUp(t *testing.T) {
+	root := t.TempDir()
+	nockDir := filepath.Join(root, ".nock")
+	if err := os.MkdirAll(nockDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	configPath := filepath.Join(nockDir, "config.toml")
+	if err := os.WriteFile(configPath, []byte(DefaultTOML()), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	subDir := filepath.Join(root, "src", "deep", "nested")
+	if err := os.MkdirAll(subDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	origDir, _ := os.Getwd()
+	defer os.Chdir(origDir)
+	if err := os.Chdir(subDir); err != nil {
+		t.Fatal(err)
+	}
+
+	found, err := FindConfig()
+	if err != nil {
+		t.Fatalf("FindConfig should find config from subdirectory, got: %v", err)
+	}
+	// Resolve symlinks for comparison (macOS /var → /private/var).
+	resolvedFound, _ := filepath.EvalSymlinks(found)
+	resolvedExpected, _ := filepath.EvalSymlinks(configPath)
+	if resolvedFound != resolvedExpected {
+		t.Errorf("FindConfig returned %q, expected %q", found, configPath)
+	}
+}
+
+func TestFindConfigNotFound(t *testing.T) {
+	dir := t.TempDir()
+	origDir, _ := os.Getwd()
+	defer os.Chdir(origDir)
+	if err := os.Chdir(dir); err != nil {
+		t.Fatal(err)
+	}
+
+	_, err := FindConfig()
+	if err == nil {
+		t.Fatal("expected error when no config exists")
+	}
+}
+
 func TestDefaultTOMLMatchesDefaultConfig(t *testing.T) {
 	var parsed Config
 	if err := toml.Unmarshal([]byte(DefaultTOML()), &parsed); err != nil {

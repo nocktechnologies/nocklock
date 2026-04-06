@@ -1,7 +1,6 @@
 package cli
 
 import (
-	"errors"
 	"fmt"
 	"os"
 
@@ -15,11 +14,15 @@ var configCmd = &cobra.Command{
 	RunE: func(cmd *cobra.Command, args []string) error {
 		configPath, err := config.FindConfig()
 		if err != nil {
-			if errors.Is(err, os.ErrNotExist) {
-				fmt.Fprintln(os.Stderr, "No config found. Run `nocklock init` to create one.")
-				return nil
-			}
-			return fmt.Errorf("failed to locate config: %w", err)
+			fmt.Fprintln(os.Stderr, "No config found. Run `nocklock init` to create one.")
+			return nil
+		}
+
+		// Parse config first to catch errors before printing anything.
+		cfg, err := config.Load(configPath)
+		if err != nil {
+			cmd.SilenceUsage = true
+			return fmt.Errorf("invalid config at %s: %w", configPath, err)
 		}
 
 		data, err := os.ReadFile(configPath)
@@ -29,13 +32,6 @@ var configCmd = &cobra.Command{
 
 		if _, err := os.Stdout.Write(data); err != nil {
 			return fmt.Errorf("failed to write config to stdout: %w", err)
-		}
-
-		// Load parsed config to show fence summary.
-		// Returns a non-zero exit code if the TOML is malformed.
-		cfg, err := config.Load(configPath)
-		if err != nil {
-			return fmt.Errorf("config parse error: %w", err)
 		}
 
 		fmt.Printf("\n# Fence summary:\n")
