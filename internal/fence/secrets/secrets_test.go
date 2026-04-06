@@ -66,7 +66,7 @@ func TestFilterEmptyLists(t *testing.T) {
 }
 
 func TestFilterBlockOnly(t *testing.T) {
-	f := mustNewFence(t,nil, []string{"AWS_*"})
+	f := mustNewFence(t, nil, []string{"AWS_*"})
 	env := []string{"HOME=/Users/kevin", "AWS_ACCESS_KEY_ID=AKIA123", "AWS_SECRET_ACCESS_KEY=secret", "PATH=/usr/bin"}
 	filtered, blocked := f.Filter(env)
 
@@ -83,7 +83,7 @@ func TestFilterBlockOnly(t *testing.T) {
 }
 
 func TestFilterPassOnly(t *testing.T) {
-	f := mustNewFence(t,[]string{"HOME", "PATH"}, nil)
+	f := mustNewFence(t, []string{"HOME", "PATH"}, nil)
 	env := []string{"HOME=/Users/kevin", "PATH=/usr/bin", "SECRET=bad", "LANG=en_US"}
 	filtered, blocked := f.Filter(env)
 
@@ -99,7 +99,7 @@ func TestFilterPassOnly(t *testing.T) {
 }
 
 func TestFilterPassAndBlock(t *testing.T) {
-	f := mustNewFence(t,[]string{"HOME", "PATH", "AWS_REGION"}, []string{"AWS_*"})
+	f := mustNewFence(t, []string{"HOME", "PATH", "AWS_REGION"}, []string{"AWS_*"})
 	env := []string{"HOME=/Users/kevin", "PATH=/usr/bin", "AWS_REGION=us-east-1", "LANG=en_US"}
 	filtered, blocked := f.Filter(env)
 
@@ -117,7 +117,7 @@ func TestFilterPassAndBlock(t *testing.T) {
 
 func TestBlockPrecedence(t *testing.T) {
 	// Var explicitly in pass AND matches block pattern → BLOCKED
-	f := mustNewFence(t,[]string{"GITHUB_TOKEN"}, []string{"*_TOKEN*"})
+	f := mustNewFence(t, []string{"GITHUB_TOKEN"}, []string{"*_TOKEN*"})
 	env := []string{"GITHUB_TOKEN=ghp_abc123"}
 	filtered, blocked := f.Filter(env)
 	if len(blocked) != 1 || blocked[0] != "GITHUB_TOKEN" {
@@ -219,7 +219,7 @@ func TestCaseInsensitive(t *testing.T) {
 }
 
 func TestEdgeCaseEmptyEnvironment(t *testing.T) {
-	f := mustNewFence(t,[]string{"HOME"}, []string{"AWS_*"})
+	f := mustNewFence(t, []string{"HOME"}, []string{"AWS_*"})
 	filtered, blocked := f.Filter(nil)
 	if len(filtered) != 0 || len(blocked) != 0 {
 		t.Errorf("expected empty results for nil env, got filtered=%v blocked=%v", filtered, blocked)
@@ -232,7 +232,7 @@ func TestEdgeCaseEmptyEnvironment(t *testing.T) {
 }
 
 func TestEdgeCaseNoValue(t *testing.T) {
-	f := mustNewFence(t,nil, []string{"SECRET"})
+	f := mustNewFence(t, nil, []string{"SECRET"})
 	env := []string{"SECRET=", "HOME=/Users/kevin"}
 	filtered, blocked := f.Filter(env)
 	if len(blocked) != 1 || blocked[0] != "SECRET" {
@@ -244,7 +244,7 @@ func TestEdgeCaseNoValue(t *testing.T) {
 }
 
 func TestEdgeCaseEqualsInValue(t *testing.T) {
-	f := mustNewFence(t,nil, []string{"OTHER"})
+	f := mustNewFence(t, nil, []string{"OTHER"})
 	env := []string{"KEY=val=ue=more", "OTHER=x"}
 	filtered, blocked := f.Filter(env)
 	if len(blocked) != 1 || blocked[0] != "OTHER" {
@@ -256,7 +256,7 @@ func TestEdgeCaseEqualsInValue(t *testing.T) {
 }
 
 func TestEdgeCaseEmptyName(t *testing.T) {
-	f := mustNewFence(t,[]string{"HOME"}, []string{"AWS_*"})
+	f := mustNewFence(t, []string{"HOME"}, []string{"AWS_*"})
 	env := []string{"=VALUE", "HOME=/Users/kevin"}
 	filtered, blocked := f.Filter(env)
 	// Empty-name entries should pass through (not matched by any pattern)
@@ -273,7 +273,7 @@ func TestEdgeCaseEmptyName(t *testing.T) {
 }
 
 func TestEdgeCaseNoEqualsSign(t *testing.T) {
-	f := mustNewFence(t,nil, []string{"WEIRD"})
+	f := mustNewFence(t, nil, []string{"WEIRD"})
 	env := []string{"NOEQUALS", "HOME=/Users/kevin"}
 	filtered, blocked := f.Filter(env)
 	// Entries with no = sign should pass through unchanged
@@ -286,7 +286,7 @@ func TestEdgeCaseNoEqualsSign(t *testing.T) {
 }
 
 func TestEdgeCaseDuplicatePatterns(t *testing.T) {
-	f := mustNewFence(t,nil, []string{"AWS_*", "AWS_*", "AWS_*"})
+	f := mustNewFence(t, nil, []string{"AWS_*", "AWS_*", "AWS_*"})
 	env := []string{"AWS_KEY=x", "HOME=/Users/kevin"}
 	filtered, blocked := f.Filter(env)
 	if len(blocked) != 1 || blocked[0] != "AWS_KEY" {
@@ -304,7 +304,7 @@ func TestDefaultConfigPatterns(t *testing.T) {
 		"ANTHROPIC_API_KEY", "OPENAI_API_KEY",
 		"*_SECRET*", "*_PASSWORD*", "*_TOKEN*",
 	}
-	f := mustNewFence(t,pass, block)
+	f := mustNewFence(t, pass, block)
 
 	env := []string{
 		"HOME=/Users/kevin",
