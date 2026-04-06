@@ -1,4 +1,3 @@
-// internal/version/version.go
 package version
 
 import "fmt"

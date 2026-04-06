@@ -13,8 +13,8 @@ var initCmd = &cobra.Command{
 	Use:   "init",
 	Short: "Initialize NockLock config in current directory",
 	RunE: func(cmd *cobra.Command, args []string) error {
-		nockDir := ".nock"
-		configPath := filepath.Join(nockDir, "config.toml")
+		nockDir := config.Dir
+		configPath := filepath.Join(nockDir, config.File)
 
 		if err := os.MkdirAll(nockDir, 0o755); err != nil {
 			return fmt.Errorf("failed to create %s directory: %w", nockDir, err)

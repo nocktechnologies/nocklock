@@ -55,6 +55,13 @@ type CloudConfig struct {
 	Endpoint string `toml:"endpoint"`
 }
 
+const (
+	// Dir is the NockLock config directory name relative to the project root.
+	Dir = ".nock"
+	// File is the config file name within Dir.
+	File = "config.toml"
+)
+
 // Load reads and parses a TOML config file at the given path.
 func Load(path string) (*Config, error) {
 	data, err := os.ReadFile(path)
