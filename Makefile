@@ -1,7 +1,7 @@
 .PHONY: build test clean install fmt vet lint
 
 VERSION ?= 0.1.0
-LDFLAGS := -ldflags "-X github.com/nocktechnologies/nocklock/internal/version.Version=$(VERSION) -X github.com/nocktechnologies/nocklock/internal/version.IsDevBuild=false"
+LDFLAGS := -ldflags "-X github.com/nocktechnologies/nocklock/internal/version.Version=$(VERSION)"
 
 build:
 	go build $(LDFLAGS) -o nocklock ./cmd/nocklock
