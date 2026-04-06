@@ -27,6 +27,12 @@ go.work.sum
 # env file
 .env
 
+# NockLock
+nocklock
+nocklock.exe
+.nock/config.toml
+.nock/events.db
+
 # Editor/IDE
 # .idea/
 # .vscode/
