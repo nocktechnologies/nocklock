@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"syscall"
 
 	"github.com/nocktechnologies/nocklock/internal/version"
 	"github.com/spf13/cobra"
@@ -40,9 +41,12 @@ var wrapCmd = &cobra.Command{
 		if exitErr, ok := err.(*exec.ExitError); ok {
 			code := exitErr.ExitCode()
 			if code < 0 {
-				// Negative exit code means the child was killed by a signal.
-				fmt.Fprintf(os.Stderr, "nocklock: child process killed by signal\n")
-				code = 1
+				// Preserve signal semantics: use 128 + signal when available.
+				if ws, ok := exitErr.Sys().(syscall.WaitStatus); ok && ws.Signaled() {
+					code = 128 + int(ws.Signal())
+				} else {
+					code = 1
+				}
 			}
 			cmd.SilenceErrors = true
 			cmd.SilenceUsage = true
