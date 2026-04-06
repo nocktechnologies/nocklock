@@ -4,7 +4,6 @@ import (
 	"errors"
 	"fmt"
 	"os"
-	"path/filepath"
 
 	"github.com/nocktechnologies/nocklock/internal/config"
 	"github.com/nocktechnologies/nocklock/internal/version"
@@ -15,13 +14,16 @@ var statusCmd = &cobra.Command{
 	Use:   "status",
 	Short: "Show active fenced sessions",
 	RunE: func(cmd *cobra.Command, args []string) error {
-		configPath := filepath.Join(config.Dir, config.File)
-		cfg, err := config.Load(configPath)
+		configPath, err := config.FindConfig()
 		if err != nil {
 			if errors.Is(err, os.ErrNotExist) {
 				fmt.Fprintln(os.Stderr, "No config found. Run 'nocklock init' first.")
 				return nil
 			}
+			return fmt.Errorf("failed to locate config: %w", err)
+		}
+		cfg, err := config.Load(configPath)
+		if err != nil {
 			return fmt.Errorf("failed to load config: %w", err)
 		}
 

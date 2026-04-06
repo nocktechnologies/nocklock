@@ -5,7 +5,6 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
-	"path/filepath"
 	"strings"
 
 	"github.com/nocktechnologies/nocklock/internal/config"
@@ -32,20 +31,25 @@ var wrapCmd = &cobra.Command{
 		}
 
 		// Attempt to load config for fence setup.
-		configPath := filepath.Join(config.Dir, config.File)
-		cfg, err := config.Load(configPath)
+		// FindConfig walks up the directory tree so subdirectory runs pick up
+		// a parent-level .nock/config.toml rather than failing open.
+		configPath, findErr := config.FindConfig()
 
 		var childEnv []string
-		if err != nil {
-			if errors.Is(err, os.ErrNotExist) {
-				// No config file — warn and run passthrough.
+		if findErr != nil {
+			if errors.Is(findErr, os.ErrNotExist) {
+				// No config found anywhere up the tree — warn and run passthrough.
 				fmt.Fprintf(os.Stderr, "%s — no config found, running without fences\n", version.BuildInfo())
 				childEnv = os.Environ()
 			} else {
-				// Config exists but is invalid — fail closed.
-				return fmt.Errorf("failed to load config: %w", err)
+				return fmt.Errorf("failed to locate config: %w", findErr)
 			}
 		} else {
+			cfg, err := config.Load(configPath)
+			if err != nil {
+				// Config found but invalid — fail closed.
+				return fmt.Errorf("failed to load config: %w", err)
+			}
 			// Apply secret fence.
 			fence, fenceErr := secrets.NewFence(cfg.Secrets.Pass, cfg.Secrets.Block)
 			if fenceErr != nil {
