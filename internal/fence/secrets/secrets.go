@@ -1,0 +1,88 @@
+// Package secrets implements environment variable filtering for NockLock.
+package secrets
+
+import (
+	"fmt"
+	"path"
+	"strings"
+)
+
+// Fence filters environment variables based on pass/block glob patterns.
+type Fence struct {
+	PassPatterns  []string
+	BlockPatterns []string
+}
+
+// NewFence creates a secret fence from config patterns.
+// Patterns are lowercased at construction for case-insensitive matching.
+// Returns an error if any pattern is an invalid glob (fail closed).
+func NewFence(pass, block []string) (*Fence, error) {
+	lowerPass := make([]string, len(pass))
+	for i, p := range pass {
+		lp := strings.ToLower(p)
+		if _, err := path.Match(lp, ""); err != nil {
+			return nil, fmt.Errorf("invalid pass pattern %q: %w", p, err)
+		}
+		lowerPass[i] = lp
+	}
+	lowerBlock := make([]string, len(block))
+	for i, p := range block {
+		lp := strings.ToLower(p)
+		if _, err := path.Match(lp, ""); err != nil {
+			return nil, fmt.Errorf("invalid block pattern %q: %w", p, err)
+		}
+		lowerBlock[i] = lp
+	}
+	return &Fence{PassPatterns: lowerPass, BlockPatterns: lowerBlock}, nil
+}
+
+// Filter takes the full environment (os.Environ() format: "KEY=VALUE")
+// and returns a filtered environment with blocked vars removed.
+// Returns (filtered env, blocked var names).
+func (f *Fence) Filter(environ []string) ([]string, []string) {
+	var filtered []string
+	var blocked []string
+
+	for _, entry := range environ {
+		name, _, hasEquals := strings.Cut(entry, "=")
+
+		// Entries with no = sign or empty name: pass through unchanged.
+		if !hasEquals || name == "" {
+			filtered = append(filtered, entry)
+			continue
+		}
+
+		// Rule 1: If var matches any block pattern → BLOCKED.
+		if Match(name, f.BlockPatterns) {
+			blocked = append(blocked, name)
+			continue
+		}
+
+		// Rule 2: If pass list is empty → all non-blocked vars pass.
+		// Rule 3: If pass list is non-empty → var must match a pass pattern.
+		if len(f.PassPatterns) == 0 || Match(name, f.PassPatterns) {
+			filtered = append(filtered, entry)
+		} else {
+			blocked = append(blocked, name)
+		}
+	}
+
+	return filtered, blocked
+}
+
+// Match checks if an env var name matches any pattern in the list.
+// Supports glob patterns (*, ?) via path.Match.
+// Matching is case-insensitive.
+func Match(name string, patterns []string) bool {
+	lowerName := strings.ToLower(name)
+	for _, p := range patterns {
+		matched, err := path.Match(strings.ToLower(p), lowerName)
+		if err != nil {
+			continue
+		}
+		if matched {
+			return true
+		}
+	}
+	return false
+}

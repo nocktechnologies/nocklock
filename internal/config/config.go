@@ -4,6 +4,7 @@ package config
 import (
 	"fmt"
 	"os"
+	"path/filepath"
 
 	"github.com/BurntSushi/toml"
 )
@@ -61,6 +62,28 @@ const (
 	// File is the config file name within Dir.
 	File = "config.toml"
 )
+
+// FindConfig walks up from the current working directory looking for a
+// .nock/config.toml file and returns the first path it finds.
+// Returns an error wrapping os.ErrNotExist if no config is found.
+func FindConfig() (string, error) {
+	dir, err := os.Getwd()
+	if err != nil {
+		return "", fmt.Errorf("failed to get working directory: %w", err)
+	}
+	for {
+		candidate := filepath.Join(dir, Dir, File)
+		if _, err := os.Stat(candidate); err == nil {
+			return candidate, nil
+		}
+		parent := filepath.Dir(dir)
+		if parent == dir {
+			// Reached filesystem root without finding config.
+			return "", fmt.Errorf("no %s/%s found in %s or any parent directory: %w", Dir, File, dir, os.ErrNotExist)
+		}
+		dir = parent
+	}
+}
 
 // Load reads and parses a TOML config file at the given path.
 func Load(path string) (*Config, error) {
