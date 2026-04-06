@@ -45,13 +45,13 @@ var wrapCmd = &cobra.Command{
 			if fenceErr != nil {
 				return fmt.Errorf("invalid secret fence config: %w", fenceErr)
 			}
-			var blocked []string
-			childEnv, blocked = fence.Filter(os.Environ())
+			var blockedNames []string
+			childEnv, blockedNames = fence.Filter(os.Environ())
 
-			if len(blocked) > 0 {
-				fmt.Fprintf(os.Stderr, "NockLock: secret fence active — blocked %d environment variable(s)\n", len(blocked))
+			if len(blockedNames) > 0 {
+				fmt.Fprintf(os.Stderr, "NockLock: secret fence active — blocked %d environment variable(s)\n", len(blockedNames))
 				if cfg.Logging.Level == "debug" {
-					fmt.Fprintf(os.Stderr, "  blocked: %s\n", strings.Join(blocked, ", "))
+					fmt.Fprintf(os.Stderr, "  blocked: %s\n", strings.Join(blockedNames, ", "))
 				}
 			} else {
 				fmt.Fprintf(os.Stderr, "NockLock: secret fence active — no variables blocked\n")

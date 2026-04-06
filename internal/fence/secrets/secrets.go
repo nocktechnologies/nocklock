@@ -3,7 +3,7 @@ package secrets
 
 import (
 	"fmt"
-	"path/filepath"
+	"path"
 	"strings"
 )
 
@@ -17,12 +17,12 @@ type Fence struct {
 // Returns an error if any pattern is an invalid glob (fail closed).
 func NewFence(pass, block []string) (*Fence, error) {
 	for _, p := range pass {
-		if _, err := filepath.Match(p, ""); err != nil {
+		if _, err := path.Match(p, ""); err != nil {
 			return nil, fmt.Errorf("invalid pass pattern %q: %w", p, err)
 		}
 	}
 	for _, p := range block {
-		if _, err := filepath.Match(p, ""); err != nil {
+		if _, err := path.Match(p, ""); err != nil {
 			return nil, fmt.Errorf("invalid block pattern %q: %w", p, err)
 		}
 	}
@@ -64,12 +64,12 @@ func (f *Fence) Filter(environ []string) ([]string, []string) {
 }
 
 // Match checks if an env var name matches any pattern in the list.
-// Supports glob patterns (*, ?) via filepath.Match.
+// Supports glob patterns (*, ?) via path.Match.
 // Matching is case-insensitive.
 func Match(name string, patterns []string) bool {
 	lowerName := strings.ToLower(name)
 	for _, p := range patterns {
-		matched, err := filepath.Match(strings.ToLower(p), lowerName)
+		matched, err := path.Match(strings.ToLower(p), lowerName)
 		if err != nil {
 			// Invalid pattern — skip it rather than crashing.
 			continue

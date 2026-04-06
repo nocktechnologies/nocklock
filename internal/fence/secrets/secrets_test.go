@@ -2,6 +2,7 @@ package secrets
 
 import (
 	"sort"
+	"strings"
 	"testing"
 )
 
@@ -376,5 +377,24 @@ func TestMatchMultiplePatterns(t *testing.T) {
 	}
 	if Match("LANG", patterns) {
 		t.Error("LANG should not match")
+	}
+}
+
+func TestBlockedNamesNeverContainValues(t *testing.T) {
+	f := mustNewFence(t, []string{"HOME"}, []string{"AWS_*", "*_TOKEN*"})
+	env := []string{
+		"HOME=/Users/kevin",
+		"AWS_SECRET_ACCESS_KEY=supersecret123",
+		"GITHUB_TOKEN=ghp_abc123xyz",
+		"STRIPE_KEY=sk_live_xxx",
+	}
+	_, blockedNames := f.Filter(env)
+	for _, name := range blockedNames {
+		if strings.Contains(name, "=") {
+			t.Errorf("blocked name %q contains '=' — values must never appear in blocked list", name)
+		}
+		if strings.Contains(name, "supersecret") || strings.Contains(name, "ghp_") || strings.Contains(name, "sk_live") {
+			t.Errorf("blocked name %q contains a secret value — values must never leak", name)
+		}
 	}
 }
