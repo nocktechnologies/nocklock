@@ -21,10 +21,10 @@ var initCmd = &cobra.Command{
 		}
 
 		// Use O_CREATE|O_EXCL for atomic create-or-fail, avoiding TOCTOU race.
-		f, err := os.OpenFile(configPath, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o644)
+		f, err := os.OpenFile(configPath, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o600)
 		if err != nil {
 			if os.IsExist(err) {
-				fmt.Printf("Config already exists at %s\n", configPath)
+				fmt.Fprintf(os.Stderr, "Config already exists at %s\n", configPath)
 				return nil
 			}
 			return fmt.Errorf("failed to create config at %s: %w", configPath, err)
@@ -39,7 +39,7 @@ var initCmd = &cobra.Command{
 			return fmt.Errorf("failed to finalize config at %s: %w", configPath, err)
 		}
 
-		fmt.Printf("NockLock initialized. Config at %s\n", configPath)
+		fmt.Fprintf(os.Stderr, "NockLock initialized. Config at %s\n", configPath)
 		return nil
 	},
 }

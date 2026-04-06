@@ -18,7 +18,7 @@ var configCmd = &cobra.Command{
 		data, err := os.ReadFile(configPath)
 		if err != nil {
 			if os.IsNotExist(err) {
-				fmt.Println("No config found. Run `nocklock init` to create one.")
+				fmt.Fprintln(os.Stderr, "No config found. Run `nocklock init` to create one.")
 				return nil
 			}
 			return fmt.Errorf("failed to read config at %s: %w", configPath, err)
