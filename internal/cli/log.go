@@ -100,7 +100,8 @@ var logCmd = &cobra.Command{
 
 		// Build query options.
 		opts := logging.QueryOptions{
-			Limit: 1000, // generous default for display
+			Limit:      1000, // generous default for display
+			Descending: true, // newest first so we always see recent events
 		}
 		if sessionFilter != "" {
 			opts.SessionID = &sessionFilter
@@ -149,11 +150,6 @@ var logCmd = &cobra.Command{
 				sessionOrder = append(sessionOrder, e.SessionID)
 			}
 			sg.events = append(sg.events, e)
-		}
-
-		// Reverse session order so most recent is first.
-		for i, j := 0, len(sessionOrder)-1; i < j; i, j = i+1, j-1 {
-			sessionOrder[i], sessionOrder[j] = sessionOrder[j], sessionOrder[i]
 		}
 
 		totalBlocked := 0

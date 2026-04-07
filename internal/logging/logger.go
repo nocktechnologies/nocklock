@@ -40,14 +40,15 @@ type Event struct {
 
 // QueryOptions filters event queries. All fields are optional.
 type QueryOptions struct {
-	EventType *EventType
-	Category  *string
-	Blocked   *bool
-	SessionID *string
-	Since     *time.Time
-	Until     *time.Time
-	Limit     int // 0 = default (100)
-	Offset    int
+	EventType  *EventType
+	Category   *string
+	Blocked    *bool
+	SessionID  *string
+	Since      *time.Time
+	Until      *time.Time
+	Limit      int // 0 = default (100)
+	Offset     int
+	Descending bool // if true, order by timestamp DESC
 }
 
 // Stats holds aggregate counts for events.
@@ -102,8 +103,8 @@ func validatePath(dbPath, projectRoot string) error {
 		if err != nil {
 			resolvedRoot = filepath.Clean(projectRoot)
 		}
-		root := resolvedRoot + string(filepath.Separator)
-		if !strings.HasPrefix(resolvedPath, root) && resolvedPath != resolvedRoot {
+		rel, err := filepath.Rel(resolvedRoot, resolvedPath)
+		if err != nil || strings.HasPrefix(rel, "..") {
 			return fmt.Errorf("DB path %q resolves outside project root %q", dbPath, projectRoot)
 		}
 	}
@@ -136,8 +137,8 @@ func NewLogger(dbPath string, projectRoot string) (*Logger, error) {
 		return nil, fmt.Errorf("failed to open event log at %s: %w", dbPath, err)
 	}
 
-	// Serialize writes through a single connection to avoid SQLITE_BUSY under
-	// concurrent access. Reads still benefit from WAL concurrency.
+	// Serialize all operations through a single connection to avoid SQLITE_BUSY.
+	// WAL mode allows external processes to read concurrently.
 	db.SetMaxOpenConns(1)
 
 	// Enable WAL mode for concurrent read/write.
@@ -264,7 +265,11 @@ func (l *Logger) Query(opts QueryOptions) ([]Event, error) {
 		args = append(args, opts.Until.UTC().Format(time.RFC3339))
 	}
 
-	query += " ORDER BY timestamp ASC"
+	if opts.Descending {
+		query += " ORDER BY timestamp DESC"
+	} else {
+		query += " ORDER BY timestamp ASC"
+	}
 
 	limit := opts.Limit
 	if limit <= 0 {

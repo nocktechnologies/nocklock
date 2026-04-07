@@ -4,6 +4,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"path/filepath"
 
 	"github.com/nocktechnologies/nocklock/internal/config"
 	"github.com/nocktechnologies/nocklock/internal/logging"
@@ -43,8 +44,17 @@ var statusCmd = &cobra.Command{
 		fmt.Println("Network fence: not active")
 
 		// Event log summary
-		relDB := cfg.Logging.DB // preserve for display
 		dbPath, projectRoot := config.ResolveDBPath(cfg, configPath)
+		relDB := cfg.Logging.DB
+		if relDB == "" {
+			// Show the default path when config doesn't specify one.
+			rel, relErr := filepath.Rel(projectRoot, dbPath)
+			if relErr == nil {
+				relDB = rel
+			} else {
+				relDB = dbPath
+			}
+		}
 
 		if _, statErr := os.Stat(dbPath); statErr != nil {
 			if errors.Is(statErr, os.ErrNotExist) {
