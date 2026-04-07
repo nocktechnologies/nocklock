@@ -39,6 +39,12 @@ var logCmd = &cobra.Command{
 
 		dbPath, projectRoot := config.ResolveDBPath(cfg, configPath)
 
+		// Don't create the DB file for a read-only operation.
+		if _, statErr := os.Stat(dbPath); statErr != nil {
+			fmt.Println("No fence events recorded. Events will appear here once fences are active.")
+			return nil
+		}
+
 		logger, err := logging.NewLogger(dbPath, projectRoot)
 		if err != nil {
 			cmd.SilenceUsage = true

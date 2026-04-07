@@ -33,7 +33,7 @@ type Event struct {
 	Timestamp time.Time
 	EventType EventType
 	Category  string // "secret", "filesystem", "network", "session"
-	Detail    string // what was blocked/passed (env var NAME only, never values)
+	Detail    string // context: env var name (secrets), command name (session), exit code (session end)
 	Blocked   bool
 	SessionID string
 }
