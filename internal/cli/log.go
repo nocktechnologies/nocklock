@@ -4,7 +4,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
-	"path/filepath"
 	"strconv"
 	"strings"
 	"time"
@@ -38,14 +37,7 @@ var logCmd = &cobra.Command{
 			return fmt.Errorf("failed to load config: %w", err)
 		}
 
-		dbPath := cfg.Logging.DB
-		if dbPath == "" {
-			dbPath = ".nock/events.db"
-		}
-		projectRoot := filepath.Dir(filepath.Dir(configPath))
-		if !filepath.IsAbs(dbPath) {
-			dbPath = filepath.Join(projectRoot, dbPath)
-		}
+		dbPath, projectRoot := config.ResolveDBPath(cfg, configPath)
 
 		logger, err := logging.NewLogger(dbPath, projectRoot)
 		if err != nil {
@@ -194,31 +186,13 @@ var logCmd = &cobra.Command{
 
 			// Display events.
 			for _, e := range sg.events {
-				switch e.EventType {
-				case logging.EventSecretBlocked:
-					fmt.Printf("  secret_blocked: %s\n", e.Detail)
+				fmt.Printf("  %s: %s\n", e.EventType, e.Detail)
+				if e.Blocked {
 					totalBlocked++
-				case logging.EventSecretPassed:
-					fmt.Printf("  secret_passed: %s\n", e.Detail)
+				} else if e.EventType == logging.EventSecretPassed ||
+					e.EventType == logging.EventFilePassed ||
+					e.EventType == logging.EventNetworkPassed {
 					totalPassed++
-				case logging.EventFileBlocked:
-					fmt.Printf("  file_blocked: %s\n", e.Detail)
-					totalBlocked++
-				case logging.EventFilePassed:
-					fmt.Printf("  file_passed: %s\n", e.Detail)
-					totalPassed++
-				case logging.EventNetworkBlocked:
-					fmt.Printf("  network_blocked: %s\n", e.Detail)
-					totalBlocked++
-				case logging.EventNetworkPassed:
-					fmt.Printf("  network_passed: %s\n", e.Detail)
-					totalPassed++
-				case logging.EventSessionStart:
-					fmt.Printf("  session_start: %s\n", e.Detail)
-				case logging.EventSessionEnd:
-					fmt.Printf("  session_end: %s\n", e.Detail)
-				case logging.EventConfigLoaded:
-					fmt.Printf("  config_loaded: %s\n", e.Detail)
 				}
 			}
 			fmt.Println()

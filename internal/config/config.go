@@ -9,6 +9,20 @@ import (
 	"github.com/BurntSushi/toml"
 )
 
+// ResolveDBPath returns the absolute path to the event log database
+// and the project root directory, given a config and the path it was loaded from.
+func ResolveDBPath(cfg *Config, configPath string) (dbPath string, projectRoot string) {
+	dbPath = cfg.Logging.DB
+	if dbPath == "" {
+		dbPath = DefaultConfig().Logging.DB
+	}
+	projectRoot = filepath.Dir(filepath.Dir(configPath))
+	if !filepath.IsAbs(dbPath) {
+		dbPath = filepath.Join(projectRoot, dbPath)
+	}
+	return dbPath, projectRoot
+}
+
 // Config is the top-level NockLock configuration.
 type Config struct {
 	Project    ProjectConfig    `toml:"project"`

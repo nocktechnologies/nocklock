@@ -4,7 +4,6 @@ import (
 	"errors"
 	"fmt"
 	"os"
-	"path/filepath"
 
 	"github.com/nocktechnologies/nocklock/internal/config"
 	"github.com/nocktechnologies/nocklock/internal/logging"
@@ -44,14 +43,12 @@ var statusCmd = &cobra.Command{
 		fmt.Println("Network fence: not active")
 
 		// Event log summary
-		dbPath := cfg.Logging.DB
-		if dbPath == "" {
-			dbPath = ".nock/events.db"
-		}
-		relDB := dbPath // preserve for display
-		projectRoot := filepath.Dir(filepath.Dir(configPath))
-		if !filepath.IsAbs(dbPath) {
-			dbPath = filepath.Join(projectRoot, dbPath)
+		relDB := cfg.Logging.DB // preserve for display
+		dbPath, projectRoot := config.ResolveDBPath(cfg, configPath)
+
+		if _, err := os.Stat(dbPath); err != nil {
+			fmt.Printf("Event log: %s (no events recorded)\n", relDB)
+			return nil
 		}
 
 		logger, logErr := logging.NewLogger(dbPath, projectRoot)

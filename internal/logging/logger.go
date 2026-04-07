@@ -178,6 +178,44 @@ func (l *Logger) Log(event Event) error {
 	return nil
 }
 
+// LogBatch records multiple events in a single transaction for efficiency.
+// Thread-safe. Use this when logging multiple events at once (e.g., blocked vars).
+func (l *Logger) LogBatch(events []Event) error {
+	if len(events) == 0 {
+		return nil
+	}
+	tx, err := l.db.Begin()
+	if err != nil {
+		return fmt.Errorf("failed to begin transaction: %w", err)
+	}
+	defer tx.Rollback()
+
+	stmt, err := tx.Prepare(
+		`INSERT INTO events (timestamp, event_type, category, detail, blocked, session_id)
+		 VALUES (?, ?, ?, ?, ?, ?)`,
+	)
+	if err != nil {
+		return fmt.Errorf("failed to prepare batch insert: %w", err)
+	}
+	defer stmt.Close()
+
+	for _, event := range events {
+		ts := event.Timestamp.UTC().Format(time.RFC3339)
+		blocked := 0
+		if event.Blocked {
+			blocked = 1
+		}
+		if _, err := stmt.Exec(ts, string(event.EventType), event.Category, event.Detail, blocked, event.SessionID); err != nil {
+			return fmt.Errorf("failed to insert event in batch: %w", err)
+		}
+	}
+
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("failed to commit batch: %w", err)
+	}
+	return nil
+}
+
 // Query returns events matching the given filters.
 // All filters are optional — nil/empty means "no filter".
 // Always returns a non-nil slice.
@@ -232,7 +270,7 @@ func (l *Logger) Query(opts QueryOptions) ([]Event, error) {
 	}
 	defer rows.Close()
 
-	events := []Event{}
+	events := make([]Event, 0, limit)
 	for rows.Next() {
 		var e Event
 		var ts string
@@ -270,66 +308,49 @@ func (l *Logger) Stats(sessionID string) (*Stats, error) {
 		ByType:     make(map[EventType]int),
 	}
 
-	row := l.db.QueryRow("SELECT COUNT(*), COALESCE(SUM(blocked), 0), COALESCE(SUM(CASE WHEN blocked = 0 THEN 1 ELSE 0 END), 0) FROM events"+where, args...)
-	if err := row.Scan(&s.TotalEvents, &s.BlockedCount, &s.PassedCount); err != nil {
+	// Single query for all scalar aggregates.
+	row := l.db.QueryRow(
+		"SELECT COUNT(*), COALESCE(SUM(blocked), 0), COALESCE(SUM(CASE WHEN blocked = 0 THEN 1 ELSE 0 END), 0), COUNT(DISTINCT session_id), MIN(timestamp), MAX(timestamp) FROM events"+where,
+		args...,
+	)
+	var firstStr, lastStr sql.NullString
+	if err := row.Scan(&s.TotalEvents, &s.BlockedCount, &s.PassedCount, &s.SessionCount, &firstStr, &lastStr); err != nil {
 		return nil, fmt.Errorf("failed to query event stats: %w", err)
 	}
-
-	row = l.db.QueryRow("SELECT COUNT(DISTINCT session_id) FROM events"+where, args...)
-	if err := row.Scan(&s.SessionCount); err != nil {
-		return nil, fmt.Errorf("failed to query session count: %w", err)
-	}
-
-	var firstStr, lastStr sql.NullString
-	row = l.db.QueryRow("SELECT MIN(timestamp), MAX(timestamp) FROM events"+where, args...)
-	if err := row.Scan(&firstStr, &lastStr); err != nil {
-		return nil, fmt.Errorf("failed to query event time range: %w", err)
-	}
 	if firstStr.Valid {
-		t, err := time.Parse(time.RFC3339, firstStr.String)
-		if err == nil {
+		if t, err := time.Parse(time.RFC3339, firstStr.String); err == nil {
 			s.FirstEvent = &t
 		}
 	}
 	if lastStr.Valid {
-		t, err := time.Parse(time.RFC3339, lastStr.String)
-		if err == nil {
+		if t, err := time.Parse(time.RFC3339, lastStr.String); err == nil {
 			s.LastEvent = &t
 		}
 	}
 
-	catRows, err := l.db.Query("SELECT category, COUNT(*) FROM events"+where+" GROUP BY category", args...)
+	// Single query for both category and type breakdowns using UNION ALL.
+	breakdownRows, err := l.db.Query(
+		"SELECT 'cat', category, COUNT(*) FROM events"+where+" GROUP BY category UNION ALL SELECT 'typ', event_type, COUNT(*) FROM events"+where+" GROUP BY event_type",
+		append(args, args...)...,
+	)
 	if err != nil {
-		return nil, fmt.Errorf("failed to query category counts: %w", err)
+		return nil, fmt.Errorf("failed to query event breakdowns: %w", err)
 	}
-	defer catRows.Close()
-	for catRows.Next() {
-		var cat string
+	defer breakdownRows.Close()
+	for breakdownRows.Next() {
+		var kind, key string
 		var count int
-		if err := catRows.Scan(&cat, &count); err != nil {
-			return nil, fmt.Errorf("failed to scan category count: %w", err)
+		if err := breakdownRows.Scan(&kind, &key, &count); err != nil {
+			return nil, fmt.Errorf("failed to scan breakdown row: %w", err)
 		}
-		s.ByCategory[cat] = count
-	}
-	if err := catRows.Err(); err != nil {
-		return nil, fmt.Errorf("error iterating category rows: %w", err)
-	}
-
-	typeRows, err := l.db.Query("SELECT event_type, COUNT(*) FROM events"+where+" GROUP BY event_type", args...)
-	if err != nil {
-		return nil, fmt.Errorf("failed to query type counts: %w", err)
-	}
-	defer typeRows.Close()
-	for typeRows.Next() {
-		var et string
-		var count int
-		if err := typeRows.Scan(&et, &count); err != nil {
-			return nil, fmt.Errorf("failed to scan type count: %w", err)
+		if kind == "cat" {
+			s.ByCategory[key] = count
+		} else {
+			s.ByType[EventType(key)] = count
 		}
-		s.ByType[EventType(et)] = count
 	}
-	if err := typeRows.Err(); err != nil {
-		return nil, fmt.Errorf("error iterating type rows: %w", err)
+	if err := breakdownRows.Err(); err != nil {
+		return nil, fmt.Errorf("error iterating breakdown rows: %w", err)
 	}
 
 	return s, nil

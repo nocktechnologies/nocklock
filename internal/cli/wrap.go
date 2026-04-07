@@ -4,7 +4,6 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
-	"path/filepath"
 	"strings"
 	"time"
 
@@ -49,15 +48,7 @@ var wrapCmd = &cobra.Command{
 
 		// Open the event logger. If it fails, warn and continue without logging.
 		var logger *logging.Logger
-		dbPath := cfg.Logging.DB
-		if dbPath == "" {
-			dbPath = ".nock/events.db"
-		}
-		projectRoot := filepath.Dir(filepath.Dir(configPath))
-		if !filepath.IsAbs(dbPath) {
-			// Resolve relative to project root (parent of .nock/).
-			dbPath = filepath.Join(projectRoot, dbPath)
-		}
+		dbPath, projectRoot := config.ResolveDBPath(cfg, configPath)
 		logger, logErr := logging.NewLogger(dbPath, projectRoot)
 		if logErr != nil {
 			fmt.Fprintf(os.Stderr, "NockLock: warning: could not open event log: %v\n", logErr)
@@ -96,9 +87,20 @@ var wrapCmd = &cobra.Command{
 		var blockedNames []string
 		childEnv, blockedNames := fence.Filter(os.Environ())
 
-		// Log each blocked env var individually.
-		for _, name := range blockedNames {
-			logEvent(logging.EventSecretBlocked, "secret", name, true)
+		// Log all blocked env vars in a single transaction.
+		if logger != nil && len(blockedNames) > 0 {
+			batch := make([]logging.Event, len(blockedNames))
+			for i, name := range blockedNames {
+				batch[i] = logging.Event{
+					Timestamp: time.Now(),
+					EventType: logging.EventSecretBlocked,
+					Category:  "secret",
+					Detail:    name,
+					Blocked:   true,
+					SessionID: sessionID,
+				}
+			}
+			_ = logger.LogBatch(batch)
 		}
 
 		// Log all passed env var names as one event.
