@@ -46,8 +46,12 @@ var statusCmd = &cobra.Command{
 		relDB := cfg.Logging.DB // preserve for display
 		dbPath, projectRoot := config.ResolveDBPath(cfg, configPath)
 
-		if _, err := os.Stat(dbPath); err != nil {
-			fmt.Printf("Event log: %s (no events recorded)\n", relDB)
+		if _, statErr := os.Stat(dbPath); statErr != nil {
+			if errors.Is(statErr, os.ErrNotExist) {
+				fmt.Printf("Event log: %s (no events recorded)\n", relDB)
+				return nil
+			}
+			fmt.Printf("Event log: error (%v)\n", statErr)
 			return nil
 		}
 

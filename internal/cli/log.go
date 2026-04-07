@@ -2,6 +2,7 @@ package cli
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"strconv"
@@ -41,8 +42,12 @@ var logCmd = &cobra.Command{
 
 		// Don't create the DB file for a read-only operation.
 		if _, statErr := os.Stat(dbPath); statErr != nil {
-			fmt.Println("No fence events recorded. Events will appear here once fences are active.")
-			return nil
+			if errors.Is(statErr, os.ErrNotExist) {
+				fmt.Println("No fence events recorded. Events will appear here once fences are active.")
+				return nil
+			}
+			cmd.SilenceUsage = true
+			return fmt.Errorf("cannot access event log: %w", statErr)
 		}
 
 		logger, err := logging.NewLogger(dbPath, projectRoot)
@@ -132,7 +137,6 @@ var logCmd = &cobra.Command{
 
 		// Group events by session, most recent session first.
 		type sessionGroup struct {
-			id     string
 			events []logging.Event
 		}
 		sessionOrder := []string{}
@@ -140,7 +144,7 @@ var logCmd = &cobra.Command{
 		for _, e := range events {
 			sg, exists := sessionMap[e.SessionID]
 			if !exists {
-				sg = &sessionGroup{id: e.SessionID}
+				sg = &sessionGroup{}
 				sessionMap[e.SessionID] = sg
 				sessionOrder = append(sessionOrder, e.SessionID)
 			}
@@ -192,7 +196,7 @@ var logCmd = &cobra.Command{
 
 			// Display events.
 			for _, e := range sg.events {
-				fmt.Printf("  %s: %s\n", e.EventType, e.Detail)
+				fmt.Printf("  %s: %s\n", e.EventType, sanitizeDetail(e.Detail))
 				if e.Blocked {
 					totalBlocked++
 				} else if e.EventType == logging.EventSecretPassed ||
@@ -237,6 +241,19 @@ func parseDuration(s string) (time.Duration, error) {
 		return time.Duration(days) * 24 * time.Hour, nil
 	}
 	return time.ParseDuration(s)
+}
+
+// sanitizeDetail removes control characters that could spoof terminal output.
+func sanitizeDetail(s string) string {
+	var b strings.Builder
+	for _, r := range s {
+		if r == '\n' || r == '\r' || r == '\x1b' {
+			b.WriteRune(' ')
+		} else {
+			b.WriteRune(r)
+		}
+	}
+	return b.String()
 }
 
 // formatDuration produces a human-readable duration string like "1h 23m 45s".

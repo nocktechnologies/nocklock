@@ -90,9 +90,21 @@ func validatePath(dbPath, projectRoot string) error {
 		return fmt.Errorf("path traversal detected in DB path: %q", dbPath)
 	}
 	if projectRoot != "" {
-		root := filepath.Clean(projectRoot) + string(filepath.Separator)
-		if !strings.HasPrefix(cleaned, root) && cleaned != filepath.Clean(projectRoot) {
-			return fmt.Errorf("DB path %q is outside project root %q", dbPath, projectRoot)
+		// Resolve symlinks to prevent symlink-based escapes.
+		resolvedPath, err := filepath.EvalSymlinks(filepath.Dir(cleaned))
+		if err == nil {
+			resolvedPath = filepath.Join(resolvedPath, filepath.Base(cleaned))
+		} else {
+			// Directory doesn't exist yet — use the cleaned path.
+			resolvedPath = cleaned
+		}
+		resolvedRoot, err := filepath.EvalSymlinks(projectRoot)
+		if err != nil {
+			resolvedRoot = filepath.Clean(projectRoot)
+		}
+		root := resolvedRoot + string(filepath.Separator)
+		if !strings.HasPrefix(resolvedPath, root) && resolvedPath != resolvedRoot {
+			return fmt.Errorf("DB path %q resolves outside project root %q", dbPath, projectRoot)
 		}
 	}
 	return nil
