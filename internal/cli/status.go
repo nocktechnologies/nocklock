@@ -4,8 +4,10 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"path/filepath"
 
 	"github.com/nocktechnologies/nocklock/internal/config"
+	"github.com/nocktechnologies/nocklock/internal/logging"
 	"github.com/nocktechnologies/nocklock/internal/version"
 	"github.com/spf13/cobra"
 )
@@ -30,10 +32,9 @@ var statusCmd = &cobra.Command{
 		fmt.Println(version.BuildInfo())
 
 		// Secret fence status
-		passCount := len(cfg.Secrets.Pass)
 		blockCount := len(cfg.Secrets.Block)
-		if passCount > 0 || blockCount > 0 {
-			fmt.Printf("Secret fence: active (pass %d, block %d patterns)\n", passCount, blockCount)
+		if len(cfg.Secrets.Pass) > 0 || blockCount > 0 {
+			fmt.Printf("Secret fence: active (blocking %d patterns)\n", blockCount)
 		} else {
 			fmt.Println("Secret fence: not configured")
 		}
@@ -41,6 +42,44 @@ var statusCmd = &cobra.Command{
 		// Placeholder for future fences
 		fmt.Println("Filesystem fence: not active")
 		fmt.Println("Network fence: not active")
+
+		// Event log summary
+		dbPath, projectRoot := config.ResolveDBPath(cfg, configPath)
+		relDB := cfg.Logging.DB
+		if relDB == "" {
+			// Show the default path when config doesn't specify one.
+			rel, relErr := filepath.Rel(projectRoot, dbPath)
+			if relErr == nil {
+				relDB = rel
+			} else {
+				relDB = dbPath
+			}
+		}
+
+		if _, statErr := os.Stat(dbPath); statErr != nil {
+			if errors.Is(statErr, os.ErrNotExist) {
+				fmt.Printf("Event log: %s (no events recorded)\n", relDB)
+				return nil
+			}
+			fmt.Printf("Event log: error (%v)\n", statErr)
+			return nil
+		}
+
+		logger, logErr := logging.NewLogger(dbPath, projectRoot)
+		if logErr != nil {
+			fmt.Printf("Event log: unavailable (%v)\n", logErr)
+		} else {
+			defer logger.Close()
+			stats, statsErr := logger.Stats("")
+			if statsErr != nil {
+				fmt.Printf("Event log: unavailable (%v)\n", statsErr)
+			} else {
+				fmt.Printf("Event log: %s (%d events, %d sessions)\n", relDB, stats.TotalEvents, stats.SessionCount)
+				if stats.LastEvent != nil {
+					fmt.Printf("Last event: %s\n", stats.LastEvent.Local().Format("2006-01-02 15:04:05"))
+				}
+			}
+		}
 
 		return nil
 	},
