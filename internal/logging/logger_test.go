@@ -26,10 +26,10 @@ func mustNewLogger(t *testing.T) (*Logger, string) {
 	return l, dbPath
 }
 
-func boolPtr(b bool) *bool          { return &b }
-func strPtr(s string) *string       { return &s }
+func boolPtr(b bool) *bool                { return &b }
+func strPtr(s string) *string             { return &s }
 func eventTypePtr(e EventType) *EventType { return &e }
-func timePtr(t time.Time) *time.Time     { return &t }
+func timePtr(t time.Time) *time.Time      { return &t }
 
 func sampleEvent(et EventType, category, detail string, blocked bool, sessionID string) Event {
 	return Event{

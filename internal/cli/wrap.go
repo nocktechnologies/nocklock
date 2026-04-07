@@ -4,10 +4,14 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"strings"
+	"time"
 
+	"github.com/google/uuid"
 	"github.com/nocktechnologies/nocklock/internal/config"
 	"github.com/nocktechnologies/nocklock/internal/fence/secrets"
+	"github.com/nocktechnologies/nocklock/internal/logging"
 	"github.com/spf13/cobra"
 )
 
@@ -28,6 +32,9 @@ var wrapCmd = &cobra.Command{
 			return fmt.Errorf("no command specified. Usage: nocklock wrap -- <command> [args...]")
 		}
 
+		// Generate a session ID for event logging.
+		sessionID := uuid.New().String()
+
 		// Find and load config — fail closed if missing or invalid.
 		configPath, err := config.FindConfig()
 		if err != nil {
@@ -40,6 +47,47 @@ var wrapCmd = &cobra.Command{
 			return fmt.Errorf("failed to load config at %s: %w", configPath, err)
 		}
 
+		// Open the event logger. If it fails, warn and continue without logging.
+		var logger *logging.Logger
+		dbPath := cfg.Logging.DB
+		if dbPath == "" {
+			dbPath = ".nock/events.db"
+		}
+		if !filepath.IsAbs(dbPath) {
+			// Resolve relative to project root (parent of .nock/).
+			projectRoot := filepath.Dir(filepath.Dir(configPath))
+			dbPath = filepath.Join(projectRoot, dbPath)
+		}
+		logger, logErr := logging.NewLogger(dbPath)
+		if logErr != nil {
+			fmt.Fprintf(os.Stderr, "NockLock: warning: could not open event log: %v\n", logErr)
+			logger = nil
+		}
+		if logger != nil {
+			defer logger.Close()
+		}
+
+		// nil-safe logging helper.
+		logEvent := func(eventType logging.EventType, category, detail string, blocked bool) {
+			if logger == nil {
+				return
+			}
+			_ = logger.Log(logging.Event{
+				Timestamp: time.Now(),
+				EventType: eventType,
+				Category:  category,
+				Detail:    detail,
+				Blocked:   blocked,
+				SessionID: sessionID,
+			})
+		}
+
+		// Log session start with the command being run.
+		logEvent(logging.EventSessionStart, "session", strings.Join(args, " "), false)
+
+		// Log config loaded with project name.
+		logEvent(logging.EventConfigLoaded, "session", cfg.Project.Name, false)
+
 		// Apply secret fence.
 		fence, fenceErr := secrets.NewFence(cfg.Secrets.Pass, cfg.Secrets.Block)
 		if fenceErr != nil {
@@ -47,6 +95,23 @@ var wrapCmd = &cobra.Command{
 		}
 		var blockedNames []string
 		childEnv, blockedNames := fence.Filter(os.Environ())
+
+		// Log each blocked env var individually.
+		for _, name := range blockedNames {
+			logEvent(logging.EventSecretBlocked, "secret", name, true)
+		}
+
+		// Log all passed env var names as one event.
+		var passedNames []string
+		for _, entry := range childEnv {
+			name, _, hasEquals := strings.Cut(entry, "=")
+			if hasEquals && name != "" {
+				passedNames = append(passedNames, name)
+			}
+		}
+		if len(passedNames) > 0 {
+			logEvent(logging.EventSecretPassed, "secret", strings.Join(passedNames, ", "), false)
+		}
 
 		if len(blockedNames) > 0 {
 			fmt.Fprintf(os.Stderr, "NockLock: secret fence active — blocked %d environment variable(s)\n", len(blockedNames))
@@ -71,14 +136,18 @@ var wrapCmd = &cobra.Command{
 					// Fall back to 1 for cross-platform safety.
 					code = 1
 				}
+				logEvent(logging.EventSessionEnd, "session", fmt.Sprintf("exit_code=%d", code), false)
 				cmd.SilenceErrors = true
 				cmd.SilenceUsage = true
 				return &exitCodeError{code: code}
 			}
+			logEvent(logging.EventSessionEnd, "session", "exit_code=1", false)
 			cmd.SilenceErrors = true
 			cmd.SilenceUsage = true
 			return fmt.Errorf("failed to run %q: %w", args[0], err)
 		}
+
+		logEvent(logging.EventSessionEnd, "session", "exit_code=0", false)
 		return nil
 	},
 }
