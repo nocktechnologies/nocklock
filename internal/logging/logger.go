@@ -83,11 +83,17 @@ CREATE INDEX IF NOT EXISTS idx_events_timestamp ON events(timestamp);
 CREATE INDEX IF NOT EXISTS idx_events_blocked ON events(blocked);
 `
 
-// validatePath rejects paths containing traversal sequences.
-func validatePath(dbPath string) error {
+// validatePath rejects paths containing traversal sequences and paths outside the project root.
+func validatePath(dbPath, projectRoot string) error {
 	cleaned := filepath.Clean(dbPath)
 	if strings.Contains(cleaned, "..") {
 		return fmt.Errorf("path traversal detected in DB path: %q", dbPath)
+	}
+	if projectRoot != "" {
+		root := filepath.Clean(projectRoot) + string(filepath.Separator)
+		if !strings.HasPrefix(cleaned, root) && cleaned != filepath.Clean(projectRoot) {
+			return fmt.Errorf("DB path %q is outside project root %q", dbPath, projectRoot)
+		}
 	}
 	return nil
 }
@@ -95,8 +101,9 @@ func validatePath(dbPath string) error {
 // NewLogger opens or creates the SQLite database at dbPath.
 // Creates parent directories and the events table if they don't exist.
 // Sets WAL mode and 0600 file permissions.
-func NewLogger(dbPath string) (*Logger, error) {
-	if err := validatePath(dbPath); err != nil {
+// If projectRoot is non-empty, dbPath must reside under it.
+func NewLogger(dbPath string, projectRoot string) (*Logger, error) {
+	if err := validatePath(dbPath, projectRoot); err != nil {
 		return nil, err
 	}
 
@@ -104,6 +111,13 @@ func NewLogger(dbPath string) (*Logger, error) {
 	if err := os.MkdirAll(dir, 0o700); err != nil {
 		return nil, fmt.Errorf("failed to create log directory %s: %w", dir, err)
 	}
+
+	// Pre-create file with correct permissions to avoid TOCTOU window.
+	f, err := os.OpenFile(dbPath, os.O_CREATE|os.O_RDWR, 0o600)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create event log at %s: %w", dbPath, err)
+	}
+	f.Close()
 
 	db, err := sql.Open("sqlite", dbPath)
 	if err != nil {
@@ -124,6 +138,12 @@ func NewLogger(dbPath string) (*Logger, error) {
 	if _, err := db.Exec("PRAGMA busy_timeout=5000"); err != nil {
 		db.Close()
 		return nil, fmt.Errorf("failed to set busy timeout: %w", err)
+	}
+
+	// Zero freed pages so pruned event data is not forensically recoverable.
+	if _, err := db.Exec("PRAGMA secure_delete=ON"); err != nil {
+		db.Close()
+		return nil, fmt.Errorf("failed to enable secure delete: %w", err)
 	}
 
 	if _, err := db.Exec(schema); err != nil {
@@ -199,6 +219,9 @@ func (l *Logger) Query(opts QueryOptions) ([]Event, error) {
 	limit := opts.Limit
 	if limit <= 0 {
 		limit = 100
+	}
+	if limit > 10000 {
+		limit = 10000
 	}
 	query += " LIMIT ? OFFSET ?"
 	args = append(args, limit, opts.Offset)

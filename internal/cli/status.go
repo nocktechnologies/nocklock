@@ -49,12 +49,12 @@ var statusCmd = &cobra.Command{
 			dbPath = ".nock/events.db"
 		}
 		relDB := dbPath // preserve for display
+		projectRoot := filepath.Dir(filepath.Dir(configPath))
 		if !filepath.IsAbs(dbPath) {
-			projectRoot := filepath.Dir(filepath.Dir(configPath))
 			dbPath = filepath.Join(projectRoot, dbPath)
 		}
 
-		logger, logErr := logging.NewLogger(dbPath)
+		logger, logErr := logging.NewLogger(dbPath, projectRoot)
 		if logErr != nil {
 			fmt.Printf("Event log: unavailable (%v)\n", logErr)
 		} else {

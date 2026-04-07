@@ -53,12 +53,12 @@ var wrapCmd = &cobra.Command{
 		if dbPath == "" {
 			dbPath = ".nock/events.db"
 		}
+		projectRoot := filepath.Dir(filepath.Dir(configPath))
 		if !filepath.IsAbs(dbPath) {
 			// Resolve relative to project root (parent of .nock/).
-			projectRoot := filepath.Dir(filepath.Dir(configPath))
 			dbPath = filepath.Join(projectRoot, dbPath)
 		}
-		logger, logErr := logging.NewLogger(dbPath)
+		logger, logErr := logging.NewLogger(dbPath, projectRoot)
 		if logErr != nil {
 			fmt.Fprintf(os.Stderr, "NockLock: warning: could not open event log: %v\n", logErr)
 			logger = nil
@@ -83,7 +83,7 @@ var wrapCmd = &cobra.Command{
 		}
 
 		// Log session start with the command being run.
-		logEvent(logging.EventSessionStart, "session", strings.Join(args, " "), false)
+		logEvent(logging.EventSessionStart, "session", args[0], false)
 
 		// Log config loaded with project name.
 		logEvent(logging.EventConfigLoaded, "session", cfg.Project.Name, false)

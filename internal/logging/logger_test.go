@@ -19,7 +19,7 @@ func tempDBPath(t *testing.T) string {
 func mustNewLogger(t *testing.T) (*Logger, string) {
 	t.Helper()
 	dbPath := tempDBPath(t)
-	l, err := NewLogger(dbPath)
+	l, err := NewLogger(dbPath, "")
 	if err != nil {
 		t.Fatalf("NewLogger(%q) failed: %v", dbPath, err)
 	}
@@ -60,7 +60,7 @@ func TestNewLogger_CreatesDBFile(t *testing.T) {
 func TestNewLogger_CreatesParentDirectories(t *testing.T) {
 	base := t.TempDir()
 	dbPath := filepath.Join(base, "deep", "nested", "dir", "events.db")
-	l, err := NewLogger(dbPath)
+	l, err := NewLogger(dbPath, "")
 	if err != nil {
 		t.Fatalf("NewLogger with nested path failed: %v", err)
 	}
@@ -73,7 +73,7 @@ func TestNewLogger_CreatesParentDirectories(t *testing.T) {
 
 func TestNewLogger_OpensExistingDBWithoutDataLoss(t *testing.T) {
 	dbPath := tempDBPath(t)
-	l1, err := NewLogger(dbPath)
+	l1, err := NewLogger(dbPath, "")
 	if err != nil {
 		t.Fatalf("first NewLogger failed: %v", err)
 	}
@@ -85,7 +85,7 @@ func TestNewLogger_OpensExistingDBWithoutDataLoss(t *testing.T) {
 	l1.Close()
 
 	// Reopen the same DB.
-	l2, err := NewLogger(dbPath)
+	l2, err := NewLogger(dbPath, "")
 	if err != nil {
 		t.Fatalf("second NewLogger failed: %v", err)
 	}
@@ -104,7 +104,7 @@ func TestNewLogger_OpensExistingDBWithoutDataLoss(t *testing.T) {
 }
 
 func TestNewLogger_InvalidPathReturnsError(t *testing.T) {
-	_, err := NewLogger("/dev/null/impossible/path/events.db")
+	_, err := NewLogger("/dev/null/impossible/path/events.db", "")
 	if err == nil {
 		t.Fatal("expected error for invalid path, got nil")
 	}
@@ -765,7 +765,7 @@ func TestSecurity_DetailStoresNamesNotValues(t *testing.T) {
 }
 
 func TestSecurity_PathTraversalBlocked(t *testing.T) {
-	_, err := NewLogger("../../etc/evil.db")
+	_, err := NewLogger("../../etc/evil.db", "")
 	if err == nil {
 		t.Fatal("expected error for path traversal, got nil")
 	}

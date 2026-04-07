@@ -42,12 +42,12 @@ var logCmd = &cobra.Command{
 		if dbPath == "" {
 			dbPath = ".nock/events.db"
 		}
+		projectRoot := filepath.Dir(filepath.Dir(configPath))
 		if !filepath.IsAbs(dbPath) {
-			projectRoot := filepath.Dir(filepath.Dir(configPath))
 			dbPath = filepath.Join(projectRoot, dbPath)
 		}
 
-		logger, err := logging.NewLogger(dbPath)
+		logger, err := logging.NewLogger(dbPath, projectRoot)
 		if err != nil {
 			cmd.SilenceUsage = true
 			return fmt.Errorf("failed to open event log: %w", err)
@@ -250,6 +250,9 @@ func parseDuration(s string) (time.Duration, error) {
 		days, err := strconv.Atoi(numStr)
 		if err != nil {
 			return 0, fmt.Errorf("invalid day duration %q", s)
+		}
+		if days <= 0 || days > 3650 {
+			return 0, fmt.Errorf("day duration must be between 1 and 3650, got %d", days)
 		}
 		return time.Duration(days) * 24 * time.Hour, nil
 	}
