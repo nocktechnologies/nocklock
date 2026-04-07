@@ -1,0 +1,333 @@
+// Package logging provides SQLite-backed event storage for NockLock fence events.
+package logging
+
+import (
+	"database/sql"
+	"fmt"
+	"os"
+	"path/filepath"
+	"strings"
+	"time"
+
+	_ "modernc.org/sqlite"
+)
+
+// EventType categorizes what kind of fence event occurred.
+type EventType string
+
+const (
+	EventSecretBlocked  EventType = "secret_blocked"
+	EventSecretPassed   EventType = "secret_passed"
+	EventFileBlocked    EventType = "file_blocked"
+	EventFilePassed     EventType = "file_passed"
+	EventNetworkBlocked EventType = "network_blocked"
+	EventNetworkPassed  EventType = "network_passed"
+	EventSessionStart   EventType = "session_start"
+	EventSessionEnd     EventType = "session_end"
+	EventConfigLoaded   EventType = "config_loaded"
+)
+
+// Event represents a single fence event.
+type Event struct {
+	ID        int64
+	Timestamp time.Time
+	EventType EventType
+	Category  string // "secret", "filesystem", "network", "session"
+	Detail    string // what was blocked/passed (env var NAME only, never values)
+	Blocked   bool
+	SessionID string
+}
+
+// QueryOptions filters event queries. All fields are optional.
+type QueryOptions struct {
+	EventType *EventType
+	Category  *string
+	Blocked   *bool
+	SessionID *string
+	Since     *time.Time
+	Until     *time.Time
+	Limit     int // 0 = default (100)
+	Offset    int
+}
+
+// Stats holds aggregate counts for events.
+type Stats struct {
+	TotalEvents  int
+	BlockedCount int
+	PassedCount  int
+	SessionCount int
+	FirstEvent   *time.Time
+	LastEvent    *time.Time
+	ByCategory   map[string]int
+	ByType       map[EventType]int
+}
+
+// Logger handles SQLite event storage.
+type Logger struct {
+	db *sql.DB
+}
+
+const schema = `
+CREATE TABLE IF NOT EXISTS events (
+	id INTEGER PRIMARY KEY AUTOINCREMENT,
+	timestamp TEXT NOT NULL,
+	event_type TEXT NOT NULL,
+	category TEXT NOT NULL,
+	detail TEXT NOT NULL,
+	blocked INTEGER NOT NULL DEFAULT 0,
+	session_id TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_events_session ON events(session_id);
+CREATE INDEX IF NOT EXISTS idx_events_type ON events(event_type);
+CREATE INDEX IF NOT EXISTS idx_events_timestamp ON events(timestamp);
+CREATE INDEX IF NOT EXISTS idx_events_blocked ON events(blocked);
+`
+
+// validatePath rejects paths containing traversal sequences.
+func validatePath(dbPath string) error {
+	cleaned := filepath.Clean(dbPath)
+	if strings.Contains(cleaned, "..") {
+		return fmt.Errorf("path traversal detected in DB path: %q", dbPath)
+	}
+	return nil
+}
+
+// NewLogger opens or creates the SQLite database at dbPath.
+// Creates parent directories and the events table if they don't exist.
+// Sets WAL mode and 0600 file permissions.
+func NewLogger(dbPath string) (*Logger, error) {
+	if err := validatePath(dbPath); err != nil {
+		return nil, err
+	}
+
+	dir := filepath.Dir(dbPath)
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		return nil, fmt.Errorf("failed to create log directory %s: %w", dir, err)
+	}
+
+	db, err := sql.Open("sqlite", dbPath)
+	if err != nil {
+		return nil, fmt.Errorf("failed to open event log at %s: %w", dbPath, err)
+	}
+
+	// Serialize writes through a single connection to avoid SQLITE_BUSY under
+	// concurrent access. Reads still benefit from WAL concurrency.
+	db.SetMaxOpenConns(1)
+
+	// Enable WAL mode for concurrent read/write.
+	if _, err := db.Exec("PRAGMA journal_mode=WAL"); err != nil {
+		db.Close()
+		return nil, fmt.Errorf("failed to enable WAL mode: %w", err)
+	}
+
+	// Set a busy timeout so concurrent operations wait rather than fail.
+	if _, err := db.Exec("PRAGMA busy_timeout=5000"); err != nil {
+		db.Close()
+		return nil, fmt.Errorf("failed to set busy timeout: %w", err)
+	}
+
+	if _, err := db.Exec(schema); err != nil {
+		db.Close()
+		return nil, fmt.Errorf("failed to create events table: %w", err)
+	}
+
+	// Set file permissions to 0600 (owner read/write only).
+	if err := os.Chmod(dbPath, 0o600); err != nil {
+		db.Close()
+		return nil, fmt.Errorf("failed to set DB file permissions: %w", err)
+	}
+
+	return &Logger{db: db}, nil
+}
+
+// Log records a single event. Thread-safe (SQLite WAL handles locking).
+func (l *Logger) Log(event Event) error {
+	ts := event.Timestamp.UTC().Format(time.RFC3339)
+	blocked := 0
+	if event.Blocked {
+		blocked = 1
+	}
+	_, err := l.db.Exec(
+		`INSERT INTO events (timestamp, event_type, category, detail, blocked, session_id)
+		 VALUES (?, ?, ?, ?, ?, ?)`,
+		ts, string(event.EventType), event.Category, event.Detail, blocked, event.SessionID,
+	)
+	if err != nil {
+		return fmt.Errorf("failed to log event: %w", err)
+	}
+	return nil
+}
+
+// Query returns events matching the given filters.
+// All filters are optional — nil/empty means "no filter".
+// Always returns a non-nil slice.
+func (l *Logger) Query(opts QueryOptions) ([]Event, error) {
+	query := "SELECT id, timestamp, event_type, category, detail, blocked, session_id FROM events WHERE 1=1"
+	var args []any
+
+	if opts.EventType != nil {
+		query += " AND event_type = ?"
+		args = append(args, string(*opts.EventType))
+	}
+	if opts.Category != nil {
+		query += " AND category = ?"
+		args = append(args, *opts.Category)
+	}
+	if opts.Blocked != nil {
+		blocked := 0
+		if *opts.Blocked {
+			blocked = 1
+		}
+		query += " AND blocked = ?"
+		args = append(args, blocked)
+	}
+	if opts.SessionID != nil {
+		query += " AND session_id = ?"
+		args = append(args, *opts.SessionID)
+	}
+	if opts.Since != nil {
+		query += " AND timestamp >= ?"
+		args = append(args, opts.Since.UTC().Format(time.RFC3339))
+	}
+	if opts.Until != nil {
+		query += " AND timestamp <= ?"
+		args = append(args, opts.Until.UTC().Format(time.RFC3339))
+	}
+
+	query += " ORDER BY timestamp ASC"
+
+	limit := opts.Limit
+	if limit <= 0 {
+		limit = 100
+	}
+	query += " LIMIT ? OFFSET ?"
+	args = append(args, limit, opts.Offset)
+
+	rows, err := l.db.Query(query, args...)
+	if err != nil {
+		return nil, fmt.Errorf("failed to query events: %w", err)
+	}
+	defer rows.Close()
+
+	events := []Event{}
+	for rows.Next() {
+		var e Event
+		var ts string
+		var blocked int
+		var eventType string
+		if err := rows.Scan(&e.ID, &ts, &eventType, &e.Category, &e.Detail, &blocked, &e.SessionID); err != nil {
+			return nil, fmt.Errorf("failed to scan event row: %w", err)
+		}
+		e.EventType = EventType(eventType)
+		e.Blocked = blocked != 0
+		e.Timestamp, err = time.Parse(time.RFC3339, ts)
+		if err != nil {
+			return nil, fmt.Errorf("failed to parse event timestamp %q: %w", ts, err)
+		}
+		events = append(events, e)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("error iterating event rows: %w", err)
+	}
+
+	return events, nil
+}
+
+// Stats returns aggregate counts. If sessionID is empty, stats cover all sessions.
+func (l *Logger) Stats(sessionID string) (*Stats, error) {
+	where := ""
+	var args []any
+	if sessionID != "" {
+		where = " WHERE session_id = ?"
+		args = append(args, sessionID)
+	}
+
+	s := &Stats{
+		ByCategory: make(map[string]int),
+		ByType:     make(map[EventType]int),
+	}
+
+	row := l.db.QueryRow("SELECT COUNT(*), COALESCE(SUM(blocked), 0), COALESCE(SUM(CASE WHEN blocked = 0 THEN 1 ELSE 0 END), 0) FROM events"+where, args...)
+	if err := row.Scan(&s.TotalEvents, &s.BlockedCount, &s.PassedCount); err != nil {
+		return nil, fmt.Errorf("failed to query event stats: %w", err)
+	}
+
+	row = l.db.QueryRow("SELECT COUNT(DISTINCT session_id) FROM events"+where, args...)
+	if err := row.Scan(&s.SessionCount); err != nil {
+		return nil, fmt.Errorf("failed to query session count: %w", err)
+	}
+
+	var firstStr, lastStr sql.NullString
+	row = l.db.QueryRow("SELECT MIN(timestamp), MAX(timestamp) FROM events"+where, args...)
+	if err := row.Scan(&firstStr, &lastStr); err != nil {
+		return nil, fmt.Errorf("failed to query event time range: %w", err)
+	}
+	if firstStr.Valid {
+		t, err := time.Parse(time.RFC3339, firstStr.String)
+		if err == nil {
+			s.FirstEvent = &t
+		}
+	}
+	if lastStr.Valid {
+		t, err := time.Parse(time.RFC3339, lastStr.String)
+		if err == nil {
+			s.LastEvent = &t
+		}
+	}
+
+	catRows, err := l.db.Query("SELECT category, COUNT(*) FROM events"+where+" GROUP BY category", args...)
+	if err != nil {
+		return nil, fmt.Errorf("failed to query category counts: %w", err)
+	}
+	defer catRows.Close()
+	for catRows.Next() {
+		var cat string
+		var count int
+		if err := catRows.Scan(&cat, &count); err != nil {
+			return nil, fmt.Errorf("failed to scan category count: %w", err)
+		}
+		s.ByCategory[cat] = count
+	}
+	if err := catRows.Err(); err != nil {
+		return nil, fmt.Errorf("error iterating category rows: %w", err)
+	}
+
+	typeRows, err := l.db.Query("SELECT event_type, COUNT(*) FROM events"+where+" GROUP BY event_type", args...)
+	if err != nil {
+		return nil, fmt.Errorf("failed to query type counts: %w", err)
+	}
+	defer typeRows.Close()
+	for typeRows.Next() {
+		var et string
+		var count int
+		if err := typeRows.Scan(&et, &count); err != nil {
+			return nil, fmt.Errorf("failed to scan type count: %w", err)
+		}
+		s.ByType[EventType(et)] = count
+	}
+	if err := typeRows.Err(); err != nil {
+		return nil, fmt.Errorf("error iterating type rows: %w", err)
+	}
+
+	return s, nil
+}
+
+// Prune removes events older than the given duration.
+// Returns the number of events removed.
+func (l *Logger) Prune(olderThan time.Duration) (int, error) {
+	cutoff := time.Now().Add(-olderThan).UTC().Format(time.RFC3339)
+	result, err := l.db.Exec("DELETE FROM events WHERE timestamp < ?", cutoff)
+	if err != nil {
+		return 0, fmt.Errorf("failed to prune events: %w", err)
+	}
+	n, err := result.RowsAffected()
+	if err != nil {
+		return 0, fmt.Errorf("failed to get prune count: %w", err)
+	}
+	return int(n), nil
+}
+
+// Close closes the database connection.
+func (l *Logger) Close() error {
+	return l.db.Close()
+}
