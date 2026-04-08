@@ -39,9 +39,22 @@ var statusCmd = &cobra.Command{
 			fmt.Println("Secret fence: not configured")
 		}
 
-		// Placeholder for future fences
-		fmt.Println("Filesystem fence: not active")
-		fmt.Println("Network fence: not active")
+		// Filesystem fence status
+		if cfg.Filesystem.Root != "" {
+			allowCount := len(cfg.Filesystem.Allow)
+			denyCount := len(cfg.Filesystem.Deny)
+			fmt.Printf("Filesystem fence: active (allow %d, deny %d)\n", allowCount, denyCount)
+		} else {
+			fmt.Println("Filesystem fence: not configured")
+		}
+
+		// Network fence status
+		if cfg.Network.AllowAll {
+			fmt.Println("Network fence: disabled (allow_all = true)")
+		} else {
+			domainCount := len(cfg.Network.Allow)
+			fmt.Printf("Network fence: active (allowing %d domain(s))\n", domainCount)
+		}
 
 		// Event log summary
 		dbPath, projectRoot := config.ResolveDBPath(cfg, configPath)
