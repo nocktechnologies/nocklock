@@ -25,6 +25,7 @@ NockLock is an AI agent security fence. Go CLI that wraps coding agents with fil
 - `internal/fence/` — fence implementations: filesystem, network, secrets
 - `internal/fence/fs/` — filesystem fence: config processing, Go wrapper, event listener
 - `internal/fence/fs/interposer/` — C shared library for LD_PRELOAD interception (Linux only)
+- `internal/fence/network/` — network fence: local HTTP/HTTPS proxy, domain allowlist, CONNECT tunnel
 - `internal/logging/` — SQLite event logging
 
 ## Detailed Context
