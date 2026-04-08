@@ -25,8 +25,8 @@ NockLock wraps your agent in an invisible fence. Three boundaries:
 Zero config defaults. The fence is invisible until something hits it.
 
 > **Current status:** NockLock is in early development. The CLI skeleton and config
-> system are working. The filesystem fence is implemented (Linux). Network and secret
-> Network fence coming in an upcoming PR.
+> system are working. The secret fence and filesystem fence (Linux) are active.
+> Network fence coming soon.
 
 ## Install (from source)
 
