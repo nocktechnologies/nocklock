@@ -8,8 +8,9 @@ func DefaultConfig() Config {
 			Root: ".",
 		},
 		Filesystem: FilesystemConfig{
+			Root: ".",
+			Mode: "read-write",
 			Allow: []string{
-				".",
 				"~/.claude/",
 				"/tmp/",
 			},
@@ -18,7 +19,6 @@ func DefaultConfig() Config {
 				"~/.aws/",
 				"~/.gnupg/",
 				"~/.nock/",
-				"../",
 			},
 		},
 		Network: NetworkConfig{
@@ -72,8 +72,9 @@ name = ""
 root = "."
 
 [filesystem]
+root = "."
+mode = "read-write"
 allow = [
-    ".",
     "~/.claude/",
     "/tmp/",
 ]
@@ -82,7 +83,6 @@ deny = [
     "~/.aws/",
     "~/.gnupg/",
     "~/.nock/",
-    "../",
 ]
 
 [network]

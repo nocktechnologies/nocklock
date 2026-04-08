@@ -179,6 +179,69 @@ func TestFindConfigNotFound(t *testing.T) {
 	}
 }
 
+func TestParseConfigWithFilesystemRootAndMode(t *testing.T) {
+	tomlContent := `
+[project]
+name = "test-project"
+root = "."
+
+[filesystem]
+root = "/home/agent/project"
+mode = "read-write"
+allow = ["."]
+deny = ["~/.ssh/"]
+
+[network]
+allow = ["github.com"]
+allow_all = false
+
+[secrets]
+pass = ["HOME"]
+block = ["AWS_*"]
+
+[logging]
+db = ".nock/events.db"
+level = "info"
+
+[cloud]
+enabled = false
+api_key = ""
+endpoint = "https://cc.nocktechnologies.io/api/fence/events/"
+`
+	dir := t.TempDir()
+	nockDir := filepath.Join(dir, ".nock")
+	if err := os.MkdirAll(nockDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	configPath := filepath.Join(nockDir, "config.toml")
+	if err := os.WriteFile(configPath, []byte(tomlContent), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	cfg, err := Load(configPath)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	if cfg.Filesystem.Root != "/home/agent/project" {
+		t.Errorf("expected filesystem root '/home/agent/project', got %q", cfg.Filesystem.Root)
+	}
+	if cfg.Filesystem.Mode != "read-write" {
+		t.Errorf("expected filesystem mode 'read-write', got %q", cfg.Filesystem.Mode)
+	}
+}
+
+func TestDefaultConfigFilesystemRootAndMode(t *testing.T) {
+	cfg := DefaultConfig()
+
+	if cfg.Filesystem.Root != "." {
+		t.Errorf("expected default filesystem root '.', got %q", cfg.Filesystem.Root)
+	}
+	if cfg.Filesystem.Mode != "read-write" {
+		t.Errorf("expected default filesystem mode 'read-write', got %q", cfg.Filesystem.Mode)
+	}
+}
+
 func TestDefaultTOMLMatchesDefaultConfig(t *testing.T) {
 	var parsed Config
 	if err := toml.Unmarshal([]byte(DefaultTOML()), &parsed); err != nil {
