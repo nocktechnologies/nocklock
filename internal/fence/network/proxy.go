@@ -21,14 +21,20 @@ var cgnat = &net.IPNet{
 }
 
 // isBlockedIP reports whether ip should never be dialed by the proxy.
-// Blocks loopback, link-local unicast, RFC-1918 private, and CGNAT ranges.
+// Blocks loopback, unspecified (0.0.0.0/::), link-local unicast, multicast,
+// RFC-1918 private ranges, and CGNAT (100.64.0.0/10).
 func isBlockedIP(ip net.IP) bool {
 	if ip4 := ip.To4(); ip4 != nil {
 		if cgnat.Contains(ip4) {
 			return true
 		}
 	}
-	return ip.IsLoopback() || ip.IsLinkLocalUnicast() || ip.IsPrivate()
+	return ip.IsLoopback() ||
+		ip.IsUnspecified() ||
+		ip.IsMulticast() ||
+		ip.IsLinkLocalUnicast() ||
+		ip.IsLinkLocalMulticast() ||
+		ip.IsPrivate()
 }
 
 // safeDial resolves addr, rejects loopback/private IPs (SSRF prevention),

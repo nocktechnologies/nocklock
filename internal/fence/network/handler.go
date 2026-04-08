@@ -97,8 +97,13 @@ func (p *ProxyServer) forwardHTTP(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	// Remove hop-by-hop headers before forwarding.
+	// Remove hop-by-hop headers before forwarding (RFC 7230 §6.1).
+	// Also remove any headers listed in the Connection header itself.
+	for _, name := range r.Header["Connection"] {
+		r.Header.Del(name)
+	}
 	for _, h := range []string{
+		"Connection", "Keep-Alive",
 		"Proxy-Connection", "Proxy-Authenticate", "Proxy-Authorization",
 		"Te", "Trailers", "Transfer-Encoding", "Upgrade",
 	} {

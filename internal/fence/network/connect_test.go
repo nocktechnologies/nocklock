@@ -143,7 +143,7 @@ func TestHandleConnectViaHTTPTest(t *testing.T) {
 		{"allowed host via apex rule", []string{"example.com"}, "example.com:443", 200},
 		{"blocked host", []string{"allowed.com"}, "evil.com:443", 403},
 		{"raw IP blocked", []string{"github.com"}, "1.2.3.4:443", 403},
-		{"allow_all bypasses check", nil, "any.com:443", 403}, // allowAll=false, empty list → 403
+		{"empty allowlist blocks everything", nil, "any.com:443", 403}, // allowAll=false, empty list → 403
 	}
 
 	for _, tc := range cases {

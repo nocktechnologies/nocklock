@@ -144,9 +144,14 @@ func TestIsBlockedIP(t *testing.T) {
 		{"192.168.1.1", true},           // RFC-1918
 		{"169.254.10.1", true},          // link-local
 		{"100.64.0.1", true},            // CGNAT
+		{"0.0.0.0", true},               // unspecified
+		{"224.0.0.1", true},             // multicast
+		{"ff02::1", true},               // IPv6 link-local multicast
 		{"8.8.8.8", false},              // public
 		{"2001:4860:4860::8888", false}, // public IPv6
-		{"198.51.100.1", false},         // TEST-NET, should be publicly routable
+		// 198.51.100.0/24 is TEST-NET-2 (documentation range, not routable in production,
+		// but not in any standard blocked range so safeDial allows it).
+		{"198.51.100.1", false},
 	}
 	for _, tc := range cases {
 		ip := net.ParseIP(tc.ip)
@@ -194,10 +199,11 @@ func TestProxyBlockedRequestReturns403(t *testing.T) {
 	}
 	resp, err := client.Get("http://blocked.com/test")
 	if err != nil {
-		// Some HTTP clients may error instead of returning the response when the
-		// proxy returns 403. Check for a 403 in the error or in the response.
-		t.Logf("client.Get error (may be expected on 403): %v", err)
-		return
+		// http.Client may return an error for 4xx responses depending on redirect
+		// handling. Only fail on unexpected errors (non-HTTP errors).
+		if resp == nil {
+			t.Fatalf("proxy request failed with no response: %v", err)
+		}
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusForbidden {

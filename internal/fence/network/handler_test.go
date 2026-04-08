@@ -4,6 +4,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 )
 
@@ -142,20 +143,7 @@ func TestServeHTTP_NockLockIdentifierInBlockedBody(t *testing.T) {
 	p.ServeHTTP(w, req)
 
 	body, _ := io.ReadAll(w.Body)
-	if !containsNockLock(string(body)) {
+	if !strings.Contains(string(body), "NockLock") {
 		t.Errorf("expected body to contain 'NockLock', got: %q", string(body))
 	}
-}
-
-func containsNockLock(s string) bool {
-	return len(s) >= 8 && (s[:8] == "NockLock" || containsSubstring(s, "NockLock"))
-}
-
-func containsSubstring(s, sub string) bool {
-	for i := 0; i+len(sub) <= len(s); i++ {
-		if s[i:i+len(sub)] == sub {
-			return true
-		}
-	}
-	return false
 }
