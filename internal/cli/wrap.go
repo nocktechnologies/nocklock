@@ -141,6 +141,9 @@ var wrapCmd = &cobra.Command{
 				if fsCfg != nil {
 					// Look for the shared library next to the nocklock binary or in standard paths.
 					libPath := findLibFenceFS()
+					if _, err := os.Stat(libPath); err != nil {
+						return fmt.Errorf("filesystem fence library not found at %s. Build it with: make build-fence-fs", libPath)
+					}
 
 					fsFence, err = fsfence.NewFence(fsCfg, libPath)
 					if err != nil {
@@ -149,7 +152,23 @@ var wrapCmd = &cobra.Command{
 					defer fsFence.Close()
 
 					// Add LD_PRELOAD and NOCKLOCK_FS_ALLOWED to child env.
-					childEnv = append(childEnv, fsFence.EnvVars()...)
+					// Merge LD_PRELOAD with any existing value in childEnv.
+					fenceEnv := fsFence.EnvVars()
+					for i, fenceVar := range fenceEnv {
+						if strings.HasPrefix(fenceVar, "LD_PRELOAD=") {
+							fenceLib := strings.TrimPrefix(fenceVar, "LD_PRELOAD=")
+							for j, childVar := range childEnv {
+								if strings.HasPrefix(childVar, "LD_PRELOAD=") {
+									existing := strings.TrimPrefix(childVar, "LD_PRELOAD=")
+									childEnv[j] = "LD_PRELOAD=" + fenceLib + ":" + existing
+									fenceEnv = append(fenceEnv[:i], fenceEnv[i+1:]...)
+									break
+								}
+							}
+							break
+						}
+					}
+					childEnv = append(childEnv, fenceEnv...)
 
 					// Start listening for events.
 					ctx, cancel := context.WithCancel(context.Background())
@@ -168,26 +187,9 @@ var wrapCmd = &cobra.Command{
 		child.Stdout = os.Stdout
 		child.Stderr = os.Stderr
 
-		if err := child.Run(); err != nil {
-			if exitErr, ok := err.(*exec.ExitError); ok {
-				code := exitErr.ExitCode()
-				if code < 0 {
-					// Negative exit code means signal termination (Unix) or abnormal exit.
-					// Fall back to 1 for cross-platform safety.
-					code = 1
-				}
-				logEvent(logging.EventSessionEnd, "session", fmt.Sprintf("exit_code=%d", code), false)
-				cmd.SilenceErrors = true
-				cmd.SilenceUsage = true
-				return &exitCodeError{code: code}
-			}
-			logEvent(logging.EventSessionEnd, "session", "exit_code=1", false)
-			cmd.SilenceErrors = true
-			cmd.SilenceUsage = true
-			return fmt.Errorf("failed to run %q: %w", args[0], err)
-		}
+		childErr := child.Run()
 
-		// Drain remaining filesystem fence events.
+		// Drain remaining filesystem fence events (regardless of child exit status).
 		if fsFenceEvents != nil {
 			drainCtx, drainCancel := context.WithTimeout(context.Background(), 500*time.Millisecond)
 			defer drainCancel()
@@ -204,6 +206,25 @@ var wrapCmd = &cobra.Command{
 					break drainLoop
 				}
 			}
+		}
+
+		if childErr != nil {
+			if exitErr, ok := childErr.(*exec.ExitError); ok {
+				code := exitErr.ExitCode()
+				if code < 0 {
+					// Negative exit code means signal termination (Unix) or abnormal exit.
+					// Fall back to 1 for cross-platform safety.
+					code = 1
+				}
+				logEvent(logging.EventSessionEnd, "session", fmt.Sprintf("exit_code=%d", code), false)
+				cmd.SilenceErrors = true
+				cmd.SilenceUsage = true
+				return &exitCodeError{code: code}
+			}
+			logEvent(logging.EventSessionEnd, "session", "exit_code=1", false)
+			cmd.SilenceErrors = true
+			cmd.SilenceUsage = true
+			return fmt.Errorf("failed to run %q: %w", args[0], childErr)
 		}
 
 		logEvent(logging.EventSessionEnd, "session", "exit_code=0", false)

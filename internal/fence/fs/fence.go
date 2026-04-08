@@ -73,6 +73,9 @@ func NewFence(cfg *FenceConfig, libPath string) (*Fence, error) {
 		return nil, fmt.Errorf("cannot listen on fence socket %s: %w", socketPath, err)
 	}
 
+	// Restrict socket permissions to owner-only, regardless of umask.
+	os.Chmod(socketPath, 0600)
+
 	return &Fence{
 		Config:     cfg,
 		SocketPath: socketPath,

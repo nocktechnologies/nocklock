@@ -148,6 +148,41 @@ func TestProcessConfig_DefaultMode(t *testing.T) {
 	}
 }
 
+func TestProcessConfig_SymlinkedRoot(t *testing.T) {
+	// Create a real directory.
+	realDir := t.TempDir()
+
+	// Create a symlink to it.
+	parent := t.TempDir()
+	linkPath := filepath.Join(parent, "linked-root")
+	if err := os.Symlink(realDir, linkPath); err != nil {
+		t.Fatalf("failed to create symlink: %v", err)
+	}
+
+	fsCfg := config.FilesystemConfig{
+		Root: linkPath,
+		Mode: "read-write",
+	}
+
+	fc, err := ProcessConfig(fsCfg)
+	if err != nil {
+		t.Fatalf("ProcessConfig failed: %v", err)
+	}
+
+	// Root should be resolved to the real path, not the symlink.
+	if fc.Root == linkPath {
+		t.Errorf("Root should be resolved through symlink, got symlink path %q", fc.Root)
+	}
+	// Resolve realDir too, since on macOS /var -> /private/var.
+	resolvedReal, err := filepath.EvalSymlinks(realDir)
+	if err != nil {
+		t.Fatalf("failed to resolve real dir: %v", err)
+	}
+	if fc.Root != resolvedReal {
+		t.Errorf("Root = %q, want real path %q", fc.Root, resolvedReal)
+	}
+}
+
 // --- Task 3: Rule Serialization Tests ---
 
 func TestSerialize_RoundTrip(t *testing.T) {
