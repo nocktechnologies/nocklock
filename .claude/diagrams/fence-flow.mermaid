@@ -1,0 +1,45 @@
+%% NockLock — Fence Flow
+%% Config loading → fence engine setup → child process wrapping
+
+flowchart TD
+    A["nocklock wrap -- command args..."] --> B{".nock/config.toml<br/>exists?"}
+
+    B -->|No| C["Use DefaultConfig()"]
+    B -->|Yes| D["Load(path)<br/>Parse TOML + reject unknown keys"]
+    D --> E{Parse OK?}
+    E -->|Error| F["Exit with actionable error"]
+    E -->|OK| G["Config loaded"]
+    C --> G
+
+    G --> H["Initialize Fence Engines"]
+
+    H --> I["Secret Fence<br/>Filter env vars:<br/>pass list → allow<br/>block list → deny<br/>block overrides pass"]
+
+    H --> J["Filesystem Fence<br/>LD_PRELOAD / DYLD_INSERT<br/>Intercept: open, openat, stat, access<br/>Check allow/deny lists<br/>Blocked → ENOENT"]
+
+    H --> K["Network Fence<br/>Start local proxy<br/>Set HTTP_PROXY / HTTPS_PROXY<br/>Check domain allowlist<br/>Blocked → 403"]
+
+    I --> L["Build filtered env"]
+    J --> M["Prepare preload library"]
+    K --> N["Start proxy, get port"]
+
+    L --> O["Spawn Child Process<br/>exec.Command(args[0], args[1:]...)<br/>Stdin/Stdout/Stderr pass-through"]
+    M --> O
+    N --> O
+
+    O --> P["Child Running"]
+    P --> Q{Child exits}
+    Q -->|exit 0| R["nocklock exits 0"]
+    Q -->|exit N| S["nocklock exits N<br/>(preserve child exit code)"]
+    Q -->|signal| T["nocklock exits 1<br/>(cross-platform fallback)"]
+
+    subgraph "Event Logging (all fences)"
+        U["Every allow/block decision<br/>→ SQLite fence_events table"]
+    end
+
+    I -.-> U
+    J -.-> U
+    K -.-> U
+
+    classDef planned fill:#1a1a2e,stroke:#10B981,stroke-dasharray: 5 5
+    class J,K,M,N,U planned

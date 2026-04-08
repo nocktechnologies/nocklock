@@ -1,0 +1,64 @@
+%% NockLock — Package Architecture
+%% Shows package structure and dependency relationships
+
+graph TD
+    subgraph "cmd"
+        main["cmd/nocklock/main.go<br/>Entry point"]
+    end
+
+    subgraph "internal/cli"
+        root["root.go<br/>rootCmd + Execute()"]
+        wrap["wrap.go<br/>wrapCmd — wrap child process"]
+        init_cmd["init_cmd.go<br/>initCmd — create .nock/config.toml"]
+        config_cmd["config.go<br/>configCmd — print config"]
+        log_cmd["log.go<br/>logCmd — view fence events"]
+        status_cmd["status.go<br/>statusCmd — show sessions"]
+        version_cmd["version.go<br/>versionCmd — print version"]
+    end
+
+    subgraph "internal/config"
+        config["config.go<br/>Config structs + Load()"]
+        defaults["defaults.go<br/>DefaultConfig() + DefaultTOML()"]
+    end
+
+    subgraph "internal/version"
+        version["version.go<br/>Version + BuildInfo()"]
+    end
+
+    subgraph "internal/fence (planned)"
+        fs_fence["filesystem.go<br/>LD_PRELOAD / DYLD_INSERT"]
+        net_fence["network.go<br/>Local proxy egress filter"]
+        sec_fence["secrets.go<br/>Env var filtering"]
+    end
+
+    subgraph "internal/logging (planned)"
+        sqlite["sqlite.go<br/>SQLite event store"]
+    end
+
+    main --> root
+    root --> wrap
+    root --> init_cmd
+    root --> config_cmd
+    root --> log_cmd
+    root --> status_cmd
+    root --> version_cmd
+
+    wrap --> version
+    version_cmd --> version
+    init_cmd --> config
+    init_cmd --> defaults
+    config_cmd --> config
+
+    wrap -.->|"PR #3-6"| fs_fence
+    wrap -.->|"PR #3-6"| net_fence
+    wrap -.->|"PR #3-6"| sec_fence
+    wrap -.->|"PR #4"| sqlite
+
+    fs_fence --> sqlite
+    net_fence --> sqlite
+    sec_fence --> sqlite
+
+    sqlite -.->|"PR #7"| cloud["NockCC Cloud Sync"]
+
+    classDef planned fill:#1a1a2e,stroke:#10B981,stroke-dasharray: 5 5
+    class fs_fence,net_fence,sec_fence,sqlite,cloud planned
