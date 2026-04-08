@@ -3,7 +3,6 @@ package network
 import (
 	"bufio"
 	"context"
-	"fmt"
 	"io"
 	"net"
 	"net/http"
@@ -132,40 +131,52 @@ func TestCONNECTRawIPBlocked(t *testing.T) {
 	}
 }
 
-// TestHandleConnectViaHTTPTest covers handleConnect via httptest.Server for simpler setup.
-func TestHandleConnectViaHTTPTest(t *testing.T) {
+// TestHandleConnect_BlockedCases verifies all block conditions via httptest.ResponseRecorder.
+// (The recorder cannot hijack, so only 403 responses — which return before hijack — can be
+// fully verified here. Allowed-host tunnelling is covered by TestCONNECTAllowedReturns200.)
+func TestHandleConnect_BlockedCases(t *testing.T) {
 	cases := []struct {
 		name      string
 		allowList []string
 		host      string
-		wantCode  int
 	}{
-		{"allowed host via apex rule", []string{"example.com"}, "example.com:443", 200},
-		{"blocked host", []string{"allowed.com"}, "evil.com:443", 403},
-		{"raw IP blocked", []string{"github.com"}, "1.2.3.4:443", 403},
-		{"empty allowlist blocks everything", nil, "any.com:443", 403}, // allowAll=false, empty list → 403
+		{"blocked host not in allowlist", []string{"allowed.com"}, "evil.com:443"},
+		{"raw IP blocked", []string{"github.com"}, "1.2.3.4:443"},
+		{"empty allowlist blocks everything", nil, "any.com:443"},
 	}
 
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			p := &ProxyServer{allowList: tc.allowList}
 
-			srv := httptest.NewServer(p)
-			defer srv.Close()
-
-			req, _ := http.NewRequest(http.MethodConnect, "http://"+srv.Listener.Addr().String(), nil)
+			req, _ := http.NewRequest(http.MethodConnect, "http://proxy", nil)
 			req.Host = tc.host
 			req.RequestURI = tc.host
 
 			w := httptest.NewRecorder()
 			p.ServeHTTP(w, req)
 
-			// The recorder can't hijack, so allowed CONNECT will fail at hijack.
-			// We only check the 403 case, which never reaches hijack.
-			if tc.wantCode == http.StatusForbidden && w.Code != http.StatusForbidden {
-				t.Errorf("expected 403, got %d", w.Code)
+			if w.Code != http.StatusForbidden {
+				t.Errorf("host %q: expected 403, got %d", tc.host, w.Code)
 			}
-			_ = fmt.Sprintf("host %s checked", tc.host) // suppress unused warning
 		})
+	}
+}
+
+// TestHandleConnect_AllowedDoesNotReturn403 verifies that an allowed CONNECT host
+// does not get a 403. The recorder can't hijack so the response will be 500 (hijack
+// unsupported), but the allowlist check must not return 403.
+func TestHandleConnect_AllowedDoesNotReturn403(t *testing.T) {
+	p := &ProxyServer{allowList: []string{"example.com"}}
+
+	req, _ := http.NewRequest(http.MethodConnect, "http://proxy", nil)
+	req.Host = "example.com:443"
+	req.RequestURI = "example.com:443"
+
+	w := httptest.NewRecorder()
+	p.ServeHTTP(w, req)
+
+	if w.Code == http.StatusForbidden {
+		t.Errorf("allowed host 'example.com' should not get 403, got %d", w.Code)
 	}
 }

@@ -149,6 +149,7 @@ func (p *ProxyServer) Start() (string, error) {
 }
 
 // Stop shuts down the proxy server gracefully.
+// After Stop returns, Addr() returns "" and the server will not accept new connections.
 func (p *ProxyServer) Stop() error {
 	if p.server == nil {
 		return nil
@@ -160,6 +161,10 @@ func (p *ProxyServer) Stop() error {
 	if p.transport != nil {
 		p.transport.CloseIdleConnections()
 	}
+
+	// Clear server and listener so Addr() returns "" and Stop() is idempotent.
+	p.server = nil
+	p.listener = nil
 
 	if p.logger != nil {
 		_ = p.logger.Log(logging.Event{
