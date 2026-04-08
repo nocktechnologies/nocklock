@@ -41,6 +41,8 @@ type ProjectConfig struct {
 
 // FilesystemConfig defines filesystem access boundaries.
 type FilesystemConfig struct {
+	Root  string   `toml:"root"`
+	Mode  string   `toml:"mode"`
 	Allow []string `toml:"allow"`
 	Deny  []string `toml:"deny"`
 }

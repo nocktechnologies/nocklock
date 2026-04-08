@@ -8,6 +8,9 @@
 *.so
 *.dylib
 
+# Filesystem fence shared library (built from C source)
+internal/fence/fs/interposer/libfence_fs.so
+
 # Test binary, built with `go test -c`
 *.test
 
