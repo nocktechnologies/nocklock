@@ -7,7 +7,7 @@ NockLock is an AI agent security fence. Go CLI that wraps coding agents with fil
 - Go 1.26+ (single binary, cross-platform)
 - cobra (CLI framework)
 - BurntSushi/toml (config parser)
-- SQLite (event logging — planned)
+- SQLite (event logging via modernc.org/sqlite)
 
 ## Commands
 - `go build ./cmd/nocklock` — build
@@ -25,7 +25,7 @@ NockLock is an AI agent security fence. Go CLI that wraps coding agents with fil
 - `internal/fence/` — fence implementations: filesystem, network, secrets
 - `internal/fence/fs/` — filesystem fence: config processing, Go wrapper, event listener
 - `internal/fence/fs/interposer/` — C shared library for LD_PRELOAD interception (Linux only)
-- `internal/logging/` — SQLite event logging *(planned, not yet created)*
+- `internal/logging/` — SQLite event logging
 
 ## Detailed Context
 All detailed documentation lives in the .claude/ directory:
