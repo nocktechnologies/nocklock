@@ -13,6 +13,7 @@ import (
 	"github.com/google/uuid"
 	"github.com/nocktechnologies/nocklock/internal/config"
 	fsfence "github.com/nocktechnologies/nocklock/internal/fence/fs"
+	"github.com/nocktechnologies/nocklock/internal/fence/network"
 	"github.com/nocktechnologies/nocklock/internal/fence/secrets"
 	"github.com/nocktechnologies/nocklock/internal/logging"
 	"github.com/spf13/cobra"
@@ -189,6 +190,30 @@ var wrapCmd = &cobra.Command{
 			}
 		}
 
+		// Apply network fence.
+		if !cfg.Network.AllowAll {
+			proxy := network.NewProxyServer(cfg.Network, logger, sessionID)
+			addr, proxyErr := proxy.Start()
+			if proxyErr != nil {
+				fmt.Fprintf(os.Stderr, "NockLock: warning: network fence failed to start: %v\n", proxyErr)
+				logEvent(logging.EventNetworkError, "network", fmt.Sprintf("proxy start failed: %v", proxyErr), false)
+			} else {
+				defer proxy.Stop()
+				proxyURL := "http://" + addr
+				childEnv = append(childEnv,
+					"HTTP_PROXY="+proxyURL,
+					"HTTPS_PROXY="+proxyURL,
+					"http_proxy="+proxyURL,
+					"https_proxy="+proxyURL,
+				)
+				childEnv = removeEnvVars(childEnv, "NO_PROXY", "no_proxy")
+				fmt.Fprintf(os.Stderr, "NockLock: network fence active — allowing %d domain(s)\n", len(cfg.Network.Allow))
+				logEvent(logging.EventNetworkPassed, "network", fmt.Sprintf("proxy=%s domains=%d", addr, len(cfg.Network.Allow)), false)
+			}
+		} else {
+			fmt.Fprintf(os.Stderr, "NockLock: network fence disabled (allow_all = true)\n")
+		}
+
 		child := exec.Command(args[0], args[1:]...)
 		child.Env = childEnv
 		child.Stdin = os.Stdin
@@ -242,6 +267,25 @@ var wrapCmd = &cobra.Command{
 
 func init() {
 	rootCmd.AddCommand(wrapCmd)
+}
+
+// removeEnvVars returns env with any entries whose key matches one of the given
+// keys removed. Keys are matched case-sensitively by prefix ("KEY=").
+func removeEnvVars(env []string, keys ...string) []string {
+	filtered := env[:0:len(env)]
+	for _, entry := range env {
+		keep := true
+		for _, key := range keys {
+			if strings.HasPrefix(entry, key+"=") || entry == key {
+				keep = false
+				break
+			}
+		}
+		if keep {
+			filtered = append(filtered, entry)
+		}
+	}
+	return filtered
 }
 
 // findLibFenceFS searches for the filesystem fence shared library.
