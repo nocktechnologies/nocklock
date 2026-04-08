@@ -13,6 +13,12 @@ import (
 // handleConnect handles HTTP CONNECT tunnel requests for HTTPS.
 // It checks the destination hostname against the allowlist, hijacks the connection
 // if allowed, and pipes bytes bidirectionally without inspecting the encrypted payload.
+//
+// Security properties:
+//   - No MITM: the proxy never reads or writes the encrypted payload.
+//   - Hostname-only inspection: only the CONNECT request host is checked.
+//   - Post-DNS IP validation: the safe dialer blocks loopback/private IP SSRF.
+//   - Both copy goroutines are joined before returning to prevent goroutine leaks.
 func (p *ProxyServer) handleConnect(w http.ResponseWriter, r *http.Request) {
 	host := r.Host
 	if h, _, err := net.SplitHostPort(r.Host); err == nil {
@@ -25,12 +31,13 @@ func (p *ProxyServer) handleConnect(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Dial the destination before hijacking so we can 502 cleanly on failure.
-	dialer := &net.Dialer{Timeout: 30 * time.Second}
-	upstream, err := dialer.DialContext(r.Context(), "tcp", r.Host)
+	// Dial the destination before hijacking so we can respond with 502 cleanly on failure.
+	// p.dialFunc defaults to safeDial, which validates the resolved IP is not loopback/private.
+	upstream, err := p.dial(r.Context(), "tcp", r.Host)
 	if err != nil {
 		p.logEvent(logging.EventNetworkError, r.Method, host, false)
-		http.Error(w, fmt.Sprintf("NockLock: could not connect to %s: %v", r.Host, err), http.StatusBadGateway)
+		// Return a generic error — do not leak the resolved IP or internal details.
+		http.Error(w, "NockLock: could not connect to upstream", http.StatusBadGateway)
 		return
 	}
 	defer upstream.Close()
@@ -59,7 +66,8 @@ func (p *ProxyServer) handleConnect(w http.ResponseWriter, r *http.Request) {
 	_ = clientConn.SetDeadline(idleDeadline)
 	_ = upstream.SetDeadline(idleDeadline)
 
-	// Pipe bytes bidirectionally. Both goroutines close when either side closes.
+	// Pipe bytes bidirectionally.
+	// Both goroutines are waited on to prevent goroutine leaks on half-closed connections.
 	done := make(chan struct{}, 2)
 	go func() {
 		io.Copy(upstream, clientConn) //nolint:errcheck
@@ -69,5 +77,7 @@ func (p *ProxyServer) handleConnect(w http.ResponseWriter, r *http.Request) {
 		io.Copy(clientConn, upstream) //nolint:errcheck
 		done <- struct{}{}
 	}()
+	// Wait for both directions to complete before releasing the connections.
+	<-done
 	<-done
 }

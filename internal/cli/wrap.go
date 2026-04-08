@@ -191,10 +191,23 @@ var wrapCmd = &cobra.Command{
 		}
 
 		// Apply network fence.
+		// Always strip ambient proxy and NO_PROXY vars first, regardless of allow_all,
+		// to prevent the child from inheriting a corporate/operator proxy that could bypass
+		// NockLock's allowlist or produce unpredictable behaviour.
+		childEnv = removeEnvVars(childEnv,
+			"HTTP_PROXY", "http_proxy",
+			"HTTPS_PROXY", "https_proxy",
+			"ALL_PROXY", "all_proxy",
+			"NO_PROXY", "no_proxy",
+		)
+
 		if !cfg.Network.AllowAll {
 			proxy := network.NewProxyServer(cfg.Network, logger, sessionID)
 			addr, proxyErr := proxy.Start()
 			if proxyErr != nil {
+				// Degrade gracefully per design — agent still runs, but logs the failure.
+				// NOTE: This is a deliberate design tradeoff (see PR #7 spec). For stricter
+				// enforcement, change this to: return fmt.Errorf("network fence failed: %w", proxyErr)
 				fmt.Fprintf(os.Stderr, "NockLock: warning: network fence failed to start: %v\n", proxyErr)
 				logEvent(logging.EventNetworkError, "network", fmt.Sprintf("proxy start failed: %v", proxyErr), false)
 			} else {
@@ -205,8 +218,9 @@ var wrapCmd = &cobra.Command{
 					"HTTPS_PROXY="+proxyURL,
 					"http_proxy="+proxyURL,
 					"https_proxy="+proxyURL,
+					"ALL_PROXY="+proxyURL,
+					"all_proxy="+proxyURL,
 				)
-				childEnv = removeEnvVars(childEnv, "NO_PROXY", "no_proxy")
 				fmt.Fprintf(os.Stderr, "NockLock: network fence active — allowing %d domain(s)\n", len(cfg.Network.Allow))
 				logEvent(logging.EventNetworkPassed, "network", fmt.Sprintf("proxy=%s domains=%d", addr, len(cfg.Network.Allow)), false)
 			}

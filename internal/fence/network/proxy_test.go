@@ -131,6 +131,50 @@ func TestProxyTwoInstancesBindDifferentPorts(t *testing.T) {
 	}
 }
 
+// TestIsBlockedIP covers the SSRF prevention helper.
+func TestIsBlockedIP(t *testing.T) {
+	cases := []struct {
+		ip      string
+		blocked bool
+	}{
+		{"127.0.0.1", true},             // loopback
+		{"::1", true},                   // IPv6 loopback
+		{"10.0.0.1", true},              // RFC-1918
+		{"172.16.5.5", true},            // RFC-1918
+		{"192.168.1.1", true},           // RFC-1918
+		{"169.254.10.1", true},          // link-local
+		{"100.64.0.1", true},            // CGNAT
+		{"8.8.8.8", false},              // public
+		{"2001:4860:4860::8888", false}, // public IPv6
+		{"198.51.100.1", false},         // TEST-NET, should be publicly routable
+	}
+	for _, tc := range cases {
+		ip := net.ParseIP(tc.ip)
+		if ip == nil {
+			t.Fatalf("invalid test IP: %q", tc.ip)
+		}
+		got := isBlockedIP(ip)
+		if got != tc.blocked {
+			t.Errorf("isBlockedIP(%q) = %v, want %v", tc.ip, got, tc.blocked)
+		}
+	}
+}
+
+// TestSafeDialBlocksLoopback verifies safeDial refuses loopback addresses.
+func TestSafeDialBlocksLoopback(t *testing.T) {
+	// Start a real server on localhost to confirm the refusal is about IP, not connectivity.
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("could not listen: %v", err)
+	}
+	defer ln.Close()
+
+	_, err = safeDial(t.Context(), "tcp", ln.Addr().String())
+	if err == nil {
+		t.Error("safeDial should have refused loopback address, but succeeded")
+	}
+}
+
 // TestProxyBlockedRequestReturns403 is an end-to-end HTTP test through the proxy.
 func TestProxyBlockedRequestReturns403(t *testing.T) {
 	p := makeProxy([]string{"allowed.com"})

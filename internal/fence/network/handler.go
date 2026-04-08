@@ -36,7 +36,7 @@ func (p *ProxyServer) isAllowed(hostname string) bool {
 	}
 	host = strings.ToLower(host)
 
-	// Block raw IP addresses.
+	// Block raw IP addresses — no reverse DNS, fail closed.
 	if net.ParseIP(host) != nil {
 		return false
 	}
@@ -51,7 +51,7 @@ func (p *ProxyServer) isAllowed(hostname string) bool {
 				return true
 			}
 		} else {
-			// Apex entry: matches exact hostname or any direct-or-deep subdomain.
+			// Apex entry: matches exact hostname or any subdomain.
 			if host == entry || strings.HasSuffix(host, "."+entry) {
 				return true
 			}
@@ -83,44 +83,36 @@ func (p *ProxyServer) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	p.forwardHTTP(w, r)
 }
 
-// forwardHTTP proxies a plain HTTP request to the destination.
+// forwardHTTP proxies a plain HTTP request to the destination using the shared transport.
+// The transport has proxy chaining disabled (Proxy: nil) and uses the safe dialer
+// that blocks loopback and private IP ranges (SSRF prevention).
 func (p *ProxyServer) forwardHTTP(w http.ResponseWriter, r *http.Request) {
 	// Ensure the request URL is absolute so the reverse proxy can dial the target.
 	if !r.URL.IsAbs() {
-		scheme := "http"
-		target := &url.URL{
-			Scheme:   scheme,
+		r.URL = &url.URL{
+			Scheme:   "http",
 			Host:     r.Host,
 			Path:     r.URL.Path,
 			RawQuery: r.URL.RawQuery,
 		}
-		r.URL = target
 	}
 
 	// Remove hop-by-hop headers before forwarding.
-	r.Header.Del("Proxy-Connection")
-	r.Header.Del("Proxy-Authenticate")
-	r.Header.Del("Proxy-Authorization")
-	r.Header.Del("Te")
-	r.Header.Del("Trailers")
-	r.Header.Del("Transfer-Encoding")
-	r.Header.Del("Upgrade")
-
-	transport := &http.Transport{
-		DialContext: (&net.Dialer{
-			Timeout:   30 * time.Second,
-			KeepAlive: 30 * time.Second,
-		}).DialContext,
-		ResponseHeaderTimeout: 30 * time.Second,
+	for _, h := range []string{
+		"Proxy-Connection", "Proxy-Authenticate", "Proxy-Authorization",
+		"Te", "Trailers", "Transfer-Encoding", "Upgrade",
+	} {
+		r.Header.Del(h)
 	}
 
 	proxy := &httputil.ReverseProxy{
 		Director: func(req *http.Request) {
-			// Director is a no-op; the URL is already absolute.
+			// Director is a no-op: the URL is already absolute and headers are cleaned.
 		},
-		Transport: transport,
+		Transport: p.transport,
 		ErrorHandler: func(w http.ResponseWriter, r *http.Request, err error) {
-			http.Error(w, fmt.Sprintf("NockLock: proxy error: %v", err), http.StatusBadGateway)
+			// Return a generic error — do not leak internal transport details.
+			http.Error(w, "NockLock: upstream connection failed", http.StatusBadGateway)
 		},
 	}
 	proxy.ServeHTTP(w, r)

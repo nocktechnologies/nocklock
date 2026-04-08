@@ -2,6 +2,7 @@ package network
 
 import (
 	"bufio"
+	"context"
 	"fmt"
 	"io"
 	"net"
@@ -10,6 +11,12 @@ import (
 	"strings"
 	"testing"
 )
+
+// unsafeDial is a test-only dialer that allows loopback connections.
+// This bypasses safeDial's SSRF protection so tests can use local TCP servers.
+func unsafeDial(ctx context.Context, network, addr string) (net.Conn, error) {
+	return (&net.Dialer{}).DialContext(ctx, network, addr)
+}
 
 // dialProxy returns a raw TCP connection to the proxy and issues a CONNECT request.
 // It returns the raw connection (for the caller to use as a tunnel) and the proxy response.
@@ -52,8 +59,10 @@ func TestCONNECTAllowedReturns200(t *testing.T) {
 		}
 	}()
 
-	// Use "localhost" (a hostname, not a raw IP) so it passes the allowlist check.
+	// Use "localhost" in the allowlist. Inject unsafeDial so the proxy can connect
+	// back to our local target (safeDial blocks loopback by design).
 	p := makeProxy([]string{"localhost"})
+	p.dialFunc = unsafeDial
 	addr, err := p.Start()
 	if err != nil {
 		t.Fatalf("proxy Start() error: %v", err)
