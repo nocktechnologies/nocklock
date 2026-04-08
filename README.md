@@ -25,7 +25,8 @@ NockLock wraps your agent in an invisible fence. Three boundaries:
 Zero config defaults. The fence is invisible until something hits it.
 
 > **Current status:** NockLock is in early development. The CLI skeleton and config
-> system are working. Fence implementations are coming in upcoming PRs.
+> system are working. The filesystem fence is implemented (Linux). Network and secret
+> fences are coming in upcoming PRs.
 
 ## Install (from source)
 
@@ -64,11 +65,51 @@ $ nocklock log
 
 Your agent never knew the fence was there. You sleep better at night.
 
+## Filesystem Fence
+
+The filesystem fence uses **LD_PRELOAD** to intercept libc file-system calls
+(open, rename, unlink, etc.) before they reach the kernel. A thin C shared library
+(`libfence_fs.so`) checks every path against the configured allow/deny rules and
+blocks access outside the project directory tree.
+
+### Config Example
+
+```toml
+[filesystem]
+root = "~/projects/my-app"
+mode = "read-write"            # or "read-only"
+allow = ["~/.config/gh"]       # extra paths (read-only)
+deny  = ["~/.ssh", "~/.aws"]   # always blocked, overrides allow
+```
+
+### Build
+
+```bash
+make build-fence-fs    # builds internal/fence/fs/interposer/libfence_fs.so
+make build-all         # builds Go binary + C shared library
+```
+
+### How It Works
+
+- NockLock spawns the child process with `LD_PRELOAD` pointing at `libfence_fs.so`
+- The library intercepts 10 libc functions (`open`, `openat`, `fopen`, `rename`, `unlink`, `rmdir`, `mkdir`, `symlink`, `link`, `chmod`)
+- Every intercepted path is resolved with `realpath` (symlink-safe) and checked against the allow/deny rules
+- Blocked calls return `EACCES` and report events over a Unix domain socket
+- Events are logged to SQLite and visible via `nocklock log`
+
+### Platform Support
+
+| Platform | Status |
+|----------|--------|
+| Linux    | Supported (LD_PRELOAD) |
+| macOS    | Coming soon (DYLD_INSERT_LIBRARIES) |
+| Windows  | Not planned |
+
 ## Roadmap
 
 - [x] CLI skeleton + config system (PR #1)
 - [ ] Secret fence — environment variable filtering (PR #3)
-- [ ] Filesystem fence — LD_PRELOAD/DYLD_INSERT_LIBRARIES (PR #5)
+- [x] Filesystem fence — LD_PRELOAD interception (PR #6)
 - [ ] Network fence — local proxy with domain allowlist (PR #6)
 - [ ] SQLite event logging (PR #4)
 - [ ] Homebrew tap + CI (PR #8)
