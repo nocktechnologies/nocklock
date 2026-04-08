@@ -1,14 +1,17 @@
 package cli
 
 import (
+	"context"
 	"fmt"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"strings"
 	"time"
 
 	"github.com/google/uuid"
 	"github.com/nocktechnologies/nocklock/internal/config"
+	fsfence "github.com/nocktechnologies/nocklock/internal/fence/fs"
 	"github.com/nocktechnologies/nocklock/internal/fence/secrets"
 	"github.com/nocktechnologies/nocklock/internal/logging"
 	"github.com/spf13/cobra"
@@ -124,6 +127,41 @@ var wrapCmd = &cobra.Command{
 			fmt.Fprintf(os.Stderr, "NockLock: secret fence active — no variables blocked\n")
 		}
 
+		// Apply filesystem fence (Linux only).
+		var fsFenceEvents <-chan fsfence.FenceEvent
+		var fsFence *fsfence.Fence
+		if cfg.Filesystem.Root != "" {
+			if err := fsfence.CheckSupported(); err != nil {
+				fmt.Fprintf(os.Stderr, "NockLock: %v\n", err)
+			} else {
+				fsCfg, err := fsfence.ProcessConfig(cfg.Filesystem)
+				if err != nil {
+					return fmt.Errorf("invalid filesystem fence config: %w", err)
+				}
+				if fsCfg != nil {
+					// Look for the shared library next to the nocklock binary or in standard paths.
+					libPath := findLibFenceFS()
+
+					fsFence, err = fsfence.NewFence(fsCfg, libPath)
+					if err != nil {
+						return fmt.Errorf("failed to initialize filesystem fence: %w", err)
+					}
+					defer fsFence.Close()
+
+					// Add LD_PRELOAD and NOCKLOCK_FS_ALLOWED to child env.
+					childEnv = append(childEnv, fsFence.EnvVars()...)
+
+					// Start listening for events.
+					ctx, cancel := context.WithCancel(context.Background())
+					defer cancel()
+					fsFenceEvents = fsFence.Listen(ctx)
+
+					fmt.Fprintf(os.Stderr, "NockLock: filesystem fence active — root %s (%s)\n", fsCfg.Root, fsCfg.Mode)
+					logEvent(logging.EventFilePassed, "filesystem", fmt.Sprintf("root=%s mode=%s", fsCfg.Root, fsCfg.Mode), false)
+				}
+			}
+		}
+
 		child := exec.Command(args[0], args[1:]...)
 		child.Env = childEnv
 		child.Stdin = os.Stdin
@@ -149,6 +187,25 @@ var wrapCmd = &cobra.Command{
 			return fmt.Errorf("failed to run %q: %w", args[0], err)
 		}
 
+		// Drain remaining filesystem fence events.
+		if fsFenceEvents != nil {
+			drainCtx, drainCancel := context.WithTimeout(context.Background(), 500*time.Millisecond)
+			defer drainCancel()
+		drainLoop:
+			for {
+				select {
+				case ev, ok := <-fsFenceEvents:
+					if !ok {
+						break drainLoop
+					}
+					logEvent(logging.EventFileBlocked, "filesystem",
+						fmt.Sprintf("op=%s path=%s reason=%s", ev.Operation, ev.Path, ev.Reason), true)
+				case <-drainCtx.Done():
+					break drainLoop
+				}
+			}
+		}
+
 		logEvent(logging.EventSessionEnd, "session", "exit_code=0", false)
 		return nil
 	},
@@ -156,4 +213,25 @@ var wrapCmd = &cobra.Command{
 
 func init() {
 	rootCmd.AddCommand(wrapCmd)
+}
+
+// findLibFenceFS searches for the filesystem fence shared library.
+// It checks: next to the nocklock binary, /usr/local/lib/nocklock/, /usr/lib/nocklock/.
+func findLibFenceFS() string {
+	// Check next to the current executable.
+	if exe, err := os.Executable(); err == nil {
+		candidate := filepath.Join(filepath.Dir(exe), "libfence_fs.so")
+		if _, err := os.Stat(candidate); err == nil {
+			return candidate
+		}
+	}
+	// Check standard paths.
+	for _, dir := range []string{"/usr/local/lib/nocklock", "/usr/lib/nocklock"} {
+		candidate := filepath.Join(dir, "libfence_fs.so")
+		if _, err := os.Stat(candidate); err == nil {
+			return candidate
+		}
+	}
+	// Default: assume it's in the working directory or PATH.
+	return "libfence_fs.so"
 }
