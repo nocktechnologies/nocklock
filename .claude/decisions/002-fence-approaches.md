@@ -35,10 +35,16 @@ NockLock has three fence types. Each has multiple implementation approaches with
 - Construct filtered environment when spawning child process
 - Start with empty env, add only `pass` list vars, remove any `block` list matches
 - Block takes precedence over pass
-- Implemented via Go's `os/exec.Cmd.Env`
+- Will be implemented via Go's `os/exec.Cmd.Env`
+
+> **Implementation status:** All three fences are planned but not yet implemented in code. The current `wrap` command (`internal/cli/wrap.go`) spawns the child process with passthrough — no env filtering, no preload, no proxy. Fences will be added incrementally.
+
+## Fail-Closed Rule
+If any enabled fence fails to initialize, the system must fail closed: block command execution entirely rather than running the agent unprotected. This is non-negotiable for a security tool.
 
 ## Consequences
 - MVP works without root/admin privileges
 - Cross-platform from day one
 - Can upgrade filesystem fence to mount namespaces on Linux later
 - Can upgrade network fence to packet filtering later if proxy proves insufficient
+- Any fence init failure aborts execution (fail closed)

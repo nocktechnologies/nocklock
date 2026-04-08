@@ -4,10 +4,10 @@
 NockLock is an AI agent security fence. Go CLI that wraps coding agents with filesystem, network, and secret isolation.
 
 ## Stack
-- Go 1.22+ (single binary, cross-platform)
+- Go 1.26+ (single binary, cross-platform)
 - cobra (CLI framework)
 - BurntSushi/toml (config parser)
-- SQLite (event logging — PR #4)
+- SQLite (event logging — planned)
 
 ## Commands
 - `go build ./cmd/nocklock` — build
@@ -21,14 +21,13 @@ NockLock is an AI agent security fence. Go CLI that wraps coding agents with fil
 - `cmd/nocklock/` — entry point (main.go)
 - `internal/cli/` — cobra command tree (wrap, init, config, log, status, version)
 - `internal/config/` — TOML config parsing, defaults, validation
-- `internal/fence/` — fence implementations: filesystem, network, secrets (planned)
-- `internal/logging/` — SQLite event logging (planned)
 - `internal/version/` — build version info
+- `internal/fence/` — fence implementations: filesystem, network, secrets *(planned, not yet created)*
+- `internal/logging/` — SQLite event logging *(planned, not yet created)*
 
 ## Detailed Context
 All detailed documentation lives in the .claude/ directory:
 - `.claude/diagrams/` — Mermaid architecture diagrams
-- `.claude/skills/` — Project-specific skills and workflows
 - `.claude/design/` — DESIGN.md with brand tokens and UI spec
 - `.claude/lessons/` — Lessons learned, anti-patterns, incident notes
 - `.claude/decisions/` — Architecture Decision Records (ADRs)

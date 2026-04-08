@@ -16,7 +16,7 @@
 - Danger: #F87171
 - Text primary: #E2E8F0
 - Text secondary: #94A3B8
-- Text muted: #64748B
+- Text muted: #818B98 (WCAG AA compliant on dark backgrounds)
 
 ### Typography
 - Body: Geist, system-ui, sans-serif

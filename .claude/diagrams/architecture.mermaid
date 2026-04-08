@@ -26,7 +26,7 @@ graph TD
     end
 
     subgraph "internal/fence (planned)"
-        fs_fence["filesystem.go<br/>LD_PRELOAD / DYLD_INSERT"]
+        fs_fence["filesystem.go<br/>LD_PRELOAD / DYLD_INSERT_LIBRARIES"]
         net_fence["network.go<br/>Local proxy egress filter"]
         sec_fence["secrets.go<br/>Env var filtering"]
     end
@@ -49,16 +49,16 @@ graph TD
     init_cmd --> defaults
     config_cmd --> config
 
-    wrap -.->|"PR #3-6"| fs_fence
-    wrap -.->|"PR #3-6"| net_fence
-    wrap -.->|"PR #3-6"| sec_fence
-    wrap -.->|"PR #4"| sqlite
+    wrap -.->|"planned"| fs_fence
+    wrap -.->|"planned"| net_fence
+    wrap -.->|"planned"| sec_fence
+    wrap -.->|"planned"| sqlite
 
     fs_fence --> sqlite
     net_fence --> sqlite
     sec_fence --> sqlite
 
-    sqlite -.->|"PR #7"| cloud["NockCC Cloud Sync"]
+    sqlite -.->|"planned"| cloud["NockCC Cloud Sync"]
 
     classDef planned fill:#1a1a2e,stroke:#10B981,stroke-dasharray: 5 5
     class fs_fence,net_fence,sec_fence,sqlite,cloud planned
