@@ -1,0 +1,23 @@
+# Changelog
+
+All notable changes to NockLock will be documented in this file.
+
+## [Unreleased]
+
+### Added
+- Standardized repo with `.claude/` directory, Mermaid architecture diagrams, DESIGN.md, review pipeline
+- ARCHITECTURE.md documenting package structure and data flow
+- Architecture Decision Records (ADRs) in `.claude/decisions/`
+- Lessons learned docs in `.claude/lessons/`
+- Review pipeline (`.claude/review/PIPELINE.md`) — 7-phase process
+
+## [0.1.0] — 2026-04-06
+
+### Added
+- CLI skeleton: `wrap`, `init`, `config`, `log`, `status`, `version` commands (PR #1, #2)
+- TOML config parsing with strict validation (reject unknown keys)
+- `nocklock init` creates `.nock/config.toml` with security-first defaults
+- `nocklock wrap` passes through to child process (fences coming in PR #3-6)
+- Cross-platform exit code handling (no Unix-only syscall dependencies)
+- Makefile with build, test, lint targets
+- Default config: deny `~/.ssh/`, `~/.aws/`, `~/.gnupg/`; block `AWS_*`, `*_SECRET*`, `*_TOKEN*`

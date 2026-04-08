@@ -1,0 +1,31 @@
+%% NockLock — Event Flow
+%% Fence events → SQLite → log command → cloud sync
+
+flowchart LR
+    subgraph "Fence Engines"
+        FS["Filesystem Fence"]
+        NET["Network Fence"]
+        SEC["Secret Fence"]
+    end
+
+    subgraph "Event Generation"
+        FS -->|"blocked: open ~/.ssh/id_rsa"| EVT["FenceEvent{<br/>timestamp, session_id,<br/>fence_type, action,<br/>detail, target,<br/>agent_command, project}"]
+        NET -->|"blocked: CONNECT evil.com:443"| EVT
+        SEC -->|"blocked: env AWS_SECRET_ACCESS_KEY"| EVT
+        FS -->|"allowed: open src/main.go"| EVT
+        NET -->|"allowed: CONNECT github.com:443"| EVT
+    end
+
+    subgraph "Local Storage"
+        EVT --> DB[".nock/events.db<br/>SQLite"]
+        DB --> LOG["nocklock log<br/>--type filesystem<br/>--action blocked<br/>--since 1h<br/>--json"]
+    end
+
+    subgraph "Cloud Sync (optional)"
+        DB -->|"Batch every 60s"| API["POST /api/fence/events/<br/>X-API-Key header<br/>JSON array of events"]
+        API --> NCC["NockCC Dashboard<br/>Nerve Center"]
+        NCC --> ALERT["Telegram / Slack<br/>alerts on high-severity blocks"]
+    end
+
+    classDef planned fill:#1a1a2e,stroke:#10B981,stroke-dasharray: 5 5
+    class FS,NET,SEC,EVT,DB,LOG,API,NCC,ALERT planned
