@@ -26,7 +26,7 @@ Zero config defaults. The fence is invisible until something hits it.
 
 > **Current status:** NockLock is in early development. The CLI skeleton and config
 > system are working. The filesystem fence is implemented (Linux). Network and secret
-> fences are coming in upcoming PRs.
+> Network fence coming in an upcoming PR.
 
 ## Install (from source)
 
@@ -92,7 +92,7 @@ make build-all         # builds Go binary + C shared library
 ### How It Works
 
 - NockLock spawns the child process with `LD_PRELOAD` pointing at `libfence_fs.so`
-- The library intercepts 25 libc functions including `open`, `openat`, `fopen`, `access`, `unlink`, `rename`, `mkdir`, `rmdir`, `readlink`, `realpath`, `symlink`, `link`, `chmod`, `chown`, `truncate`, `creat`, and their `*at`/64-bit variants
+- The library intercepts 27 libc functions including `open`, `openat`, `fopen`, `access`, `unlink`, `rename`, `mkdir`, `rmdir`, `readlink`, `realpath`, `symlink`, `link`, `chmod`, `chown`, `truncate`, `creat`, and their `*at`/64-bit variants
 - Every intercepted path is resolved with `realpath` (symlink-safe) and checked against the allow/deny rules
 - Blocked calls return `EACCES` and report events over a Unix domain socket
 - Events are logged to SQLite and visible via `nocklock log`

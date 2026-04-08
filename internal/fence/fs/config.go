@@ -58,17 +58,25 @@ func ExpandTilde(path string) (string, error) {
 }
 
 // resolvePath expands tilde, converts to absolute, and cleans the path.
+// If the path exists on disk, symlinks are resolved so that rules match
+// the real paths used by the C interposer's realpath calls.
 // The resolved path does not need to exist on disk.
-func resolvePath(path string) (string, error) {
-	expanded, err := ExpandTilde(path)
+func resolvePath(p string) (string, error) {
+	expanded, err := ExpandTilde(p)
 	if err != nil {
 		return "", err
 	}
 	abs, err := filepath.Abs(expanded)
 	if err != nil {
-		return "", fmt.Errorf("cannot resolve path %q: %w", path, err)
+		return "", fmt.Errorf("cannot resolve path %q: %w", p, err)
 	}
-	return filepath.Clean(abs), nil
+	cleaned := filepath.Clean(abs)
+	// Resolve symlinks if path exists — the C interposer uses realpath
+	// so we must store the real path for rules to match.
+	if resolved, err := filepath.EvalSymlinks(cleaned); err == nil {
+		return resolved, nil
+	}
+	return cleaned, nil
 }
 
 // ProcessConfig validates and resolves a FilesystemConfig into a FenceConfig.

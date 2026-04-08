@@ -6,7 +6,7 @@ All notable changes to NockLock will be documented in this file.
 
 ### Added
 - Filesystem fence via LD_PRELOAD — intercepts file system calls on Linux, blocks access outside allowed directory tree (PR #6)
-- C shared library (`libfence_fs.so`) intercepts 10 libc functions with symlink-safe path resolution
+- C shared library (`libfence_fs.so`) intercepts 27 libc functions with symlink-safe path resolution
 - Filesystem config: `root`, `mode` (read-write/read-only), `allow`, `deny` with tilde expansion
 - Deny list takes priority over allow list; allow list is read-only
 - Fence events reported over Unix domain socket and logged to SQLite

@@ -7,7 +7,11 @@ build:
 	go build $(LDFLAGS) -o nocklock ./cmd/nocklock
 
 build-fence-fs:
-	$(MAKE) -C internal/fence/fs/interposer build
+	@if [ "$$(uname -s)" = "Linux" ]; then \
+		$(MAKE) -C internal/fence/fs/interposer build; \
+	else \
+		echo "Skipping fence library build (Linux only, current OS: $$(uname -s))"; \
+	fi
 
 build-all: build build-fence-fs
 

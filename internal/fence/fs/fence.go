@@ -9,6 +9,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"sync"
 )
 
 // IsSupported returns true if the filesystem fence is supported on the current OS.
@@ -101,8 +102,11 @@ func (f *Fence) EnvVars() []string {
 // Listen reads fence events from the Unix domain socket in background goroutines.
 // It returns a channel that receives parsed FenceEvent values. The channel is
 // closed when the provided context is cancelled or the listener is closed.
+// A sync.WaitGroup ensures all connection handlers finish before the channel
+// is closed, preventing send-on-closed-channel panics.
 func (f *Fence) Listen(ctx context.Context) <-chan FenceEvent {
 	ch := make(chan FenceEvent, 64)
+	var wg sync.WaitGroup
 
 	// Close listener when context is done.
 	go func() {
@@ -112,14 +116,21 @@ func (f *Fence) Listen(ctx context.Context) <-chan FenceEvent {
 
 	// Accept connections and handle each in a separate goroutine.
 	go func() {
-		defer close(ch)
+		defer func() {
+			wg.Wait()
+			close(ch)
+		}()
 		for {
 			conn, err := f.listener.Accept()
 			if err != nil {
 				// Listener was closed (context cancelled or Close called).
 				return
 			}
-			go f.handleConn(ctx, conn, ch)
+			wg.Add(1)
+			go func() {
+				defer wg.Done()
+				f.handleConn(ctx, conn, ch)
+			}()
 		}
 	}()
 

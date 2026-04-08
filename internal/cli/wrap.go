@@ -160,7 +160,11 @@ var wrapCmd = &cobra.Command{
 							for j, childVar := range childEnv {
 								if strings.HasPrefix(childVar, "LD_PRELOAD=") {
 									existing := strings.TrimPrefix(childVar, "LD_PRELOAD=")
-									childEnv[j] = "LD_PRELOAD=" + fenceLib + ":" + existing
+									if existing == "" {
+										childEnv[j] = "LD_PRELOAD=" + fenceLib
+									} else {
+										childEnv[j] = "LD_PRELOAD=" + fenceLib + ":" + existing
+									}
 									fenceEnv = append(fenceEnv[:i], fenceEnv[i+1:]...)
 									break
 								}
@@ -237,8 +241,19 @@ func init() {
 }
 
 // findLibFenceFS searches for the filesystem fence shared library.
-// It checks: next to the nocklock binary, /usr/local/lib/nocklock/, /usr/lib/nocklock/.
+// It checks: build output directory, next to the nocklock binary,
+// /usr/local/lib/nocklock/, /usr/lib/nocklock/.
 func findLibFenceFS() string {
+	// Check the build output directory (relative to working directory).
+	candidate := filepath.Join("internal", "fence", "fs", "interposer", "libfence_fs.so")
+	if _, err := os.Stat(candidate); err == nil {
+		abs, err := filepath.Abs(candidate)
+		if err == nil {
+			return abs
+		}
+		return candidate
+	}
+
 	// Check next to the current executable.
 	if exe, err := os.Executable(); err == nil {
 		candidate := filepath.Join(filepath.Dir(exe), "libfence_fs.so")
