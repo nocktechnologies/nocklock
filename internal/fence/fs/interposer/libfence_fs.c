@@ -49,6 +49,7 @@ typedef struct {
     char deny[MAX_PATHS][PATH_MAX];
     int  deny_count;
     int  initialized;
+    int  deny_all;  /* 1 = block everything (config error, fail closed) */
 } fence_config_t;
 
 static fence_config_t g_config;
@@ -142,6 +143,8 @@ static real_fchdir_t   real_fchdir;
 static int path_starts_with(const char *path, const char *prefix)
 {
     size_t plen = strlen(prefix);
+
+    if (plen == 0) return 0;  /* Empty prefix never matches. */
 
     /* Root "/" matches all absolute paths. */
     if (plen == 1 && prefix[0] == '/')
@@ -401,6 +404,13 @@ static void report_blocked(const char *path, const char *operation,
 static int check_path(const char *resolved, int is_write,
                       char *reason_out, size_t reason_len)
 {
+    /* Config was malformed or too large — fail closed, block everything. */
+    if (g_config.deny_all) {
+        snprintf(reason_out, reason_len,
+                 "fence config error - blocking all access");
+        return -1;
+    }
+
     /* 1. Check deny list — if path starts with any deny entry, BLOCK. */
     for (int i = 0; i < g_config.deny_count; i++) {
         if (path_starts_with(resolved, g_config.deny[i])) {
@@ -491,13 +501,16 @@ static void fence_init(void)
         return;
     }
 
-    /* Copy env value so we can tokenize it. */
-    char envbuf[PATH_MAX * (MAX_PATHS + 4)];
+    /* Copy env value so we can tokenize it.
+     * Heap-allocated: the old stack buffer (PATH_MAX * MAX_PATHS, ~1 MB)
+     * risked stack overflow in multi-threaded apps with small stacks.
+     * Allocating exactly strlen(env)+1 is both safer and more efficient. */
     size_t envlen = strlen(env);
-    if (envlen >= sizeof(envbuf)) {
-        /* Config too large, fail closed. */
+    char *envbuf = malloc(envlen + 1);
+    if (!envbuf) {
+        /* Allocation failed, fail closed. */
+        g_config.deny_all = 1;
         g_config.initialized = 1;
-        g_config.root[0] = '\0'; /* Empty root blocks everything. */
         return;
     }
     memcpy(envbuf, env, envlen + 1);
@@ -517,8 +530,9 @@ static void fence_init(void)
 
     if (field_count < 3) {
         /* Malformed config, fail closed. */
+        g_config.deny_all = 1;
         g_config.initialized = 1;
-        g_config.root[0] = '\0';
+        free(envbuf);
         return;
     }
 
@@ -538,17 +552,39 @@ static void fence_init(void)
     g_config.deny_count = 0;
     for (int i = 3; i < field_count; i++) {
         char *f = fields[i];
-        if (f[0] == '+' && g_config.allow_count < MAX_PATHS) {
+        if (f[0] == '+') {
+            if (g_config.allow_count >= MAX_PATHS) {
+                /*
+                 * Too many allow paths — fail closed. We cannot silently
+                 * drop paths because deny rules (parsed after allow) could
+                 * be truncated, leaving dangerous paths accessible.
+                 */
+                g_config.deny_all = 1;
+                g_config.initialized = 1;
+                free(envbuf);
+                return;
+            }
             strncpy(g_config.allow[g_config.allow_count], f + 1, PATH_MAX - 1);
             g_config.allow[g_config.allow_count][PATH_MAX - 1] = '\0';
             g_config.allow_count++;
-        } else if (f[0] == '-' && g_config.deny_count < MAX_PATHS) {
+        } else if (f[0] == '-') {
+            if (g_config.deny_count >= MAX_PATHS) {
+                /*
+                 * Too many deny paths — fail closed. Silently dropping
+                 * deny rules would leave paths unblocked.
+                 */
+                g_config.deny_all = 1;
+                g_config.initialized = 1;
+                free(envbuf);
+                return;
+            }
             strncpy(g_config.deny[g_config.deny_count], f + 1, PATH_MAX - 1);
             g_config.deny[g_config.deny_count][PATH_MAX - 1] = '\0';
             g_config.deny_count++;
         }
     }
 
+    free(envbuf);
     g_config.initialized = 1;
 }
 
@@ -580,8 +616,11 @@ int open(const char *pathname, int flags, ...)
         va_end(ap);
     }
 
-    if (!ensure_init())
-        return real_open(pathname, flags, mode);
+    if (!ensure_init()) {
+        if (real_open) return real_open(pathname, flags, mode);
+        errno = ENOSYS;
+        return -1;
+    }
 
     char resolved[PATH_MAX];
     if (resolve_path(pathname, resolved) != 0) {
@@ -597,6 +636,7 @@ int open(const char *pathname, int flags, ...)
         return -1;
     }
 
+    if (!real_open) { errno = ENOSYS; return -1; }
     return real_open(pathname, flags, mode);
 }
 
@@ -614,8 +654,11 @@ int openat(int dirfd, const char *pathname, int flags, ...)
         va_end(ap);
     }
 
-    if (!ensure_init())
-        return real_openat(dirfd, pathname, flags, mode);
+    if (!ensure_init()) {
+        if (real_openat) return real_openat(dirfd, pathname, flags, mode);
+        errno = ENOSYS;
+        return -1;
+    }
 
     char resolved[PATH_MAX];
     if (resolve_openat_path(dirfd, pathname, resolved) != 0) {
@@ -631,13 +674,17 @@ int openat(int dirfd, const char *pathname, int flags, ...)
         return -1;
     }
 
+    if (!real_openat) { errno = ENOSYS; return -1; }
     return real_openat(dirfd, pathname, flags, mode);
 }
 
 FILE *fopen(const char *pathname, const char *mode)
 {
-    if (!ensure_init())
-        return real_fopen(pathname, mode);
+    if (!ensure_init()) {
+        if (real_fopen) return real_fopen(pathname, mode);
+        errno = ENOSYS;
+        return NULL;
+    }
 
     char resolved[PATH_MAX];
     if (resolve_path(pathname, resolved) != 0) {
@@ -653,13 +700,17 @@ FILE *fopen(const char *pathname, const char *mode)
         return NULL;
     }
 
+    if (!real_fopen) { errno = ENOSYS; return NULL; }
     return real_fopen(pathname, mode);
 }
 
 int access(const char *pathname, int amode)
 {
-    if (!ensure_init())
-        return real_access(pathname, amode);
+    if (!ensure_init()) {
+        if (real_access) return real_access(pathname, amode);
+        errno = ENOSYS;
+        return -1;
+    }
 
     char resolved[PATH_MAX];
     if (resolve_path(pathname, resolved) != 0) {
@@ -676,13 +727,17 @@ int access(const char *pathname, int amode)
         return -1;
     }
 
+    if (!real_access) { errno = ENOSYS; return -1; }
     return real_access(pathname, amode);
 }
 
 int unlink(const char *pathname)
 {
-    if (!ensure_init())
-        return real_unlink(pathname);
+    if (!ensure_init()) {
+        if (real_unlink) return real_unlink(pathname);
+        errno = ENOSYS;
+        return -1;
+    }
 
     char resolved[PATH_MAX];
     if (resolve_path(pathname, resolved) != 0) {
@@ -698,13 +753,17 @@ int unlink(const char *pathname)
         return -1;
     }
 
+    if (!real_unlink) { errno = ENOSYS; return -1; }
     return real_unlink(pathname);
 }
 
 int rename(const char *oldpath, const char *newpath)
 {
-    if (!ensure_init())
-        return real_rename(oldpath, newpath);
+    if (!ensure_init()) {
+        if (real_rename) return real_rename(oldpath, newpath);
+        errno = ENOSYS;
+        return -1;
+    }
 
     /* Both paths must be allowed for write. */
     char resolved_old[PATH_MAX];
@@ -733,13 +792,17 @@ int rename(const char *oldpath, const char *newpath)
         return -1;
     }
 
+    if (!real_rename) { errno = ENOSYS; return -1; }
     return real_rename(oldpath, newpath);
 }
 
 int mkdir(const char *pathname, mode_t mode)
 {
-    if (!ensure_init())
-        return real_mkdir(pathname, mode);
+    if (!ensure_init()) {
+        if (real_mkdir) return real_mkdir(pathname, mode);
+        errno = ENOSYS;
+        return -1;
+    }
 
     char resolved[PATH_MAX];
     if (resolve_path(pathname, resolved) != 0) {
@@ -755,13 +818,17 @@ int mkdir(const char *pathname, mode_t mode)
         return -1;
     }
 
+    if (!real_mkdir) { errno = ENOSYS; return -1; }
     return real_mkdir(pathname, mode);
 }
 
 int rmdir(const char *pathname)
 {
-    if (!ensure_init())
-        return real_rmdir(pathname);
+    if (!ensure_init()) {
+        if (real_rmdir) return real_rmdir(pathname);
+        errno = ENOSYS;
+        return -1;
+    }
 
     char resolved[PATH_MAX];
     if (resolve_path(pathname, resolved) != 0) {
@@ -777,13 +844,17 @@ int rmdir(const char *pathname)
         return -1;
     }
 
+    if (!real_rmdir) { errno = ENOSYS; return -1; }
     return real_rmdir(pathname);
 }
 
 ssize_t readlink(const char *pathname, char *buf, size_t bufsiz)
 {
-    if (!ensure_init())
-        return real_readlink(pathname, buf, bufsiz);
+    if (!ensure_init()) {
+        if (real_readlink) return real_readlink(pathname, buf, bufsiz);
+        errno = ENOSYS;
+        return -1;
+    }
 
     char resolved[PATH_MAX];
     if (resolve_path(pathname, resolved) != 0) {
@@ -799,15 +870,20 @@ ssize_t readlink(const char *pathname, char *buf, size_t bufsiz)
         return -1;
     }
 
+    if (!real_readlink) { errno = ENOSYS; return -1; }
     return real_readlink(pathname, buf, bufsiz);
 }
 
 char *realpath(const char *path, char *resolved_path)
 {
-    if (!ensure_init())
-        return real_realpath(path, resolved_path);
+    if (!ensure_init()) {
+        if (real_realpath) return real_realpath(path, resolved_path);
+        errno = ENOSYS;
+        return NULL;
+    }
 
     /* Call real realpath first, then check the result. */
+    if (!real_realpath) { errno = ENOSYS; return NULL; }
     char *result = real_realpath(path, resolved_path);
     if (result == NULL)
         return NULL;
@@ -1268,8 +1344,11 @@ int symlink(const char *target, const char *linkpath)
 
 int link(const char *oldpath, const char *newpath)
 {
-    if (!ensure_init())
-        return real_link(oldpath, newpath);
+    if (!ensure_init()) {
+        if (real_link) return real_link(oldpath, newpath);
+        errno = ENOSYS;
+        return -1;
+    }
 
     char resolved_old[PATH_MAX];
     char resolved_new[PATH_MAX];
@@ -1297,13 +1376,17 @@ int link(const char *oldpath, const char *newpath)
         return -1;
     }
 
+    if (!real_link) { errno = ENOSYS; return -1; }
     return real_link(oldpath, newpath);
 }
 
 int chmod(const char *pathname, mode_t mode)
 {
-    if (!ensure_init())
-        return real_chmod(pathname, mode);
+    if (!ensure_init()) {
+        if (real_chmod) return real_chmod(pathname, mode);
+        errno = ENOSYS;
+        return -1;
+    }
 
     char resolved[PATH_MAX];
     if (resolve_path(pathname, resolved) != 0) {
@@ -1319,13 +1402,17 @@ int chmod(const char *pathname, mode_t mode)
         return -1;
     }
 
+    if (!real_chmod) { errno = ENOSYS; return -1; }
     return real_chmod(pathname, mode);
 }
 
 int chown(const char *pathname, uid_t owner, gid_t group)
 {
-    if (!ensure_init())
-        return real_chown(pathname, owner, group);
+    if (!ensure_init()) {
+        if (real_chown) return real_chown(pathname, owner, group);
+        errno = ENOSYS;
+        return -1;
+    }
 
     char resolved[PATH_MAX];
     if (resolve_path(pathname, resolved) != 0) {
@@ -1341,13 +1428,17 @@ int chown(const char *pathname, uid_t owner, gid_t group)
         return -1;
     }
 
+    if (!real_chown) { errno = ENOSYS; return -1; }
     return real_chown(pathname, owner, group);
 }
 
 int truncate(const char *pathname, off_t length)
 {
-    if (!ensure_init())
-        return real_truncate(pathname, length);
+    if (!ensure_init()) {
+        if (real_truncate) return real_truncate(pathname, length);
+        errno = ENOSYS;
+        return -1;
+    }
 
     char resolved[PATH_MAX];
     if (resolve_path(pathname, resolved) != 0) {
@@ -1363,6 +1454,7 @@ int truncate(const char *pathname, off_t length)
         return -1;
     }
 
+    if (!real_truncate) { errno = ENOSYS; return -1; }
     return real_truncate(pathname, length);
 }
 
