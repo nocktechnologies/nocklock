@@ -90,6 +90,10 @@ typedef int    (*real_chmod_t)(const char *, mode_t);
 typedef int    (*real_chown_t)(const char *, uid_t, gid_t);
 typedef int    (*real_truncate_t)(const char *, off_t);
 
+/* chdir family */
+typedef int    (*real_chdir_t)(const char *);
+typedef int    (*real_fchdir_t)(int);
+
 static real_open_t     real_open;
 static real_openat_t   real_openat;
 static real_fopen_t    real_fopen;
@@ -121,6 +125,10 @@ static real_link_t     real_link;
 static real_chmod_t    real_chmod;
 static real_chown_t    real_chown;
 static real_truncate_t real_truncate;
+
+/* chdir family */
+static real_chdir_t    real_chdir;
+static real_fchdir_t   real_fchdir;
 
 /* ------------------------------------------------------------------ */
 /* Helpers                                                             */
@@ -470,6 +478,10 @@ static void fence_init(void)
     real_chmod     = (real_chmod_t)dlsym(RTLD_NEXT, "chmod");
     real_chown     = (real_chown_t)dlsym(RTLD_NEXT, "chown");
     real_truncate  = (real_truncate_t)dlsym(RTLD_NEXT, "truncate");
+
+    /* chdir family */
+    real_chdir     = (real_chdir_t)dlsym(RTLD_NEXT, "chdir");
+    real_fchdir    = (real_fchdir_t)dlsym(RTLD_NEXT, "fchdir");
 
     /* Parse NOCKLOCK_FS_ALLOWED environment variable. */
     const char *env = getenv("NOCKLOCK_FS_ALLOWED");
@@ -931,8 +943,12 @@ FILE *fopen64(const char *pathname, const char *mode)
 
 int unlinkat(int dirfd, const char *pathname, int flags)
 {
-    if (!ensure_init())
-        return real_unlinkat(dirfd, pathname, flags);
+    if (!ensure_init()) {
+        if (real_unlinkat)
+            return real_unlinkat(dirfd, pathname, flags);
+        errno = ENOSYS;
+        return -1;
+    }
 
     char resolved[PATH_MAX];
     if (resolve_openat_path(dirfd, pathname, resolved) != 0) {
@@ -948,14 +964,19 @@ int unlinkat(int dirfd, const char *pathname, int flags)
         return -1;
     }
 
+    if (!real_unlinkat) { errno = ENOSYS; return -1; }
     return real_unlinkat(dirfd, pathname, flags);
 }
 
 int renameat(int olddirfd, const char *oldpath,
              int newdirfd, const char *newpath)
 {
-    if (!ensure_init())
-        return real_renameat(olddirfd, oldpath, newdirfd, newpath);
+    if (!ensure_init()) {
+        if (real_renameat)
+            return real_renameat(olddirfd, oldpath, newdirfd, newpath);
+        errno = ENOSYS;
+        return -1;
+    }
 
     char resolved_old[PATH_MAX];
     char resolved_new[PATH_MAX];
@@ -983,6 +1004,7 @@ int renameat(int olddirfd, const char *oldpath,
         return -1;
     }
 
+    if (!real_renameat) { errno = ENOSYS; return -1; }
     return real_renameat(olddirfd, oldpath, newdirfd, newpath);
 }
 
@@ -1030,8 +1052,12 @@ int renameat2(int olddirfd, const char *oldpath,
 
 int mkdirat(int dirfd, const char *pathname, mode_t mode)
 {
-    if (!ensure_init())
-        return real_mkdirat(dirfd, pathname, mode);
+    if (!ensure_init()) {
+        if (real_mkdirat)
+            return real_mkdirat(dirfd, pathname, mode);
+        errno = ENOSYS;
+        return -1;
+    }
 
     char resolved[PATH_MAX];
     if (resolve_openat_path(dirfd, pathname, resolved) != 0) {
@@ -1047,13 +1073,18 @@ int mkdirat(int dirfd, const char *pathname, mode_t mode)
         return -1;
     }
 
+    if (!real_mkdirat) { errno = ENOSYS; return -1; }
     return real_mkdirat(dirfd, pathname, mode);
 }
 
 int symlinkat(const char *target, int newdirfd, const char *linkpath)
 {
-    if (!ensure_init())
-        return real_symlinkat(target, newdirfd, linkpath);
+    if (!ensure_init()) {
+        if (real_symlinkat)
+            return real_symlinkat(target, newdirfd, linkpath);
+        errno = ENOSYS;
+        return -1;
+    }
 
     /* Resolve the linkpath (where the symlink is created), always write. */
     char resolved[PATH_MAX];
@@ -1070,14 +1101,50 @@ int symlinkat(const char *target, int newdirfd, const char *linkpath)
         return -1;
     }
 
+    /* Check target — resolve relative targets against linkpath's parent directory. */
+    char resolved_target[PATH_MAX];
+    if (target[0] == '/') {
+        /* Absolute target — resolve directly. */
+        if (resolve_path(target, resolved_target) != 0) {
+            report_blocked(target, "symlinkat", "target path resolution failed");
+            errno = EACCES;
+            return -1;
+        }
+    } else {
+        /* Relative target — resolve against linkpath's parent. */
+        char link_parent[PATH_MAX];
+        strncpy(link_parent, resolved, PATH_MAX - 1);
+        link_parent[PATH_MAX - 1] = '\0';
+        char *slash = strrchr(link_parent, '/');
+        if (slash) *slash = '\0';
+        char full_target[PATH_MAX];
+        snprintf(full_target, PATH_MAX, "%s/%s", link_parent, target);
+        if (resolve_path(full_target, resolved_target) != 0) {
+            report_blocked(target, "symlinkat", "target path resolution failed");
+            errno = EACCES;
+            return -1;
+        }
+    }
+    char target_reason[512];
+    if (check_path(resolved_target, 0 /* read */, target_reason, sizeof(target_reason)) != 0) {
+        report_blocked(target, "symlinkat", target_reason);
+        errno = EACCES;
+        return -1;
+    }
+
+    if (!real_symlinkat) { errno = ENOSYS; return -1; }
     return real_symlinkat(target, newdirfd, linkpath);
 }
 
 int linkat(int olddirfd, const char *oldpath,
            int newdirfd, const char *newpath, int flags)
 {
-    if (!ensure_init())
-        return real_linkat(olddirfd, oldpath, newdirfd, newpath, flags);
+    if (!ensure_init()) {
+        if (real_linkat)
+            return real_linkat(olddirfd, oldpath, newdirfd, newpath, flags);
+        errno = ENOSYS;
+        return -1;
+    }
 
     char resolved_old[PATH_MAX];
     char resolved_new[PATH_MAX];
@@ -1105,6 +1172,7 @@ int linkat(int olddirfd, const char *oldpath,
         return -1;
     }
 
+    if (!real_linkat) { errno = ENOSYS; return -1; }
     return real_linkat(olddirfd, oldpath, newdirfd, newpath, flags);
 }
 
@@ -1141,8 +1209,12 @@ int creat(const char *pathname, mode_t mode)
 
 int symlink(const char *target, const char *linkpath)
 {
-    if (!ensure_init())
-        return real_symlink(target, linkpath);
+    if (!ensure_init()) {
+        if (real_symlink)
+            return real_symlink(target, linkpath);
+        errno = ENOSYS;
+        return -1;
+    }
 
     /* Resolve the linkpath (where the symlink is created), always write. */
     char resolved[PATH_MAX];
@@ -1159,6 +1231,38 @@ int symlink(const char *target, const char *linkpath)
         return -1;
     }
 
+    /* Check target — resolve relative targets against linkpath's parent directory. */
+    char resolved_target[PATH_MAX];
+    if (target[0] == '/') {
+        /* Absolute target — resolve directly. */
+        if (resolve_path(target, resolved_target) != 0) {
+            report_blocked(target, "symlink", "target path resolution failed");
+            errno = EACCES;
+            return -1;
+        }
+    } else {
+        /* Relative target — resolve against linkpath's parent. */
+        char link_parent[PATH_MAX];
+        strncpy(link_parent, resolved, PATH_MAX - 1);
+        link_parent[PATH_MAX - 1] = '\0';
+        char *slash = strrchr(link_parent, '/');
+        if (slash) *slash = '\0';
+        char full_target[PATH_MAX];
+        snprintf(full_target, PATH_MAX, "%s/%s", link_parent, target);
+        if (resolve_path(full_target, resolved_target) != 0) {
+            report_blocked(target, "symlink", "target path resolution failed");
+            errno = EACCES;
+            return -1;
+        }
+    }
+    char target_reason[512];
+    if (check_path(resolved_target, 0 /* read */, target_reason, sizeof(target_reason)) != 0) {
+        report_blocked(target, "symlink", target_reason);
+        errno = EACCES;
+        return -1;
+    }
+
+    if (!real_symlink) { errno = ENOSYS; return -1; }
     return real_symlink(target, linkpath);
 }
 
@@ -1260,4 +1364,64 @@ int truncate(const char *pathname, off_t length)
     }
 
     return real_truncate(pathname, length);
+}
+
+/* ------------------------------------------------------------------ */
+/* chdir family                                                        */
+/* ------------------------------------------------------------------ */
+
+int chdir(const char *path)
+{
+    if (!ensure_init()) {
+        if (real_chdir) return real_chdir(path);
+        errno = ENOSYS;
+        return -1;
+    }
+
+    char resolved[PATH_MAX];
+    if (resolve_path(path, resolved) != 0) {
+        report_blocked(path, "chdir", "path resolution failed");
+        errno = EACCES;
+        return -1;
+    }
+
+    char reason[512];
+    if (check_path(resolved, 0 /* read */, reason, sizeof(reason)) != 0) {
+        report_blocked(path, "chdir", reason);
+        errno = EACCES;
+        return -1;
+    }
+
+    if (!real_chdir) { errno = ENOSYS; return -1; }
+    return real_chdir(path);
+}
+
+int fchdir(int fd)
+{
+    if (!ensure_init()) {
+        if (real_fchdir) return real_fchdir(fd);
+        errno = ENOSYS;
+        return -1;
+    }
+
+    /* Resolve fd to path via /proc/self/fd/ */
+    char fd_link[64], resolved[PATH_MAX];
+    snprintf(fd_link, sizeof(fd_link), "/proc/self/fd/%d", fd);
+    ssize_t len = real_readlink(fd_link, resolved, sizeof(resolved) - 1);
+    if (len < 0) {
+        report_blocked("(unknown fd)", "fchdir", "fd resolution failed");
+        errno = EACCES;
+        return -1;
+    }
+    resolved[len] = '\0';
+
+    char reason[512];
+    if (check_path(resolved, 0 /* read */, reason, sizeof(reason)) != 0) {
+        report_blocked(resolved, "fchdir", reason);
+        errno = EACCES;
+        return -1;
+    }
+
+    if (!real_fchdir) { errno = ENOSYS; return -1; }
+    return real_fchdir(fd);
 }
