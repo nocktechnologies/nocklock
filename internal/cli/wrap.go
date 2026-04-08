@@ -196,20 +196,14 @@ var wrapCmd = &cobra.Command{
 		child.Stderr = os.Stderr
 
 		// Start consuming events in background before running child.
-		var collectedEvents []fsfence.FenceEvent
-		var eventsMu sync.Mutex
 		var eventsWg sync.WaitGroup
 		if fsFenceEvents != nil {
 			eventsWg.Add(1)
 			go func() {
 				defer eventsWg.Done()
 				for ev := range fsFenceEvents {
-					eventsMu.Lock()
-					collectedEvents = append(collectedEvents, ev)
-					// Log immediately while child is running.
 					logEvent(logging.EventFileBlocked, "filesystem",
 						fmt.Sprintf("op=%s path=%s reason=%s", ev.Operation, ev.Path, ev.Reason), true)
-					eventsMu.Unlock()
 				}
 			}()
 		}

@@ -115,13 +115,6 @@ func ProcessConfig(cfg config.FilesystemConfig) (*FenceConfig, error) {
 		return nil, fmt.Errorf("root path %q is not a directory", rootPath)
 	}
 
-	// Resolve symlinks on root.
-	rootPath, err = filepath.EvalSymlinks(rootPath)
-	if err != nil {
-		return nil, fmt.Errorf("cannot resolve symlinks on root %q: %w", rootPath, err)
-	}
-	rootPath = filepath.Clean(rootPath)
-
 	// Resolve allow paths.
 	allowPaths := make([]string, 0, len(cfg.Allow))
 	for _, p := range cfg.Allow {

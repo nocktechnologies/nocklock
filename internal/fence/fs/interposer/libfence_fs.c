@@ -166,6 +166,11 @@ static int path_starts_with(const char *path, const char *prefix)
  */
 static int resolve_path(const char *path, char *resolved)
 {
+    if (!real_realpath) {
+        /* Cannot resolve paths without realpath — fail closed. */
+        return -1;
+    }
+
     /* Try realpath first (works for existing paths). */
     if (real_realpath(path, resolved) != NULL)
         return 0;
@@ -252,6 +257,8 @@ static int resolve_openat_path(int dirfd, const char *pathname, char *resolved)
 {
     if (pathname[0] == '/' || dirfd == AT_FDCWD)
         return resolve_path(pathname, resolved);
+
+    if (!real_readlink) return -1;
 
     char fdpath[64];
     char dirpath[PATH_MAX];
@@ -925,7 +932,10 @@ int open64(const char *pathname, int flags, ...)
     if (!ensure_init()) {
         if (real_open64)
             return real_open64(pathname, flags, mode);
-        return real_open(pathname, flags, mode);
+        if (real_open)
+            return real_open(pathname, flags, mode);
+        errno = ENOSYS;
+        return -1;
     }
 
     char resolved[PATH_MAX];
@@ -944,7 +954,10 @@ int open64(const char *pathname, int flags, ...)
 
     if (real_open64)
         return real_open64(pathname, flags, mode);
-    return real_open(pathname, flags, mode);
+    if (real_open)
+        return real_open(pathname, flags, mode);
+    errno = ENOSYS;
+    return -1;
 }
 
 int openat64(int dirfd, const char *pathname, int flags, ...)
@@ -964,7 +977,10 @@ int openat64(int dirfd, const char *pathname, int flags, ...)
     if (!ensure_init()) {
         if (real_openat64)
             return real_openat64(dirfd, pathname, flags, mode);
-        return real_openat(dirfd, pathname, flags, mode);
+        if (real_openat)
+            return real_openat(dirfd, pathname, flags, mode);
+        errno = ENOSYS;
+        return -1;
     }
 
     char resolved[PATH_MAX];
@@ -983,7 +999,10 @@ int openat64(int dirfd, const char *pathname, int flags, ...)
 
     if (real_openat64)
         return real_openat64(dirfd, pathname, flags, mode);
-    return real_openat(dirfd, pathname, flags, mode);
+    if (real_openat)
+        return real_openat(dirfd, pathname, flags, mode);
+    errno = ENOSYS;
+    return -1;
 }
 
 FILE *fopen64(const char *pathname, const char *mode)
@@ -991,7 +1010,10 @@ FILE *fopen64(const char *pathname, const char *mode)
     if (!ensure_init()) {
         if (real_fopen64)
             return real_fopen64(pathname, mode);
-        return real_fopen(pathname, mode);
+        if (real_fopen)
+            return real_fopen(pathname, mode);
+        errno = ENOSYS;
+        return NULL;
     }
 
     char resolved[PATH_MAX];
@@ -1010,7 +1032,10 @@ FILE *fopen64(const char *pathname, const char *mode)
 
     if (real_fopen64)
         return real_fopen64(pathname, mode);
-    return real_fopen(pathname, mode);
+    if (real_fopen)
+        return real_fopen(pathname, mode);
+    errno = ENOSYS;
+    return NULL;
 }
 
 /* ------------------------------------------------------------------ */
@@ -1261,7 +1286,10 @@ int creat(const char *pathname, mode_t mode)
     if (!ensure_init()) {
         if (real_creat)
             return real_creat(pathname, mode);
-        return real_open(pathname, O_CREAT | O_WRONLY | O_TRUNC, mode);
+        if (real_open)
+            return real_open(pathname, O_CREAT | O_WRONLY | O_TRUNC, mode);
+        errno = ENOSYS;
+        return -1;
     }
 
     char resolved[PATH_MAX];
@@ -1280,7 +1308,10 @@ int creat(const char *pathname, mode_t mode)
 
     if (real_creat)
         return real_creat(pathname, mode);
-    return real_open(pathname, O_CREAT | O_WRONLY | O_TRUNC, mode);
+    if (real_open)
+        return real_open(pathname, O_CREAT | O_WRONLY | O_TRUNC, mode);
+    errno = ENOSYS;
+    return -1;
 }
 
 int symlink(const char *target, const char *linkpath)
@@ -1497,6 +1528,10 @@ int fchdir(int fd)
     }
 
     /* Resolve fd to path via /proc/self/fd/ */
+    if (!real_readlink) {
+        errno = EACCES;
+        return -1;
+    }
     char fd_link[64], resolved[PATH_MAX];
     snprintf(fd_link, sizeof(fd_link), "/proc/self/fd/%d", fd);
     ssize_t len = real_readlink(fd_link, resolved, sizeof(resolved) - 1);
