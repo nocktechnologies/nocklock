@@ -92,10 +92,16 @@ make build-all         # builds Go binary + C shared library
 ### How It Works
 
 - NockLock spawns the child process with `LD_PRELOAD` pointing at `libfence_fs.so`
-- The library intercepts 10 libc functions (`open`, `openat`, `fopen`, `rename`, `unlink`, `rmdir`, `mkdir`, `symlink`, `link`, `chmod`)
+- The library intercepts 25 libc functions including `open`, `openat`, `fopen`, `access`, `unlink`, `rename`, `mkdir`, `rmdir`, `readlink`, `realpath`, `symlink`, `link`, `chmod`, `chown`, `truncate`, `creat`, and their `*at`/64-bit variants
 - Every intercepted path is resolved with `realpath` (symlink-safe) and checked against the allow/deny rules
 - Blocked calls return `EACCES` and report events over a Unix domain socket
 - Events are logged to SQLite and visible via `nocklock log`
+
+### Known Limitations
+
+- **Environment variable protection:** The wrapped process can call `unsetenv("LD_PRELOAD")` and spawn unfenced subprocesses. This is inherent to LD_PRELOAD-based sandboxing. Future versions may intercept `execve` to re-inject the preload.
+- **TOCTOU races:** A time-of-check-to-time-of-use window exists between path resolution and the actual syscall. Kernel-level sandboxing (seccomp, landlock) can eliminate this in a future PR.
+- **stat/lstat:** Not currently intercepted. The primary attack surface (file read/write/create/delete) is covered.
 
 ### Platform Support
 
@@ -108,10 +114,10 @@ make build-all         # builds Go binary + C shared library
 ## Roadmap
 
 - [x] CLI skeleton + config system (PR #1)
-- [ ] Secret fence — environment variable filtering (PR #3)
+- [x] Secret fence — environment variable filtering (PR #3)
+- [x] SQLite event logging (PR #4)
 - [x] Filesystem fence — LD_PRELOAD interception (PR #6)
-- [ ] Network fence — local proxy with domain allowlist (PR #6)
-- [ ] SQLite event logging (PR #4)
+- [ ] Network fence — local proxy with domain allowlist (PR #7)
 - [ ] Homebrew tap + CI (PR #8)
 
 ## Dashboard (Coming Soon)
