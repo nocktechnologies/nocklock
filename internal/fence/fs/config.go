@@ -1,0 +1,191 @@
+// Package fs implements filesystem fence configuration processing
+// and rule serialization for NockLock.
+package fs
+
+import (
+	"fmt"
+	"os"
+	"path/filepath"
+	"strings"
+
+	"github.com/nocktechnologies/nocklock/internal/config"
+)
+
+// fieldSep is the Unit Separator character used to delimit fields in
+// the serialized fence config passed to the LD_PRELOAD interposer.
+const fieldSep = "\x1f"
+
+// FenceConfig holds resolved, absolute filesystem fence paths ready
+// for enforcement. All paths have been cleaned, expanded, and (for Root)
+// symlink-resolved.
+type FenceConfig struct {
+	Root       string
+	Mode       string
+	AllowPaths []string
+	DenyPaths  []string
+}
+
+// SerializedConfig is the parsed representation of a serialized fence
+// rule string, as consumed by the interposer shared library.
+type SerializedConfig struct {
+	Root       string
+	Mode       string // "rw" or "ro"
+	SocketPath string
+	AllowPaths []string
+	DenyPaths  []string
+}
+
+// ExpandTilde replaces a leading ~ in path with the user's home directory.
+// If path is exactly "~", the home directory is returned.
+// If path starts with "~/", the ~ prefix is replaced.
+// All other paths are returned unchanged.
+func ExpandTilde(path string) (string, error) {
+	if path == "~" {
+		home, err := os.UserHomeDir()
+		if err != nil {
+			return "", fmt.Errorf("cannot expand ~: %w", err)
+		}
+		return home, nil
+	}
+	if strings.HasPrefix(path, "~/") {
+		home, err := os.UserHomeDir()
+		if err != nil {
+			return "", fmt.Errorf("cannot expand ~: %w", err)
+		}
+		return filepath.Join(home, path[2:]), nil
+	}
+	return path, nil
+}
+
+// resolvePath expands tilde, converts to absolute, and cleans the path.
+// The resolved path does not need to exist on disk.
+func resolvePath(path string) (string, error) {
+	expanded, err := ExpandTilde(path)
+	if err != nil {
+		return "", err
+	}
+	abs, err := filepath.Abs(expanded)
+	if err != nil {
+		return "", fmt.Errorf("cannot resolve path %q: %w", path, err)
+	}
+	return filepath.Clean(abs), nil
+}
+
+// ProcessConfig validates and resolves a FilesystemConfig into a FenceConfig.
+// If Root is empty, the fence is disabled and (nil, nil) is returned.
+// Root must exist and be a directory; symlinks on Root are resolved.
+// Allow and Deny paths are resolved but do not need to exist on disk.
+// Mode defaults to "read-write" if empty; only "read-write" and "read-only"
+// are valid.
+func ProcessConfig(cfg config.FilesystemConfig) (*FenceConfig, error) {
+	// Empty root disables the filesystem fence.
+	if cfg.Root == "" {
+		return nil, nil
+	}
+
+	// Validate mode.
+	mode := cfg.Mode
+	if mode == "" {
+		mode = "read-write"
+	}
+	if mode != "read-write" && mode != "read-only" {
+		return nil, fmt.Errorf("invalid filesystem mode %q: must be \"read-write\" or \"read-only\"", mode)
+	}
+
+	// Resolve root path.
+	rootPath, err := resolvePath(cfg.Root)
+	if err != nil {
+		return nil, fmt.Errorf("cannot resolve root path: %w", err)
+	}
+
+	// Root must exist and be a directory.
+	info, err := os.Stat(rootPath)
+	if err != nil {
+		return nil, fmt.Errorf("root path %q does not exist: %w", rootPath, err)
+	}
+	if !info.IsDir() {
+		return nil, fmt.Errorf("root path %q is not a directory", rootPath)
+	}
+
+	// Resolve symlinks on root.
+	rootPath, err = filepath.EvalSymlinks(rootPath)
+	if err != nil {
+		return nil, fmt.Errorf("cannot resolve symlinks on root %q: %w", rootPath, err)
+	}
+	rootPath = filepath.Clean(rootPath)
+
+	// Resolve allow paths.
+	allowPaths := make([]string, 0, len(cfg.Allow))
+	for _, p := range cfg.Allow {
+		resolved, err := resolvePath(p)
+		if err != nil {
+			return nil, fmt.Errorf("cannot resolve allow path %q: %w", p, err)
+		}
+		allowPaths = append(allowPaths, resolved)
+	}
+
+	// Resolve deny paths.
+	denyPaths := make([]string, 0, len(cfg.Deny))
+	for _, p := range cfg.Deny {
+		resolved, err := resolvePath(p)
+		if err != nil {
+			return nil, fmt.Errorf("cannot resolve deny path %q: %w", p, err)
+		}
+		denyPaths = append(denyPaths, resolved)
+	}
+
+	return &FenceConfig{
+		Root:       rootPath,
+		Mode:       mode,
+		AllowPaths: allowPaths,
+		DenyPaths:  denyPaths,
+	}, nil
+}
+
+// Serialize encodes the FenceConfig into a delimited string suitable for
+// passing to the LD_PRELOAD interposer via an environment variable.
+// The format uses the Unit Separator (\x1f) as delimiter:
+//
+//	root\x1fmode\x1fsocket\x1f+allow1\x1f+allow2\x1f-deny1\x1f-deny2
+//
+// Mode is abbreviated: "read-write" becomes "rw", "read-only" becomes "ro".
+func (fc *FenceConfig) Serialize(socketPath string) string {
+	modeShort := "rw"
+	if fc.Mode == "read-only" {
+		modeShort = "ro"
+	}
+
+	parts := []string{fc.Root, modeShort, socketPath}
+	for _, p := range fc.AllowPaths {
+		parts = append(parts, "+"+p)
+	}
+	for _, p := range fc.DenyPaths {
+		parts = append(parts, "-"+p)
+	}
+	return strings.Join(parts, fieldSep)
+}
+
+// ParseSerialized decodes a serialized fence config string back into a
+// SerializedConfig. Returns an error if fewer than 3 fields are present.
+func ParseSerialized(s string) (*SerializedConfig, error) {
+	fields := strings.Split(s, fieldSep)
+	if len(fields) < 3 {
+		return nil, fmt.Errorf("serialized config has %d fields, need at least 3 (root, mode, socket)", len(fields))
+	}
+
+	sc := &SerializedConfig{
+		Root:       fields[0],
+		Mode:       fields[1],
+		SocketPath: fields[2],
+	}
+
+	for _, f := range fields[3:] {
+		if strings.HasPrefix(f, "+") {
+			sc.AllowPaths = append(sc.AllowPaths, f[1:])
+		} else if strings.HasPrefix(f, "-") {
+			sc.DenyPaths = append(sc.DenyPaths, f[1:])
+		}
+	}
+
+	return sc, nil
+}
