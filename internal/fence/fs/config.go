@@ -134,12 +134,36 @@ func ProcessConfig(cfg config.FilesystemConfig) (*FenceConfig, error) {
 		denyPaths = append(denyPaths, resolved)
 	}
 
+	// Validate that no resolved path contains the field separator character.
+	if err := validateNoSeparator(rootPath, "root"); err != nil {
+		return nil, err
+	}
+	for _, p := range allowPaths {
+		if err := validateNoSeparator(p, "allow"); err != nil {
+			return nil, err
+		}
+	}
+	for _, p := range denyPaths {
+		if err := validateNoSeparator(p, "deny"); err != nil {
+			return nil, err
+		}
+	}
+
 	return &FenceConfig{
 		Root:       rootPath,
 		Mode:       mode,
 		AllowPaths: allowPaths,
 		DenyPaths:  denyPaths,
 	}, nil
+}
+
+// validateNoSeparator checks that a path does not contain the field separator
+// character used in NOCKLOCK_FS_ALLOWED serialization.
+func validateNoSeparator(path, label string) error {
+	if strings.Contains(path, fieldSep) {
+		return fmt.Errorf("%s path %q contains reserved separator character (\\x1f)", label, path)
+	}
+	return nil
 }
 
 // Serialize encodes the FenceConfig into a delimited string suitable for

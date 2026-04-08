@@ -74,7 +74,11 @@ func NewFence(cfg *FenceConfig, libPath string) (*Fence, error) {
 	}
 
 	// Restrict socket permissions to owner-only, regardless of umask.
-	os.Chmod(socketPath, 0600)
+	if err := os.Chmod(socketPath, 0600); err != nil {
+		listener.Close()
+		os.RemoveAll(tmpDir)
+		return nil, fmt.Errorf("cannot set socket permissions: %w", err)
+	}
 
 	return &Fence{
 		Config:     cfg,
@@ -127,6 +131,7 @@ func (f *Fence) Listen(ctx context.Context) <-chan FenceEvent {
 func (f *Fence) handleConn(ctx context.Context, conn net.Conn, ch chan<- FenceEvent) {
 	defer conn.Close()
 	scanner := bufio.NewScanner(conn)
+	scanner.Buffer(make([]byte, 4096), 16*1024)
 	for scanner.Scan() {
 		select {
 		case <-ctx.Done():
@@ -144,6 +149,9 @@ func (f *Fence) handleConn(ctx context.Context, conn net.Conn, ch chan<- FenceEv
 			return
 		}
 	}
+	// scanner.Err() is intentionally not checked — connection close from child
+	// exit produces an expected error. Protocol errors (oversized lines) are
+	// bounded by the 16KB buffer limit above.
 }
 
 // Close stops listening and removes the socket directory.

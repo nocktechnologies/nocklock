@@ -101,6 +101,7 @@ make build-all         # builds Go binary + C shared library
 
 - **Environment variable protection:** The wrapped process can call `unsetenv("LD_PRELOAD")` and spawn unfenced subprocesses. This is inherent to LD_PRELOAD-based sandboxing. Future versions may intercept `execve` to re-inject the preload.
 - **TOCTOU races:** A time-of-check-to-time-of-use window exists between path resolution and the actual syscall. Kernel-level sandboxing (seccomp, landlock) can eliminate this in a future PR.
+- **LD_PRELOAD ordering:** If the wrapped process has its own `LD_PRELOAD` libraries, they sit between the fence and glibc and could theoretically intercept `realpath` to lie about path resolution. The fence library is always placed first in the chain.
 - **stat/lstat:** Not currently intercepted. The primary attack surface (file read/write/create/delete) is covered.
 
 ### Platform Support
