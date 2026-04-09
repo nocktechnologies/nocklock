@@ -5,6 +5,9 @@ All notable changes to NockLock will be documented in this file.
 ## [Unreleased]
 
 ### Added
+- README.md: complete rewrite for public launch — accurate defaults, Quick Start, full command reference, platform notes
+- Integration tests: 10 end-to-end tests covering all three fences (`integration/integration_test.go`, `//go:build integration`)
+- Homebrew tap formula: `brew install nocktechnologies/tap/nocklock` via `nocktechnologies/homebrew-tap`
 - Network fence (PR #7) — local HTTP/HTTPS proxy on 127.0.0.1:<random> enforces domain allowlist
   - HTTP CONNECT tunnel for HTTPS (no MITM — hostname inspection only, payload never decrypted)
   - Domain matching: exact hostname + all subdomains, `*.example.com` wildcard, case-insensitive
