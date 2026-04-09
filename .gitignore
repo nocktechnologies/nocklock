@@ -36,6 +36,9 @@ nocklock.exe
 .nock/config.toml
 .nock/events.db
 
+# Git worktrees
+.worktrees/
+
 # Editor/IDE
 # .idea/
 # .vscode/
