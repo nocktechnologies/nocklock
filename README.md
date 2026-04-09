@@ -27,11 +27,11 @@ That's it. Four commands. Your agent is fenced.
 
 `nocklock wrap` does three things before spawning your agent:
 
-1. **Filters environment variables** based on pass/block lists with glob patterns — Linux, macOS, Windows
+1. **Filters environment variables** based on pass/block lists with glob patterns — Linux, macOS
 2. **Intercepts filesystem calls** via LD_PRELOAD, blocking access outside allowed paths — Linux only; macOS support coming
-3. **Routes network traffic** through a local proxy that enforces a domain allowlist — Linux, macOS, Windows. For HTTPS, only the hostname is inspected — no certificate injection, no payload decryption.
+3. **Routes network traffic** through a local proxy that enforces a domain allowlist — Linux, macOS. For HTTPS, only the hostname is inspected — no certificate injection, no payload decryption. If the proxy fails to start, the agent still runs but the network fence is inactive (this is logged).
 
-Every blocked access is logged to `.nock/events.db`. Your agent doesn't know the fence exists — blocked files return EACCES (permission denied), blocked domains return 403.
+Every blocked access is logged to `.nock/events.db`. Blocked files return EACCES (permission denied), blocked domains return 403.
 
 ## Configuration
 
