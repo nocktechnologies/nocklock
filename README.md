@@ -9,7 +9,7 @@ NockLock puts a fence around your AI coding agent — controlling what secrets i
 Your AI agent runs with `--dangerously-skip-permissions`. It has access to your environment variables, your filesystem, your network. NockLock doesn't change how your agent works — it controls what it can reach.
 
 - **Secret Fence** — Filter environment variables. Your agent sees `PATH` and `HOME`. It never sees `AWS_SECRET_ACCESS_KEY`.
-- **Filesystem Fence** — LD_PRELOAD interception. Your agent can read the project directory. It can't read `~/.ssh/`.
+- **Filesystem Fence** — LD_PRELOAD interception. Your agent can read the project directory. It can't read `~/.ssh/`. Linux via LD_PRELOAD (macOS support coming).
 - **Network Fence** — Local proxy with domain allowlist. Your agent can reach `github.com` and `api.anthropic.com`. It can't phone home to anywhere else.
 
 ## Quick Start
@@ -29,7 +29,7 @@ That's it. Four commands. Your agent is fenced.
 
 1. **Filters environment variables** based on pass/block lists with glob patterns
 2. **Intercepts filesystem calls** via LD_PRELOAD, blocking access outside allowed paths
-3. **Routes network traffic** through a local proxy that enforces a domain allowlist
+3. **Routes network traffic** through a local proxy that enforces a domain allowlist. For HTTPS, only the hostname is inspected — no certificate injection, no payload decryption.
 
 Every blocked access is logged to `.nock/events.db`. Your agent doesn't know the fence exists — blocked files return "not found", blocked domains return 403.
 
@@ -136,14 +136,6 @@ Last event:   2026-04-09 14:47:33
 
 The CLI is free and open source. For teams that want visibility across machines, [NockLock Dashboard](https://nocktechnologies.io) adds cloud monitoring, alerts, and team-wide fence event history.
 
-## Platform Support
-
-| Fence | Linux | macOS | Windows |
-|-------|-------|-------|---------|
-| Secret | Yes | Yes | Yes |
-| Filesystem | Yes (LD_PRELOAD) | Coming soon | Not planned |
-| Network | Yes | Yes | Yes |
-
 ## Philosophy
 
 NockLock is a fence, not guardrails. The distinction matters.
@@ -153,10 +145,6 @@ NockLock is a fence, not guardrails. The distinction matters.
 **A fence** sits between the agent and the resource. The agent can't read `~/.ssh/id_rsa` because the syscall returns EACCES. The agent can't reach `evil.com` because the proxy returns 403. No amount of prompt injection changes this.
 
 NockLock doesn't restrict how your agent works. It restricts what your agent can reach. Your agent still has full permissions — inside the fence.
-
-## HTTPS Privacy
-
-The network fence inspects the hostname from the HTTP CONNECT request to decide whether to allow a connection. It does not perform MITM, inject certificates, or decrypt traffic. The encrypted payload is never touched.
 
 ## Contributing
 
