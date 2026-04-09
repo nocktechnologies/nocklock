@@ -6,6 +6,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"sync"
 	"time"
@@ -134,59 +135,58 @@ var wrapCmd = &cobra.Command{
 		var fsFence *fsfence.Fence
 		var fsFenceCancel context.CancelFunc
 		if cfg.Filesystem.Root != "" {
-			if err := fsfence.CheckSupported(); err != nil {
-				cmd.SilenceUsage = true
-				return fmt.Errorf("filesystem fence configured but cannot activate: %w", err)
-			}
-
-			fsCfg, err := fsfence.ProcessConfig(cfg.Filesystem)
-			if err != nil {
-				return fmt.Errorf("invalid filesystem fence config: %w", err)
-			}
-			if fsCfg != nil {
-				// Look for the shared library next to the nocklock binary or in standard paths.
-				libPath := findLibFenceFS()
-				if _, err := os.Stat(libPath); err != nil {
-					return fmt.Errorf("filesystem fence library not found at %s. Build it with: make build-fence-fs", libPath)
-				}
-
-				fsFence, err = fsfence.NewFence(fsCfg, libPath)
+			if !fsfence.IsSupported() {
+				fmt.Fprintf(os.Stderr, "NockLock: filesystem fence configured but not supported on %s (Linux only) — skipping\n", runtime.GOOS)
+			} else {
+				fsCfg, err := fsfence.ProcessConfig(cfg.Filesystem)
 				if err != nil {
-					return fmt.Errorf("failed to initialize filesystem fence: %w", err)
+					return fmt.Errorf("invalid filesystem fence config: %w", err)
 				}
-				defer fsFence.Close()
-
-				// Add LD_PRELOAD and NOCKLOCK_FS_ALLOWED to child env.
-				// Merge LD_PRELOAD with any existing value in childEnv.
-				fenceEnv := fsFence.EnvVars()
-				for i, fenceVar := range fenceEnv {
-					if strings.HasPrefix(fenceVar, "LD_PRELOAD=") {
-						fenceLib := strings.TrimPrefix(fenceVar, "LD_PRELOAD=")
-						for j, childVar := range childEnv {
-							if strings.HasPrefix(childVar, "LD_PRELOAD=") {
-								existing := strings.TrimPrefix(childVar, "LD_PRELOAD=")
-								if existing == "" {
-									childEnv[j] = "LD_PRELOAD=" + fenceLib
-								} else {
-									childEnv[j] = "LD_PRELOAD=" + fenceLib + ":" + existing
-								}
-								fenceEnv = append(fenceEnv[:i], fenceEnv[i+1:]...)
-								break
-							}
-						}
-						break
+				if fsCfg != nil {
+					// Look for the shared library next to the nocklock binary or in standard paths.
+					libPath := findLibFenceFS()
+					if _, err := os.Stat(libPath); err != nil {
+						return fmt.Errorf("filesystem fence library not found at %s. Build it with: make build-fence-fs", libPath)
 					}
+
+					fsFence, err = fsfence.NewFence(fsCfg, libPath)
+					if err != nil {
+						return fmt.Errorf("failed to initialize filesystem fence: %w", err)
+					}
+					defer fsFence.Close()
+
+					// Add LD_PRELOAD and NOCKLOCK_FS_ALLOWED to child env.
+					// Merge LD_PRELOAD with any existing value in childEnv.
+					fenceEnv := fsFence.EnvVars()
+					for i, fenceVar := range fenceEnv {
+						if strings.HasPrefix(fenceVar, "LD_PRELOAD=") {
+							fenceLib := strings.TrimPrefix(fenceVar, "LD_PRELOAD=")
+							for j, childVar := range childEnv {
+								if strings.HasPrefix(childVar, "LD_PRELOAD=") {
+									existing := strings.TrimPrefix(childVar, "LD_PRELOAD=")
+									if existing == "" {
+										childEnv[j] = "LD_PRELOAD=" + fenceLib
+									} else {
+										childEnv[j] = "LD_PRELOAD=" + fenceLib + ":" + existing
+									}
+									fenceEnv = append(fenceEnv[:i], fenceEnv[i+1:]...)
+									break
+								}
+							}
+							break
+						}
+					}
+					childEnv = append(childEnv, fenceEnv...)
+
+					// Start listening for events.
+					var ctx context.Context
+					ctx, fsFenceCancel = context.WithCancel(context.Background())
+					defer fsFenceCancel()
+					fsFenceEvents = fsFence.Listen(ctx)
+
+					fmt.Fprintf(os.Stderr, "NockLock: filesystem fence active — root %s (%s)\n", fsCfg.Root, fsCfg.Mode)
+					logEvent(logging.EventFilePassed, "filesystem", fmt.Sprintf("root=%s mode=%s", fsCfg.Root, fsCfg.Mode), false)
 				}
-				childEnv = append(childEnv, fenceEnv...)
-
-				// Start listening for events.
-				var ctx context.Context
-				ctx, fsFenceCancel = context.WithCancel(context.Background())
-				defer fsFenceCancel()
-				fsFenceEvents = fsFence.Listen(ctx)
-
-				fmt.Fprintf(os.Stderr, "NockLock: filesystem fence active — root %s (%s)\n", fsCfg.Root, fsCfg.Mode)
-				logEvent(logging.EventFilePassed, "filesystem", fmt.Sprintf("root=%s mode=%s", fsCfg.Root, fsCfg.Mode), false)
 			}
 		}
 

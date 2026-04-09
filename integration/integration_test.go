@@ -5,6 +5,7 @@ package integration_test
 import (
 	"database/sql"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -36,6 +37,25 @@ func TestMain(m *testing.M) {
 	}
 	nocklockBin = binPath
 
+	// On Linux, build the filesystem fence interposer and place it next to
+	// the binary so that findLibFenceFS() can locate it.
+	if runtime.GOOS == "linux" {
+		interposerCmd := exec.Command("make", "build-fence-fs")
+		interposerCmd.Dir = projectRoot()
+		if out, err := interposerCmd.CombinedOutput(); err != nil {
+			fmt.Fprintf(os.Stderr, "Failed to build filesystem interposer: %v\n%s\n", err, out)
+			os.RemoveAll(tmp)
+			os.Exit(1)
+		}
+		soSrc := filepath.Join(projectRoot(), "internal", "fence", "fs", "interposer", "libfence_fs.so")
+		soDst := filepath.Join(tmp, "libfence_fs.so")
+		if err := copyFile(soSrc, soDst); err != nil {
+			fmt.Fprintf(os.Stderr, "Failed to copy libfence_fs.so: %v\n", err)
+			os.RemoveAll(tmp)
+			os.Exit(1)
+		}
+	}
+
 	code := m.Run()
 	os.RemoveAll(tmp)
 	os.Exit(code)
@@ -46,6 +66,29 @@ func projectRoot() string {
 	// This file lives in integration/; go up one level.
 	_, file, _, _ := runtime.Caller(0)
 	return filepath.Dir(filepath.Dir(file))
+}
+
+// copyFile copies the file at src to dst, preserving permissions.
+func copyFile(src, dst string) error {
+	in, err := os.Open(src)
+	if err != nil {
+		return err
+	}
+	defer in.Close()
+
+	info, err := in.Stat()
+	if err != nil {
+		return err
+	}
+
+	out, err := os.OpenFile(dst, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, info.Mode())
+	if err != nil {
+		return err
+	}
+	defer out.Close()
+
+	_, err = io.Copy(out, in)
+	return err
 }
 
 // testConfig returns a minimal but valid config.toml for integration tests.

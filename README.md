@@ -126,10 +126,10 @@ brew install nocktechnologies/tap/nocklock
 ```bash
 git clone https://github.com/nocktechnologies/nocklock.git
 cd nocklock
-make build
+make build-all
 ```
 
-Requires Go 1.26+. The binary is built to `./nocklock`.
+Requires Go 1.26+. The binary is built to `./nocklock`. On Linux, `build-all` also compiles the filesystem fence interposer library (`libfence_fs.so`). On macOS, the library build is skipped automatically (macOS support coming).
 
 ### Verify Installation
 
