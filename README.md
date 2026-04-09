@@ -10,7 +10,7 @@ Your AI agent runs with full shell access — your environment, your filesystem,
 
 - **Secret Fence** — Filter environment variables. Your agent sees `PATH` and `HOME`. It never sees `AWS_SECRET_ACCESS_KEY`.
 - **Filesystem Fence** — LD_PRELOAD interception. Your agent can read the project directory. It can't read `~/.ssh/`. Linux via LD_PRELOAD (macOS support coming).
-- **Network Fence** — Local proxy with domain allowlist. Your agent can reach `github.com` and `api.anthropic.com`. It can't phone home to anywhere else.
+- **Network Fence** — Local proxy with domain allowlist. Your agent can reach GitHub and `api.anthropic.com`. It can't phone home to anywhere else.
 
 ## Quick Start
 
@@ -153,7 +153,7 @@ nocklock wrap -- your-custom-agent               # Anything
 
 Every fence decision is recorded in `.nock/events.db`. Query it with `nocklock log`:
 
-```
+```text
 $ nocklock log --blocked
 Session a1b2c3d4  started 2026-04-09 14:23:01  ended 2026-04-09 14:47:33  (24m 32s)
   secret_blocked: AWS_SECRET_ACCESS_KEY
@@ -163,7 +163,7 @@ Session a1b2c3d4  started 2026-04-09 14:23:01  ended 2026-04-09 14:47:33  (24m 3
 Total: 3 event(s) across 1 session(s), 3 blocked, 0 passed
 ```
 
-```
+```text
 $ nocklock log --stats
 Total events: 847
 Sessions:     12

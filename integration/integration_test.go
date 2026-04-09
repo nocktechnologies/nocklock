@@ -346,16 +346,17 @@ func TestNetworkFenceAllowsGithub(t *testing.T) {
 
 	stdout, stderr, exitCode := runNocklock(t, dir, nil,
 		"wrap", "--",
-		"curl", "-s", "--head", "https://github.com",
+		"curl", "-s", "-o", "/dev/null", "-w", "%{http_code}", "https://github.com",
 	)
 
 	if exitCode != 0 {
 		t.Errorf("expected exit code 0, got %d; stderr=%q", exitCode, stderr)
 	}
 
-	// github.com returns either 200 OK or 301 redirect.
-	if !strings.Contains(stdout, "200") && !strings.Contains(stdout, "301") {
-		t.Errorf("expected response to contain 200 or 301, got %q", stdout)
+	// Accept any 2xx or 3xx response from github.com.
+	code := strings.TrimSpace(stdout)
+	if len(code) != 3 || (code[0] != '2' && code[0] != '3') {
+		t.Errorf("expected 2xx/3xx status from github.com, got %q (stderr=%q)", stdout, stderr)
 	}
 }
 
