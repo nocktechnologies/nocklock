@@ -24,9 +24,9 @@ NockLock wraps your agent in an invisible fence. Three boundaries:
 
 Zero config defaults. The fence is invisible until something hits it.
 
-> **Current status:** NockLock is in early development. The CLI skeleton and config
-> system are working. The secret fence and filesystem fence (Linux) are active.
-> Network fence coming soon.
+> **Current status:** All three fences are active. The secret fence, filesystem fence
+> (Linux via LD_PRELOAD), and network fence (local HTTP/HTTPS proxy) are working.
+> NockLock MVP is complete.
 
 ## Install (from source)
 
@@ -46,7 +46,7 @@ nocklock init
 # View your config
 nocklock config
 
-# Wrap your agent (passthrough mode — fences coming soon)
+# Wrap your agent with all three fences active
 nocklock wrap -- claude --dangerously-skip-permissions
 
 # Check version
@@ -112,13 +112,57 @@ make build-all         # builds Go binary + C shared library
 | macOS    | Coming soon (DYLD_INSERT_LIBRARIES) |
 | Windows  | Not planned |
 
+## Network Fence
+
+The network fence starts a local HTTP/HTTPS proxy on `127.0.0.1:<random-port>` and injects
+proxy environment variables into the child process. Every outbound request is checked against
+the domain allowlist before being forwarded.
+
+### Config Example
+
+```toml
+[network]
+allow = [
+    "github.com",           # also matches *.github.com
+    "api.anthropic.com",
+    "registry.npmjs.org",
+    "pypi.org",
+]
+allow_all = false           # set true to disable the fence
+```
+
+### How It Works
+
+- `nocklock wrap` starts a local proxy and sets `HTTP_PROXY`, `HTTPS_PROXY`, `http_proxy`, `https_proxy` in the child's environment
+- `NO_PROXY`/`no_proxy` are explicitly removed to prevent bypass
+- For HTTP requests: proxy checks the destination hostname and either forwards or returns 403
+- For HTTPS requests: proxy inspects the hostname from the HTTP CONNECT request — **no MITM, no certificate injection, encrypted payload is never decrypted**
+- Raw IP addresses are blocked (fail closed — no reverse DNS lookup)
+- If the proxy fails to start, the agent still runs but unfenced (logged as `network_error`)
+
+### Domain Matching
+
+| Rule | Matches |
+|------|---------|
+| `"github.com"` | `github.com`, `api.github.com`, `*.github.com` |
+| `"*.example.com"` | `sub.example.com` but **not** `example.com` |
+| Raw IP `1.2.3.4` | Always blocked |
+
+### Platform Support
+
+| Platform | Status |
+|----------|--------|
+| Linux    | Supported |
+| macOS    | Supported |
+| Windows  | Supported |
+
 ## Roadmap
 
 - [x] CLI skeleton + config system (PR #1)
 - [x] Secret fence — environment variable filtering (PR #3)
 - [x] SQLite event logging (PR #4)
 - [x] Filesystem fence — LD_PRELOAD interception (PR #6)
-- [ ] Network fence — local proxy with domain allowlist (PR #7)
+- [x] Network fence — local proxy with domain allowlist (PR #7)
 - [ ] Homebrew tap + CI (PR #8)
 
 ## Dashboard (Coming Soon)

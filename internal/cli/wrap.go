@@ -13,6 +13,7 @@ import (
 	"github.com/google/uuid"
 	"github.com/nocktechnologies/nocklock/internal/config"
 	fsfence "github.com/nocktechnologies/nocklock/internal/fence/fs"
+	"github.com/nocktechnologies/nocklock/internal/fence/network"
 	"github.com/nocktechnologies/nocklock/internal/fence/secrets"
 	"github.com/nocktechnologies/nocklock/internal/logging"
 	"github.com/spf13/cobra"
@@ -189,6 +190,46 @@ var wrapCmd = &cobra.Command{
 			}
 		}
 
+		// Apply network fence.
+		// Strip ALL ambient proxy vars unconditionally — even when allow_all = true.
+		// Rationale: if the fence is active, an inherited proxy bypasses the allowlist.
+		// If allow_all = true, we want the child to have direct network access rather
+		// than an operator proxy whose scope we don't control. This is a deliberate
+		// security-over-convenience tradeoff; document it if it surprises users.
+		childEnv = removeEnvVars(childEnv,
+			"HTTP_PROXY", "http_proxy",
+			"HTTPS_PROXY", "https_proxy",
+			"ALL_PROXY", "all_proxy",
+			"NO_PROXY", "no_proxy",
+		)
+
+		if !cfg.Network.AllowAll {
+			proxy := network.NewProxyServer(cfg.Network, logger, sessionID)
+			addr, proxyErr := proxy.Start()
+			if proxyErr != nil {
+				// Degrade gracefully per design — agent still runs, but logs the failure.
+				// NOTE: This is a deliberate design tradeoff (see PR #7 spec). For stricter
+				// enforcement, change this to: return fmt.Errorf("network fence failed: %w", proxyErr)
+				fmt.Fprintf(os.Stderr, "NockLock: warning: network fence failed to start: %v\n", proxyErr)
+				logEvent(logging.EventNetworkError, "network", fmt.Sprintf("proxy start failed: %v", proxyErr), false)
+			} else {
+				defer proxy.Stop()
+				proxyURL := "http://" + addr
+				childEnv = append(childEnv,
+					"HTTP_PROXY="+proxyURL,
+					"HTTPS_PROXY="+proxyURL,
+					"http_proxy="+proxyURL,
+					"https_proxy="+proxyURL,
+					"ALL_PROXY="+proxyURL,
+					"all_proxy="+proxyURL,
+				)
+				fmt.Fprintf(os.Stderr, "NockLock: network fence active — allowing %d domain(s)\n", len(cfg.Network.Allow))
+				logEvent(logging.EventNetworkPassed, "network", fmt.Sprintf("proxy=%s domains=%d", addr, len(cfg.Network.Allow)), false)
+			}
+		} else {
+			fmt.Fprintf(os.Stderr, "NockLock: network fence disabled (allow_all = true)\n")
+		}
+
 		child := exec.Command(args[0], args[1:]...)
 		child.Env = childEnv
 		child.Stdin = os.Stdin
@@ -242,6 +283,25 @@ var wrapCmd = &cobra.Command{
 
 func init() {
 	rootCmd.AddCommand(wrapCmd)
+}
+
+// removeEnvVars returns env with any entries whose key matches one of the given
+// keys removed. Keys are matched case-sensitively by prefix ("KEY=").
+func removeEnvVars(env []string, keys ...string) []string {
+	filtered := env[:0:len(env)]
+	for _, entry := range env {
+		keep := true
+		for _, key := range keys {
+			if strings.HasPrefix(entry, key+"=") || entry == key {
+				keep = false
+				break
+			}
+		}
+		if keep {
+			filtered = append(filtered, entry)
+		}
+	}
+	return filtered
 }
 
 // findLibFenceFS searches for the filesystem fence shared library.
