@@ -6,7 +6,7 @@ NockLock puts a fence around your AI coding agent — controlling what secrets i
 
 ## Why NockLock?
 
-Your AI agent runs with `--dangerously-skip-permissions`. It has access to your environment variables, your filesystem, your network. NockLock doesn't change how your agent works — it controls what it can reach.
+Your AI agent runs with full shell access — your environment, your filesystem, your network. NockLock doesn't change how your agent works — it controls what it can reach.
 
 - **Secret Fence** — Filter environment variables. Your agent sees `PATH` and `HOME`. It never sees `AWS_SECRET_ACCESS_KEY`.
 - **Filesystem Fence** — LD_PRELOAD interception. Your agent can read the project directory. It can't read `~/.ssh/`. Linux via LD_PRELOAD (macOS support coming).
@@ -27,34 +27,75 @@ That's it. Four commands. Your agent is fenced.
 
 `nocklock wrap` does three things before spawning your agent:
 
-1. **Filters environment variables** based on pass/block lists with glob patterns
-2. **Intercepts filesystem calls** via LD_PRELOAD, blocking access outside allowed paths
-3. **Routes network traffic** through a local proxy that enforces a domain allowlist. For HTTPS, only the hostname is inspected — no certificate injection, no payload decryption.
+1. **Filters environment variables** based on pass/block lists with glob patterns — Linux, macOS, Windows
+2. **Intercepts filesystem calls** via LD_PRELOAD, blocking access outside allowed paths — Linux only; macOS support coming
+3. **Routes network traffic** through a local proxy that enforces a domain allowlist — Linux, macOS, Windows. For HTTPS, only the hostname is inspected — no certificate injection, no payload decryption.
 
-Every blocked access is logged to `.nock/events.db`. Your agent doesn't know the fence exists — blocked files return "not found", blocked domains return 403.
+Every blocked access is logged to `.nock/events.db`. Your agent doesn't know the fence exists — blocked files return EACCES (permission denied), blocked domains return 403.
 
 ## Configuration
 
 `nocklock init` creates `.nock/config.toml` with sensible defaults:
 
 ```toml
-[secrets]
-pass = ["HOME", "PATH", "SHELL", "USER", "LANG", "TERM"]
-block = ["AWS_*", "STRIPE_*", "DATABASE_URL", "ANTHROPIC_API_KEY", "OPENAI_API_KEY", "*_SECRET*", "*_PASSWORD*", "*_TOKEN*"]
+[project]
+name = ""
+root = "."
 
 [filesystem]
 root = "."
 mode = "read-write"
-allow = ["~/.claude/", "/tmp/"]
-deny = ["~/.ssh/", "~/.aws/", "~/.gnupg/", "~/.nock/"]
+allow = [
+    "~/.claude/",
+    "/tmp/",
+]
+deny = [
+    "~/.ssh/",
+    "~/.aws/",
+    "~/.gnupg/",
+    "~/.nock/",
+]
 
 [network]
-allow = ["github.com", "api.github.com", "api.anthropic.com", "registry.npmjs.org", "pypi.org", "rubygems.org", "crates.io"]
+allow = [
+    "github.com",
+    "api.github.com",
+    "api.anthropic.com",
+    "registry.npmjs.org",
+    "pypi.org",
+    "rubygems.org",
+    "crates.io",
+]
 allow_all = false
+
+[secrets]
+pass = [
+    "HOME",
+    "PATH",
+    "SHELL",
+    "USER",
+    "LANG",
+    "TERM",
+]
+block = [
+    "AWS_*",
+    "STRIPE_*",
+    "DATABASE_URL",
+    "ANTHROPIC_API_KEY",
+    "OPENAI_API_KEY",
+    "*_SECRET*",
+    "*_PASSWORD*",
+    "*_TOKEN*",
+]
 
 [logging]
 db = ".nock/events.db"
 level = "info"
+
+[cloud]
+enabled = false
+api_key = ""
+endpoint = "https://cc.nocktechnologies.io/api/fence/events/"
 ```
 
 Defaults are deliberately safe. Customize per project.
@@ -116,8 +157,8 @@ Every fence decision is recorded in `.nock/events.db`. Query it with `nocklock l
 $ nocklock log --blocked
 Session a1b2c3d4  started 2026-04-09 14:23:01  ended 2026-04-09 14:47:33  (24m 32s)
   secret_blocked: AWS_SECRET_ACCESS_KEY
-  file_blocked: open /home/user/.ssh/id_rsa
-  network_blocked: CONNECT evil.example.com:443
+  file_blocked: /home/user/.ssh/id_rsa
+  network_blocked: evil.example.com:443
 
 Total: 3 event(s) across 1 session(s), 3 blocked, 0 passed
 ```
