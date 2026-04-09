@@ -25,19 +25,20 @@ func TestMain(m *testing.M) {
 		fmt.Fprintf(os.Stderr, "failed to create temp dir: %v\n", err)
 		os.Exit(1)
 	}
-	defer os.RemoveAll(tmp)
-
 	binPath := filepath.Join(tmp, "nocklock")
 	build := exec.Command("go", "build", "-o", binPath, "./cmd/nocklock")
 	build.Dir = projectRoot()
 	build.Stderr = os.Stderr
 	if err := build.Run(); err != nil {
 		fmt.Fprintf(os.Stderr, "failed to build nocklock: %v\n", err)
+		os.RemoveAll(tmp)
 		os.Exit(1)
 	}
 	nocklockBin = binPath
 
-	os.Exit(m.Run())
+	code := m.Run()
+	os.RemoveAll(tmp)
+	os.Exit(code)
 }
 
 // projectRoot returns the absolute path to the project root (parent of integration/).
@@ -235,9 +236,12 @@ func TestSecretFenceMultipleBlocked(t *testing.T) {
 	stdout, _, _ := runNocklock(t, dir, env, "wrap", "--", "env")
 
 	for _, blocked := range []string{"STRIPE_SECRET=", "DB_PASSWORD=", "MY_SECRET_KEY="} {
-		if strings.Contains(stdout, blocked) {
-			t.Errorf("expected %q to be blocked from env output, but it appeared", blocked)
-		}
+		blocked := blocked // capture
+		t.Run(blocked, func(t *testing.T) {
+			if strings.Contains(stdout, blocked) {
+				t.Errorf("blocked var %q leaked into output", blocked)
+			}
+		})
 	}
 }
 
@@ -252,10 +256,14 @@ func TestNetworkFenceBlocksUnknownDomain(t *testing.T) {
 
 	dir := setupTestDir(t)
 
-	stdout, stderr, _ := runNocklock(t, dir, nil,
+	stdout, stderr, exitCode := runNocklock(t, dir, nil,
 		"wrap", "--",
 		"curl", "-s", "-o", "/dev/null", "-w", "%{http_code}", "http://httpbin.org/get",
 	)
+
+	if exitCode != 0 {
+		t.Fatalf("curl itself failed (exit %d), can't verify fence: stderr=%s", exitCode, stderr)
+	}
 
 	// The proxy should return 403 for domains not in the allowlist.
 	if !strings.Contains(stdout, "403") {
@@ -270,6 +278,9 @@ func TestNetworkFenceBlocksUnknownDomain(t *testing.T) {
 func TestNetworkFenceAllowsGithub(t *testing.T) {
 	if _, err := exec.LookPath("curl"); err != nil {
 		t.Skip("curl not available")
+	}
+	if os.Getenv("INTEGRATION_NETWORK") == "" {
+		t.Skip("skipping: set INTEGRATION_NETWORK=1 to enable tests requiring live internet")
 	}
 
 	dir := setupTestDir(t)
@@ -297,7 +308,10 @@ func TestEventLogging(t *testing.T) {
 	dir := setupTestDir(t)
 	env := []string{"AWS_SECRET_ACCESS_KEY=supersecret"}
 
-	_, _, _ = runNocklock(t, dir, env, "wrap", "--", "printenv", "AWS_SECRET_ACCESS_KEY")
+	_, stderr, code := runNocklock(t, dir, env, "wrap", "--", "printenv", "AWS_SECRET_ACCESS_KEY")
+	if code != 0 {
+		t.Logf("nocklock exited %d, stderr: %s", code, stderr)
+	}
 
 	dbPath := filepath.Join(dir, ".nock", "events.db")
 	if _, err := os.Stat(dbPath); os.IsNotExist(err) {
@@ -337,8 +351,15 @@ func TestFilesystemFenceBlocks(t *testing.T) {
 		t.Skip("filesystem fence is Linux-only")
 	}
 
-	// Use a config with filesystem fence enabled.
-	config := `[project]
+	// Create a readable file OUTSIDE the allowed directory to use as the deny target.
+	sensitiveDir := t.TempDir()
+	sensitiveFile := filepath.Join(sensitiveDir, "sensitive.txt")
+	if err := os.WriteFile(sensitiveFile, []byte("secret-content"), 0o644); err != nil {
+		t.Fatalf("failed to create sensitive file: %v", err)
+	}
+
+	// Use a config with filesystem fence enabled, denying the sensitive dir.
+	config := fmt.Sprintf(`[project]
 name = "integration-test-fs"
 root = "."
 
@@ -346,7 +367,7 @@ root = "."
 root = "."
 mode = "read-write"
 allow = ["/tmp/"]
-deny = ["/etc/shadow"]
+deny = [%q]
 
 [network]
 allow = []
@@ -364,19 +385,20 @@ level = "info"
 enabled = false
 api_key = ""
 endpoint = "https://cc.nocktechnologies.io/api/fence/events/"
-`
+`, sensitiveDir)
+
 	dir := setupTestDirWithConfig(t, config)
 
-	_, stderr, exitCode := runNocklock(t, dir, nil, "wrap", "--", "cat", "/etc/shadow")
+	_, stderr, exitCode := runNocklock(t, dir, nil, "wrap", "--", "cat", sensitiveFile)
 
 	if exitCode == 0 {
-		t.Errorf("expected non-zero exit code when reading /etc/shadow, got 0")
+		t.Errorf("expected non-zero exit code when reading denied file, got 0")
 	}
 	combined := stderr
 	if !strings.Contains(strings.ToLower(combined), "permission denied") &&
 		!strings.Contains(strings.ToLower(combined), "eacces") {
 		t.Logf("stderr: %s", stderr)
-		t.Errorf("expected permission denied or EACCES error for /etc/shadow")
+		t.Errorf("expected permission denied or EACCES error for denied file")
 	}
 }
 
