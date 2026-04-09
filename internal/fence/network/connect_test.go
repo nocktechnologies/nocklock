@@ -3,6 +3,7 @@ package network
 import (
 	"bufio"
 	"context"
+	"fmt"
 	"io"
 	"net"
 	"net/http"
@@ -164,10 +165,17 @@ func TestHandleConnect_BlockedCases(t *testing.T) {
 }
 
 // TestHandleConnect_AllowedDoesNotReturn403 verifies that an allowed CONNECT host
-// does not get a 403. The recorder can't hijack so the response will be 500 (hijack
-// unsupported), but the allowlist check must not return 403.
+// does not get a 403. The dial is stubbed so no real network access occurs.
+// The recorder can't hijack so the final response is 500 (hijack unsupported),
+// but the critical assertion is that the allowlist check does not return 403.
 func TestHandleConnect_AllowedDoesNotReturn403(t *testing.T) {
-	p := &ProxyServer{allowList: []string{"example.com"}}
+	p := &ProxyServer{
+		allowList: []string{"example.com"},
+		// Stub the dialer so this test never touches the real network.
+		dialFunc: func(ctx context.Context, network, addr string) (net.Conn, error) {
+			return nil, fmt.Errorf("test stub: no real dialing")
+		},
+	}
 
 	req, _ := http.NewRequest(http.MethodConnect, "http://proxy", nil)
 	req.Host = "example.com:443"

@@ -191,9 +191,11 @@ var wrapCmd = &cobra.Command{
 		}
 
 		// Apply network fence.
-		// Always strip ambient proxy and NO_PROXY vars first, regardless of allow_all,
-		// to prevent the child from inheriting a corporate/operator proxy that could bypass
-		// NockLock's allowlist or produce unpredictable behaviour.
+		// Strip ALL ambient proxy vars unconditionally — even when allow_all = true.
+		// Rationale: if the fence is active, an inherited proxy bypasses the allowlist.
+		// If allow_all = true, we want the child to have direct network access rather
+		// than an operator proxy whose scope we don't control. This is a deliberate
+		// security-over-convenience tradeoff; document it if it surprises users.
 		childEnv = removeEnvVars(childEnv,
 			"HTTP_PROXY", "http_proxy",
 			"HTTPS_PROXY", "https_proxy",

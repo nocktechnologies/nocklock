@@ -117,7 +117,11 @@ func NewProxyServer(cfg config.NetworkConfig, logger *logging.Logger, sessionID 
 
 // Start binds to 127.0.0.1:0 (OS assigns the port) and begins serving.
 // Returns the bound address as "127.0.0.1:PORT".
+// Returns an error if called on an already-started proxy (idempotent guard).
 func (p *ProxyServer) Start() (string, error) {
+	if p.listener != nil {
+		return "", fmt.Errorf("proxy already started at %s", p.listener.Addr())
+	}
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
 		return "", fmt.Errorf("network fence: failed to bind proxy: %w", err)

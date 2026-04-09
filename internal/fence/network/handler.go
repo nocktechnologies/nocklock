@@ -68,9 +68,16 @@ func (p *ProxyServer) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	host := r.Host
-	if host == "" && r.URL != nil {
+	// For proxy-style requests the destination is in the absolute URL (r.URL.Host).
+	// Use that as the authoritative host; fall back to the Host header only when
+	// the URL is not absolute (e.g. direct requests from tests).
+	// This prevents a mismatch where a spoofed Host header passes the check but
+	// the request is forwarded to a different host from the URL.
+	host := ""
+	if r.URL != nil && r.URL.Host != "" {
 		host = r.URL.Host
+	} else {
+		host = r.Host
 	}
 
 	if !p.isAllowed(host) {
@@ -98,9 +105,12 @@ func (p *ProxyServer) forwardHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Remove hop-by-hop headers before forwarding (RFC 7230 §6.1).
-	// Also remove any headers listed in the Connection header itself.
-	for _, name := range r.Header["Connection"] {
-		r.Header.Del(name)
+	// The Connection header may list additional headers to remove; split on commas
+	// since one Connection header line can contain multiple comma-separated tokens.
+	for _, v := range r.Header["Connection"] {
+		for _, name := range strings.Split(v, ",") {
+			r.Header.Del(strings.TrimSpace(name))
+		}
 	}
 	for _, h := range []string{
 		"Connection", "Keep-Alive",

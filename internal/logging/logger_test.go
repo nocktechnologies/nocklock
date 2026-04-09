@@ -201,6 +201,7 @@ func TestLog_AllEventTypes(t *testing.T) {
 		EventSecretBlocked, EventSecretPassed,
 		EventFileBlocked, EventFilePassed,
 		EventNetworkBlocked, EventNetworkPassed,
+		EventProxyStart, EventProxyStop, EventNetworkError,
 		EventSessionStart, EventSessionEnd,
 		EventConfigLoaded,
 	}
