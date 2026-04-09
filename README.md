@@ -2,7 +2,7 @@
 
 **Fence, not guardrails.** Sandbox your AI agents without restricting how they work.
 
-NockLock puts a fence around your AI coding agent — controlling what secrets it can see, what files it can access, and what domains it can reach. Your agent runs with full permissions inside the fence. Nothing gets out.
+NockLock puts a fence around your AI coding agent — controlling what secrets it can see, what files it can access, and what domains it can reach. Your agent runs with full permissions inside the fence. When fences are active, nothing gets out beyond the access you allow.
 
 ## Why NockLock?
 

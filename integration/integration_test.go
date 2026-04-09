@@ -19,6 +19,8 @@ import (
 // nocklockBin is the path to the compiled nocklock binary, set in TestMain.
 var nocklockBin string
 
+// TestMain builds the nocklock binary (and the filesystem fence interposer on
+// Linux) once, then runs the integration suite. Cleanup happens after all tests.
 func TestMain(m *testing.M) {
 	// Build binary to a temp location.
 	tmp, err := os.MkdirTemp("", "nocklock-integration-*")
@@ -185,6 +187,8 @@ func runNocklock(t *testing.T, dir string, env []string, args ...string) (stdout
 // Test 1: Basic passthrough
 // ---------------------------------------------------------------------------
 
+// TestWrapPassthrough verifies that nocklock wrap passes child stdout through
+// unchanged and exits with code 0.
 func TestWrapPassthrough(t *testing.T) {
 	dir := setupTestDir(t)
 	stdout, _, exitCode := runNocklock(t, dir, nil, "wrap", "--", "echo", "hello")
@@ -201,6 +205,8 @@ func TestWrapPassthrough(t *testing.T) {
 // Test 2: nocklock init creates config
 // ---------------------------------------------------------------------------
 
+// TestInitCreatesConfig verifies that nocklock init creates .nock/config.toml
+// containing all six expected TOML sections.
 func TestInitCreatesConfig(t *testing.T) {
 	dir := t.TempDir()
 
@@ -227,6 +233,8 @@ func TestInitCreatesConfig(t *testing.T) {
 // Test 3: Secret fence blocks sensitive vars
 // ---------------------------------------------------------------------------
 
+// TestSecretFenceBlocks verifies that the secret fence strips AWS_SECRET_ACCESS_KEY
+// from the child process environment.
 func TestSecretFenceBlocks(t *testing.T) {
 	dir := setupTestDir(t)
 	env := []string{"AWS_SECRET_ACCESS_KEY=supersecret"}
@@ -247,6 +255,8 @@ func TestSecretFenceBlocks(t *testing.T) {
 // Test 4: Secret fence allows pass-listed vars
 // ---------------------------------------------------------------------------
 
+// TestSecretFenceAllows verifies that variables on the pass-list (PATH) are
+// forwarded to the child process unchanged.
 func TestSecretFenceAllows(t *testing.T) {
 	dir := setupTestDir(t)
 
@@ -268,6 +278,8 @@ func TestSecretFenceAllows(t *testing.T) {
 // Test 5: Secret fence blocks multiple sensitive vars
 // ---------------------------------------------------------------------------
 
+// TestSecretFenceMultipleBlocked verifies that all sensitive variables matching
+// block-list patterns are stripped from the child environment.
 func TestSecretFenceMultipleBlocked(t *testing.T) {
 	dir := setupTestDir(t)
 	env := []string{
@@ -292,6 +304,8 @@ func TestSecretFenceMultipleBlocked(t *testing.T) {
 // Test 6: Network fence blocks unknown domains
 // ---------------------------------------------------------------------------
 
+// TestNetworkFenceBlocksUnknownDomain verifies that the network fence proxy
+// returns HTTP 403 for domains not on the allowlist (httpbin.org).
 func TestNetworkFenceBlocksUnknownDomain(t *testing.T) {
 	if _, err := exec.LookPath("curl"); err != nil {
 		t.Skip("curl not available")
@@ -318,6 +332,8 @@ func TestNetworkFenceBlocksUnknownDomain(t *testing.T) {
 // Test 7: Network fence allows github.com
 // ---------------------------------------------------------------------------
 
+// TestNetworkFenceAllowsGithub verifies that the network fence permits requests
+// to github.com (on the allowlist). Requires INTEGRATION_NETWORK=1.
 func TestNetworkFenceAllowsGithub(t *testing.T) {
 	if _, err := exec.LookPath("curl"); err != nil {
 		t.Skip("curl not available")
@@ -347,6 +363,8 @@ func TestNetworkFenceAllowsGithub(t *testing.T) {
 // Test 8: Event logging records secret_blocked events
 // ---------------------------------------------------------------------------
 
+// TestEventLogging verifies that fence events are written to .nock/events.db
+// and that secret_blocked events include the variable name.
 func TestEventLogging(t *testing.T) {
 	dir := setupTestDir(t)
 	env := []string{"AWS_SECRET_ACCESS_KEY=supersecret"}
@@ -389,6 +407,8 @@ func TestEventLogging(t *testing.T) {
 // Test 9: Filesystem fence blocks (Linux only)
 // ---------------------------------------------------------------------------
 
+// TestFilesystemFenceBlocks verifies that the LD_PRELOAD filesystem fence
+// returns EACCES for files in a deny-listed directory. Linux only.
 func TestFilesystemFenceBlocks(t *testing.T) {
 	if runtime.GOOS != "linux" {
 		t.Skip("filesystem fence is Linux-only")
@@ -449,6 +469,8 @@ endpoint = "https://cc.nocktechnologies.io/api/fence/events/"
 // Test 10: Exit code passthrough
 // ---------------------------------------------------------------------------
 
+// TestWrapExitCodePassthrough verifies that nocklock wrap forwards the child's
+// exit code exactly, including non-zero values.
 func TestWrapExitCodePassthrough(t *testing.T) {
 	dir := setupTestDir(t)
 
