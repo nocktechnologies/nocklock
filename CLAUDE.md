@@ -36,6 +36,14 @@ All detailed documentation lives in the .claude/ directory:
 - `.claude/decisions/` — Architecture Decision Records (ADRs)
 - `.claude/review/` — Review pipeline instructions, pre-push checklist
 
+## Branch-Lock Hook
+`.claude/hooks/branch-lock.sh` runs as a PreToolUse hook on every Bash
+invocation (5s timeout, registered in `.claude/settings.json`). It inspects
+`git checkout` / `git switch` commands and blocks any attempt to leave the
+branch first touched in the session. The locked branch is recorded in
+`.branch-lock` at the repo root (gitignored); remove that file to unlock.
+`git merge` and `git rebase` are intentionally out of scope.
+
 ## Code Standards
 - All exported functions need doc comments
 - Error messages must be actionable
