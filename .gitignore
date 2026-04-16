@@ -42,3 +42,4 @@ nocklock.exe
 # Editor/IDE
 # .idea/
 # .vscode/
+.branch-lock
