@@ -1,0 +1,70 @@
+name: Anvil (Codex Security Review)
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened]
+
+permissions:
+  contents: read
+  pull-requests: write
+  issues: write
+
+jobs:
+  anvil-review:
+    if: github.event.pull_request.draft == false
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Install Codex CLI
+        run: npm install -g @openai/codex@0.118.0
+
+      - name: Run Codex security review
+        id: anvil
+        env:
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+          PR_BASE_REF: ${{ github.event.pull_request.base.ref }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          PR_TITLE: ${{ github.event.pull_request.title }}
+        run: |
+          NO_COLOR=1 codex review \
+            --base "$PR_BASE_REF" \
+            --title "PR #${PR_NUMBER}: ${PR_TITLE}" \
+            -c model="o4-mini" \
+            -c 'sandbox_permissions=["disk-full-read-access"]' \
+            "Security-focused adversarial review. Check for: injection vulnerabilities (SQL, XSS, SSRF, command injection), auth/authz bypasses, insecure data handling, hard-coded secrets, CSRF issues, logic errors in security-critical paths. Report ALL findings with file and line references. Be thorough and adversarial." \
+            > /tmp/anvil-output.txt 2>&1 || true
+          {
+            echo 'review<<ANVIL_REVIEW_EOF'
+            head -c 60000 /tmp/anvil-output.txt
+            echo 'ANVIL_REVIEW_EOF'
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Post Anvil review comment
+        if: always()
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const output = `${{ steps.anvil.outputs.review }}`;
+            const body = [
+              '## 🔨 Anvil Security Review (Codex)',
+              '',
+              '```',
+              output || 'No output captured — verify OPENAI_API_KEY secret is set on this repo.',
+              '```',
+              '',
+              '*Adversarial security audit powered by OpenAI Codex o4-mini. Does not replace human review.*',
+            ].join('\n');
+            github.rest.issues.createComment({
+              issue_number: context.issue.number,
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              body,
+            });
