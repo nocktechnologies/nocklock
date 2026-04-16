@@ -49,8 +49,9 @@ type FilesystemConfig struct {
 
 // NetworkConfig defines network egress boundaries.
 type NetworkConfig struct {
-	Allow    []string `toml:"allow"`
-	AllowAll bool     `toml:"allow_all"`
+	Allow              []string `toml:"allow"`
+	AllowAll           bool     `toml:"allow_all"`
+	AllowPrivateRanges bool     `toml:"allow_private_ranges"`
 }
 
 // SecretsConfig defines environment variable filtering rules.
@@ -115,6 +116,14 @@ func Load(path string) (*Config, error) {
 	}
 	if undecoded := md.Undecoded(); len(undecoded) > 0 {
 		return nil, fmt.Errorf("unknown config keys at %s: %v", path, undecoded)
+	}
+
+	if errs := Validate(&cfg); len(errs) > 0 {
+		for _, e := range errs {
+			if e.Severity == "error" {
+				return nil, fmt.Errorf("invalid config at %s: %s", path, e.Error())
+			}
+		}
 	}
 
 	return &cfg, nil
