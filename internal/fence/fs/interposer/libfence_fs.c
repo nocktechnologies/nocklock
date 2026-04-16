@@ -1552,3 +1552,509 @@ int fchdir(int fd)
     if (!real_fchdir) { errno = ENOSYS; return -1; }
     return real_fchdir(fd);
 }
+
+/* ------------------------------------------------------------------ */
+/* stat family (path enumeration prevention)                           */
+/* ------------------------------------------------------------------ */
+
+/*
+ * The stat family is intercepted to prevent path enumeration outside the
+ * allowed tree. Denied calls return ENOENT (not EACCES) so that an attacker
+ * cannot distinguish "denied" from "does not exist".
+ *
+ * faccessat and readlinkat return EACCES, consistent with the existing
+ * access() and readlink() hooks.
+ *
+ * On older glibc, stat() is routed through __xstat(vers, path, buf).
+ * We intercept both the modern symbols (stat/lstat/fstatat) and the legacy
+ * wrapper symbols (__xstat/__lxstat/__fxstatat). dlsym(RTLD_NEXT, ...)
+ * returns NULL for symbols that do not exist on the running system;
+ * each hook checks its real pointer before calling and returns ENOSYS
+ * if neither symbol is available.
+ *
+ * statx(2) is guarded by #ifdef __NR_statx since it requires kernel ≥4.11
+ * and glibc ≥2.28.
+ *
+ * lstat interception uses resolve_lstat_path() which resolves only the
+ * parent directory, preserving the symlink-no-follow semantics of lstat.
+ */
+
+/* New typedefs — stat family */
+typedef int    (*real_stat_t)(const char *, struct stat *);
+typedef int    (*real_lstat_t)(const char *, struct stat *);
+typedef int    (*real_fstatat_t)(int, const char *, struct stat *, int);
+typedef int    (*real_faccessat_t)(int, const char *, int, int);
+typedef ssize_t (*real_readlinkat_t)(int, const char *, char *, size_t);
+
+/* Legacy glibc wrappers (__xstat/__lxstat/__fxstatat) */
+typedef int    (*real___xstat_t)(int, const char *, struct stat *);
+typedef int    (*real___lxstat_t)(int, const char *, struct stat *);
+typedef int    (*real___fxstatat_t)(int, int, const char *, struct stat *, int);
+
+static real_stat_t       real_stat;
+static real_lstat_t      real_lstat;
+static real_fstatat_t    real_fstatat;
+static real_faccessat_t  real_faccessat;
+static real_readlinkat_t real_readlinkat;
+
+static real___xstat_t    real___xstat;
+static real___lxstat_t   real___lxstat;
+static real___fxstatat_t real___fxstatat;
+
+/* One-time init for stat family pointers.
+ * Called lazily on first use; thread-safe via pthread_once (shares g_init_once). */
+static void fence_init_stat(void)
+{
+    real_stat      = (real_stat_t)dlsym(RTLD_NEXT, "stat");
+    real_lstat     = (real_lstat_t)dlsym(RTLD_NEXT, "lstat");
+    real_fstatat   = (real_fstatat_t)dlsym(RTLD_NEXT, "fstatat");
+    real_faccessat = (real_faccessat_t)dlsym(RTLD_NEXT, "faccessat");
+    real_readlinkat = (real_readlinkat_t)dlsym(RTLD_NEXT, "readlinkat");
+
+    real___xstat    = (real___xstat_t)dlsym(RTLD_NEXT, "__xstat");
+    real___lxstat   = (real___lxstat_t)dlsym(RTLD_NEXT, "__lxstat");
+    real___fxstatat = (real___fxstatat_t)dlsym(RTLD_NEXT, "__fxstatat");
+}
+
+static pthread_once_t g_stat_init_once = PTHREAD_ONCE_INIT;
+
+static int ensure_stat_init(void)
+{
+    pthread_once(&g_init_once, fence_init);   /* main init first */
+    pthread_once(&g_stat_init_once, fence_init_stat);
+    return g_config.initialized;
+}
+
+/*
+ * resolve_openat_lstat_path resolves a path for AT_SYMLINK_NOFOLLOW *at
+ * operations: applies the same dirfd/absolute/relative logic as
+ * resolve_openat_path, but then resolves only the parent directory
+ * (does not follow the final symlink component).
+ *
+ * Returns 0 on success, -1 on failure.
+ */
+static int resolve_openat_lstat_path(int dirfd, const char *pathname, char *resolved)
+{
+    if (pathname[0] == '/' || dirfd == AT_FDCWD) {
+        /* Already absolute or relative to cwd — delegate to resolve_lstat_path. */
+        return resolve_lstat_path(pathname, resolved);
+    }
+
+    /* Relative to dirfd: read the dirfd path, build fullpath, then apply lstat resolution. */
+    if (!real_readlink) return -1;
+
+    char fdpath[64];
+    char dirpath[PATH_MAX];
+    snprintf(fdpath, sizeof(fdpath), "/proc/self/fd/%d", dirfd);
+    ssize_t n = real_readlink(fdpath, dirpath, sizeof(dirpath) - 1);
+    if (n <= 0)
+        return -1;
+    dirpath[n] = '\0';
+
+    char fullpath[PATH_MAX];
+    size_t dlen = (size_t)n;
+    size_t plen = strlen(pathname);
+    if (dlen + 1 + plen >= PATH_MAX)
+        return -1;
+    memcpy(fullpath, dirpath, dlen);
+    fullpath[dlen] = '/';
+    memcpy(fullpath + dlen + 1, pathname, plen + 1);
+
+    return resolve_lstat_path(fullpath, resolved);
+}
+
+/*
+ * resolve_lstat_path resolves a path for lstat — resolves the parent
+ * directory via realpath but does NOT follow the final component (symlink
+ * or otherwise). This preserves lstat's semantics of inspecting the link
+ * itself rather than its target.
+ *
+ * Returns 0 on success, -1 on failure.
+ */
+static int resolve_lstat_path(const char *path, char *resolved)
+{
+    if (!real_realpath)
+        return -1;
+
+    char tmp[PATH_MAX];
+    size_t pathlen = strlen(path);
+    if (pathlen == 0 || pathlen >= PATH_MAX)
+        return -1;
+    memcpy(tmp, path, pathlen + 1);
+
+    /* Strip trailing slashes (but keep root "/"). */
+    size_t len = pathlen;
+    while (len > 1 && tmp[len - 1] == '/')
+        tmp[--len] = '\0';
+
+    /* If relative, prepend cwd. */
+    if (tmp[0] != '/') {
+        char cwd[PATH_MAX];
+        if (getcwd(cwd, sizeof(cwd)) == NULL)
+            return -1;
+        size_t cwdlen = strlen(cwd);
+        if (cwdlen + 1 + len >= PATH_MAX)
+            return -1;
+        memmove(tmp + cwdlen + 1, tmp, len + 1);
+        memcpy(tmp, cwd, cwdlen);
+        tmp[cwdlen] = '/';
+        len += cwdlen + 1;
+    }
+
+    /* Split at last slash. */
+    char *last_slash = strrchr(tmp, '/');
+    if (last_slash == NULL)
+        return -1;
+
+    const char *basename_part = last_slash + 1;
+    size_t blen = strlen(basename_part);
+
+    if (last_slash == tmp) {
+        /* Parent is root "/". */
+        if (1 + blen >= PATH_MAX)
+            return -1;
+        resolved[0] = '/';
+        memcpy(resolved + 1, basename_part, blen + 1);
+        return 0;
+    }
+
+    *last_slash = '\0';
+    char parent_resolved[PATH_MAX];
+    int ok = (real_realpath(tmp, parent_resolved) != NULL) ? 0 : -1;
+    *last_slash = '/';
+    if (ok != 0)
+        return -1;
+
+    size_t plen = strlen(parent_resolved);
+    if (plen + 1 + blen >= PATH_MAX)
+        return -1;
+    memcpy(resolved, parent_resolved, plen);
+    resolved[plen] = '/';
+    memcpy(resolved + plen + 1, basename_part, blen + 1);
+    return 0;
+}
+
+int stat(const char *pathname, struct stat *buf)
+{
+    if (!ensure_stat_init()) {
+        if (real_stat) return real_stat(pathname, buf);
+        errno = ENOSYS; return -1;
+    }
+
+    char resolved[PATH_MAX];
+    if (resolve_path(pathname, resolved) != 0) {
+        report_blocked(pathname, "stat", "path resolution failed");
+        errno = ENOENT;
+        return -1;
+    }
+
+    char reason[512];
+    if (check_path(resolved, 0 /* read */, reason, sizeof(reason)) != 0) {
+        report_blocked(pathname, "stat", reason);
+        errno = ENOENT;
+        return -1;
+    }
+
+    /* Use resolved (canonical absolute path) rather than the original pathname.
+     * This closes the TOCTOU window: a symlink swap between check_path and the
+     * real syscall cannot redirect the stat to a different kernel object. */
+    if (real_stat) return real_stat(resolved, buf);
+    errno = ENOSYS; return -1;
+}
+
+int lstat(const char *pathname, struct stat *buf)
+{
+    if (!ensure_stat_init()) {
+        if (real_lstat) return real_lstat(pathname, buf);
+        errno = ENOSYS; return -1;
+    }
+
+    /* Use resolve_lstat_path so we do not follow the final symlink component. */
+    char resolved[PATH_MAX];
+    if (resolve_lstat_path(pathname, resolved) != 0) {
+        report_blocked(pathname, "lstat", "path resolution failed");
+        errno = ENOENT;
+        return -1;
+    }
+
+    char reason[512];
+    if (check_path(resolved, 0 /* read */, reason, sizeof(reason)) != 0) {
+        report_blocked(pathname, "lstat", reason);
+        errno = ENOENT;
+        return -1;
+    }
+
+    /* Use resolved (parent-canonical path, final component preserved) to close
+     * the TOCTOU window.  lstat semantics are preserved: resolved retains the
+     * symlink as the final component; the real call will stat the link itself. */
+    if (real_lstat) return real_lstat(resolved, buf);
+    errno = ENOSYS; return -1;
+}
+
+int fstatat(int dirfd, const char *pathname, struct stat *buf, int flags)
+{
+    if (!ensure_stat_init()) {
+        if (real_fstatat) return real_fstatat(dirfd, pathname, buf, flags);
+        errno = ENOSYS; return -1;
+    }
+
+    char resolved[PATH_MAX];
+    /* AT_EMPTY_PATH: operates on dirfd itself — resolve from /proc/self/fd */
+    if (pathname != NULL && pathname[0] == '\0' && (flags & AT_EMPTY_PATH)) {
+        /* AT_EMPTY_PATH — check the fd itself */
+        if (!real_readlink) { errno = EACCES; return -1; }
+        char fdpath[64];
+        snprintf(fdpath, sizeof(fdpath), "/proc/self/fd/%d", dirfd);
+        ssize_t n = real_readlink(fdpath, resolved, sizeof(resolved) - 1);
+        if (n <= 0) { errno = ENOENT; return -1; }
+        resolved[n] = '\0';
+    } else if (flags & AT_SYMLINK_NOFOLLOW) {
+        /* lstat-like: resolve parent only, do not follow final symlink. */
+        if (resolve_openat_lstat_path(dirfd, pathname, resolved) != 0) {
+            report_blocked(pathname, "fstatat", "path resolution failed");
+            errno = ENOENT;
+            return -1;
+        }
+    } else {
+        if (resolve_openat_path(dirfd, pathname, resolved) != 0) {
+            report_blocked(pathname, "fstatat", "path resolution failed");
+            errno = ENOENT;
+            return -1;
+        }
+    }
+
+    char reason[512];
+    if (check_path(resolved, 0 /* read */, reason, sizeof(reason)) != 0) {
+        report_blocked(pathname ? pathname : "(fd)", "fstatat", reason);
+        errno = ENOENT;
+        return -1;
+    }
+
+    /* Use resolved + AT_FDCWD.  Strip AT_EMPTY_PATH (only meaningful with
+     * empty pathname + dirfd); AT_SYMLINK_NOFOLLOW is preserved so lstat-like
+     * callers still get symlink metadata, not the target. */
+    if (real_fstatat) return real_fstatat(AT_FDCWD, resolved, buf, flags & ~AT_EMPTY_PATH);
+    errno = ENOSYS; return -1;
+}
+
+int faccessat(int dirfd, const char *pathname, int amode, int flags)
+{
+    if (!ensure_stat_init()) {
+        if (real_faccessat) return real_faccessat(dirfd, pathname, amode, flags);
+        errno = ENOSYS; return -1;
+    }
+
+    char resolved[PATH_MAX];
+    if (resolve_openat_path(dirfd, pathname, resolved) != 0) {
+        report_blocked(pathname, "faccessat", "path resolution failed");
+        errno = EACCES;
+        return -1;
+    }
+
+    int is_write = (amode & W_OK) ? 1 : 0;
+    char reason[512];
+    if (check_path(resolved, is_write, reason, sizeof(reason)) != 0) {
+        report_blocked(pathname, "faccessat", reason);
+        errno = EACCES;
+        return -1;
+    }
+
+    if (real_faccessat) return real_faccessat(AT_FDCWD, resolved, amode, flags);
+    errno = ENOSYS; return -1;
+}
+
+ssize_t readlinkat(int dirfd, const char *pathname, char *buf, size_t bufsiz)
+{
+    if (!ensure_stat_init()) {
+        if (real_readlinkat) return real_readlinkat(dirfd, pathname, buf, bufsiz);
+        errno = ENOSYS; return -1;
+    }
+
+    char resolved[PATH_MAX];
+    /* readlinkat reads the symlink itself — do not follow the final component. */
+    if (resolve_openat_lstat_path(dirfd, pathname, resolved) != 0) {
+        report_blocked(pathname, "readlinkat", "path resolution failed");
+        errno = EACCES;
+        return -1;
+    }
+
+    char reason[512];
+    if (check_path(resolved, 0 /* read */, reason, sizeof(reason)) != 0) {
+        report_blocked(pathname, "readlinkat", reason);
+        errno = EACCES;
+        return -1;
+    }
+
+    if (real_readlinkat) return real_readlinkat(AT_FDCWD, resolved, buf, bufsiz);
+    errno = ENOSYS; return -1;
+}
+
+/* ------------------------------------------------------------------ */
+/* Legacy glibc stat wrappers (__xstat/__lxstat/__fxstatat)            */
+/* ------------------------------------------------------------------ */
+
+/*
+ * On glibc < 2.33, user-space stat() calls are compiled to __xstat(vers, path, buf).
+ * We intercept these for older glibc compatibility. On modern glibc these
+ * symbols may not exist; dlsym returns NULL and the hooks are no-ops.
+ */
+
+int __xstat(int vers, const char *pathname, struct stat *buf)
+{
+    if (!ensure_stat_init()) {
+        if (real___xstat) return real___xstat(vers, pathname, buf);
+        if (real_stat) return real_stat(pathname, buf);
+        errno = ENOSYS; return -1;
+    }
+
+    char resolved[PATH_MAX];
+    if (resolve_path(pathname, resolved) != 0) {
+        report_blocked(pathname, "__xstat", "path resolution failed");
+        errno = ENOENT;
+        return -1;
+    }
+
+    char reason[512];
+    if (check_path(resolved, 0 /* read */, reason, sizeof(reason)) != 0) {
+        report_blocked(pathname, "__xstat", reason);
+        errno = ENOENT;
+        return -1;
+    }
+
+    if (real___xstat) return real___xstat(vers, resolved, buf);
+    if (real_stat) return real_stat(resolved, buf);
+    errno = ENOSYS; return -1;
+}
+
+int __lxstat(int vers, const char *pathname, struct stat *buf)
+{
+    if (!ensure_stat_init()) {
+        if (real___lxstat) return real___lxstat(vers, pathname, buf);
+        if (real_lstat) return real_lstat(pathname, buf);
+        errno = ENOSYS; return -1;
+    }
+
+    char resolved[PATH_MAX];
+    if (resolve_lstat_path(pathname, resolved) != 0) {
+        report_blocked(pathname, "__lxstat", "path resolution failed");
+        errno = ENOENT;
+        return -1;
+    }
+
+    char reason[512];
+    if (check_path(resolved, 0 /* read */, reason, sizeof(reason)) != 0) {
+        report_blocked(pathname, "__lxstat", reason);
+        errno = ENOENT;
+        return -1;
+    }
+
+    if (real___lxstat) return real___lxstat(vers, resolved, buf);
+    if (real_lstat) return real_lstat(resolved, buf);
+    errno = ENOSYS; return -1;
+}
+
+int __fxstatat(int vers, int dirfd, const char *pathname, struct stat *buf, int flags)
+{
+    if (!ensure_stat_init()) {
+        if (real___fxstatat) return real___fxstatat(vers, dirfd, pathname, buf, flags);
+        if (real_fstatat) return real_fstatat(dirfd, pathname, buf, flags);
+        errno = ENOSYS; return -1;
+    }
+
+    char resolved[PATH_MAX];
+    if (pathname != NULL && pathname[0] == '\0' && (flags & AT_EMPTY_PATH)) {
+        /* AT_EMPTY_PATH: operates on dirfd itself — resolve from /proc/self/fd */
+        if (!real_readlink) { errno = EACCES; return -1; }
+        char fdpath[64];
+        snprintf(fdpath, sizeof(fdpath), "/proc/self/fd/%d", dirfd);
+        ssize_t n = real_readlink(fdpath, resolved, sizeof(resolved) - 1);
+        if (n <= 0) { errno = ENOENT; return -1; }
+        resolved[n] = '\0';
+    } else if (flags & AT_SYMLINK_NOFOLLOW) {
+        /* lstat-like: resolve parent only, do not follow final symlink. */
+        if (resolve_openat_lstat_path(dirfd, pathname, resolved) != 0) {
+            report_blocked(pathname, "__fxstatat", "path resolution failed");
+            errno = ENOENT;
+            return -1;
+        }
+    } else {
+        if (resolve_openat_path(dirfd, pathname, resolved) != 0) {
+            report_blocked(pathname, "__fxstatat", "path resolution failed");
+            errno = ENOENT;
+            return -1;
+        }
+    }
+
+    char reason[512];
+    if (check_path(resolved, 0 /* read */, reason, sizeof(reason)) != 0) {
+        report_blocked(pathname, "__fxstatat", reason);
+        errno = ENOENT;
+        return -1;
+    }
+
+    if (real___fxstatat) return real___fxstatat(vers, AT_FDCWD, resolved, buf, flags & ~AT_EMPTY_PATH);
+    if (real_fstatat) return real_fstatat(AT_FDCWD, resolved, buf, flags & ~AT_EMPTY_PATH);
+    errno = ENOSYS; return -1;
+}
+
+/* ------------------------------------------------------------------ */
+/* statx(2) — kernel 4.11+, glibc 2.28+                               */
+/* ------------------------------------------------------------------ */
+
+#ifdef __NR_statx
+#include <linux/stat.h>
+
+typedef int (*real_statx_t)(int, const char *, int, unsigned int, struct statx *);
+static real_statx_t real_statx;
+static pthread_once_t g_statx_init_once = PTHREAD_ONCE_INIT;
+
+static void fence_init_statx(void)
+{
+    real_statx = (real_statx_t)dlsym(RTLD_NEXT, "statx");
+}
+
+int statx(int dirfd, const char *pathname, int flags,
+          unsigned int mask, struct statx *statxbuf)
+{
+    pthread_once(&g_statx_init_once, fence_init_statx);
+
+    if (!ensure_stat_init()) {
+        if (real_statx) return real_statx(dirfd, pathname, flags, mask, statxbuf);
+        errno = ENOSYS; return -1;
+    }
+
+    char resolved[PATH_MAX];
+    /* AT_EMPTY_PATH: operates on dirfd */
+    if (pathname != NULL && pathname[0] == '\0' && (flags & AT_EMPTY_PATH)) {
+        if (!real_readlink) { errno = EACCES; return -1; }
+        char fdpath[64];
+        snprintf(fdpath, sizeof(fdpath), "/proc/self/fd/%d", dirfd);
+        ssize_t n = real_readlink(fdpath, resolved, sizeof(resolved) - 1);
+        if (n <= 0) { errno = ENOENT; return -1; }
+        resolved[n] = '\0';
+    } else if (flags & AT_SYMLINK_NOFOLLOW) {
+        /* lstat-like: resolve parent only, do not follow final symlink. */
+        if (resolve_openat_lstat_path(dirfd, pathname, resolved) != 0) {
+            report_blocked(pathname, "statx", "path resolution failed");
+            errno = ENOENT;
+            return -1;
+        }
+    } else {
+        if (resolve_openat_path(dirfd, pathname, resolved) != 0) {
+            report_blocked(pathname, "statx", "path resolution failed");
+            errno = ENOENT;
+            return -1;
+        }
+    }
+
+    char reason[512];
+    if (check_path(resolved, 0 /* read */, reason, sizeof(reason)) != 0) {
+        report_blocked(pathname ? pathname : "(fd)", "statx", reason);
+        errno = ENOENT;
+        return -1;
+    }
+
+    if (real_statx) return real_statx(AT_FDCWD, resolved, flags & ~AT_EMPTY_PATH, mask, statxbuf);
+    errno = ENOSYS; return -1;
+}
+#endif /* __NR_statx */

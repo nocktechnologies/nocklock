@@ -158,9 +158,9 @@ func TestIsBlockedIP(t *testing.T) {
 		if ip == nil {
 			t.Fatalf("invalid test IP: %q", tc.ip)
 		}
-		got := isBlockedIP(ip)
+		got := isBlockedIP(ip, false)
 		if got != tc.blocked {
-			t.Errorf("isBlockedIP(%q) = %v, want %v", tc.ip, got, tc.blocked)
+			t.Errorf("isBlockedIP(%q, allowPrivateRanges=false) = %v, want %v", tc.ip, got, tc.blocked)
 		}
 	}
 }

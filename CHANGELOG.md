@@ -4,6 +4,21 @@ All notable changes to NockLock will be documented in this file.
 
 ## [Unreleased]
 
+### Security (hotfix/security-139-142)
+- **CRITICAL** — Network proxy now fails closed by default (task 139): if the proxy cannot bind or crashes, NockLock exits non-zero and the child never runs. A proxy watchdog goroutine monitors proxy health during the session and terminates the child if the proxy dies unexpectedly. Use `--allow-unfenced` to opt into the previous degraded behaviour.
+- **CRITICAL** — Process group isolation (Codex gate): wrapped child is placed in its own process group (`Setpgid: true`). On context cancellation the entire process group is killed via `SIGKILL` — descendants cannot escape the fence by forking before the parent dies. On Linux, `Pdeathsig: SIGKILL` additionally kills the child if the nocklock wrapper exits unexpectedly.
+- **CRITICAL** — LD_PRELOAD hook now intercepts `stat`, `lstat`, `fstatat`, `faccessat`, `readlinkat`, `__xstat`, `__lxstat`, `__fxstatat`, and `statx` (kernel ≥4.11, Linux only — task 140). Denied stat-family calls return ENOENT; denied access/readlinkat calls return EACCES. `lstat` path resolution preserves symlink-no-follow semantics.
+- **CRITICAL** — TOCTOU race in stat-family hooks closed (Codex gate): all stat/lstat/fstatat/statx hooks now pass the resolved canonical path to the real syscall. A symlink swap between `check_path` and the real call can no longer redirect the stat outside the fence.
+- **MAJOR** — DNS rebinding prevention (task 141): proxy resolves each hostname once per session and pins the result. Subsequent lookups return the cached IPs, preventing an attacker from rebinding an allowed domain to a private IP range. Use `--allow-private-ranges` to permit RFC1918/loopback connections (local dev).
+- **MAJOR** — DNS cache hostname canonicalization (Codex gate): `DNSCache.LookupOrResolve` normalizes hostnames (lowercase + strip trailing dot) before lookup and store. Mixed-case variants cannot produce divergent cache entries.
+- **MAJOR** — Strict config validation (task 142): `config.Load()` now runs semantic validation (`filesystem.mode`, `logging.level`, `cloud.api_key` when enabled, path traversal in allow/deny lists). Invalid configs exit non-zero with a specific error rather than silently applying defaults.
+
+### Added
+- `nocklock validate [config-path]` — validates a config file and prints the effective policy summary (task 142).
+- `--allow-unfenced` flag on `nocklock wrap` — opt-in fail-open mode when network fence cannot start (task 139).
+- `--allow-private-ranges` flag on `nocklock wrap` — permits RFC1918/loopback network connections (task 141).
+- `config.NetworkConfig.AllowPrivateRanges` field (`toml:"allow_private_ranges"`) (task 141).
+
 ### Added
 - README.md: complete rewrite for public launch — accurate defaults, Quick Start, full command reference, platform notes
 - Integration tests: 10 end-to-end tests covering all three fences (`integration/integration_test.go`, `//go:build integration`)

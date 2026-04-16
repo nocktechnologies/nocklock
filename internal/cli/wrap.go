@@ -9,6 +9,7 @@ import (
 	"runtime"
 	"strings"
 	"sync"
+	"syscall"
 	"time"
 
 	"github.com/google/uuid"
@@ -28,13 +29,14 @@ var wrapCmd = &cobra.Command{
 	// Cobra will not consume any flags; we manually strip the leading "--" below.
 	DisableFlagParsing: true,
 	RunE: func(cmd *cobra.Command, args []string) error {
-		// Strip leading "--" if present
-		if len(args) > 0 && args[0] == "--" {
-			args = args[1:]
+		// Parse NockLock flags (before "--") and child args (after "--").
+		wrapFlags, args, flagErr := parseWrapFlags(args)
+		if flagErr != nil {
+			return flagErr
 		}
 
 		if len(args) == 0 {
-			return fmt.Errorf("no command specified. Usage: nocklock wrap -- <command> [args...]")
+			return fmt.Errorf("no command specified. Usage: nocklock wrap [--allow-unfenced] [--allow-private-ranges] -- <command> [args...]")
 		}
 
 		// Generate a session ID for event logging.
@@ -203,17 +205,44 @@ var wrapCmd = &cobra.Command{
 			"NO_PROXY", "no_proxy",
 		)
 
+		// childCtx is cancelled by the proxy watchdog if the proxy dies unexpectedly.
+		// This terminates the child process, enforcing fail-closed behaviour.
+		childCtx, childCancel := context.WithCancel(context.Background())
+		defer childCancel()
+
 		if !cfg.Network.AllowAll {
-			proxy := network.NewProxyServer(cfg.Network, logger, sessionID)
+			proxyCfg := cfg.Network
+			// CLI flag is additive: if either config-file or flag permits private ranges, allow them.
+			proxyCfg.AllowPrivateRanges = cfg.Network.AllowPrivateRanges || wrapFlags.AllowPrivateRanges
+			proxy := network.NewProxyServer(proxyCfg, logger, sessionID)
 			addr, proxyErr := proxy.Start()
 			if proxyErr != nil {
-				// Degrade gracefully per design — agent still runs, but logs the failure.
-				// NOTE: This is a deliberate design tradeoff (see PR #7 spec). For stricter
-				// enforcement, change this to: return fmt.Errorf("network fence failed: %w", proxyErr)
-				fmt.Fprintf(os.Stderr, "NockLock: warning: network fence failed to start: %v\n", proxyErr)
 				logEvent(logging.EventNetworkError, "network", fmt.Sprintf("proxy start failed: %v", proxyErr), false)
+				if wrapFlags.AllowUnfenced {
+					// Opt-in degraded mode: warn and continue without network fence.
+					fmt.Fprintf(os.Stderr, "NockLock: warning: network fence failed to start (--allow-unfenced active): %v\n", proxyErr)
+				} else {
+					// Default: fail closed — do not run the child if the fence can't start.
+					fmt.Fprintf(os.Stderr, "NockLock: fatal: network fence failed to start: %v\n", proxyErr)
+					fmt.Fprintf(os.Stderr, "NockLock: use --allow-unfenced to run without network protection (not recommended)\n")
+					cmd.SilenceUsage = true
+					return fmt.Errorf("network fence failed: %w", proxyErr)
+				}
 			} else {
 				defer proxy.Stop()
+
+				// Launch watchdog: if proxy crashes mid-session, cancel childCtx to kill the child.
+				if !wrapFlags.AllowUnfenced {
+					watchdogCtx, watchdogCancel := context.WithCancel(context.Background())
+					defer watchdogCancel()
+					watchdog := network.NewProxyWatchdog(addr, 5*time.Second, 2, func() {
+						logEvent(logging.EventNetworkError, "network", "proxy watchdog: proxy died, killing child", true)
+						fmt.Fprintf(os.Stderr, "NockLock: fatal: network proxy died unexpectedly — terminating child process\n")
+						childCancel()
+					})
+					watchdog.Start(watchdogCtx)
+				}
+
 				proxyURL := "http://" + addr
 				childEnv = append(childEnv,
 					"HTTP_PROXY="+proxyURL,
@@ -230,11 +259,27 @@ var wrapCmd = &cobra.Command{
 			fmt.Fprintf(os.Stderr, "NockLock: network fence disabled (allow_all = true)\n")
 		}
 
-		child := exec.Command(args[0], args[1:]...)
+		child := exec.CommandContext(childCtx, args[0], args[1:]...)
 		child.Env = childEnv
 		child.Stdin = os.Stdin
 		child.Stdout = os.Stdout
 		child.Stderr = os.Stderr
+
+		// Place the child in its own process group (Setpgid) and, on Linux,
+		// set Pdeathsig so descendants are killed if nocklock exits unexpectedly.
+		child.SysProcAttr = childSysProcAttr()
+
+		// When the child context is cancelled (e.g. by the proxy watchdog), kill
+		// the entire process group — not just the direct child — so no descendant
+		// can escape the fence by forking before the parent dies.
+		child.Cancel = func() error {
+			if child.Process != nil {
+				// Negative pid targets the process group (POSIX).
+				// ESRCH is returned if the group is already gone; ignore it.
+				_ = syscall.Kill(-child.Process.Pid, syscall.SIGKILL)
+			}
+			return nil
+		}
 
 		// Start consuming events in background before running child.
 		var eventsWg sync.WaitGroup
