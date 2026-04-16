@@ -2,11 +2,10 @@ name: Anvil (Codex Security Review)
 
 on:
   pull_request:
-    types: [opened, synchronize, reopened]
+    types: [opened, synchronize, reopened, ready_for_review]
 
 permissions:
   contents: read
-  pull-requests: write
   issues: write
 
 jobs:
@@ -34,27 +33,40 @@ jobs:
           PR_NUMBER: ${{ github.event.pull_request.number }}
           PR_TITLE: ${{ github.event.pull_request.title }}
         run: |
+          set +e
           NO_COLOR=1 codex review \
             --base "$PR_BASE_REF" \
             --title "PR #${PR_NUMBER}: ${PR_TITLE}" \
             -c model="o4-mini" \
-            -c 'sandbox_permissions=["disk-full-read-access"]' \
+            -c 'sandbox_permissions=["workspace-read-access"]' \
             "Security-focused adversarial review. Check for: injection vulnerabilities (SQL, XSS, SSRF, command injection), auth/authz bypasses, insecure data handling, hard-coded secrets, CSRF issues, logic errors in security-critical paths. Report ALL findings with file and line references. Be thorough and adversarial." \
-            > /tmp/anvil-output.txt 2>&1 || true
+            > /tmp/anvil-output.txt 2>&1
+          CODEX_EXIT=$?
+          echo "codex_exit=$CODEX_EXIT" >> "$GITHUB_OUTPUT"
           {
             echo 'review<<ANVIL_REVIEW_EOF'
             head -c 60000 /tmp/anvil-output.txt
             echo 'ANVIL_REVIEW_EOF'
           } >> "$GITHUB_OUTPUT"
+          # Always exit 0 here so the comment-posting step runs. The final
+          # step re-surfaces the codex exit code as the job result.
+          exit 0
 
       - name: Post Anvil review comment
         if: always()
         uses: actions/github-script@v7
+        env:
+          ANVIL_REVIEW: ${{ steps.anvil.outputs.review }}
+          ANVIL_EXIT: ${{ steps.anvil.outputs.codex_exit }}
         with:
           script: |
-            const output = `${{ steps.anvil.outputs.review }}`;
+            const output = process.env.ANVIL_REVIEW || '';
+            const exitCode = process.env.ANVIL_EXIT || '0';
+            const header = exitCode === '0'
+              ? '## 🔨 Anvil Security Review (Codex)'
+              : `## 🔨 Anvil Security Review (Codex) — FAILED (codex exit ${exitCode})`;
             const body = [
-              '## 🔨 Anvil Security Review (Codex)',
+              header,
               '',
               '```',
               output || 'No output captured — verify OPENAI_API_KEY secret is set on this repo.',
@@ -62,9 +74,17 @@ jobs:
               '',
               '*Adversarial security audit powered by OpenAI Codex o4-mini. Does not replace human review.*',
             ].join('\n');
-            github.rest.issues.createComment({
+            await github.rest.issues.createComment({
               issue_number: context.issue.number,
               owner: context.repo.owner,
               repo: context.repo.repo,
               body,
             });
+
+      - name: Fail job if Codex errored
+        if: steps.anvil.outputs.codex_exit != '0'
+        env:
+          CODEX_EXIT: ${{ steps.anvil.outputs.codex_exit }}
+        run: |
+          echo "::error::Codex security review exited ${CODEX_EXIT} — see PR comment for captured output."
+          exit 1
