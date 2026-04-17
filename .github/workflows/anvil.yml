@@ -6,6 +6,7 @@ on:
 
 permissions:
   contents: read
+  pull-requests: write
   issues: write
 
 jobs:
@@ -30,16 +31,31 @@ jobs:
         env:
           OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
           PR_BASE_REF: ${{ github.event.pull_request.base.ref }}
+          PR_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
           PR_NUMBER: ${{ github.event.pull_request.number }}
-          PR_TITLE: ${{ github.event.pull_request.title }}
         run: |
           set +e
+          # Codex 0.118 rejects --base + positional PROMPT together. Pre-compute
+          # the diff into a file and pass scope inside the prompt instead.
+          git fetch --no-tags origin "$PR_BASE_REF" >/dev/null 2>&1
+          mkdir -p .anvil
+          git diff "origin/${PR_BASE_REF}...${PR_HEAD_SHA}" > .anvil/pr-diff.patch
+          DIFF_LINES=$(wc -l < .anvil/pr-diff.patch | tr -d ' ')
+          PROMPT="Security-focused adversarial review of PR #${PR_NUMBER}.
+
+          Diff scope: changes between origin/${PR_BASE_REF} and HEAD (${PR_HEAD_SHA}).
+          Pre-computed diff file: .anvil/pr-diff.patch (${DIFF_LINES} lines).
+          Read that file first, then read the surrounding source for any region
+          you need full context on.
+
+          Check for: injection vulnerabilities (SQL, XSS, SSRF, command injection),
+          auth/authz bypasses, insecure data handling, hard-coded secrets, CSRF
+          issues, logic errors in security-critical paths. Report ALL findings
+          with file and line references. Be thorough and adversarial."
           NO_COLOR=1 codex review \
-            --base "$PR_BASE_REF" \
-            --title "PR #${PR_NUMBER}: ${PR_TITLE}" \
             -c model="o4-mini" \
             -c 'sandbox_permissions=["workspace-read-access"]' \
-            "Security-focused adversarial review. Check for: injection vulnerabilities (SQL, XSS, SSRF, command injection), auth/authz bypasses, insecure data handling, hard-coded secrets, CSRF issues, logic errors in security-critical paths. Report ALL findings with file and line references. Be thorough and adversarial." \
+            "$PROMPT" \
             > /tmp/anvil-output.txt 2>&1
           CODEX_EXIT=$?
           echo "codex_exit=$CODEX_EXIT" >> "$GITHUB_OUTPUT"
