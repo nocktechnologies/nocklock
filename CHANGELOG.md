@@ -4,6 +4,9 @@ All notable changes to NockLock will be documented in this file.
 
 ## [Unreleased]
 
+### Added
+- Branch-lock PreToolUse hook (`.claude/hooks/branch-lock.sh`, task 144) — prevents agent sessions from switching branches mid-session by inspecting `git checkout` / `git switch` commands. Scope limited to branch switches; `git merge` and `git rebase` remain unrestricted. Lock file `.branch-lock` at repo root is gitignored; remove to reset.
+
 ### Security (hotfix/security-139-142)
 - **CRITICAL** — Network proxy now fails closed by default (task 139): if the proxy cannot bind or crashes, NockLock exits non-zero and the child never runs. A proxy watchdog goroutine monitors proxy health during the session and terminates the child if the proxy dies unexpectedly. Use `--allow-unfenced` to opt into the previous degraded behaviour.
 - **CRITICAL** — Process group isolation (Codex gate): wrapped child is placed in its own process group (`Setpgid: true`). On context cancellation the entire process group is killed via `SIGKILL` — descendants cannot escape the fence by forking before the parent dies. On Linux, `Pdeathsig: SIGKILL` additionally kills the child if the nocklock wrapper exits unexpectedly.
