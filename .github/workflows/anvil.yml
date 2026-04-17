@@ -26,6 +26,15 @@ jobs:
       - name: Install Codex CLI
         run: npm install -g @openai/codex@0.118.0
 
+      - name: Codex login (writes ~/.codex/auth.json)
+        env:
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+        run: |
+          # Codex 0.118 reads its API key from ~/.codex/auth.json, not the
+          # OPENAI_API_KEY env var directly. Without this, codex review hits
+          # 401 Unauthorized on every responses-API call.
+          printenv OPENAI_API_KEY | codex login --with-api-key
+
       - name: Run Codex security review
         id: anvil
         env:
