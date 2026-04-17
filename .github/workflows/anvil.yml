@@ -63,7 +63,7 @@ jobs:
           with file and line references. Be thorough and adversarial."
           NO_COLOR=1 codex review \
             -c model="o4-mini" \
-            -c 'sandbox_permissions=["workspace-read-access"]' \
+            -c sandbox_mode='"danger-full-access"' \
             "$PROMPT" \
             > /tmp/anvil-output.txt 2>&1
           CODEX_EXIT=$?
