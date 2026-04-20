@@ -2,7 +2,9 @@ package network
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"io"
 	"net"
 	"net/http"
 	"net/url"
@@ -149,7 +151,14 @@ func NewProxyServer(cfg config.NetworkConfig, logger *logging.Logger, sessionID 
 // cachedSafeDial is the ProxyServer's dial function that uses the session DNS cache
 // and respects the allowPrivateRanges setting.
 func (p *ProxyServer) cachedSafeDial(ctx context.Context, network, addr string) (net.Conn, error) {
-	return dialWithCache(ctx, network, addr, p.dnsCache, p.allowPrivateRanges)
+	conn, err := dialWithCache(ctx, network, addr, p.dnsCache, p.allowPrivateRanges)
+	if err != nil {
+		var rebindErr *dnsRebindError
+		if errors.As(err, &rebindErr) {
+			p.logDNSRebind(rebindErr)
+		}
+	}
+	return conn, err
 }
 
 // Start binds to 127.0.0.1:0 (OS assigns the port) and begins serving.
@@ -234,4 +243,86 @@ func (p *ProxyServer) Addr() string {
 		return ""
 	}
 	return p.listener.Addr().String()
+}
+
+// WaitForProxyReady polls the proxy health endpoint until it is ready or the
+// timeout expires. The polling loop uses exponential backoff and does not
+// consult ambient proxy environment variables.
+func WaitForProxyReady(ctx context.Context, addr string, timeout time.Duration) error {
+	if addr == "" {
+		return fmt.Errorf("proxy address is empty")
+	}
+	if timeout <= 0 {
+		return fmt.Errorf("proxy readiness timeout must be positive")
+	}
+
+	ctx, cancel := context.WithTimeout(ctx, timeout)
+	defer cancel()
+
+	transport := &http.Transport{
+		Proxy: nil,
+	}
+	defer transport.CloseIdleConnections()
+
+	client := &http.Client{
+		Transport: transport,
+		Timeout:   500 * time.Millisecond,
+	}
+
+	url := "http://" + addr + ProxyHealthPath
+	backoff := 25 * time.Millisecond
+	const maxBackoff = 500 * time.Millisecond
+	var lastErr error
+
+	for {
+		req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
+		if err != nil {
+			return fmt.Errorf("cannot build proxy health request: %w", err)
+		}
+
+		resp, err := client.Do(req)
+		if err == nil {
+			_, _ = io.Copy(io.Discard, resp.Body)
+			_ = resp.Body.Close()
+			if resp.StatusCode == http.StatusOK {
+				return nil
+			}
+			lastErr = fmt.Errorf("health endpoint returned %s", resp.Status)
+		} else {
+			lastErr = err
+		}
+
+		timer := time.NewTimer(backoff)
+		select {
+		case <-ctx.Done():
+			timer.Stop()
+			if lastErr != nil {
+				return fmt.Errorf("proxy did not become ready within %s: %w", timeout, lastErr)
+			}
+			return fmt.Errorf("proxy did not become ready within %s", timeout)
+		case <-timer.C:
+		}
+
+		if backoff < maxBackoff {
+			backoff *= 2
+			if backoff > maxBackoff {
+				backoff = maxBackoff
+			}
+		}
+	}
+}
+
+func (p *ProxyServer) logDNSRebind(err *dnsRebindError) {
+	if p.logger == nil || err == nil {
+		return
+	}
+	_ = p.logger.Log(logging.Event{
+		Timestamp: time.Now(),
+		EventType: logging.EventNetworkBlocked,
+		Category:  "network",
+		Detail: fmt.Sprintf("dns_rebind host=%s pinned=%s current=%s",
+			err.host, formatIPs(err.pinned), formatIPs(err.current)),
+		Blocked:   true,
+		SessionID: p.sessionID,
+	})
 }

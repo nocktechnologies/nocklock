@@ -8,17 +8,17 @@ All notable changes to NockLock will be documented in this file.
 - Branch-lock PreToolUse hook (`.claude/hooks/branch-lock.sh`, task 144) — prevents agent sessions from switching branches mid-session by inspecting `git checkout` / `git switch` commands. Scope limited to branch switches; `git merge` and `git rebase` remain unrestricted. Lock file `.branch-lock` at repo root is gitignored; remove to reset.
 
 ### Security (hotfix/security-139-142)
-- **CRITICAL** — Network proxy now fails closed by default (task 139): if the proxy cannot bind or crashes, NockLock exits non-zero and the child never runs. A proxy watchdog goroutine monitors proxy health during the session and terminates the child if the proxy dies unexpectedly. Use `--allow-unfenced` to opt into the previous degraded behaviour.
+- **CRITICAL** — Network proxy now fails closed (task 139): if the proxy cannot bind, fails readiness, or crashes, NockLock exits non-zero and the child never runs. A health/readiness probe gates child startup, and a proxy watchdog monitors health during the session.
 - **CRITICAL** — Process group isolation (Codex gate): wrapped child is placed in its own process group (`Setpgid: true`). On context cancellation the entire process group is killed via `SIGKILL` — descendants cannot escape the fence by forking before the parent dies. On Linux, `Pdeathsig: SIGKILL` additionally kills the child if the nocklock wrapper exits unexpectedly.
 - **CRITICAL** — LD_PRELOAD hook now intercepts `stat`, `lstat`, `fstatat`, `faccessat`, `readlinkat`, `__xstat`, `__lxstat`, `__fxstatat`, and `statx` (kernel ≥4.11, Linux only — task 140). Denied stat-family calls return ENOENT; denied access/readlinkat calls return EACCES. `lstat` path resolution preserves symlink-no-follow semantics.
 - **CRITICAL** — TOCTOU race in stat-family hooks closed (Codex gate): all stat/lstat/fstatat/statx hooks now pass the resolved canonical path to the real syscall. A symlink swap between `check_path` and the real call can no longer redirect the stat outside the fence.
-- **MAJOR** — DNS rebinding prevention (task 141): proxy resolves each hostname once per session and pins the result. Subsequent lookups return the cached IPs, preventing an attacker from rebinding an allowed domain to a private IP range. Use `--allow-private-ranges` to permit RFC1918/loopback connections (local dev).
+- **MAJOR** — DNS rebinding prevention (task 141): proxy pins the first resolved IP set for each hostname and verifies later DNS answers against it. Rebinding attempts are blocked and logged. Use `--allow-private-ranges` to permit RFC1918/loopback connections (local dev).
 - **MAJOR** — DNS cache hostname canonicalization (Codex gate): `DNSCache.LookupOrResolve` normalizes hostnames (lowercase + strip trailing dot) before lookup and store. Mixed-case variants cannot produce divergent cache entries.
 - **MAJOR** — Strict config validation (task 142): `config.Load()` now runs semantic validation (`filesystem.mode`, `logging.level`, `cloud.api_key` when enabled, path traversal in allow/deny lists). Invalid configs exit non-zero with a specific error rather than silently applying defaults.
 
 ### Added
-- `nocklock validate [config-path]` — validates a config file and prints the effective policy summary (task 142).
-- `--allow-unfenced` flag on `nocklock wrap` — opt-in fail-open mode when network fence cannot start (task 139).
+- `nocklock validate [config-path]` and `nocklock wrap --dry-run` — validate config and print the effective policy summary without starting fences or a child process (task 142).
+- `--allow-unfenced` is rejected; NockLock fails closed when the network fence is unavailable.
 - `--allow-private-ranges` flag on `nocklock wrap` — permits RFC1918/loopback network connections (task 141).
 - `config.NetworkConfig.AllowPrivateRanges` field (`toml:"allow_private_ranges"`) (task 141).
 
@@ -32,7 +32,7 @@ All notable changes to NockLock will be documented in this file.
   - Raw IP addresses blocked (fail closed)
   - `HTTP_PROXY`, `HTTPS_PROXY`, `http_proxy`, `https_proxy` injected into child env
   - `NO_PROXY`/`no_proxy` cleared from child env to prevent bypass
-  - Graceful degradation: agent still runs if proxy fails to start
+  - Fail closed: agent does not start if proxy fails to start
   - `allow_all = true` disables the fence entirely
   - `nocklock status` shows network fence domain count
   - 27 new tests in `internal/fence/network/`

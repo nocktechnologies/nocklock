@@ -2,7 +2,8 @@ package network
 
 import (
 	"context"
-	"net"
+	"io"
+	"net/http"
 	"time"
 )
 
@@ -63,13 +64,20 @@ func (w *ProxyWatchdog) run(ctx context.Context) {
 	}
 }
 
-// probe attempts a TCP connect to the proxy address with a short timeout.
-// Returns true if the proxy is reachable.
+// probe requests the proxy health endpoint with a short timeout.
+// Returns true if the proxy is reachable and serving health checks.
 func (w *ProxyWatchdog) probe() bool {
-	conn, err := net.DialTimeout("tcp", w.addr, 500*time.Millisecond)
+	transport := &http.Transport{Proxy: nil}
+	defer transport.CloseIdleConnections()
+	client := &http.Client{
+		Transport: transport,
+		Timeout:   500 * time.Millisecond,
+	}
+	resp, err := client.Get("http://" + w.addr + ProxyHealthPath)
 	if err != nil {
 		return false
 	}
-	conn.Close()
-	return true
+	defer resp.Body.Close()
+	_, _ = io.Copy(io.Discard, resp.Body)
+	return resp.StatusCode == http.StatusOK
 }

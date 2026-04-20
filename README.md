@@ -29,7 +29,7 @@ That's it. Four commands. Your agent is fenced.
 
 1. **Filters environment variables** based on pass/block lists with glob patterns — Linux, macOS
 2. **Intercepts filesystem calls** via LD_PRELOAD, blocking access outside allowed paths — Linux only; macOS support coming
-3. **Routes network traffic** through a local proxy that enforces a domain allowlist — Linux, macOS. For HTTPS, only the hostname is inspected — no certificate injection, no payload decryption. If the proxy fails to start, the agent still runs but the network fence is inactive (this is logged).
+3. **Routes network traffic** through a local proxy that enforces a domain allowlist — Linux, macOS. For HTTPS, only the hostname is inspected — no certificate injection, no payload decryption. If the proxy is not confirmed healthy, the agent does not start.
 
 Every blocked access is logged to `.nock/events.db`. Blocked files return EACCES (permission denied), blocked domains return 403.
 
@@ -106,6 +106,8 @@ Defaults are deliberately safe. Customize per project.
 |---------|-------------|
 | `nocklock init` | Create `.nock/config.toml` with safe defaults |
 | `nocklock wrap -- <cmd>` | Run a command inside the fence |
+| `nocklock wrap --dry-run` | Validate config without starting fences or a command |
+| `nocklock validate [config-path]` | Validate a config file and print the effective policy |
 | `nocklock status` | Show fence state and event log summary |
 | `nocklock log` | View fence event history |
 | `nocklock log --blocked` | Show only blocked events |

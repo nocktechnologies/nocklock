@@ -2,19 +2,18 @@ package network
 
 import (
 	"context"
-	"net"
 	"sync/atomic"
 	"testing"
 	"time"
 )
 
 func TestWatchdogHealthyProxyDoesNotFire(t *testing.T) {
-	// Start a real TCP listener to represent a healthy proxy.
-	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	p := makeProxy(nil)
+	addr, err := p.Start()
 	if err != nil {
-		t.Fatalf("failed to start listener: %v", err)
+		t.Fatalf("failed to start proxy: %v", err)
 	}
-	defer ln.Close()
+	defer p.Stop()
 
 	var fired atomic.Bool
 	onFailure := func() { fired.Store(true) }
@@ -22,7 +21,7 @@ func TestWatchdogHealthyProxyDoesNotFire(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
-	w := NewProxyWatchdog(ln.Addr().String(), 20*time.Millisecond, 2, onFailure)
+	w := NewProxyWatchdog(addr, 20*time.Millisecond, 2, onFailure)
 	w.Start(ctx)
 
 	// Wait a few intervals — watchdog must not fire.
@@ -34,12 +33,11 @@ func TestWatchdogHealthyProxyDoesNotFire(t *testing.T) {
 }
 
 func TestWatchdogDetectsProxyFailure(t *testing.T) {
-	// Start a listener, then close it to simulate proxy crash.
-	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	p := makeProxy(nil)
+	addr, err := p.Start()
 	if err != nil {
-		t.Fatalf("failed to start listener: %v", err)
+		t.Fatalf("failed to start proxy: %v", err)
 	}
-	addr := ln.Addr().String()
 
 	var fired atomic.Bool
 	onFailure := func() { fired.Store(true) }
@@ -52,7 +50,7 @@ func TestWatchdogDetectsProxyFailure(t *testing.T) {
 
 	// Give the watchdog a moment to start, then kill the proxy.
 	time.Sleep(10 * time.Millisecond)
-	ln.Close()
+	_ = p.Stop()
 
 	// Wait for N consecutive failures + interval buffer.
 	deadline := time.Now().Add(500 * time.Millisecond)
@@ -66,18 +64,19 @@ func TestWatchdogDetectsProxyFailure(t *testing.T) {
 }
 
 func TestWatchdogStopsOnContextCancel(t *testing.T) {
-	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	p := makeProxy(nil)
+	addr, err := p.Start()
 	if err != nil {
-		t.Fatalf("failed to start listener: %v", err)
+		t.Fatalf("failed to start proxy: %v", err)
 	}
-	defer ln.Close()
+	defer p.Stop()
 
 	var fired atomic.Bool
 	onFailure := func() { fired.Store(true) }
 
 	ctx, cancel := context.WithCancel(context.Background())
 
-	w := NewProxyWatchdog(ln.Addr().String(), 20*time.Millisecond, 2, onFailure)
+	w := NewProxyWatchdog(addr, 20*time.Millisecond, 2, onFailure)
 	w.Start(ctx)
 
 	// Cancel the context.
@@ -85,7 +84,7 @@ func TestWatchdogStopsOnContextCancel(t *testing.T) {
 	time.Sleep(80 * time.Millisecond)
 
 	// Close the listener after cancel — watchdog should be stopped and not fire.
-	ln.Close()
+	_ = p.Stop()
 	time.Sleep(80 * time.Millisecond)
 
 	if fired.Load() {
