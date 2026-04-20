@@ -143,6 +143,21 @@ func TestEffectivePolicyAllowAll(t *testing.T) {
 	}
 }
 
+func TestEffectivePolicyShowsPrivateRangeSetting(t *testing.T) {
+	cfg := DefaultConfig()
+
+	summary := cfg.EffectivePolicy()
+	if !strings.Contains(summary, "private_ranges=blocked") {
+		t.Fatalf("effective policy should show private ranges blocked by default, got:\n%s", summary)
+	}
+
+	cfg.Network.AllowPrivateRanges = true
+	summary = cfg.EffectivePolicy()
+	if !strings.Contains(summary, "private_ranges=allowed") {
+		t.Fatalf("effective policy should show private ranges allowed when configured, got:\n%s", summary)
+	}
+}
+
 // hasError returns true if errs contains an error-severity entry for the given field.
 func hasError(errs []ValidationError, field string) bool {
 	for _, e := range errs {

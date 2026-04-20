@@ -54,8 +54,9 @@ var wrapCmd = &cobra.Command{
 			cmd.SilenceUsage = true
 			return fmt.Errorf("invalid config at %s: %w", configPath, err)
 		}
+		effectiveCfg := effectiveWrapConfig(cfg, wrapFlags)
 		if wrapFlags.DryRun {
-			fmt.Fprintln(os.Stdout, cfg.EffectivePolicy())
+			fmt.Fprintln(os.Stdout, effectiveCfg.EffectivePolicy())
 			fmt.Fprintf(os.Stderr, "NockLock: dry run OK (%s)\n", configPath)
 			return nil
 		}
@@ -147,7 +148,7 @@ var wrapCmd = &cobra.Command{
 		var fsFenceCancel context.CancelFunc
 		if cfg.Filesystem.Root != "" {
 			if !fsfence.IsSupported() {
-				fmt.Fprintf(os.Stderr, "NockLock: filesystem fence configured but not supported on %s (Linux only) — skipping\n", runtime.GOOS)
+				return fmt.Errorf("filesystem fence configured but not supported on %s", runtime.GOOS)
 			} else {
 				fsCfg, err := fsfence.ProcessConfig(cfg.Filesystem)
 				if err != nil {
@@ -191,7 +192,7 @@ var wrapCmd = &cobra.Command{
 
 					// Start listening for events.
 					var ctx context.Context
-					ctx, fsFenceCancel = context.WithCancel(context.Background())
+					ctx, fsFenceCancel = context.WithCancel(cmd.Context())
 					defer fsFenceCancel()
 					fsFenceEvents = fsFence.Listen(ctx)
 
@@ -216,13 +217,11 @@ var wrapCmd = &cobra.Command{
 
 		// childCtx is cancelled by the proxy watchdog if the proxy dies unexpectedly.
 		// This terminates the child process, enforcing fail-closed behaviour.
-		childCtx, childCancel := context.WithCancel(context.Background())
+		childCtx, childCancel := context.WithCancel(cmd.Context())
 		defer childCancel()
 
 		if !cfg.Network.AllowAll {
-			proxyCfg := cfg.Network
-			// CLI flag is additive: if either config-file or flag permits private ranges, allow them.
-			proxyCfg.AllowPrivateRanges = cfg.Network.AllowPrivateRanges || wrapFlags.AllowPrivateRanges
+			proxyCfg := effectiveCfg.Network
 			proxy := network.NewProxyServer(proxyCfg, logger, sessionID)
 			addr, proxyErr := proxy.Start()
 			if proxyErr != nil {
@@ -231,7 +230,7 @@ var wrapCmd = &cobra.Command{
 				cmd.SilenceUsage = true
 				return fmt.Errorf("network fence failed: %w", proxyErr)
 			} else {
-				if readyErr := network.WaitForProxyReady(context.Background(), addr, 5*time.Second); readyErr != nil {
+				if readyErr := network.WaitForProxyReady(cmd.Context(), addr, 5*time.Second); readyErr != nil {
 					_ = proxy.Stop()
 					logEvent(logging.EventNetworkError, "network", fmt.Sprintf("proxy readiness failed: %v", readyErr), true)
 					fmt.Fprintf(os.Stderr, "NockLock: fatal: network fence proxy is not healthy: %v\n", readyErr)
@@ -241,7 +240,7 @@ var wrapCmd = &cobra.Command{
 				defer proxy.Stop()
 
 				// Launch watchdog: if proxy crashes mid-session, cancel childCtx to kill the child.
-				watchdogCtx, watchdogCancel := context.WithCancel(context.Background())
+				watchdogCtx, watchdogCancel := context.WithCancel(cmd.Context())
 				defer watchdogCancel()
 				watchdog := network.NewProxyWatchdog(addr, 5*time.Second, 2, func() {
 					logEvent(logging.EventNetworkError, "network", "proxy watchdog: proxy died, killing child", true)
@@ -337,6 +336,13 @@ func init() {
 	rootCmd.AddCommand(wrapCmd)
 }
 
+func effectiveWrapConfig(cfg *config.Config, flags WrapFlags) config.Config {
+	effective := *cfg
+	// CLI flag is additive: if either config-file or flag permits private ranges, allow them.
+	effective.Network.AllowPrivateRanges = cfg.Network.AllowPrivateRanges || flags.AllowPrivateRanges
+	return effective
+}
+
 // removeEnvVars returns env with any entries whose key matches one of the given
 // keys removed. Keys are matched case-sensitively by prefix ("KEY=").
 func removeEnvVars(env []string, keys ...string) []string {
@@ -361,7 +367,10 @@ func validateWrapRuntimeConfig(cfg *config.Config) error {
 		return fmt.Errorf("invalid secret fence config: %w", err)
 	}
 
-	if cfg.Filesystem.Root != "" && fsfence.IsSupported() {
+	if cfg.Filesystem.Root != "" {
+		if !fsfence.IsSupported() {
+			return fmt.Errorf("filesystem fence configured but not supported on %s", runtime.GOOS)
+		}
 		if _, err := fsfence.ProcessConfig(cfg.Filesystem); err != nil {
 			return fmt.Errorf("invalid filesystem fence config: %w", err)
 		}

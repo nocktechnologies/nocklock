@@ -62,14 +62,14 @@ func (c *DNSCache) LookupOrResolve(ctx context.Context, host string) ([]net.IP, 
 	// and "example.com." all resolve to the same pinned entry.
 	host = strings.ToLower(strings.TrimSuffix(host, "."))
 
-	c.mu.Lock()
-	defer c.mu.Unlock()
-
 	rawAddrs, err := c.resolve(ctx, host)
 	if err != nil {
 		return nil, err
 	}
 	current := parseIPs(rawAddrs)
+
+	c.mu.Lock()
+	defer c.mu.Unlock()
 
 	if pinned, ok := c.entries[host]; ok {
 		if !sameIPSet(pinned, current) {
@@ -90,7 +90,7 @@ func parseIPs(rawAddrs []string) []net.IP {
 	ips := make([]net.IP, 0, len(rawAddrs))
 	for _, raw := range rawAddrs {
 		if ip := net.ParseIP(raw); ip != nil {
-			ips = append(ips, cloneIP(ip))
+			ips = append(ips, ip)
 		}
 	}
 	return ips

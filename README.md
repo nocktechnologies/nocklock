@@ -31,7 +31,7 @@ That's it. Four commands. Your agent is fenced.
 2. **Intercepts filesystem calls** via LD_PRELOAD, blocking access outside allowed paths — Linux only; macOS support coming
 3. **Routes network traffic** through a local proxy that enforces a domain allowlist — Linux, macOS. For HTTPS, only the hostname is inspected — no certificate injection, no payload decryption. If the proxy is not confirmed healthy, the agent does not start.
 
-Every blocked access is logged to `.nock/events.db`. Blocked files return EACCES (permission denied), blocked domains return 403.
+Every blocked access is logged to `.nock/events.db`. Blocked file opens and access-style checks return EACCES (permission denied); denied stat-family probes return ENOENT to avoid existence enumeration. Blocked domains return 403.
 
 ## Configuration
 

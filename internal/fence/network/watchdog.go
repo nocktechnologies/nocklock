@@ -16,6 +16,8 @@ type ProxyWatchdog struct {
 	interval      time.Duration
 	failThreshold int
 	onFailure     func()
+	transport     *http.Transport
+	client        *http.Client
 }
 
 // NewProxyWatchdog creates a watchdog for the given proxy address.
@@ -27,11 +29,17 @@ func NewProxyWatchdog(addr string, interval time.Duration, failThreshold int, on
 	if failThreshold < 1 {
 		failThreshold = 1
 	}
+	transport := &http.Transport{Proxy: nil}
 	return &ProxyWatchdog{
 		addr:          addr,
 		interval:      interval,
 		failThreshold: failThreshold,
 		onFailure:     onFailure,
+		transport:     transport,
+		client: &http.Client{
+			Transport: transport,
+			Timeout:   500 * time.Millisecond,
+		},
 	}
 }
 
@@ -45,6 +53,7 @@ func (w *ProxyWatchdog) run(ctx context.Context) {
 	consecutive := 0
 	ticker := time.NewTicker(w.interval)
 	defer ticker.Stop()
+	defer w.transport.CloseIdleConnections()
 
 	for {
 		select {
@@ -67,13 +76,7 @@ func (w *ProxyWatchdog) run(ctx context.Context) {
 // probe requests the proxy health endpoint with a short timeout.
 // Returns true if the proxy is reachable and serving health checks.
 func (w *ProxyWatchdog) probe() bool {
-	transport := &http.Transport{Proxy: nil}
-	defer transport.CloseIdleConnections()
-	client := &http.Client{
-		Transport: transport,
-		Timeout:   500 * time.Millisecond,
-	}
-	resp, err := client.Get("http://" + w.addr + ProxyHealthPath)
+	resp, err := w.client.Get("http://" + w.addr + ProxyHealthPath)
 	if err != nil {
 		return false
 	}

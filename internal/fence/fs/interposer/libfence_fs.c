@@ -157,6 +157,8 @@ static int path_starts_with(const char *path, const char *prefix)
     return (next == '\0' || next == '/');
 }
 
+static int resolve_lstat_path(const char *path, char *resolved);
+
 /*
  * resolve_path resolves `path` to an absolute path. For existing paths we use
  * realpath(). For non-existing paths (e.g. O_CREAT targets) we resolve the
@@ -1624,8 +1626,6 @@ static int ensure_stat_init(void)
     pthread_once(&g_stat_init_once, fence_init_stat);
     return g_config.initialized;
 }
-
-static int resolve_lstat_path(const char *path, char *resolved);
 
 /*
  * resolve_openat_lstat_path resolves a path for AT_SYMLINK_NOFOLLOW *at
