@@ -39,6 +39,9 @@ func NewProxyWatchdog(addr string, interval time.Duration, failThreshold int, on
 		client: &http.Client{
 			Transport: transport,
 			Timeout:   500 * time.Millisecond,
+			CheckRedirect: func(*http.Request, []*http.Request) error {
+				return http.ErrUseLastResponse
+			},
 		},
 	}
 }
@@ -60,7 +63,7 @@ func (w *ProxyWatchdog) run(ctx context.Context) {
 		case <-ctx.Done():
 			return
 		case <-ticker.C:
-			if w.probe() {
+			if w.probe(ctx) {
 				consecutive = 0
 			} else {
 				consecutive++
@@ -75,8 +78,12 @@ func (w *ProxyWatchdog) run(ctx context.Context) {
 
 // probe requests the proxy health endpoint with a short timeout.
 // Returns true if the proxy is reachable and serving health checks.
-func (w *ProxyWatchdog) probe() bool {
-	resp, err := w.client.Get("http://" + w.addr + ProxyHealthPath)
+func (w *ProxyWatchdog) probe(ctx context.Context) bool {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, "http://"+w.addr+ProxyHealthPath, nil)
+	if err != nil {
+		return false
+	}
+	resp, err := w.client.Do(req)
 	if err != nil {
 		return false
 	}

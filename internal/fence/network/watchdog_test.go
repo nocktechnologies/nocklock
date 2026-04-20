@@ -2,6 +2,9 @@ package network
 
 import (
 	"context"
+	"net/http"
+	"net/http/httptest"
+	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -89,5 +92,42 @@ func TestWatchdogStopsOnContextCancel(t *testing.T) {
 
 	if fired.Load() {
 		t.Error("watchdog fired after context was cancelled")
+	}
+}
+
+func TestWatchdogProbeRejectsRedirect(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case ProxyHealthPath:
+			http.Redirect(w, r, "/ok", http.StatusFound)
+		case "/ok":
+			w.WriteHeader(http.StatusOK)
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer server.Close()
+
+	addr := strings.TrimPrefix(server.URL, "http://")
+	w := NewProxyWatchdog(addr, 20*time.Millisecond, 1, func() {})
+
+	if w.probe(context.Background()) {
+		t.Fatal("watchdog probe should not follow redirects to a healthy endpoint")
+	}
+}
+
+func TestWatchdogProbeUsesContext(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer server.Close()
+
+	addr := strings.TrimPrefix(server.URL, "http://")
+	w := NewProxyWatchdog(addr, 20*time.Millisecond, 1, func() {})
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	if w.probe(ctx) {
+		t.Fatal("watchdog probe should fail when the context is already canceled")
 	}
 }

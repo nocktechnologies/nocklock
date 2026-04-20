@@ -93,7 +93,7 @@ func (cfg *Config) EffectivePolicy() string {
 		privateRanges = "allowed"
 	}
 	if cfg.Network.AllowAll {
-		fmt.Fprintf(&b, "  Network: ALLOW ALL (allow_all = true, private_ranges=%s)\n", privateRanges)
+		b.WriteString("  Network: ALLOW ALL (allow_all = true)\n")
 	} else {
 		fmt.Fprintf(&b, "  Network: DENY (default) — %d allowed domain(s): %s; private_ranges=%s\n",
 			len(cfg.Network.Allow),
