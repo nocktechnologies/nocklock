@@ -8,13 +8,10 @@
  * Configuration is read from the NOCKLOCK_FS_ALLOWED environment variable
  * on the first intercepted call (lazy init, thread-safe via pthread_once).
  *
- * Blocked calls set errno = EACCES and return -1 (or NULL for fopen/realpath).
+ * Blocked mutating/open calls set errno = EACCES and return -1 (or NULL for
+ * fopen/realpath). Blocked stat-family calls return ENOENT so restricted paths
+ * cannot be enumerated by existence probes.
  * Events are reported as newline-delimited JSON over a Unix domain socket.
- *
- * Future enhancement: stat/lstat interception. On modern glibc, stat() is
- * implemented via __xstat(). The primary attack surface (open/fopen/access)
- * is covered by this implementation. stat interception can be added later
- * by hooking __xstat/__lxstat with fallback to stat/lstat via dlsym.
  */
 #define _GNU_SOURCE
 
@@ -29,6 +26,9 @@
 #include <string.h>
 #include <sys/socket.h>
 #include <sys/stat.h>
+#ifdef __linux__
+#include <sys/syscall.h>
+#endif
 #include <sys/un.h>
 #include <time.h>
 #include <unistd.h>
@@ -156,6 +156,8 @@ static int path_starts_with(const char *path, const char *prefix)
     char next = path[plen];
     return (next == '\0' || next == '/');
 }
+
+static int resolve_lstat_path(const char *path, char *resolved);
 
 /*
  * resolve_path resolves `path` to an absolute path. For existing paths we use
@@ -2001,9 +2003,7 @@ int __fxstatat(int vers, int dirfd, const char *pathname, struct stat *buf, int 
 /* statx(2) — kernel 4.11+, glibc 2.28+                               */
 /* ------------------------------------------------------------------ */
 
-#ifdef __NR_statx
-#include <linux/stat.h>
-
+#if defined(__linux__) && defined(__NR_statx) && defined(STATX_BASIC_STATS)
 typedef int (*real_statx_t)(int, const char *, int, unsigned int, struct statx *);
 static real_statx_t real_statx;
 static pthread_once_t g_statx_init_once = PTHREAD_ONCE_INIT;
@@ -2057,4 +2057,4 @@ int statx(int dirfd, const char *pathname, int flags,
     if (real_statx) return real_statx(AT_FDCWD, resolved, flags & ~AT_EMPTY_PATH, mask, statxbuf);
     errno = ENOSYS; return -1;
 }
-#endif /* __NR_statx */
+#endif /* __linux__ && __NR_statx && STATX_BASIC_STATS */

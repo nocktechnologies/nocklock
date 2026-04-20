@@ -18,6 +18,7 @@ import (
 
 // nocklockBin is the path to the compiled nocklock binary, set in TestMain.
 var nocklockBin string
+var statProbeBin string
 
 // TestMain builds the nocklock binary (and the filesystem fence interposer on
 // Linux) once, then runs the integration suite. Cleanup happens after all tests.
@@ -56,6 +57,14 @@ func TestMain(m *testing.M) {
 			os.RemoveAll(tmp)
 			os.Exit(1)
 		}
+
+		statProbePath := filepath.Join(tmp, "statprobe")
+		if err := buildStatProbe(tmp, statProbePath); err != nil {
+			fmt.Fprintf(os.Stderr, "Failed to build stat probe helper: %v\n", err)
+			os.RemoveAll(tmp)
+			os.Exit(1)
+		}
+		statProbeBin = statProbePath
 	}
 
 	code := m.Run()
@@ -91,6 +100,75 @@ func copyFile(src, dst string) error {
 
 	_, err = io.Copy(out, in)
 	return err
+}
+
+func buildStatProbe(dir, binPath string) error {
+	sourcePath := filepath.Join(dir, "statprobe.c")
+	source := `#define _GNU_SOURCE
+#include <errno.h>
+#include <fcntl.h>
+#include <stdio.h>
+#include <string.h>
+#include <sys/stat.h>
+
+int main(int argc, char **argv) {
+    if (argc != 3) {
+        fprintf(stderr, "usage: statprobe <stat|lstat|fstatat|statx> <path>\n");
+        return 2;
+    }
+
+    const char *mode = argv[1];
+    const char *path = argv[2];
+    int rc = -1;
+
+    if (strcmp(mode, "stat") == 0) {
+        struct stat st;
+        rc = stat(path, &st);
+    } else if (strcmp(mode, "lstat") == 0) {
+        struct stat st;
+        rc = lstat(path, &st);
+    } else if (strcmp(mode, "fstatat") == 0) {
+        struct stat st;
+        rc = fstatat(AT_FDCWD, path, &st, 0);
+    } else if (strcmp(mode, "statx") == 0) {
+#ifdef STATX_BASIC_STATS
+        struct statx sx;
+        rc = statx(AT_FDCWD, path, 0, STATX_BASIC_STATS, &sx);
+#else
+        puts("UNSUPPORTED");
+        return 77;
+#endif
+    } else {
+        fprintf(stderr, "unknown mode: %s\n", mode);
+        return 2;
+    }
+
+    if (rc == 0) {
+        puts("EXISTS");
+        return 0;
+    }
+    if (errno == ENOENT) {
+        puts("ENOENT");
+        return 10;
+    }
+    if (errno == EACCES) {
+        puts("EACCES");
+        return 11;
+    }
+
+    printf("ERRNO=%d:%s\n", errno, strerror(errno));
+    return 12;
+}
+`
+	if err := os.WriteFile(sourcePath, []byte(source), 0o600); err != nil {
+		return err
+	}
+	cmd := exec.Command("gcc", "-Wall", "-Wextra", "-Werror", "-O2", "-o", binPath, sourcePath)
+	cmd.Dir = dir
+	if out, err := cmd.CombinedOutput(); err != nil {
+		return fmt.Errorf("%w\n%s", err, out)
+	}
+	return nil
 }
 
 // testConfig returns a minimal but valid config.toml for integration tests.
@@ -463,6 +541,88 @@ endpoint = "https://cc.nocktechnologies.io/api/fence/events/"
 		!strings.Contains(strings.ToLower(combined), "eacces") {
 		t.Logf("stderr: %s", stderr)
 		t.Errorf("expected permission denied or EACCES error for denied file")
+	}
+}
+
+// TestFilesystemFenceStatFamilyReturnsENOENT verifies denied stat-style probes
+// do not reveal that restricted files exist. Linux only.
+func TestFilesystemFenceStatFamilyReturnsENOENT(t *testing.T) {
+	if runtime.GOOS != "linux" {
+		t.Skip("filesystem fence is Linux-only")
+	}
+	if statProbeBin == "" {
+		t.Fatal("stat probe helper was not built")
+	}
+
+	sensitiveDir := t.TempDir()
+	sensitiveFile := filepath.Join(sensitiveDir, "sensitive.txt")
+	if err := os.WriteFile(sensitiveFile, []byte("secret-content"), 0o644); err != nil {
+		t.Fatalf("failed to create sensitive file: %v", err)
+	}
+
+	config := fmt.Sprintf(`[project]
+name = "integration-test-fs-stat"
+root = "."
+
+[filesystem]
+root = "."
+mode = "read-write"
+allow = ["/tmp/"]
+deny = [%q]
+
+[network]
+allow = []
+allow_all = true
+
+[secrets]
+pass = ["HOME", "PATH", "SHELL", "USER", "LANG", "TERM"]
+block = []
+
+[logging]
+db = ".nock/events.db"
+level = "info"
+
+[cloud]
+enabled = false
+api_key = ""
+endpoint = "https://cc.nocktechnologies.io/api/fence/events/"
+`, sensitiveDir)
+
+	dir := setupTestDirWithConfig(t, config)
+
+	for _, mode := range []string{"stat", "lstat", "fstatat", "statx"} {
+		mode := mode
+		t.Run(mode, func(t *testing.T) {
+			stdout, stderr, exitCode := runNocklock(t, dir, nil, "wrap", "--", statProbeBin, mode, sensitiveFile)
+			if mode == "statx" && exitCode == 77 && strings.Contains(stdout, "UNSUPPORTED") {
+				t.Skip("statx is not available on this libc")
+			}
+			if exitCode != 10 || !strings.Contains(stdout, "ENOENT") {
+				t.Fatalf("expected denied %s to return ENOENT (exit 10), got exit=%d stdout=%q stderr=%q",
+					mode, exitCode, stdout, stderr)
+			}
+			if strings.Contains(stdout, "EACCES") || strings.Contains(stderr, "Permission denied") {
+				t.Fatalf("denied %s leaked permission error: stdout=%q stderr=%q", mode, stdout, stderr)
+			}
+		})
+	}
+
+	allowedFile := filepath.Join(dir, "allowed.txt")
+	if err := os.WriteFile(allowedFile, []byte("allowed-content"), 0o644); err != nil {
+		t.Fatalf("failed to create allowed file: %v", err)
+	}
+	for _, mode := range []string{"stat", "lstat", "fstatat", "statx"} {
+		mode := mode
+		t.Run(mode+"_allowed", func(t *testing.T) {
+			stdout, stderr, exitCode := runNocklock(t, dir, nil, "wrap", "--", statProbeBin, mode, allowedFile)
+			if mode == "statx" && exitCode == 77 && strings.Contains(stdout, "UNSUPPORTED") {
+				t.Skip("statx is not available on this libc")
+			}
+			if exitCode != 0 || !strings.Contains(stdout, "EXISTS") {
+				t.Fatalf("expected allowed %s to succeed, got exit=%d stdout=%q stderr=%q",
+					mode, exitCode, stdout, stderr)
+			}
+		})
 	}
 }
 

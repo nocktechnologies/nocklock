@@ -135,11 +135,30 @@ func TestEffectivePolicySummary(t *testing.T) {
 func TestEffectivePolicyAllowAll(t *testing.T) {
 	cfg := DefaultConfig()
 	cfg.Network.AllowAll = true
+	cfg.Network.AllowPrivateRanges = true
 
 	summary := cfg.EffectivePolicy()
 
 	if !strings.Contains(summary, "allow_all") && !strings.Contains(summary, "ALLOW ALL") {
 		t.Error("effective policy should indicate allow_all is set")
+	}
+	if strings.Contains(summary, "private_ranges=") {
+		t.Fatalf("effective policy should not show private range settings when allow_all disables the network fence, got:\n%s", summary)
+	}
+}
+
+func TestEffectivePolicyShowsPrivateRangeSetting(t *testing.T) {
+	cfg := DefaultConfig()
+
+	summary := cfg.EffectivePolicy()
+	if !strings.Contains(summary, "private_ranges=blocked") {
+		t.Fatalf("effective policy should show private ranges blocked by default, got:\n%s", summary)
+	}
+
+	cfg.Network.AllowPrivateRanges = true
+	summary = cfg.EffectivePolicy()
+	if !strings.Contains(summary, "private_ranges=allowed") {
+		t.Fatalf("effective policy should show private ranges allowed when configured, got:\n%s", summary)
 	}
 }
 

@@ -14,6 +14,10 @@ import (
 	"github.com/nocktechnologies/nocklock/internal/logging"
 )
 
+// ProxyHealthPath is the local endpoint used to verify that the proxy is
+// listening and serving before a wrapped child process is started.
+const ProxyHealthPath = "/healthz"
+
 // isAllowed reports whether the given hostname is permitted by the proxy's allowlist.
 //
 // Rules:
@@ -63,6 +67,18 @@ func (p *ProxyServer) isAllowed(hostname string) bool {
 // ServeHTTP handles incoming proxy requests. CONNECT requests are routed to
 // handleConnect; all other methods are handled as forward-proxy requests.
 func (p *ProxyServer) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	if r.URL != nil && !r.URL.IsAbs() && r.URL.Path == ProxyHealthPath {
+		if r.Method != http.MethodGet && r.Method != http.MethodHead {
+			http.Error(w, "NockLock: method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+		w.WriteHeader(http.StatusOK)
+		if r.Method == http.MethodGet {
+			_, _ = w.Write([]byte("ok\n"))
+		}
+		return
+	}
+
 	if r.Method == http.MethodConnect {
 		p.handleConnect(w, r)
 		return

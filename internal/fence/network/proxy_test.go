@@ -1,13 +1,17 @@
 package network
 
 import (
+	"context"
 	"net"
 	"net/http"
 	"net/url"
+	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/nocktechnologies/nocklock/internal/config"
+	"github.com/nocktechnologies/nocklock/internal/logging"
 )
 
 func makeProxy(allowList []string) *ProxyServer {
@@ -209,4 +213,101 @@ func TestProxyBlockedRequestReturns403(t *testing.T) {
 	if resp.StatusCode != http.StatusForbidden {
 		t.Errorf("expected 403, got %d", resp.StatusCode)
 	}
+}
+
+func TestProxyHealthEndpointReady(t *testing.T) {
+	p := makeProxy(nil)
+	addr, err := p.Start()
+	if err != nil {
+		t.Fatalf("Start() error: %v", err)
+	}
+	defer p.Stop()
+
+	client := &http.Client{Transport: &http.Transport{Proxy: nil}}
+	resp, err := client.Get("http://" + addr + ProxyHealthPath)
+	if err != nil {
+		t.Fatalf("health request failed: %v", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("health status = %d, want %d", resp.StatusCode, http.StatusOK)
+	}
+}
+
+func TestWaitForProxyReadySucceeds(t *testing.T) {
+	p := makeProxy([]string{"example.com"})
+	addr, err := p.Start()
+	if err != nil {
+		t.Fatalf("Start() error: %v", err)
+	}
+	defer p.Stop()
+
+	if err := WaitForProxyReady(t.Context(), addr, time.Second); err != nil {
+		t.Fatalf("WaitForProxyReady() error: %v", err)
+	}
+}
+
+func TestWaitForProxyReadyFailsClosedPort(t *testing.T) {
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+	addr := ln.Addr().String()
+	ln.Close()
+
+	if err := WaitForProxyReady(t.Context(), addr, 75*time.Millisecond); err == nil {
+		t.Fatal("WaitForProxyReady() should fail for a closed port")
+	}
+}
+
+func TestCachedSafeDialLogsDNSRebind(t *testing.T) {
+	projectRoot := t.TempDir()
+	logger, err := logging.NewLogger(filepath.Join(projectRoot, ".nock", "events.db"), "")
+	if err != nil {
+		t.Fatalf("NewLogger() error: %v", err)
+	}
+	defer logger.Close()
+
+	callCount := 0
+	resolver := func(_ context.Context, _ string) ([]string, error) {
+		callCount++
+		if callCount == 1 {
+			return []string{"93.184.216.34"}, nil
+		}
+		return []string{"192.168.1.20"}, nil
+	}
+
+	p := NewProxyServer(config.NetworkConfig{Allow: []string{"target.com"}}, logger, "sess-dns-rebind")
+	p.dnsCache = newDNSCacheWithResolver(resolver)
+
+	if _, err := p.dnsCache.LookupOrResolve(t.Context(), "target.com"); err != nil {
+		t.Fatalf("initial lookup should pin: %v", err)
+	}
+	_, err = p.cachedSafeDial(t.Context(), "tcp", "target.com:443")
+	if err == nil {
+		t.Fatal("cachedSafeDial should block rebinding")
+	}
+
+	blocked := true
+	events, err := logger.Query(logging.QueryOptions{
+		Blocked:   &blocked,
+		SessionID: stringPtr("sess-dns-rebind"),
+	})
+	if err != nil {
+		t.Fatalf("query events: %v", err)
+	}
+	if len(events) != 1 {
+		t.Fatalf("expected 1 blocked event, got %d: %+v", len(events), events)
+	}
+	if events[0].EventType != logging.EventNetworkBlocked {
+		t.Fatalf("event type = %s, want %s", events[0].EventType, logging.EventNetworkBlocked)
+	}
+	if !strings.Contains(events[0].Detail, "dns_rebind host=target.com") {
+		t.Fatalf("event detail should mention dns_rebind, got %q", events[0].Detail)
+	}
+}
+
+func stringPtr(s string) *string {
+	return &s
 }

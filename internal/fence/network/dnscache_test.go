@@ -2,6 +2,7 @@ package network
 
 import (
 	"context"
+	"errors"
 	"net"
 	"sync"
 	"testing"
@@ -37,7 +38,7 @@ func TestDNSCacheFirstLookupResolvesAndCaches(t *testing.T) {
 	}
 }
 
-func TestDNSCacheSecondLookupReturnsCached(t *testing.T) {
+func TestDNSCacheSecondLookupVerifiesPinnedSet(t *testing.T) {
 	resolver := &fakeResolver{addrs: []string{"93.184.216.34"}}
 	cache := newDNSCacheWithResolver(resolver.lookup)
 
@@ -49,13 +50,13 @@ func TestDNSCacheSecondLookupReturnsCached(t *testing.T) {
 	if len(ips) != 1 {
 		t.Errorf("unexpected IPs: %v", ips)
 	}
-	// Second lookup must not trigger another DNS query.
-	if resolver.calls != 1 {
-		t.Errorf("expected 1 DNS call total (cached), got %d", resolver.calls)
+	// Later lookups must re-resolve so DNS rebinding can be detected.
+	if resolver.calls != 2 {
+		t.Errorf("expected 2 DNS calls total (pin + verify), got %d", resolver.calls)
 	}
 }
 
-func TestDNSCachePinsIPAcrossRebind(t *testing.T) {
+func TestDNSCacheRejectsRebind(t *testing.T) {
 	// Simulate a rebind: first resolve returns public IP, second returns private.
 	callCount := 0
 	rebindResolver := func(_ context.Context, _ string) ([]string, error) {
@@ -67,14 +68,24 @@ func TestDNSCachePinsIPAcrossRebind(t *testing.T) {
 	}
 	cache := newDNSCacheWithResolver(rebindResolver)
 
-	ips1, _ := cache.LookupOrResolve(context.Background(), "target.com")
-	ips2, _ := cache.LookupOrResolve(context.Background(), "target.com")
-
-	if ips1[0].String() != "93.184.216.34" || ips2[0].String() != "93.184.216.34" {
-		t.Errorf("DNS rebind was not prevented: first=%v second=%v", ips1, ips2)
+	ips1, err := cache.LookupOrResolve(context.Background(), "target.com")
+	if err != nil {
+		t.Fatalf("first lookup should pin: %v", err)
 	}
-	if callCount != 1 {
-		t.Errorf("expected 1 DNS call (cache should pin), got %d", callCount)
+	_, err = cache.LookupOrResolve(context.Background(), "target.com")
+	if err == nil {
+		t.Fatal("expected DNS rebinding error, got nil")
+	}
+
+	var rebindErr *dnsRebindError
+	if !errors.As(err, &rebindErr) {
+		t.Fatalf("expected dnsRebindError, got %T: %v", err, err)
+	}
+	if ips1[0].String() != "93.184.216.34" {
+		t.Errorf("unexpected pinned IPs: %v", ips1)
+	}
+	if callCount != 2 {
+		t.Errorf("expected 2 DNS calls (pin + rebind verification), got %d", callCount)
 	}
 }
 
@@ -95,9 +106,10 @@ func TestDNSCacheCaseVariantsShareEntry(t *testing.T) {
 			t.Errorf("variant %q: unexpected IPs: %v", v, ips)
 		}
 	}
-	// All variants must have resolved to the same cache entry — only 1 DNS call.
-	if resolver.calls != 1 {
-		t.Errorf("expected 1 DNS call for all case variants, got %d", resolver.calls)
+	// All variants must hit the same cache entry, but each lookup re-resolves
+	// to verify that DNS has not drifted.
+	if resolver.calls != len(variants) {
+		t.Errorf("expected %d DNS calls for all case variants, got %d", len(variants), resolver.calls)
 	}
 }
 

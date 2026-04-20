@@ -9,26 +9,10 @@ func TestParseWrapFlagsNoFlags(t *testing.T) {
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	if flags.AllowUnfenced || flags.AllowPrivateRanges {
+	if flags.DryRun || flags.AllowPrivateRanges {
 		t.Errorf("expected no flags set, got %+v", flags)
 	}
 	if len(childArgs) != 2 || childArgs[0] != "echo" || childArgs[1] != "hello" {
-		t.Errorf("unexpected child args: %v", childArgs)
-	}
-}
-
-func TestParseWrapFlagsAllowUnfenced(t *testing.T) {
-	flags, childArgs, err := parseWrapFlags([]string{"--allow-unfenced", "--", "echo", "hello"})
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-	if !flags.AllowUnfenced {
-		t.Error("expected AllowUnfenced to be true")
-	}
-	if flags.AllowPrivateRanges {
-		t.Error("expected AllowPrivateRanges to be false")
-	}
-	if len(childArgs) != 2 || childArgs[0] != "echo" {
 		t.Errorf("unexpected child args: %v", childArgs)
 	}
 }
@@ -38,9 +22,6 @@ func TestParseWrapFlagsAllowPrivateRanges(t *testing.T) {
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	if flags.AllowUnfenced {
-		t.Error("expected AllowUnfenced to be false")
-	}
 	if !flags.AllowPrivateRanges {
 		t.Error("expected AllowPrivateRanges to be true")
 	}
@@ -49,32 +30,42 @@ func TestParseWrapFlagsAllowPrivateRanges(t *testing.T) {
 	}
 }
 
-func TestParseWrapFlagsBothFlags(t *testing.T) {
-	flags, childArgs, err := parseWrapFlags([]string{"--allow-unfenced", "--allow-private-ranges", "--", "cmd", "arg"})
+func TestParseWrapFlagsDryRun(t *testing.T) {
+	flags, childArgs, err := parseWrapFlags([]string{"--dry-run", "--", "cmd", "arg"})
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	if !flags.AllowUnfenced {
-		t.Error("expected AllowUnfenced to be true")
-	}
-	if !flags.AllowPrivateRanges {
-		t.Error("expected AllowPrivateRanges to be true")
+	if !flags.DryRun {
+		t.Error("expected DryRun to be true")
 	}
 	if len(childArgs) != 2 || childArgs[0] != "cmd" {
 		t.Errorf("unexpected child args: %v", childArgs)
 	}
 }
 
-func TestParseWrapFlagsChildFlagsNotConsumed(t *testing.T) {
-	// Flags after "--" belong to the child, not nocklock.
-	flags, childArgs, err := parseWrapFlags([]string{"--", "cmd", "--allow-unfenced"})
+func TestParseWrapFlagsDryRunWithoutSeparator(t *testing.T) {
+	flags, childArgs, err := parseWrapFlags([]string{"--dry-run"})
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	if flags.AllowUnfenced {
-		t.Error("--allow-unfenced after -- should not set AllowUnfenced")
+	if !flags.DryRun {
+		t.Error("expected DryRun to be true")
 	}
-	if len(childArgs) != 2 || childArgs[1] != "--allow-unfenced" {
+	if len(childArgs) != 0 {
+		t.Errorf("unexpected child args: %v", childArgs)
+	}
+}
+
+func TestParseWrapFlagsChildFlagsNotConsumed(t *testing.T) {
+	// Flags after "--" belong to the child, not nocklock.
+	flags, childArgs, err := parseWrapFlags([]string{"--", "cmd", "--dry-run"})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if flags.DryRun {
+		t.Error("--dry-run after -- should not set DryRun")
+	}
+	if len(childArgs) != 2 || childArgs[1] != "--dry-run" {
 		t.Errorf("unexpected child args: %v", childArgs)
 	}
 }
@@ -85,7 +76,7 @@ func TestParseWrapFlagsNoSeparator(t *testing.T) {
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	if flags.AllowUnfenced || flags.AllowPrivateRanges {
+	if flags.DryRun || flags.AllowPrivateRanges {
 		t.Errorf("expected no flags, got %+v", flags)
 	}
 	if len(childArgs) != 2 || childArgs[0] != "echo" {
@@ -100,12 +91,19 @@ func TestParseWrapFlagsUnknownFlagBeforeSeparatorIsError(t *testing.T) {
 	}
 }
 
+func TestParseWrapFlagsAllowUnfencedIsRejected(t *testing.T) {
+	_, _, err := parseWrapFlags([]string{"--allow-unfenced", "--", "cmd"})
+	if err == nil {
+		t.Error("expected error for removed --allow-unfenced flag")
+	}
+}
+
 func TestParseWrapFlagsEmptyArgs(t *testing.T) {
 	flags, childArgs, err := parseWrapFlags([]string{})
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	if flags.AllowUnfenced || flags.AllowPrivateRanges {
+	if flags.DryRun || flags.AllowPrivateRanges {
 		t.Errorf("expected no flags, got %+v", flags)
 	}
 	if len(childArgs) != 0 {

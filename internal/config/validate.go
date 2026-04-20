@@ -88,12 +88,17 @@ func (cfg *Config) EffectivePolicy() string {
 	b.WriteString("NockLock effective policy:\n")
 
 	// Network
+	privateRanges := "blocked"
+	if cfg.Network.AllowPrivateRanges {
+		privateRanges = "allowed"
+	}
 	if cfg.Network.AllowAll {
 		b.WriteString("  Network: ALLOW ALL (allow_all = true)\n")
 	} else {
-		fmt.Fprintf(&b, "  Network: DENY (default) — %d allowed domain(s): %s\n",
+		fmt.Fprintf(&b, "  Network: DENY (default) — %d allowed domain(s): %s; private_ranges=%s\n",
 			len(cfg.Network.Allow),
-			strings.Join(cfg.Network.Allow, ", "))
+			strings.Join(cfg.Network.Allow, ", "),
+			privateRanges)
 	}
 
 	// Filesystem

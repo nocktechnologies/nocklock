@@ -35,24 +35,34 @@ var wrapCmd = &cobra.Command{
 			return flagErr
 		}
 
-		if len(args) == 0 {
-			return fmt.Errorf("no command specified. Usage: nocklock wrap [--allow-unfenced] [--allow-private-ranges] -- <command> [args...]")
+		if len(args) == 0 && !wrapFlags.DryRun {
+			return fmt.Errorf("no command specified. Usage: nocklock wrap [--dry-run] [--allow-private-ranges] -- <command> [args...]")
 		}
-
-		// Generate a session ID for event logging.
-		sessionID := uuid.New().String()
 
 		// Find and load config — fail closed if missing or invalid.
 		configPath, err := config.FindConfig()
 		if err != nil {
 			cmd.SilenceUsage = true
-			return fmt.Errorf("no NockLock config found. Run 'nocklock init' first")
+			return fmt.Errorf("no NockLock config found. Run 'nocklock init' first to create %s/%s", config.Dir, config.File)
 		}
 		cfg, err := config.Load(configPath)
 		if err != nil {
 			cmd.SilenceUsage = true
 			return fmt.Errorf("failed to load config at %s: %w", configPath, err)
 		}
+		if err := validateWrapRuntimeConfig(cfg); err != nil {
+			cmd.SilenceUsage = true
+			return fmt.Errorf("invalid config at %s: %w", configPath, err)
+		}
+		effectiveCfg := effectiveWrapConfig(cfg, wrapFlags)
+		if wrapFlags.DryRun {
+			fmt.Fprintln(os.Stdout, effectiveCfg.EffectivePolicy())
+			fmt.Fprintf(os.Stderr, "NockLock: dry run OK (%s)\n", configPath)
+			return nil
+		}
+
+		// Generate a session ID for event logging.
+		sessionID := uuid.New().String()
 
 		// Open the event logger. If it fails, warn and continue without logging.
 		var logger *logging.Logger
@@ -138,7 +148,7 @@ var wrapCmd = &cobra.Command{
 		var fsFenceCancel context.CancelFunc
 		if cfg.Filesystem.Root != "" {
 			if !fsfence.IsSupported() {
-				fmt.Fprintf(os.Stderr, "NockLock: filesystem fence configured but not supported on %s (Linux only) — skipping\n", runtime.GOOS)
+				return fmt.Errorf("filesystem fence configured but not supported on %s", runtime.GOOS)
 			} else {
 				fsCfg, err := fsfence.ProcessConfig(cfg.Filesystem)
 				if err != nil {
@@ -182,7 +192,7 @@ var wrapCmd = &cobra.Command{
 
 					// Start listening for events.
 					var ctx context.Context
-					ctx, fsFenceCancel = context.WithCancel(context.Background())
+					ctx, fsFenceCancel = context.WithCancel(cmd.Context())
 					defer fsFenceCancel()
 					fsFenceEvents = fsFence.Listen(ctx)
 
@@ -207,41 +217,37 @@ var wrapCmd = &cobra.Command{
 
 		// childCtx is cancelled by the proxy watchdog if the proxy dies unexpectedly.
 		// This terminates the child process, enforcing fail-closed behaviour.
-		childCtx, childCancel := context.WithCancel(context.Background())
+		childCtx, childCancel := context.WithCancel(cmd.Context())
 		defer childCancel()
 
 		if !cfg.Network.AllowAll {
-			proxyCfg := cfg.Network
-			// CLI flag is additive: if either config-file or flag permits private ranges, allow them.
-			proxyCfg.AllowPrivateRanges = cfg.Network.AllowPrivateRanges || wrapFlags.AllowPrivateRanges
+			proxyCfg := effectiveCfg.Network
 			proxy := network.NewProxyServer(proxyCfg, logger, sessionID)
 			addr, proxyErr := proxy.Start()
 			if proxyErr != nil {
 				logEvent(logging.EventNetworkError, "network", fmt.Sprintf("proxy start failed: %v", proxyErr), false)
-				if wrapFlags.AllowUnfenced {
-					// Opt-in degraded mode: warn and continue without network fence.
-					fmt.Fprintf(os.Stderr, "NockLock: warning: network fence failed to start (--allow-unfenced active): %v\n", proxyErr)
-				} else {
-					// Default: fail closed — do not run the child if the fence can't start.
-					fmt.Fprintf(os.Stderr, "NockLock: fatal: network fence failed to start: %v\n", proxyErr)
-					fmt.Fprintf(os.Stderr, "NockLock: use --allow-unfenced to run without network protection (not recommended)\n")
-					cmd.SilenceUsage = true
-					return fmt.Errorf("network fence failed: %w", proxyErr)
-				}
+				fmt.Fprintf(os.Stderr, "NockLock: fatal: network fence failed to start: %v\n", proxyErr)
+				cmd.SilenceUsage = true
+				return fmt.Errorf("network fence failed: %w", proxyErr)
 			} else {
+				if readyErr := network.WaitForProxyReady(cmd.Context(), addr, 5*time.Second); readyErr != nil {
+					_ = proxy.Stop()
+					logEvent(logging.EventNetworkError, "network", fmt.Sprintf("proxy readiness failed: %v", readyErr), true)
+					fmt.Fprintf(os.Stderr, "NockLock: fatal: network fence proxy is not healthy: %v\n", readyErr)
+					cmd.SilenceUsage = true
+					return fmt.Errorf("network fence proxy not ready: %w", readyErr)
+				}
 				defer proxy.Stop()
 
 				// Launch watchdog: if proxy crashes mid-session, cancel childCtx to kill the child.
-				if !wrapFlags.AllowUnfenced {
-					watchdogCtx, watchdogCancel := context.WithCancel(context.Background())
-					defer watchdogCancel()
-					watchdog := network.NewProxyWatchdog(addr, 5*time.Second, 2, func() {
-						logEvent(logging.EventNetworkError, "network", "proxy watchdog: proxy died, killing child", true)
-						fmt.Fprintf(os.Stderr, "NockLock: fatal: network proxy died unexpectedly — terminating child process\n")
-						childCancel()
-					})
-					watchdog.Start(watchdogCtx)
-				}
+				watchdogCtx, watchdogCancel := context.WithCancel(cmd.Context())
+				defer watchdogCancel()
+				watchdog := network.NewProxyWatchdog(addr, 5*time.Second, 2, func() {
+					logEvent(logging.EventNetworkError, "network", "proxy watchdog: proxy died, killing child", true)
+					fmt.Fprintf(os.Stderr, "NockLock: fatal: network proxy died unexpectedly — terminating child process\n")
+					childCancel()
+				})
+				watchdog.Start(watchdogCtx)
 
 				proxyURL := "http://" + addr
 				childEnv = append(childEnv,
@@ -330,6 +336,13 @@ func init() {
 	rootCmd.AddCommand(wrapCmd)
 }
 
+func effectiveWrapConfig(cfg *config.Config, flags WrapFlags) config.Config {
+	effective := *cfg
+	// CLI flag is additive: if either config-file or flag permits private ranges, allow them.
+	effective.Network.AllowPrivateRanges = cfg.Network.AllowPrivateRanges || flags.AllowPrivateRanges
+	return effective
+}
+
 // removeEnvVars returns env with any entries whose key matches one of the given
 // keys removed. Keys are matched case-sensitively by prefix ("KEY=").
 func removeEnvVars(env []string, keys ...string) []string {
@@ -347,6 +360,23 @@ func removeEnvVars(env []string, keys ...string) []string {
 		}
 	}
 	return filtered
+}
+
+func validateWrapRuntimeConfig(cfg *config.Config) error {
+	if _, err := secrets.NewFence(cfg.Secrets.Pass, cfg.Secrets.Block); err != nil {
+		return fmt.Errorf("invalid secret fence config: %w", err)
+	}
+
+	if cfg.Filesystem.Root != "" {
+		if !fsfence.IsSupported() {
+			return fmt.Errorf("filesystem fence configured but not supported on %s", runtime.GOOS)
+		}
+		if _, err := fsfence.ProcessConfig(cfg.Filesystem); err != nil {
+			return fmt.Errorf("invalid filesystem fence config: %w", err)
+		}
+	}
+
+	return nil
 }
 
 // findLibFenceFS searches for the filesystem fence shared library.
