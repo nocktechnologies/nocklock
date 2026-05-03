@@ -1584,9 +1584,16 @@ int fchdir(int fd)
 /* New typedefs — stat family */
 typedef int    (*real_stat_t)(const char *, struct stat *);
 typedef int    (*real_lstat_t)(const char *, struct stat *);
+typedef int    (*real_fstat_t)(int, struct stat *);
 typedef int    (*real_fstatat_t)(int, const char *, struct stat *, int);
 typedef int    (*real_faccessat_t)(int, const char *, int, int);
 typedef ssize_t (*real_readlinkat_t)(int, const char *, char *, size_t);
+
+#ifdef __linux__
+typedef int    (*real_stat64_t)(const char *, struct stat64 *);
+typedef int    (*real_lstat64_t)(const char *, struct stat64 *);
+typedef int    (*real_fstat64_t)(int, struct stat64 *);
+#endif
 
 /* Legacy glibc wrappers (__xstat/__lxstat/__fxstatat) */
 typedef int    (*real___xstat_t)(int, const char *, struct stat *);
@@ -1595,9 +1602,16 @@ typedef int    (*real___fxstatat_t)(int, int, const char *, struct stat *, int);
 
 static real_stat_t       real_stat;
 static real_lstat_t      real_lstat;
+static real_fstat_t      real_fstat;
 static real_fstatat_t    real_fstatat;
 static real_faccessat_t  real_faccessat;
 static real_readlinkat_t real_readlinkat;
+
+#ifdef __linux__
+static real_stat64_t     real_stat64;
+static real_lstat64_t    real_lstat64;
+static real_fstat64_t    real_fstat64;
+#endif
 
 static real___xstat_t    real___xstat;
 static real___lxstat_t   real___lxstat;
@@ -1609,9 +1623,16 @@ static void fence_init_stat(void)
 {
     real_stat      = (real_stat_t)dlsym(RTLD_NEXT, "stat");
     real_lstat     = (real_lstat_t)dlsym(RTLD_NEXT, "lstat");
+    real_fstat     = (real_fstat_t)dlsym(RTLD_NEXT, "fstat");
     real_fstatat   = (real_fstatat_t)dlsym(RTLD_NEXT, "fstatat");
     real_faccessat = (real_faccessat_t)dlsym(RTLD_NEXT, "faccessat");
     real_readlinkat = (real_readlinkat_t)dlsym(RTLD_NEXT, "readlinkat");
+
+#ifdef __linux__
+    real_stat64  = (real_stat64_t)dlsym(RTLD_NEXT, "stat64");
+    real_lstat64 = (real_lstat64_t)dlsym(RTLD_NEXT, "lstat64");
+    real_fstat64 = (real_fstat64_t)dlsym(RTLD_NEXT, "fstat64");
+#endif
 
     real___xstat    = (real___xstat_t)dlsym(RTLD_NEXT, "__xstat");
     real___lxstat   = (real___lxstat_t)dlsym(RTLD_NEXT, "__lxstat");
@@ -1625,6 +1646,20 @@ static int ensure_stat_init(void)
     pthread_once(&g_init_once, fence_init);   /* main init first */
     pthread_once(&g_stat_init_once, fence_init_stat);
     return g_config.initialized;
+}
+
+static int resolve_fd_path(int fd, char *resolved)
+{
+    if (!real_readlink)
+        return -1;
+
+    char fdpath[64];
+    snprintf(fdpath, sizeof(fdpath), "/proc/self/fd/%d", fd);
+    ssize_t n = real_readlink(fdpath, resolved, PATH_MAX - 1);
+    if (n <= 0)
+        return -1;
+    resolved[n] = '\0';
+    return 0;
 }
 
 /*
@@ -1793,6 +1828,31 @@ int lstat(const char *pathname, struct stat *buf)
     errno = ENOSYS; return -1;
 }
 
+int fstat(int fd, struct stat *buf)
+{
+    if (!ensure_stat_init()) {
+        if (real_fstat) return real_fstat(fd, buf);
+        errno = ENOSYS; return -1;
+    }
+
+    char resolved[PATH_MAX];
+    if (resolve_fd_path(fd, resolved) != 0) {
+        report_blocked("(fd)", "fstat", "fd path resolution failed");
+        errno = ENOENT;
+        return -1;
+    }
+
+    char reason[512];
+    if (check_path(resolved, 0 /* read */, reason, sizeof(reason)) != 0) {
+        report_blocked(resolved, "fstat", reason);
+        errno = ENOENT;
+        return -1;
+    }
+
+    if (real_fstat) return real_fstat(fd, buf);
+    errno = ENOSYS; return -1;
+}
+
 int fstatat(int dirfd, const char *pathname, struct stat *buf, int flags)
 {
     if (!ensure_stat_init()) {
@@ -1838,6 +1898,89 @@ int fstatat(int dirfd, const char *pathname, struct stat *buf, int flags)
     if (real_fstatat) return real_fstatat(AT_FDCWD, resolved, buf, flags & ~AT_EMPTY_PATH);
     errno = ENOSYS; return -1;
 }
+
+#ifdef __linux__
+int stat64(const char *pathname, struct stat64 *buf)
+{
+    if (!ensure_stat_init()) {
+        if (real_stat64) return real_stat64(pathname, buf);
+        if (real_stat) return real_stat(pathname, (struct stat *)buf);
+        errno = ENOSYS; return -1;
+    }
+
+    char resolved[PATH_MAX];
+    if (resolve_path(pathname, resolved) != 0) {
+        report_blocked(pathname, "stat64", "path resolution failed");
+        errno = ENOENT;
+        return -1;
+    }
+
+    char reason[512];
+    if (check_path(resolved, 0 /* read */, reason, sizeof(reason)) != 0) {
+        report_blocked(pathname, "stat64", reason);
+        errno = ENOENT;
+        return -1;
+    }
+
+    if (real_stat64) return real_stat64(resolved, buf);
+    if (real_stat) return real_stat(resolved, (struct stat *)buf);
+    errno = ENOSYS; return -1;
+}
+
+int lstat64(const char *pathname, struct stat64 *buf)
+{
+    if (!ensure_stat_init()) {
+        if (real_lstat64) return real_lstat64(pathname, buf);
+        if (real_lstat) return real_lstat(pathname, (struct stat *)buf);
+        errno = ENOSYS; return -1;
+    }
+
+    char resolved[PATH_MAX];
+    if (resolve_lstat_path(pathname, resolved) != 0) {
+        report_blocked(pathname, "lstat64", "path resolution failed");
+        errno = ENOENT;
+        return -1;
+    }
+
+    char reason[512];
+    if (check_path(resolved, 0 /* read */, reason, sizeof(reason)) != 0) {
+        report_blocked(pathname, "lstat64", reason);
+        errno = ENOENT;
+        return -1;
+    }
+
+    if (real_lstat64) return real_lstat64(resolved, buf);
+    if (real_lstat) return real_lstat(resolved, (struct stat *)buf);
+    errno = ENOSYS; return -1;
+}
+
+int fstat64(int fd, struct stat64 *buf)
+{
+    if (!ensure_stat_init()) {
+        if (real_fstat64) return real_fstat64(fd, buf);
+        if (real_fstat) return real_fstat(fd, (struct stat *)buf);
+        errno = ENOSYS; return -1;
+    }
+
+    char resolved[PATH_MAX];
+    if (resolve_fd_path(fd, resolved) != 0) {
+        report_blocked("(fd)", "fstat64", "fd path resolution failed");
+        errno = ENOENT;
+        return -1;
+    }
+
+    char reason[512];
+    if (check_path(resolved, 0 /* read */, reason, sizeof(reason)) != 0) {
+        report_blocked(resolved, "fstat64", reason);
+        errno = ENOENT;
+        return -1;
+    }
+
+    if (real_fstat64) return real_fstat64(fd, buf);
+    if (real_fstat) return real_fstat(fd, (struct stat *)buf);
+    errno = ENOSYS; return -1;
+}
+#endif
 
 int faccessat(int dirfd, const char *pathname, int amode, int flags)
 {

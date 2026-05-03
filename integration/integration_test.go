@@ -19,6 +19,7 @@ import (
 // nocklockBin is the path to the compiled nocklock binary, set in TestMain.
 var nocklockBin string
 var statProbeBin string
+var fenceLibPath string
 
 // TestMain builds the nocklock binary (and the filesystem fence interposer on
 // Linux) once, then runs the integration suite. Cleanup happens after all tests.
@@ -57,6 +58,7 @@ func TestMain(m *testing.M) {
 			os.RemoveAll(tmp)
 			os.Exit(1)
 		}
+		fenceLibPath = soDst
 
 		statProbePath := filepath.Join(tmp, "statprobe")
 		if err := buildStatProbe(tmp, statProbePath); err != nil {
@@ -113,7 +115,7 @@ func buildStatProbe(dir, binPath string) error {
 
 int main(int argc, char **argv) {
     if (argc != 3) {
-        fprintf(stderr, "usage: statprobe <stat|lstat|fstatat|statx> <path>\n");
+        fprintf(stderr, "usage: statprobe <stat|lstat|fstat|fstatat|stat64|lstat64|fstat64|statx> <path>\n");
         return 2;
     }
 
@@ -127,9 +129,36 @@ int main(int argc, char **argv) {
     } else if (strcmp(mode, "lstat") == 0) {
         struct stat st;
         rc = lstat(path, &st);
+    } else if (strcmp(mode, "fstat") == 0) {
+        struct stat st;
+        rc = fstat(3, &st);
     } else if (strcmp(mode, "fstatat") == 0) {
         struct stat st;
         rc = fstatat(AT_FDCWD, path, &st, 0);
+    } else if (strcmp(mode, "stat64") == 0) {
+#ifdef __linux__
+        struct stat64 st;
+        rc = stat64(path, &st);
+#else
+        puts("UNSUPPORTED");
+        return 77;
+#endif
+    } else if (strcmp(mode, "lstat64") == 0) {
+#ifdef __linux__
+        struct stat64 st;
+        rc = lstat64(path, &st);
+#else
+        puts("UNSUPPORTED");
+        return 77;
+#endif
+    } else if (strcmp(mode, "fstat64") == 0) {
+#ifdef __linux__
+        struct stat64 st;
+        rc = fstat64(3, &st);
+#else
+        puts("UNSUPPORTED");
+        return 77;
+#endif
     } else if (strcmp(mode, "statx") == 0) {
 #ifdef STATX_BASIC_STATS
         struct statx sx;
@@ -255,6 +284,42 @@ func runNocklock(t *testing.T, dir string, env []string, args ...string) (stdout
 			exitCode = exitErr.ExitCode()
 		} else {
 			t.Fatalf("failed to run nocklock: %v", err)
+		}
+	}
+
+	return outBuf.String(), errBuf.String(), exitCode
+}
+
+func runStatProbeWithPreload(t *testing.T, dir string, inherited *os.File, mode, path string) (stdout, stderr string, exitCode int) {
+	t.Helper()
+
+	envConfig := strings.Join([]string{
+		dir,
+		"rw",
+		"",
+	}, "\x1f")
+
+	cmd := exec.Command(statProbeBin, mode, path)
+	cmd.Dir = dir
+	cmd.Env = append(os.Environ(),
+		"LD_PRELOAD="+fenceLibPath,
+		"NOCKLOCK_FS_ALLOWED="+envConfig,
+	)
+	if inherited != nil {
+		cmd.ExtraFiles = []*os.File{inherited}
+	}
+
+	var outBuf, errBuf strings.Builder
+	cmd.Stdout = &outBuf
+	cmd.Stderr = &errBuf
+
+	err := cmd.Run()
+	exitCode = 0
+	if err != nil {
+		if exitErr, ok := err.(*exec.ExitError); ok {
+			exitCode = exitErr.ExitCode()
+		} else {
+			t.Fatalf("failed to run stat probe: %v", err)
 		}
 	}
 
@@ -590,7 +655,7 @@ endpoint = "https://cc.nocktechnologies.io/api/fence/events/"
 
 	dir := setupTestDirWithConfig(t, config)
 
-	for _, mode := range []string{"stat", "lstat", "fstatat", "statx"} {
+	for _, mode := range []string{"stat", "lstat", "fstatat", "stat64", "lstat64", "statx"} {
 		mode := mode
 		t.Run(mode, func(t *testing.T) {
 			stdout, stderr, exitCode := runNocklock(t, dir, nil, "wrap", "--", statProbeBin, mode, sensitiveFile)
@@ -611,7 +676,7 @@ endpoint = "https://cc.nocktechnologies.io/api/fence/events/"
 	if err := os.WriteFile(allowedFile, []byte("allowed-content"), 0o644); err != nil {
 		t.Fatalf("failed to create allowed file: %v", err)
 	}
-	for _, mode := range []string{"stat", "lstat", "fstatat", "statx"} {
+	for _, mode := range []string{"stat", "lstat", "fstatat", "stat64", "lstat64", "statx"} {
 		mode := mode
 		t.Run(mode+"_allowed", func(t *testing.T) {
 			stdout, stderr, exitCode := runNocklock(t, dir, nil, "wrap", "--", statProbeBin, mode, allowedFile)
@@ -620,6 +685,42 @@ endpoint = "https://cc.nocktechnologies.io/api/fence/events/"
 			}
 			if exitCode != 0 || !strings.Contains(stdout, "EXISTS") {
 				t.Fatalf("expected allowed %s to succeed, got exit=%d stdout=%q stderr=%q",
+					mode, exitCode, stdout, stderr)
+			}
+		})
+	}
+}
+
+func TestFilesystemFenceFstatFamilyReturnsENOENTForInheritedDeniedFD(t *testing.T) {
+	if runtime.GOOS != "linux" {
+		t.Skip("filesystem fence is Linux-only")
+	}
+	if statProbeBin == "" || fenceLibPath == "" {
+		t.Fatal("stat probe helper or fence library was not built")
+	}
+
+	allowedDir := t.TempDir()
+	sensitiveDir := t.TempDir()
+	sensitiveFile := filepath.Join(sensitiveDir, "sensitive.txt")
+	if err := os.WriteFile(sensitiveFile, []byte("secret-content"), 0o644); err != nil {
+		t.Fatalf("failed to create sensitive file: %v", err)
+	}
+
+	inherited, err := os.Open(sensitiveFile)
+	if err != nil {
+		t.Fatalf("open sensitive file before interposer preload: %v", err)
+	}
+	defer inherited.Close()
+
+	for _, mode := range []string{"fstat", "fstat64"} {
+		mode := mode
+		t.Run(mode, func(t *testing.T) {
+			stdout, stderr, exitCode := runStatProbeWithPreload(t, allowedDir, inherited, mode, sensitiveFile)
+			if exitCode == 77 && strings.Contains(stdout, "UNSUPPORTED") {
+				t.Skip(mode + " is not available on this libc")
+			}
+			if exitCode != 10 || !strings.Contains(stdout, "ENOENT") {
+				t.Fatalf("expected denied %s to return ENOENT (exit 10), got exit=%d stdout=%q stderr=%q",
 					mode, exitCode, stdout, stderr)
 			}
 		})
