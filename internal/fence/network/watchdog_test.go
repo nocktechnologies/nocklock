@@ -2,6 +2,7 @@ package network
 
 import (
 	"context"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -64,6 +65,48 @@ func TestWatchdogDetectsProxyFailure(t *testing.T) {
 		time.Sleep(10 * time.Millisecond)
 	}
 	t.Error("watchdog did not fire after proxy failure")
+}
+
+func TestWatchdogTriggersFailClosedAfterThreshold(t *testing.T) {
+	p := makeProxy(nil)
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+	addr := ln.Addr().String()
+	_ = ln.Close()
+
+	var fired atomic.Bool
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	w := NewProxyWatchdog(addr, 10*time.Millisecond, 2, func() {
+		p.MarkDegraded("watchdog failure")
+		fired.Store(true)
+		cancel()
+	})
+	w.Start(ctx)
+
+	deadline := time.Now().Add(500 * time.Millisecond)
+	for time.Now().Before(deadline) {
+		if fired.Load() {
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+
+	if !fired.Load() {
+		t.Fatal("watchdog did not invoke onFailure after the failure threshold")
+	}
+
+	p.dialFunc = func(context.Context, string, string) (net.Conn, error) {
+		server, client := net.Pipe()
+		_ = server.Close()
+		return client, nil
+	}
+	if _, err := p.dial(t.Context(), "tcp", "example.com:443"); err == nil {
+		t.Fatal("proxy should refuse dials after watchdog marks it degraded")
+	}
 }
 
 func TestWatchdogStopsOnContextCancel(t *testing.T) {
