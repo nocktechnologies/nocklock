@@ -1664,7 +1664,13 @@ static int resolve_fd_path(int fd, char *resolved)
 
 static int fd_target_is_path(const char *resolved)
 {
-    return resolved != NULL && resolved[0] == '/';
+    if (resolved == NULL || resolved[0] != '/')
+        return 0;
+
+    return strncmp(resolved, "socket:[", 8) != 0 &&
+           strncmp(resolved, "pipe:[", 6) != 0 &&
+           strncmp(resolved, "anon_inode:[", 12) != 0 &&
+           strncmp(resolved, "/memfd:", 7) != 0;
 }
 
 /*

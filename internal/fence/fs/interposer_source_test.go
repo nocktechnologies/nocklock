@@ -60,6 +60,25 @@ func TestInterposerSourceBypassesNonPathFileDescriptors(t *testing.T) {
 	}
 }
 
+func TestInterposerSourceTreatsProcFSMagicTargetsAsNonPaths(t *testing.T) {
+	source, err := os.ReadFile("interposer/libfence_fs.c")
+	if err != nil {
+		t.Fatalf("read interposer source: %v", err)
+	}
+	text := string(source)
+
+	for _, pattern := range []string{
+		`strncmp\s*\(\s*resolved\s*,\s*"socket:\["\s*,\s*8\s*\)`,
+		`strncmp\s*\(\s*resolved\s*,\s*"pipe:\["\s*,\s*6\s*\)`,
+		`strncmp\s*\(\s*resolved\s*,\s*"anon_inode:\["\s*,\s*12\s*\)`,
+		`strncmp\s*\(\s*resolved\s*,\s*"/memfd:"\s*,\s*7\s*\)`,
+	} {
+		if !regexp.MustCompile(pattern).MatchString(text) {
+			t.Fatalf("libfence_fs.c missing procfs magic fd target guard pattern %q", pattern)
+		}
+	}
+}
+
 func TestInterposerSourceBypassesATEmptyPathForNonPathFileDescriptors(t *testing.T) {
 	source, err := os.ReadFile("interposer/libfence_fs.c")
 	if err != nil {
