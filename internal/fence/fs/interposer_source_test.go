@@ -35,7 +35,7 @@ func TestInterposerSourceAvoidsUnsafeStat64FallbackCasts(t *testing.T) {
 		t.Fatalf("read interposer source: %v", err)
 	}
 
-	unsafeFallback := regexp.MustCompile(`real_(stat|lstat|fstat)\s*\([^;]*\(struct stat \*\)\s*buf`)
+	unsafeFallback := regexp.MustCompile(`real_(stat|lstat|fstat)\s*\([^;]*\(\s*struct\s+stat\s*\*\s*\)\s*buf`)
 	if match := unsafeFallback.FindString(string(source)); match != "" {
 		t.Fatalf("libfence_fs.c has unsafe stat64 fallback cast %q", match)
 	}
@@ -56,6 +56,24 @@ func TestInterposerSourceBypassesNonPathFileDescriptors(t *testing.T) {
 	} {
 		if !regexp.MustCompile(pattern).MatchString(text) {
 			t.Fatalf("libfence_fs.c missing non-path fd bypass pattern %q", pattern)
+		}
+	}
+}
+
+func TestInterposerSourceBypassesATEmptyPathForNonPathFileDescriptors(t *testing.T) {
+	source, err := os.ReadFile("interposer/libfence_fs.c")
+	if err != nil {
+		t.Fatalf("read interposer source: %v", err)
+	}
+	text := string(source)
+
+	for _, pattern := range []string{
+		`(?s)int\s+fstatat\s*\(.*?if\s*\(\s*!\s*fd_target_is_path\s*\(\s*resolved\s*\)\s*\)\s*\{.*?return\s+real_fstatat\s*\(\s*dirfd\s*,\s*pathname\s*,\s*buf\s*,\s*flags\s*\)\s*;`,
+		`(?s)int\s+__fxstatat\s*\(.*?if\s*\(\s*!\s*fd_target_is_path\s*\(\s*resolved\s*\)\s*\)\s*\{.*?return\s+real___fxstatat\s*\(\s*vers\s*,\s*dirfd\s*,\s*pathname\s*,\s*buf\s*,\s*flags\s*\)\s*;`,
+		`(?s)int\s+statx\s*\(.*?if\s*\(\s*!\s*fd_target_is_path\s*\(\s*resolved\s*\)\s*\)\s*\{.*?return\s+real_statx\s*\(\s*dirfd\s*,\s*pathname\s*,\s*flags\s*,\s*mask\s*,\s*statxbuf\s*\)\s*;`,
+	} {
+		if !regexp.MustCompile(pattern).MatchString(text) {
+			t.Fatalf("libfence_fs.c missing AT_EMPTY_PATH non-path fd bypass pattern %q", pattern)
 		}
 	}
 }

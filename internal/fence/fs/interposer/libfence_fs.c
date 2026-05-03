@@ -1895,6 +1895,11 @@ int fstatat(int dirfd, const char *pathname, struct stat *buf, int flags)
         }
     }
 
+    if (!fd_target_is_path(resolved)) {
+        if (real_fstatat) return real_fstatat(dirfd, pathname, buf, flags);
+        errno = ENOSYS; return -1;
+    }
+
     char reason[512];
     if (check_path(resolved, 0 /* read */, reason, sizeof(reason)) != 0) {
         report_blocked(pathname ? pathname : "(fd)", "fstatat", reason);
@@ -2139,6 +2144,12 @@ int __fxstatat(int vers, int dirfd, const char *pathname, struct stat *buf, int 
         }
     }
 
+    if (!fd_target_is_path(resolved)) {
+        if (real___fxstatat) return real___fxstatat(vers, dirfd, pathname, buf, flags);
+        if (real_fstatat) return real_fstatat(dirfd, pathname, buf, flags);
+        errno = ENOSYS; return -1;
+    }
+
     char reason[512];
     if (check_path(resolved, 0 /* read */, reason, sizeof(reason)) != 0) {
         report_blocked(pathname, "__fxstatat", reason);
@@ -2197,6 +2208,11 @@ int statx(int dirfd, const char *pathname, int flags,
             errno = ENOENT;
             return -1;
         }
+    }
+
+    if (!fd_target_is_path(resolved)) {
+        if (real_statx) return real_statx(dirfd, pathname, flags, mask, statxbuf);
+        errno = ENOSYS; return -1;
     }
 
     char reason[512];
