@@ -9,6 +9,7 @@ import (
 	"runtime"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"syscall"
 	"time"
 
@@ -219,6 +220,7 @@ var wrapCmd = &cobra.Command{
 		// This terminates the child process, enforcing fail-closed behaviour.
 		childCtx, childCancel := context.WithCancel(cmd.Context())
 		defer childCancel()
+		var proxyFailed atomic.Bool
 
 		if !cfg.Network.AllowAll {
 			proxyCfg := effectiveCfg.Network
@@ -228,14 +230,16 @@ var wrapCmd = &cobra.Command{
 				logEvent(logging.EventNetworkError, "network", fmt.Sprintf("proxy start failed: %v", proxyErr), false)
 				fmt.Fprintf(os.Stderr, "NockLock: fatal: network fence failed to start: %v\n", proxyErr)
 				cmd.SilenceUsage = true
-				return fmt.Errorf("network fence failed: %w", proxyErr)
+				cmd.SilenceErrors = true
+				return &exitCodeError{code: 2}
 			} else {
 				if readyErr := network.WaitForProxyReady(cmd.Context(), addr, 5*time.Second); readyErr != nil {
 					_ = proxy.Stop()
 					logEvent(logging.EventNetworkError, "network", fmt.Sprintf("proxy readiness failed: %v", readyErr), true)
 					fmt.Fprintf(os.Stderr, "NockLock: fatal: network fence proxy is not healthy: %v\n", readyErr)
 					cmd.SilenceUsage = true
-					return fmt.Errorf("network fence proxy not ready: %w", readyErr)
+					cmd.SilenceErrors = true
+					return &exitCodeError{code: 2}
 				}
 				defer proxy.Stop()
 
@@ -243,6 +247,8 @@ var wrapCmd = &cobra.Command{
 				watchdogCtx, watchdogCancel := context.WithCancel(cmd.Context())
 				defer watchdogCancel()
 				watchdog := network.NewProxyWatchdog(addr, 5*time.Second, 2, func() {
+					proxyFailed.Store(true)
+					proxy.MarkDegraded("proxy watchdog: proxy died")
 					logEvent(logging.EventNetworkError, "network", "proxy watchdog: proxy died, killing child", true)
 					fmt.Fprintf(os.Stderr, "NockLock: fatal: network proxy died unexpectedly — terminating child process\n")
 					childCancel()
@@ -309,6 +315,12 @@ var wrapCmd = &cobra.Command{
 		eventsWg.Wait()
 
 		if childErr != nil {
+			if proxyFailed.Load() {
+				logEvent(logging.EventSessionEnd, "session", "exit_code=2 proxy_failed=true", true)
+				cmd.SilenceErrors = true
+				cmd.SilenceUsage = true
+				return &exitCodeError{code: 2}
+			}
 			if exitErr, ok := childErr.(*exec.ExitError); ok {
 				code := exitErr.ExitCode()
 				if code < 0 {
@@ -325,6 +337,13 @@ var wrapCmd = &cobra.Command{
 			cmd.SilenceErrors = true
 			cmd.SilenceUsage = true
 			return fmt.Errorf("failed to run %q: %w", args[0], childErr)
+		}
+
+		if proxyFailed.Load() {
+			logEvent(logging.EventSessionEnd, "session", "exit_code=2 proxy_failed=true", true)
+			cmd.SilenceErrors = true
+			cmd.SilenceUsage = true
+			return &exitCodeError{code: 2}
 		}
 
 		logEvent(logging.EventSessionEnd, "session", "exit_code=0", false)

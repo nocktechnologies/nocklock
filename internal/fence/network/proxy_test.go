@@ -135,6 +135,43 @@ func TestProxyTwoInstancesBindDifferentPorts(t *testing.T) {
 	}
 }
 
+func TestProxyStartFailsWhenPortUnavailable(t *testing.T) {
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+	defer ln.Close()
+
+	p := makeProxy(nil)
+	p.listenAddr = ln.Addr().String()
+
+	if _, err := p.Start(); err == nil {
+		t.Fatal("Start() should fail when the configured proxy port is unavailable")
+	}
+}
+
+func TestProxyDialFailsClosedWhenDegraded(t *testing.T) {
+	p := makeProxy([]string{"example.com"})
+	p.dialFunc = func(context.Context, string, string) (net.Conn, error) {
+		server, client := net.Pipe()
+		_ = server.Close()
+		return client, nil
+	}
+
+	p.MarkDegraded("watchdog failure")
+
+	conn, err := p.dial(t.Context(), "tcp", "example.com:443")
+	if err == nil {
+		if conn != nil {
+			_ = conn.Close()
+		}
+		t.Fatal("dial should fail closed when the proxy is degraded")
+	}
+	if !strings.Contains(err.Error(), "degraded") {
+		t.Fatalf("dial error should mention degraded state, got %v", err)
+	}
+}
+
 // TestIsBlockedIP covers the SSRF prevention helper.
 func TestIsBlockedIP(t *testing.T) {
 	cases := []struct {

@@ -68,7 +68,9 @@ func (w *ProxyWatchdog) run(ctx context.Context) {
 			} else {
 				consecutive++
 				if consecutive >= w.failThreshold {
-					w.onFailure()
+					if w.onFailure != nil {
+						w.onFailure()
+					}
 					return
 				}
 			}

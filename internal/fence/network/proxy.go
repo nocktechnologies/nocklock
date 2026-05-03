@@ -8,6 +8,7 @@ import (
 	"net"
 	"net/http"
 	"net/url"
+	"sync/atomic"
 	"time"
 
 	"github.com/nocktechnologies/nocklock/internal/config"
@@ -105,6 +106,7 @@ type DialFunc func(ctx context.Context, network, addr string) (net.Conn, error)
 // It binds exclusively to 127.0.0.1 on a randomly assigned port.
 type ProxyServer struct {
 	listener           net.Listener
+	listenAddr         string
 	allowList          []string
 	allowAll           bool
 	allowPrivateRanges bool
@@ -116,11 +118,13 @@ type ProxyServer struct {
 	// dialFunc is used by handleConnect to establish upstream connections.
 	// Defaults to cachedSafeDial which uses the session DNS cache. Overridable in tests.
 	dialFunc DialFunc
+	degraded atomic.Bool
 }
 
 // NewProxyServer creates a ProxyServer from a NetworkConfig.
 func NewProxyServer(cfg config.NetworkConfig, logger *logging.Logger, sessionID string) *ProxyServer {
 	p := &ProxyServer{
+		listenAddr:         "127.0.0.1:0",
 		allowList:          cfg.Allow,
 		allowAll:           cfg.AllowAll,
 		allowPrivateRanges: cfg.AllowPrivateRanges,
@@ -168,11 +172,17 @@ func (p *ProxyServer) Start() (string, error) {
 	if p.listener != nil {
 		return "", fmt.Errorf("proxy already started at %s", p.listener.Addr())
 	}
-	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	listenAddr := p.listenAddr
+	if listenAddr == "" {
+		listenAddr = "127.0.0.1:0"
+	}
+	ln, err := net.Listen("tcp", listenAddr)
 	if err != nil {
+		p.MarkDegraded("bind failure")
 		return "", fmt.Errorf("network fence: failed to bind proxy: %w", err)
 	}
 	p.listener = ln
+	p.degraded.Store(false)
 
 	p.server = &http.Server{
 		Handler:           p,
@@ -202,6 +212,10 @@ func (p *ProxyServer) Start() (string, error) {
 // After Stop returns, Addr() returns "" and the server will not accept new connections.
 func (p *ProxyServer) Stop() error {
 	if p.server == nil {
+		p.degraded.Store(true)
+		if p.transport != nil {
+			p.transport.CloseIdleConnections()
+		}
 		return nil
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
@@ -215,6 +229,7 @@ func (p *ProxyServer) Stop() error {
 	// Clear server and listener so Addr() returns "" and Stop() is idempotent.
 	p.server = nil
 	p.listener = nil
+	p.degraded.Store(true)
 
 	if p.logger != nil {
 		_ = p.logger.Log(logging.Event{
@@ -231,10 +246,36 @@ func (p *ProxyServer) Stop() error {
 
 // dial dials addr using p.dialFunc, falling back to safeDial if unset.
 func (p *ProxyServer) dial(ctx context.Context, network, addr string) (net.Conn, error) {
+	if p.degraded.Load() {
+		return nil, fmt.Errorf("NockLock: network proxy is degraded; refusing connection to %s", addr)
+	}
 	if p.dialFunc != nil {
 		return p.dialFunc(ctx, network, addr)
 	}
 	return safeDial(ctx, network, addr)
+}
+
+// MarkDegraded marks the proxy as unsafe to use after a startup or watchdog
+// failure. Once degraded, the proxy refuses new upstream dials.
+func (p *ProxyServer) MarkDegraded(reason string) {
+	p.degraded.Store(true)
+	if p.transport != nil {
+		p.transport.CloseIdleConnections()
+	}
+	if p.logger == nil {
+		return
+	}
+	if reason == "" {
+		reason = "proxy degraded"
+	}
+	_ = p.logger.Log(logging.Event{
+		Timestamp: time.Now(),
+		EventType: logging.EventNetworkError,
+		Category:  "network",
+		Detail:    reason,
+		Blocked:   true,
+		SessionID: p.sessionID,
+	})
 }
 
 // Addr returns the bound address, or empty string if not started.
