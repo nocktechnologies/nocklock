@@ -1662,6 +1662,17 @@ static int resolve_fd_path(int fd, char *resolved)
     return 0;
 }
 
+static int fd_target_is_path(const char *resolved)
+{
+    if (resolved == NULL || resolved[0] != '/')
+        return 0;
+
+    return strncmp(resolved, "socket:[", 8) != 0 &&
+           strncmp(resolved, "pipe:[", 6) != 0 &&
+           strncmp(resolved, "anon_inode:[", 12) != 0 &&
+           strncmp(resolved, "/memfd:", 7) != 0;
+}
+
 /*
  * resolve_openat_lstat_path resolves a path for AT_SYMLINK_NOFOLLOW *at
  * operations: applies the same dirfd/absolute/relative logic as
@@ -1842,6 +1853,11 @@ int fstat(int fd, struct stat *buf)
         return -1;
     }
 
+    if (!fd_target_is_path(resolved)) {
+        if (real_fstat) return real_fstat(fd, buf);
+        errno = ENOSYS; return -1;
+    }
+
     char reason[512];
     if (check_path(resolved, 0 /* read */, reason, sizeof(reason)) != 0) {
         report_blocked(resolved, "fstat", reason);
@@ -1885,6 +1901,11 @@ int fstatat(int dirfd, const char *pathname, struct stat *buf, int flags)
         }
     }
 
+    if (!fd_target_is_path(resolved)) {
+        if (real_fstatat) return real_fstatat(dirfd, pathname, buf, flags);
+        errno = ENOSYS; return -1;
+    }
+
     char reason[512];
     if (check_path(resolved, 0 /* read */, reason, sizeof(reason)) != 0) {
         report_blocked(pathname ? pathname : "(fd)", "fstatat", reason);
@@ -1904,7 +1925,6 @@ int stat64(const char *pathname, struct stat64 *buf)
 {
     if (!ensure_stat_init()) {
         if (real_stat64) return real_stat64(pathname, buf);
-        if (real_stat) return real_stat(pathname, (struct stat *)buf);
         errno = ENOSYS; return -1;
     }
 
@@ -1923,7 +1943,6 @@ int stat64(const char *pathname, struct stat64 *buf)
     }
 
     if (real_stat64) return real_stat64(resolved, buf);
-    if (real_stat) return real_stat(resolved, (struct stat *)buf);
     errno = ENOSYS; return -1;
 }
 
@@ -1931,7 +1950,6 @@ int lstat64(const char *pathname, struct stat64 *buf)
 {
     if (!ensure_stat_init()) {
         if (real_lstat64) return real_lstat64(pathname, buf);
-        if (real_lstat) return real_lstat(pathname, (struct stat *)buf);
         errno = ENOSYS; return -1;
     }
 
@@ -1950,7 +1968,6 @@ int lstat64(const char *pathname, struct stat64 *buf)
     }
 
     if (real_lstat64) return real_lstat64(resolved, buf);
-    if (real_lstat) return real_lstat(resolved, (struct stat *)buf);
     errno = ENOSYS; return -1;
 }
 
@@ -1958,7 +1975,6 @@ int fstat64(int fd, struct stat64 *buf)
 {
     if (!ensure_stat_init()) {
         if (real_fstat64) return real_fstat64(fd, buf);
-        if (real_fstat) return real_fstat(fd, (struct stat *)buf);
         errno = ENOSYS; return -1;
     }
 
@@ -1969,6 +1985,11 @@ int fstat64(int fd, struct stat64 *buf)
         return -1;
     }
 
+    if (!fd_target_is_path(resolved)) {
+        if (real_fstat64) return real_fstat64(fd, buf);
+        errno = ENOSYS; return -1;
+    }
+
     char reason[512];
     if (check_path(resolved, 0 /* read */, reason, sizeof(reason)) != 0) {
         report_blocked(resolved, "fstat64", reason);
@@ -1977,7 +1998,6 @@ int fstat64(int fd, struct stat64 *buf)
     }
 
     if (real_fstat64) return real_fstat64(fd, buf);
-    if (real_fstat) return real_fstat(fd, (struct stat *)buf);
     errno = ENOSYS; return -1;
 }
 #endif
@@ -2130,6 +2150,12 @@ int __fxstatat(int vers, int dirfd, const char *pathname, struct stat *buf, int 
         }
     }
 
+    if (!fd_target_is_path(resolved)) {
+        if (real___fxstatat) return real___fxstatat(vers, dirfd, pathname, buf, flags);
+        if (real_fstatat) return real_fstatat(dirfd, pathname, buf, flags);
+        errno = ENOSYS; return -1;
+    }
+
     char reason[512];
     if (check_path(resolved, 0 /* read */, reason, sizeof(reason)) != 0) {
         report_blocked(pathname, "__fxstatat", reason);
@@ -2188,6 +2214,11 @@ int statx(int dirfd, const char *pathname, int flags,
             errno = ENOENT;
             return -1;
         }
+    }
+
+    if (!fd_target_is_path(resolved)) {
+        if (real_statx) return real_statx(dirfd, pathname, flags, mask, statxbuf);
+        errno = ENOSYS; return -1;
     }
 
     char reason[512];
