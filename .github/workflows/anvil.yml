@@ -12,7 +12,7 @@ permissions:
 jobs:
   anvil-review:
     if: github.event.pull_request.draft == false
-    runs-on: ubuntu-latest
+    runs-on: [self-hosted, macOS, ARM64]
 
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4
@@ -22,14 +22,13 @@ jobs:
       - name: Record shared Codex auth guard
         id: shared-codex-auth
         run: |
-          AUTH_FILE="${HOME}/.codex/auth.json"
-          if [[ -f "${AUTH_FILE}" ]]; then
-            echo "auth_present=true" >> "$GITHUB_OUTPUT"
-            shasum -a 256 "${AUTH_FILE}" | awk '{print "auth_sha="$1}' >> "$GITHUB_OUTPUT"
-          else
-            echo "auth_present=false" >> "$GITHUB_OUTPUT"
-            echo "auth_sha=missing" >> "$GITHUB_OUTPUT"
+          SHARED_AUTH_FILE="${HOME}/.codex/auth.json"
+          if [[ ! -f "${SHARED_AUTH_FILE}" ]]; then
+            echo "::error::Shared Codex auth file is missing at ${SHARED_AUTH_FILE}. Restore ChatGPT Pro auth on the self-hosted runner before running Anvil."
+            exit 1
           fi
+          echo "auth_present=true" >> "$GITHUB_OUTPUT"
+          shasum -a 256 "${SHARED_AUTH_FILE}" | awk '{print "auth_sha="$1}' >> "$GITHUB_OUTPUT"
 
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020  # v4
         with:
@@ -40,43 +39,43 @@ jobs:
 
       - name: Prepare isolated Codex home
         run: |
-          CODEX_HOME="${RUNNER_TEMP}/anvil-codex-home"
+          CODEX_HOME="${RUNNER_TEMP}/anvil-codex-home-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
           mkdir -p "${CODEX_HOME}"
           chmod 700 "${CODEX_HOME}"
           echo "CODEX_HOME=${CODEX_HOME}" >> "$GITHUB_ENV"
 
-      - name: Codex login (isolated Anvil auth)
-        env:
-          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+      - name: Copy shared Codex auth into isolated home
         run: |
-          # Codex 0.118 reads its API key from auth.json, not the OPENAI_API_KEY
-          # env var directly. Keep that auth file under CODEX_HOME so Anvil never
-          # overwrites the runner's shared ~/.codex/auth.json.
-          printenv OPENAI_API_KEY | codex login --with-api-key
+          SHARED_AUTH_FILE="${HOME}/.codex/auth.json"
+          if [[ ! -f "${SHARED_AUTH_FILE}" ]]; then
+            echo "::error::Shared Codex auth file is missing at ${SHARED_AUTH_FILE}. Restore ChatGPT Pro auth on the self-hosted runner before running Anvil."
+            exit 1
+          fi
+          cp "${SHARED_AUTH_FILE}" "${CODEX_HOME}/auth.json"
+          chmod 600 "${CODEX_HOME}/auth.json"
 
-      - name: Verify isolated Codex auth location
+      - name: Verify isolated Codex auth copy
         run: |
           if [[ ! -f "${CODEX_HOME}/auth.json" ]]; then
-            echo "::error::Codex login did not write auth.json under CODEX_HOME."
+            echo "::error::Shared Codex auth was not copied under CODEX_HOME."
             exit 1
           fi
           SHARED_AUTH_FILE="${HOME}/.codex/auth.json"
-          if [[ "${{ steps.shared-codex-auth.outputs.auth_present }}" == "true" ]]; then
-            SHARED_AUTH_SHA="$(shasum -a 256 "${SHARED_AUTH_FILE}" | awk '{print $1}')"
-            if [[ "${SHARED_AUTH_SHA}" != "${{ steps.shared-codex-auth.outputs.auth_sha }}" ]]; then
-              echo "::error::Codex login changed the shared auth file instead of isolated CODEX_HOME."
-              exit 1
-            fi
-          elif [[ -f "${SHARED_AUTH_FILE}" ]]; then
-            echo "::error::Codex login created a shared auth file instead of isolated CODEX_HOME."
+          SHARED_AUTH_SHA="$(shasum -a 256 "${SHARED_AUTH_FILE}" | awk '{print $1}')"
+          COPIED_AUTH_SHA="$(shasum -a 256 "${CODEX_HOME}/auth.json" | awk '{print $1}')"
+          if [[ "${COPIED_AUTH_SHA}" != "${{ steps.shared-codex-auth.outputs.auth_sha }}" ]]; then
+            echo "::error::Isolated Codex auth copy does not match the recorded shared auth."
             exit 1
           fi
-          echo "Codex auth is isolated under CODEX_HOME."
+          if [[ "${SHARED_AUTH_SHA}" != "${{ steps.shared-codex-auth.outputs.auth_sha }}" ]]; then
+            echo "::error::Shared Codex auth changed while preparing isolated CODEX_HOME."
+            exit 1
+          fi
+          echo "Codex auth copied into isolated CODEX_HOME."
 
       - name: Run Codex security review
         id: anvil
         env:
-          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
           PR_BASE_REF: ${{ github.event.pull_request.base.ref }}
           PR_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
           PR_NUMBER: ${{ github.event.pull_request.number }}
@@ -132,7 +131,7 @@ jobs:
               header,
               '',
               '```',
-              output || 'No output captured — verify OPENAI_API_KEY secret is set on this repo.',
+              output || 'No output captured — verify shared ChatGPT Pro auth is present on the runner.',
               '```',
               '',
               '*Adversarial security audit powered by OpenAI Codex o4-mini. Does not replace human review.*',
