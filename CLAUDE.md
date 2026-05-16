@@ -51,6 +51,15 @@ branch first touched in the session. The locked branch is recorded in
 - No external dependencies without discussion
 - Config changes must be backwards compatible
 
+## Session Closeout
+
+File a Session Report for every build/session before final response, even
+docs-only work. Use `nockcc_session_report_create` or
+`POST /api/sessions/reports/` with `session_id`, `agent_name`, `duration`,
+task/PR/message/decision counts, `handoff_written`, standing-order pass/total
+counts, concise notes, and 2-5 highlights. Include `nocklock` in the session
+id or notes so NockCC can trace the report back to this repo.
+
 ## Pre-Push Checklist
 1. `go test ./... -v` — all tests pass
 2. `go vet ./...` — no warnings
