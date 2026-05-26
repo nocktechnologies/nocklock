@@ -1,0 +1,12 @@
+#!/usr/bin/env bash
+# Scan staged changes for secrets before commit.
+# Requires gitleaks: https://github.com/gitleaks/gitleaks
+# Install: brew install gitleaks
+set -uo pipefail
+
+if ! command -v gitleaks &>/dev/null; then
+    echo "gitleaks not found — skipping secret scan (install with: brew install gitleaks)"
+    exit 0
+fi
+
+gitleaks protect --staged -v
