@@ -1,0 +1,23 @@
+[
+ {
+  "RuleID": "generic-api-key",
+  "Description": "Detected a Generic API Key, potentially exposing access to various services and sensitive operations.",
+  "StartLine": 388,
+  "EndLine": 388,
+  "StartColumn": 5,
+  "EndColumn": 31,
+  "Match": "GITHUB_TOKEN=REDACTED\"",
+  "Secret": "REDACTED",
+  "File": "internal/fence/secrets/secrets_test.go",
+  "SymlinkFile": "",
+  "Commit": "049ea39b16640f1565a3c6b60f3fd6bba8c6c281",
+  "Link": "https://github.com/nocktechnologies/nocklock/blob/049ea39b16640f1565a3c6b60f3fd6bba8c6c281/internal/fence/secrets/secrets_test.go#L388",
+  "Entropy": 3.7004397,
+  "Author": "kkwills13",
+  "Email": "kkwills13@gmail.com",
+  "Date": "2026-04-06T22:01:22Z",
+  "Message": "fix: address security review findings\n\n- Switch filepath.Match to path.Match for platform-independent glob\n  matching (env var names are not filesystem paths)\n- Rename blocked → blockedNames in wrap.go to make the names-only\n  contract self-documenting and prevent accidental value leaks\n- Add TestBlockedNamesNeverContainValues regression test asserting\n  no secret values ever appear in the blocked names list\n\nCo-Authored-By: Claude Opus 4.6 (1M context) \u003cnoreply@anthropic.com\u003e",
+  "Tags": [],
+  "Fingerprint": "049ea39b16640f1565a3c6b60f3fd6bba8c6c281:internal/fence/secrets/secrets_test.go:generic-api-key:388"
+ }
+]
