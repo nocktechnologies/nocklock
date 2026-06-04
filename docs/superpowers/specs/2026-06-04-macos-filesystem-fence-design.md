@@ -46,18 +46,19 @@ The combination means the user cannot trust the fence is on. That is disqualifyi
 
 macOS ships the Seatbelt sandbox (the same engine behind App Sandbox and Chrome's renderer sandbox). `sandbox-exec -p '<profile>' -- <agent>` runs an arbitrary child under a sandbox profile written in **SBPL** (Scheme-like Sandbox Profile Language).
 
-This maps **directly** onto NockLock's model:
+**Interim profile shape (empirically validated 2026-06-04 — see below):**
 
 ```scheme
 (version 1)
-(deny default)                         ; fail-closed: deny everything not explicitly allowed
-(allow process*)                       ; the agent itself runs normally
-(allow file-read* file-write*          ; full perms INSIDE the fence
-    (subpath "/Users/<u>/project"))
-(allow file-read*                      ; read-only system paths the toolchain needs
-    (subpath "/usr") (subpath "/bin") (subpath "/System") (literal "/dev/null"))
-; everything else — ~/.ssh, ~/.aws, ~/.config — is denied by (deny default)
+(allow default)                        ; allow-default base (see "deny-default SIGABRTs")
+(deny file-read* file-write*           ; fence the sensitive paths (canonical realpaths!)
+    (subpath "/Users/<u>/.ssh")
+    (subpath "/Users/<u>/.aws")
+    (subpath "/Users/<u>/.config")
+    ...)                               ; from [filesystem] block / sensible defaults
 ```
+
+This is a **denylist** (default-allow, block sensitive), not the strict allowlist the Linux fence uses (default-deny, allow project). The spike below shows **why**: a true `(deny default)` allowlist `SIGABRT`s every process — even `/bin/echo` — because process/dyld startup needs more allows than are practical to enumerate from scratch. The denylist is the shippable interim; strict-allowlist parity comes with Option C (Endpoint Security). This divergence is documented, not hidden (see "Known caveats").
 
 **Why it wins:**
 - **No code injection.** The kernel enforces the policy on the child *and all its descendants*, so the `/bin/sh` → child → grandchild problem that kills Option A does not exist. The sandbox is inherited, not env-propagated.
@@ -99,23 +100,40 @@ This is a deliberate, documented reduction — not a silent one — consistent w
 
 ---
 
-## Build increment (scoped, for dispatch)
+## Empirical validation (2026-06-04, macOS 26.5 / sandbox-exec present)
 
-Phase 1 — macOS enforcement (this PR's follow-on build):
-- `internal/fence/fs/fence_darwin.go`: `IsSupported()` true on darwin; compile `[filesystem].allow` → SBPL profile; build `sandbox-exec -p <profile> --` argv wrapper.
-- `internal/fence/fs/sbpl.go`: pure, table-tested SBPL profile generator (subpath escaping, default-deny, required system read paths).
-- `internal/cli/wrap.go`: on darwin, wrap the child argv with `sandbox-exec` instead of injecting `LD_PRELOAD`.
-- Fail-closed: if `sandbox-exec` is absent or the profile is rejected, the agent does not start (mirror the network-fence health gate).
-- Tests: SBPL generation (pure, cross-platform CI) + darwin integration test asserting a denied path returns an error and an allowed path succeeds (gated on `GOOS == darwin`).
-- Docs: update README ("macOS support coming") → supported-with-caveats; note deprecation + partial event logging.
+Spiked the mechanism with `sandbox-exec -f <profile>` on real fixtures before committing the build. Results:
 
-Phase 2 — event logging via `log stream` parsing (best-effort).
-Phase 3 — Endpoint Security system extension (separate epic).
+| Test | Result |
+|------|--------|
+| `(deny default)` + allow project/system from scratch | **`SIGABRT` (rc=134) on EVERY process**, even `/bin/echo` — startup needs more allows than practical to enumerate. Pure allowlist rejected for interim. |
+| `(allow default)` + `(deny … (subpath <project-relative /tmp path>))` | **Failed open** — secret was readable. macOS canonicalizes `/tmp`→`/private/tmp`; the un-resolved subpath silently never matched. |
+| `(allow default)` + `(deny … (subpath <REALPATH>))` | ✅ secret read → `rc=1 Operation not permitted`; project read → ok; `python3 --version` → ok; **access via the `/tmp` symlink alias also blocked** once the rule is canonical. |
+| Same profile vs real `~/.ssh` | ✅ bare `ls ~/.ssh` works; fenced `ls ~/.ssh` → `Operation not permitted`. |
+
+**Two findings that are now hard build requirements:**
+1. **Interim is a denylist** (`allow default` + `deny` sensitive paths), not a strict allowlist — deny-default is not viable via raw SBPL. Documented divergence from the Linux fence.
+2. **Path canonicalization is MANDATORY and fail-open if skipped.** The SBPL generator MUST resolve every path to its realpath (symlinks, `/tmp`→`/private/tmp`, `/var`→`/private/var`) before emitting `(subpath …)`. A non-canonical rule silently does not match → the fence fails open. This is the #1 correctness requirement and gets an explicit regression test.
 
 ---
 
-## Open questions for approval
+## Build increment (scoped, for dispatch)
 
-1. **Ship interim on a deprecated API?** Recommendation: yes — Seatbelt is still functional and used widely; the alternative is no macOS fence at all. Pin + CI-test per OS version.
-2. **Event logging:** accept partial parity for v1 (recommended) or block on `log stream` parsing first? Recommendation: accept partial; enforcement is the guarantee.
-3. **System read allowlist:** how broad a default `(subpath "/usr") (subpath "/System")` etc. before agent toolchains break? Needs an empirical pass with a real `claude` run under the profile.
+Phase 1 — macOS enforcement (validated above):
+- `internal/fence/fs/sbpl.go`: pure, table-tested SBPL generator — emits `(allow default)` + `(deny file-read* file-write* (subpath <realpath>) …)` for each sensitive path. **MUST canonicalize every path (`filepath.EvalSymlinks` + `/tmp`,`/var` resolution) before emitting**; refuse/error on a path that can't be resolved (fail closed, never emit a non-canonical rule).
+- `internal/fence/fs/fence_darwin.go`: `IsSupported()` true on darwin; build the profile from config sensitive-paths (with sane defaults: `~/.ssh`, `~/.aws`, `~/.config`, `~/.gnupg`, `~/Library/Keychains`, etc.); build the `sandbox-exec -f <profile> --` argv wrapper.
+- `internal/cli/wrap.go`: on darwin, wrap the child argv with `sandbox-exec` instead of injecting `LD_PRELOAD`.
+- Fail-closed: if `sandbox-exec` is absent or the profile is rejected, the agent does not start (mirror the network-fence health gate).
+- Tests: SBPL generation incl. **a canonicalization regression test** (a `/tmp`-aliased path must emit the `/private/tmp` rule), pure + cross-platform in CI; darwin integration test asserting a denied path → `EPERM` and an allowed path succeeds (gated on `GOOS == darwin`).
+- Docs: README "macOS support coming" → supported-with-caveats; state the denylist-vs-allowlist divergence + deprecation + partial event logging honestly.
+
+Phase 2 — event logging via `log stream` parsing (best-effort).
+Phase 3 — Endpoint Security system extension (separate epic) — restores strict allowlist + native event stream.
+
+---
+
+## Decisions (made 2026-06-04 — Kevin delegated "it's your project, take it and run")
+
+1. **Ship interim on the deprecated `sandbox-exec`?** YES — present + functional on macOS 26.5, widely relied on; the alternative is no macOS fence. Pin + CI-test per OS version.
+2. **Event logging:** accept partial parity for v1. Enforcement is the security guarantee; logging follows in P2/P3.
+3. **Default sensitive-path denylist:** ship a curated default set (`~/.ssh`, `~/.aws`, `~/.config`, `~/.gnupg`, `~/Library/Keychains`, cloud/credential dotdirs) + user-extensible via config — rather than a fragile system-read allowlist. Validated that this leaves toolchains (`python3`, etc.) working.
