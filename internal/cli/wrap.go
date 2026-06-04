@@ -143,19 +143,20 @@ var wrapCmd = &cobra.Command{
 			fmt.Fprintf(os.Stderr, "NockLock: secret fence active — no variables blocked\n")
 		}
 
-		// Apply filesystem fence (Linux only).
+		// Apply filesystem fence. Linux: LD_PRELOAD interposition. macOS: Seatbelt
+		// (sandbox-exec) — fsSandboxPrefix wraps the child argv at launch.
 		var fsFenceEvents <-chan fsfence.FenceEvent
 		var fsFence *fsfence.Fence
 		var fsFenceCancel context.CancelFunc
+		var fsSandboxPrefix []string
 		if cfg.Filesystem.Root != "" {
-			if !fsfence.IsSupported() {
-				return fmt.Errorf("filesystem fence configured but not supported on %s", runtime.GOOS)
-			} else {
-				fsCfg, err := fsfence.ProcessConfig(cfg.Filesystem)
-				if err != nil {
-					return fmt.Errorf("invalid filesystem fence config: %w", err)
-				}
-				if fsCfg != nil {
+			fsCfg, err := fsfence.ProcessConfig(cfg.Filesystem)
+			if err != nil {
+				return fmt.Errorf("invalid filesystem fence config: %w", err)
+			}
+			if fsCfg != nil {
+				switch runtime.GOOS {
+				case "linux":
 					// Look for the shared library next to the nocklock binary or in standard paths.
 					libPath := findLibFenceFS()
 					if _, err := os.Stat(libPath); err != nil {
@@ -199,6 +200,33 @@ var wrapCmd = &cobra.Command{
 
 					fmt.Fprintf(os.Stderr, "NockLock: filesystem fence active — root %s (%s)\n", fsCfg.Root, fsCfg.Mode)
 					logEvent(logging.EventFilePassed, "filesystem", fmt.Sprintf("root=%s mode=%s", fsCfg.Root, fsCfg.Mode), false)
+
+				case "darwin":
+					// Seatbelt (sandbox-exec) interim. NOTE: this enforces a DENYLIST
+					// (deny sensitive paths, allow the rest), not the Linux allowlist
+					// (allow root only). Documented interim divergence; the strict
+					// allowlist returns with the Endpoint Security implementation.
+					// Fail closed at every step.
+					if err := fsfence.EnsureSandboxExecAvailable(); err != nil {
+						return fmt.Errorf("filesystem fence cannot be enforced (fail-closed): %w", err)
+					}
+					sensitive := append(fsfence.DefaultSensitivePaths(), fsCfg.DenyPaths...)
+					profile, err := fsfence.GenerateProfile(sensitive)
+					if err != nil {
+						return fmt.Errorf("filesystem fence profile generation failed (fail-closed): %w", err)
+					}
+					profilePath, err := fsfence.WriteProfile(profile)
+					if err != nil {
+						return fmt.Errorf("filesystem fence profile write failed (fail-closed): %w", err)
+					}
+					defer os.Remove(profilePath)
+					fsSandboxPrefix = []string{fsfence.SandboxExecPath, "-f", profilePath}
+
+					fmt.Fprintf(os.Stderr, "NockLock: filesystem fence active (macOS Seatbelt, denylist interim) — %d path(s) fenced\n", len(sensitive))
+					logEvent(logging.EventFilePassed, "filesystem", fmt.Sprintf("seatbelt deny_paths=%d", len(sensitive)), false)
+
+				default:
+					return fmt.Errorf("filesystem fence configured but not supported on %s", runtime.GOOS)
 				}
 			}
 		}
@@ -271,7 +299,14 @@ var wrapCmd = &cobra.Command{
 			fmt.Fprintf(os.Stderr, "NockLock: network fence disabled (allow_all = true)\n")
 		}
 
-		child := exec.CommandContext(childCtx, args[0], args[1:]...)
+		// On macOS the filesystem fence wraps the child argv with sandbox-exec
+		// (kernel-enforced, inherited by all descendants). On Linux fsSandboxPrefix
+		// is empty and the child runs directly with the LD_PRELOAD env above.
+		childArgv := args
+		if len(fsSandboxPrefix) > 0 {
+			childArgv = append(append([]string{}, fsSandboxPrefix...), args...)
+		}
+		child := exec.CommandContext(childCtx, childArgv[0], childArgv[1:]...)
 		child.Env = childEnv
 		child.Stdin = os.Stdin
 		child.Stdout = os.Stdout

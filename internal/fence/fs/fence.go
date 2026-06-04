@@ -13,20 +13,21 @@ import (
 )
 
 // IsSupported returns true if the filesystem fence is supported on the current OS.
-// Currently only Linux is supported, as the fence relies on LD_PRELOAD interposition.
+// Linux uses LD_PRELOAD interposition; macOS (darwin) uses the Seatbelt sandbox
+// via sandbox-exec (see sbpl.go / seatbelt.go). The wrap command selects the
+// mechanism at launch.
 func IsSupported() bool {
-	return runtime.GOOS == "linux"
+	return runtime.GOOS == "linux" || runtime.GOOS == "darwin"
 }
 
 // CheckSupported returns an error if the filesystem fence is not supported
-// on the current operating system. The error message includes the current OS
-// and guidance on future platform support.
+// on the current operating system. The error message includes the current OS.
 func CheckSupported() error {
 	if IsSupported() {
 		return nil
 	}
 	return fmt.Errorf(
-		"filesystem fence is not supported on %s (requires Linux LD_PRELOAD); macOS support coming soon",
+		"filesystem fence is not supported on %s (supported: linux via LD_PRELOAD, darwin via Seatbelt)",
 		runtime.GOOS,
 	)
 }
