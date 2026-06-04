@@ -15,27 +15,24 @@ import (
 
 func TestIsSupported(t *testing.T) {
 	got := IsSupported()
-	want := runtime.GOOS == "linux"
+	// Linux (LD_PRELOAD) and darwin (Seatbelt) are both supported (N7938).
+	want := runtime.GOOS == "linux" || runtime.GOOS == "darwin"
 	if got != want {
 		t.Errorf("IsSupported() = %v, want %v (GOOS=%s)", got, want, runtime.GOOS)
 	}
 }
 
 func TestUnsupportedError(t *testing.T) {
-	if runtime.GOOS == "linux" {
-		t.Skip("test only runs on non-Linux platforms")
+	if IsSupported() {
+		t.Skipf("test only runs on unsupported platforms (GOOS=%s is supported)", runtime.GOOS)
 	}
 	err := CheckSupported()
 	if err == nil {
-		t.Fatal("expected error on non-Linux OS, got nil")
+		t.Fatal("expected error on an unsupported OS, got nil")
 	}
 	// Error should mention the current OS.
 	if got := err.Error(); !strings.Contains(got, runtime.GOOS) {
 		t.Errorf("error should mention %s, got: %s", runtime.GOOS, got)
-	}
-	// Error should mention macOS support coming soon.
-	if got := err.Error(); !strings.Contains(got, "macOS support coming soon") {
-		t.Errorf("error should mention macOS support, got: %s", got)
 	}
 }
 
@@ -68,8 +65,8 @@ func TestFenceEvent_UnmarshalJSON(t *testing.T) {
 // --- Task 5: Go Fence Wrapper Tests ---
 
 func TestNewFence_CreatesSocket(t *testing.T) {
-	if !IsSupported() {
-		t.Skip("filesystem fence not supported on " + runtime.GOOS)
+	if runtime.GOOS != "linux" {
+		t.Skip("LD_PRELOAD fence path is Linux-only; macOS uses Seatbelt (see seatbelt_darwin_test.go)")
 	}
 
 	cfg := &FenceConfig{
@@ -100,8 +97,8 @@ func TestNewFence_CreatesSocket(t *testing.T) {
 }
 
 func TestFence_EnvVars(t *testing.T) {
-	if !IsSupported() {
-		t.Skip("filesystem fence not supported on " + runtime.GOOS)
+	if runtime.GOOS != "linux" {
+		t.Skip("LD_PRELOAD fence path is Linux-only; macOS uses Seatbelt (see seatbelt_darwin_test.go)")
 	}
 
 	cfg := &FenceConfig{
@@ -140,8 +137,8 @@ func TestFence_EnvVars(t *testing.T) {
 }
 
 func TestFence_ListenReceivesEvents(t *testing.T) {
-	if !IsSupported() {
-		t.Skip("filesystem fence not supported on " + runtime.GOOS)
+	if runtime.GOOS != "linux" {
+		t.Skip("LD_PRELOAD fence path is Linux-only; macOS uses Seatbelt (see seatbelt_darwin_test.go)")
 	}
 
 	cfg := &FenceConfig{

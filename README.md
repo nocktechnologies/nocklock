@@ -9,7 +9,7 @@ NockLock puts a fence around your AI coding agent — controlling what secrets i
 Your AI agent runs with full shell access — your environment, your filesystem, your network. NockLock doesn't change how your agent works — it controls what it can reach.
 
 - **Secret Fence** — Filter environment variables. Your agent sees `PATH` and `HOME`. It never sees `AWS_SECRET_ACCESS_KEY`.
-- **Filesystem Fence** — LD_PRELOAD interception. Your agent can read the project directory. It can't read `~/.ssh/`. Linux via LD_PRELOAD (macOS support coming).
+- **Filesystem Fence** — Your agent can't read `~/.ssh/`, `~/.aws/`, and other credential paths. Linux: LD_PRELOAD interposition (allowlist — deny outside the project). macOS: Seatbelt / `sandbox-exec` (interim denylist — denies a curated set of sensitive paths; strict allowlist parity is planned via the Endpoint Security framework). Blocked-access event logging is Linux-only for now on the macOS path.
 - **Network Fence** — Local proxy with domain allowlist. Your agent can reach GitHub and `api.anthropic.com`. It can't phone home to anywhere else.
 
 ## Quick Start
@@ -28,7 +28,7 @@ That's it. Four commands. Your agent is fenced.
 `nocklock wrap` does three things before spawning your agent:
 
 1. **Filters environment variables** based on pass/block lists with glob patterns — Linux, macOS
-2. **Intercepts filesystem calls** via LD_PRELOAD, blocking access outside allowed paths — Linux only; macOS support coming
+2. **Fences the filesystem** — Linux: LD_PRELOAD interposition, blocking access outside allowed paths. macOS: a kernel Seatbelt sandbox (`sandbox-exec`) that denies a curated set of sensitive paths (interim denylist). Fails closed: if the fence can't be enforced, the agent doesn't start.
 3. **Routes network traffic** through a local proxy that enforces a domain allowlist — Linux, macOS. For HTTPS, only the hostname is inspected — no certificate injection, no payload decryption. If the proxy is not confirmed healthy, the agent does not start.
 
 Every blocked access is logged to `.nock/events.db`. Blocked file opens and access-style checks return EACCES (permission denied); denied stat-family probes return ENOENT to avoid existence enumeration. Blocked domains return 403.
@@ -131,7 +131,7 @@ cd nocklock
 make build-all
 ```
 
-Requires Go 1.26+. The binary is built to `./nocklock`. On Linux, `build-all` also compiles the filesystem fence interposer library (`libfence_fs.so`). On macOS, the library build is skipped automatically (macOS support coming).
+Requires Go 1.26+. The binary is built to `./nocklock`. On Linux, `build-all` also compiles the filesystem fence interposer library (`libfence_fs.so`). On macOS, the library build is skipped automatically — the filesystem fence uses the built-in Seatbelt sandbox (`sandbox-exec`), no native library required.
 
 ### Verify Installation
 
