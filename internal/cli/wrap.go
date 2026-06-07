@@ -149,6 +149,12 @@ var wrapCmd = &cobra.Command{
 		var fsFenceCancel context.CancelFunc
 		var fsSandboxPrefix []string
 		if cfg.Filesystem.Root != "" {
+			// Fence the audit log from the CHILD so the fenced agent can't delete
+			// or corrupt the record of its own actions (the unfenced parent still
+			// writes it). Critical on the macOS denylist fence, where the child can
+			// otherwise reach the db unless it's explicitly denied.
+			cfg.Filesystem.Deny = append(cfg.Filesystem.Deny, auditDenyPath(dbPath, projectRoot))
+
 			fsCfg, err := fsfence.ProcessConfig(cfg.Filesystem)
 			if err != nil {
 				return fmt.Errorf("invalid filesystem fence config: %w", err)
@@ -435,6 +441,34 @@ func validateWrapRuntimeConfig(cfg *config.Config) error {
 // findLibFenceFS searches for the filesystem fence shared library.
 // Security: check trusted paths first (next to binary, system paths)
 // before falling back to working directory paths.
+// auditDenyPath returns the path to add to the filesystem fence's deny list so a
+// fenced child cannot tamper with its own audit log. It denies the whole audit
+// directory (covering the db and blocking rename/delete of the log) unless the
+// log sits directly in the project root — in which case it denies only the db
+// file, so the root itself is never accidentally denied.
+//
+// The root comparison resolves symlinks (matching the fence's own path
+// canonicalization): on macOS /tmp and /var are symlinks to /private/*, so a
+// string-only compare could see the audit dir and a symlinked root as different
+// and deny the entire root (breaking the agent) — or as equal and skip the dir.
+func auditDenyPath(dbPath, projectRoot string) string {
+	auditDir := filepath.Dir(dbPath)
+	if resolvePathBestEffort(auditDir) != resolvePathBestEffort(projectRoot) {
+		return auditDir
+	}
+	return dbPath
+}
+
+// resolvePathBestEffort canonicalizes a path the way the fence does (resolving
+// symlinks), falling back to a lexical clean when the path cannot be resolved
+// (e.g. it does not exist yet).
+func resolvePathBestEffort(p string) string {
+	if resolved, err := filepath.EvalSymlinks(p); err == nil {
+		return resolved
+	}
+	return filepath.Clean(p)
+}
+
 func findLibFenceFS() string {
 	// 1. Next to the current executable.
 	if exe, err := os.Executable(); err == nil {

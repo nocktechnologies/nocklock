@@ -106,6 +106,44 @@ func TestWrapFailsClosedWhenEventLogCannotOpen(t *testing.T) {
 	}
 }
 
+func TestAuditDenyPath(t *testing.T) {
+	root := t.TempDir()
+	nock := filepath.Join(root, ".nock")
+	if err := os.MkdirAll(nock, 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	// Common case: db in a .nock subdir -> deny the whole audit dir (covers the
+	// db and blocks rename/delete of the log).
+	db := filepath.Join(nock, "events.db")
+	if got := auditDenyPath(db, root); got != nock {
+		t.Errorf("subdir case: auditDenyPath = %q, want %q", got, nock)
+	}
+
+	// Pathological: db directly in the project root -> deny only the file, never
+	// the root itself.
+	dbInRoot := filepath.Join(root, "events.db")
+	if got := auditDenyPath(dbInRoot, root); got != dbInRoot {
+		t.Errorf("root case: auditDenyPath = %q, want the file %q", got, dbInRoot)
+	}
+}
+
+// A symlinked project root must be recognized as the root via symlink resolution
+// (macOS /tmp -> /private/tmp). Without it, a string compare would see the audit
+// dir and the symlinked root as different and DENY THE WHOLE ROOT, breaking the
+// agent. db sits directly in the real root; root is given as a symlink to it.
+func TestAuditDenyPathSymlinkedRoot(t *testing.T) {
+	realRoot := t.TempDir()
+	link := filepath.Join(t.TempDir(), "link")
+	if err := os.Symlink(realRoot, link); err != nil {
+		t.Skipf("symlinks unsupported: %v", err)
+	}
+	db := filepath.Join(realRoot, "events.db")
+	if got := auditDenyPath(db, link); got != db {
+		t.Errorf("symlinked root not recognized: got %q, want the file %q (denying the root would break the agent)", got, db)
+	}
+}
+
 func TestWrapDryRunRejectsMalformedConfig(t *testing.T) {
 	dir := t.TempDir()
 	writeTestConfig(t, dir, "[network]\nallow_all = \"sometimes\"\n")
