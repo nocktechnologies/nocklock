@@ -65,23 +65,22 @@ var wrapCmd = &cobra.Command{
 		// Generate a session ID for event logging.
 		sessionID := uuid.New().String()
 
-		// Open the event logger. If it fails, warn and continue without logging.
-		var logger *logging.Logger
+		// Open the event logger. The audit trail is not optional — NockLock's
+		// guarantee is that every fence decision is recorded — so a logger that
+		// cannot open FAILS CLOSED: the agent does not start. This is the same
+		// posture as the network fence (cf. the removed --allow-unfenced flag):
+		// running unrecorded would silently break the "every decision is recorded"
+		// promise, which is worse than not running at all.
 		dbPath, projectRoot := config.ResolveDBPath(cfg, configPath)
 		logger, logErr := logging.NewLogger(dbPath, projectRoot)
 		if logErr != nil {
-			fmt.Fprintf(os.Stderr, "NockLock: warning: could not open event log: %v\n", logErr)
-			logger = nil
+			return fmt.Errorf("could not open the event log at %s: %w\nThe audit trail is required — refusing to run unrecorded. Fix the .nock directory's permissions or free disk space", dbPath, logErr)
 		}
-		if logger != nil {
-			defer logger.Close()
-		}
+		defer logger.Close()
 
-		// nil-safe logging helper.
+		// logEvent records one event. logger is guaranteed non-nil here (the open
+		// above fails closed), so no nil guard is needed.
 		logEvent := func(eventType logging.EventType, category, detail string, blocked bool) {
-			if logger == nil {
-				return
-			}
 			_ = logger.Log(logging.Event{
 				Timestamp: time.Now(),
 				EventType: eventType,
@@ -107,7 +106,7 @@ var wrapCmd = &cobra.Command{
 		childEnv, blockedNames := fence.Filter(os.Environ())
 
 		// Log all blocked env vars in a single transaction.
-		if logger != nil && len(blockedNames) > 0 {
+		if len(blockedNames) > 0 {
 			batch := make([]logging.Event, len(blockedNames))
 			for i, name := range blockedNames {
 				batch[i] = logging.Event{
