@@ -446,12 +446,27 @@ func validateWrapRuntimeConfig(cfg *config.Config) error {
 // directory (covering the db and blocking rename/delete of the log) unless the
 // log sits directly in the project root — in which case it denies only the db
 // file, so the root itself is never accidentally denied.
+//
+// The root comparison resolves symlinks (matching the fence's own path
+// canonicalization): on macOS /tmp and /var are symlinks to /private/*, so a
+// string-only compare could see the audit dir and a symlinked root as different
+// and deny the entire root (breaking the agent) — or as equal and skip the dir.
 func auditDenyPath(dbPath, projectRoot string) string {
 	auditDir := filepath.Dir(dbPath)
-	if filepath.Clean(auditDir) != filepath.Clean(projectRoot) {
+	if resolvePathBestEffort(auditDir) != resolvePathBestEffort(projectRoot) {
 		return auditDir
 	}
 	return dbPath
+}
+
+// resolvePathBestEffort canonicalizes a path the way the fence does (resolving
+// symlinks), falling back to a lexical clean when the path cannot be resolved
+// (e.g. it does not exist yet).
+func resolvePathBestEffort(p string) string {
+	if resolved, err := filepath.EvalSymlinks(p); err == nil {
+		return resolved
+	}
+	return filepath.Clean(p)
 }
 
 func findLibFenceFS() string {

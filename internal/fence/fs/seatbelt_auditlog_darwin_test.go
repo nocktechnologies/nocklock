@@ -45,7 +45,9 @@ func TestSeatbeltDeniesWriteToFencedAuditLog(t *testing.T) {
 	defer os.Remove(pf)
 
 	write := func(target string) error {
-		argv, werr := WrapArgv(pf, []string{"/bin/sh", "-c", "echo tampered > " + target})
+		// Pass the target as $1 rather than concatenating it into the script, so
+		// spaces or shell metacharacters in the path can't change the command.
+		argv, werr := WrapArgv(pf, []string{"/bin/sh", "-c", `echo tampered > "$1"`, "sh", target})
 		if werr != nil {
 			t.Fatalf("WrapArgv: %v", werr)
 		}
