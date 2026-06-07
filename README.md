@@ -185,7 +185,7 @@ NockLock is a fence, not guardrails. The distinction matters.
 
 **Guardrails** tell the agent what not to do. The agent can ignore them, work around them, or hallucinate past them. Guardrails are prompts.
 
-**A fence** sits between the agent and the resource. The agent can't read `~/.ssh/id_rsa` because the syscall returns EACCES. The agent can't reach `evil.com` because the proxy returns 403. No amount of prompt injection changes this.
+**A fence** sits between the agent and the resource. How hard the boundary is depends on the fence. The **secret fence** is absolute — a blocked variable is gone from the environment before the agent starts. On **macOS the filesystem fence** is kernel-enforced (Seatbelt) and fails closed. The **Linux filesystem and network fences** stop an agent's normal and prompt-injected attempts to read `~/.ssh/id_rsa` (EACCES) or reach `evil.com` (403) and log every try, but they are userspace containment: a process running arbitrary native code can bypass them. They are a strong default with a full audit trail, not a substitute for OS-level isolation against fully adversarial code.
 
 NockLock doesn't restrict how your agent works. It restricts what your agent can reach. Your agent still has full permissions — inside the fence.
 
