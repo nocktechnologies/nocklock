@@ -106,6 +106,23 @@ func TestWrapFailsClosedWhenEventLogCannotOpen(t *testing.T) {
 	}
 }
 
+func TestAuditDenyPath(t *testing.T) {
+	// Common case: db in a .nock subdir -> deny the whole audit dir (covers the
+	// db and blocks rename/delete of the log).
+	if got := auditDenyPath("/proj/.nock/events.db", "/proj"); got != "/proj/.nock" {
+		t.Errorf("auditDenyPath(.nock subdir) = %q, want /proj/.nock", got)
+	}
+	// Pathological: db directly in the project root -> deny only the file, never
+	// the root itself.
+	if got := auditDenyPath("/proj/events.db", "/proj"); got != "/proj/events.db" {
+		t.Errorf("auditDenyPath(db in root) = %q, want the file not the root", got)
+	}
+	// Trailing-slash / uncleaned root must still be recognized as the root.
+	if got := auditDenyPath("/proj/events.db", "/proj/"); got != "/proj/events.db" {
+		t.Errorf("auditDenyPath(uncleaned root) = %q, want the file", got)
+	}
+}
+
 func TestWrapDryRunRejectsMalformedConfig(t *testing.T) {
 	dir := t.TempDir()
 	writeTestConfig(t, dir, "[network]\nallow_all = \"sometimes\"\n")
