@@ -23,21 +23,43 @@ var cgnat = &net.IPNet{
 	Mask: net.CIDRMask(10, 32),
 }
 
+// awsMetadataIPv6 is the AWS IMDS IPv6 endpoint (fd00:ec2::254). It is a Unique
+// Local Address (fc00::/7), so IsLinkLocalUnicast() is false and IsPrivate() is
+// true — meaning allowPrivateRanges would otherwise permit it, exposing IPv6
+// credential SSRF. It is blocked unconditionally, like the IPv4 metadata endpoint
+// (169.254.169.254, already covered by IsLinkLocalUnicast). Blocking only this
+// exact address — not all of fc00::/7 — keeps legitimate ULA local-dev targets
+// reachable under allowPrivateRanges.
+var awsMetadataIPv6 = net.ParseIP("fd00:ec2::254")
+
 // isBlockedIP reports whether ip should never be dialed by the proxy.
 //
 // By default blocks: loopback, unspecified (0.0.0.0/::), link-local unicast,
 // multicast, RFC-1918 private ranges, and CGNAT (100.64.0.0/10).
 //
-// When allowPrivateRanges is true, RFC-1918, loopback, CGNAT, and link-local
-// are permitted (useful for local development). Multicast is always blocked.
+// When allowPrivateRanges is true, RFC-1918, loopback, CGNAT, and unspecified
+// are permitted (useful for local development). Multicast AND link-local unicast
+// remain blocked regardless: link-local (169.254.0.0/16, fe80::/10) covers the
+// cloud-metadata endpoint 169.254.169.254 — the AWS/GCP/Azure credential-SSRF
+// target — so a blunt "local dev" flag must never silently re-open it.
 func isBlockedIP(ip net.IP, allowPrivateRanges bool) bool {
 	// Multicast is always blocked regardless of allowPrivateRanges.
 	if ip.IsMulticast() || ip.IsLinkLocalMulticast() {
 		return true
 	}
 
+	// Link-local unicast (incl. the IPv4 metadata endpoint 169.254.169.254) and
+	// the AWS IPv6 metadata endpoint (fd00:ec2::254, a ULA that IsPrivate would
+	// otherwise permit) are ALWAYS blocked, even with allowPrivateRanges.
+	// Permitting RFC-1918/loopback/CGNAT for local development is a separate,
+	// lower-risk decision than exposing instance-credential metadata.
+	if ip.IsLinkLocalUnicast() || ip.Equal(awsMetadataIPv6) {
+		return true
+	}
+
 	if allowPrivateRanges {
-		// Permit everything except multicast (checked above).
+		// Permit RFC-1918 / loopback / CGNAT / unspecified for local development.
+		// (Multicast and link-local already rejected above.)
 		return false
 	}
 
@@ -48,7 +70,6 @@ func isBlockedIP(ip net.IP, allowPrivateRanges bool) bool {
 	}
 	return ip.IsLoopback() ||
 		ip.IsUnspecified() ||
-		ip.IsLinkLocalUnicast() ||
 		ip.IsPrivate()
 }
 
