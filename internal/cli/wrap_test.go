@@ -77,6 +77,35 @@ func TestWrapDryRunValidatesConfigWithoutCommand(t *testing.T) {
 	}
 }
 
+// The audit trail is the product's core promise ("every fence decision is
+// recorded"), so a logger that cannot open must FAIL CLOSED — the agent does not
+// start — rather than silently continue unrecorded. Same posture as the network
+// fence (the removed --allow-unfenced).
+func TestWrapFailsClosedWhenEventLogCannotOpen(t *testing.T) {
+	dir := t.TempDir()
+	// Put a regular FILE where the log directory needs to be, so the logger's
+	// MkdirAll fails and NewLogger returns an error — a portable way to force an
+	// unopenable event log without relying on permission bits.
+	if err := os.WriteFile(filepath.Join(dir, "blocker"), []byte("x"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	toml := strings.Replace(dryRunTestTOML(), `db = ".nock/events.db"`, `db = "blocker/events.db"`, 1)
+	if !strings.Contains(toml, "blocker/events.db") {
+		t.Fatal("test setup: failed to redirect the log db path")
+	}
+	writeTestConfig(t, dir, toml)
+	withWorkingDir(t, dir)
+
+	cmd := &cobra.Command{}
+	err := wrapCmd.RunE(cmd, []string{"--", "true"})
+	if err == nil {
+		t.Fatal("wrap should fail closed when the event log cannot open, but returned nil")
+	}
+	if !strings.Contains(err.Error(), "event log") || !strings.Contains(err.Error(), "audit trail is required") {
+		t.Fatalf("expected a fail-closed audit-log error, got: %v", err)
+	}
+}
+
 func TestWrapDryRunRejectsMalformedConfig(t *testing.T) {
 	dir := t.TempDir()
 	writeTestConfig(t, dir, "[network]\nallow_all = \"sometimes\"\n")
