@@ -216,9 +216,10 @@ func TestIsBlockedIPAllowPrivateStillBlocksLinkLocalMetadata(t *testing.T) {
 		blocked bool
 		why     string
 	}{
-		{"169.254.169.254", true, "cloud-metadata endpoint must stay blocked"},
+		{"169.254.169.254", true, "IPv4 cloud-metadata endpoint must stay blocked"},
 		{"169.254.10.1", true, "link-local unicast must stay blocked"},
 		{"fe80::1", true, "IPv6 link-local must stay blocked"},
+		{"fd00:ec2::254", true, "AWS IPv6 metadata endpoint (ULA) must stay blocked"},
 		{"224.0.0.1", true, "multicast must stay blocked"},
 		{"ff02::1", true, "IPv6 link-local multicast must stay blocked"},
 		// These ARE the point of allowPrivateRanges — now reachable.
@@ -226,6 +227,7 @@ func TestIsBlockedIPAllowPrivateStillBlocksLinkLocalMetadata(t *testing.T) {
 		{"192.168.1.10", false, "RFC-1918 permitted for local dev"},
 		{"127.0.0.1", false, "loopback permitted for local dev"},
 		{"100.64.0.1", false, "CGNAT permitted for local dev"},
+		{"fd12:3456:789a::1", false, "a normal IPv6 ULA (not the metadata endpoint) is still reachable — we don't over-block fc00::/7"},
 		{"8.8.8.8", false, "public still reachable"},
 	}
 	for _, tc := range cases {

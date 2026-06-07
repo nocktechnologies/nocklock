@@ -23,6 +23,15 @@ var cgnat = &net.IPNet{
 	Mask: net.CIDRMask(10, 32),
 }
 
+// awsMetadataIPv6 is the AWS IMDS IPv6 endpoint (fd00:ec2::254). It is a Unique
+// Local Address (fc00::/7), so IsLinkLocalUnicast() is false and IsPrivate() is
+// true — meaning allowPrivateRanges would otherwise permit it, exposing IPv6
+// credential SSRF. It is blocked unconditionally, like the IPv4 metadata endpoint
+// (169.254.169.254, already covered by IsLinkLocalUnicast). Blocking only this
+// exact address — not all of fc00::/7 — keeps legitimate ULA local-dev targets
+// reachable under allowPrivateRanges.
+var awsMetadataIPv6 = net.ParseIP("fd00:ec2::254")
+
 // isBlockedIP reports whether ip should never be dialed by the proxy.
 //
 // By default blocks: loopback, unspecified (0.0.0.0/::), link-local unicast,
@@ -39,11 +48,12 @@ func isBlockedIP(ip net.IP, allowPrivateRanges bool) bool {
 		return true
 	}
 
-	// Link-local unicast is ALWAYS blocked, even with allowPrivateRanges, because
-	// it includes the cloud-metadata SSRF endpoint (169.254.169.254). Permitting
-	// RFC-1918/loopback/CGNAT for local development is a separate, lower-risk
-	// decision than exposing instance-credential metadata.
-	if ip.IsLinkLocalUnicast() {
+	// Link-local unicast (incl. the IPv4 metadata endpoint 169.254.169.254) and
+	// the AWS IPv6 metadata endpoint (fd00:ec2::254, a ULA that IsPrivate would
+	// otherwise permit) are ALWAYS blocked, even with allowPrivateRanges.
+	// Permitting RFC-1918/loopback/CGNAT for local development is a separate,
+	// lower-risk decision than exposing instance-credential metadata.
+	if ip.IsLinkLocalUnicast() || ip.Equal(awsMetadataIPv6) {
 		return true
 	}
 
