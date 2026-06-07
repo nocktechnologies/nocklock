@@ -28,16 +28,28 @@ var cgnat = &net.IPNet{
 // By default blocks: loopback, unspecified (0.0.0.0/::), link-local unicast,
 // multicast, RFC-1918 private ranges, and CGNAT (100.64.0.0/10).
 //
-// When allowPrivateRanges is true, RFC-1918, loopback, CGNAT, and link-local
-// are permitted (useful for local development). Multicast is always blocked.
+// When allowPrivateRanges is true, RFC-1918, loopback, CGNAT, and unspecified
+// are permitted (useful for local development). Multicast AND link-local unicast
+// remain blocked regardless: link-local (169.254.0.0/16, fe80::/10) covers the
+// cloud-metadata endpoint 169.254.169.254 — the AWS/GCP/Azure credential-SSRF
+// target — so a blunt "local dev" flag must never silently re-open it.
 func isBlockedIP(ip net.IP, allowPrivateRanges bool) bool {
 	// Multicast is always blocked regardless of allowPrivateRanges.
 	if ip.IsMulticast() || ip.IsLinkLocalMulticast() {
 		return true
 	}
 
+	// Link-local unicast is ALWAYS blocked, even with allowPrivateRanges, because
+	// it includes the cloud-metadata SSRF endpoint (169.254.169.254). Permitting
+	// RFC-1918/loopback/CGNAT for local development is a separate, lower-risk
+	// decision than exposing instance-credential metadata.
+	if ip.IsLinkLocalUnicast() {
+		return true
+	}
+
 	if allowPrivateRanges {
-		// Permit everything except multicast (checked above).
+		// Permit RFC-1918 / loopback / CGNAT / unspecified for local development.
+		// (Multicast and link-local already rejected above.)
 		return false
 	}
 
@@ -48,7 +60,6 @@ func isBlockedIP(ip net.IP, allowPrivateRanges bool) bool {
 	}
 	return ip.IsLoopback() ||
 		ip.IsUnspecified() ||
-		ip.IsLinkLocalUnicast() ||
 		ip.IsPrivate()
 }
 
