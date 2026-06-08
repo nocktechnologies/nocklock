@@ -390,11 +390,19 @@ static void report_blocked(const char *path, const char *operation,
     struct sockaddr_un addr;
     memset(&addr, 0, sizeof(addr));
     addr.sun_family = AF_UNIX;
-    strncpy(addr.sun_path, g_config.socket_path, sizeof(addr.sun_path) - 1);
+    /* snprintf truncates safely and null-terminates (memset zeroed the buffer).
+     * The socket path is bounded in practice but GCC can't prove it, so suppress
+     * the pedantic format-truncation diagnostic locally. */
+#pragma GCC diagnostic push
+#pragma GCC diagnostic ignored "-Wformat-truncation"
+    snprintf(addr.sun_path, sizeof(addr.sun_path), "%s", g_config.socket_path);
+#pragma GCC diagnostic pop
 
     if (connect(fd, (struct sockaddr *)&addr, sizeof(addr)) == 0) {
-        /* Write the full buffer; best-effort, ignore partial writes. */
-        (void)write(fd, buf, (size_t)len);
+        /* Write the full buffer; best-effort. Explicitly ignore the result
+         * (checking it satisfies warn_unused_result on modern GCC). */
+        ssize_t wr = write(fd, buf, (size_t)len);
+        (void)wr;
     }
     close(fd);
 }
@@ -646,7 +654,10 @@ int open(const char *pathname, int flags, ...)
     }
 
     if (!real_open) { errno = ENOSYS; return -1; }
-    return real_open(pathname, flags, mode);
+    /* Pass the canonical resolved path, not the original pathname, so a symlink
+     * swap between check_path and the real call can't redirect the operation
+     * outside the fence (TOCTOU). Matches the stat-family hooks. */
+    return real_open(resolved, flags, mode);
 }
 
 int openat(int dirfd, const char *pathname, int flags, ...)
@@ -684,7 +695,9 @@ int openat(int dirfd, const char *pathname, int flags, ...)
     }
 
     if (!real_openat) { errno = ENOSYS; return -1; }
-    return real_openat(dirfd, pathname, flags, mode);
+    /* resolved is absolute, so dirfd is ignored by the kernel — closes the
+     * symlink-swap TOCTOU between check_path and the real call. */
+    return real_openat(dirfd, resolved, flags, mode);
 }
 
 FILE *fopen(const char *pathname, const char *mode)
@@ -710,7 +723,7 @@ FILE *fopen(const char *pathname, const char *mode)
     }
 
     if (!real_fopen) { errno = ENOSYS; return NULL; }
-    return real_fopen(pathname, mode);
+    return real_fopen(resolved, mode);
 }
 
 int access(const char *pathname, int amode)
@@ -763,7 +776,7 @@ int unlink(const char *pathname)
     }
 
     if (!real_unlink) { errno = ENOSYS; return -1; }
-    return real_unlink(pathname);
+    return real_unlink(resolved);
 }
 
 int rename(const char *oldpath, const char *newpath)
@@ -802,7 +815,7 @@ int rename(const char *oldpath, const char *newpath)
     }
 
     if (!real_rename) { errno = ENOSYS; return -1; }
-    return real_rename(oldpath, newpath);
+    return real_rename(resolved_old, resolved_new);
 }
 
 int mkdir(const char *pathname, mode_t mode)
@@ -828,7 +841,7 @@ int mkdir(const char *pathname, mode_t mode)
     }
 
     if (!real_mkdir) { errno = ENOSYS; return -1; }
-    return real_mkdir(pathname, mode);
+    return real_mkdir(resolved, mode);
 }
 
 int rmdir(const char *pathname)
@@ -854,7 +867,7 @@ int rmdir(const char *pathname)
     }
 
     if (!real_rmdir) { errno = ENOSYS; return -1; }
-    return real_rmdir(pathname);
+    return real_rmdir(resolved);
 }
 
 ssize_t readlink(const char *pathname, char *buf, size_t bufsiz)
@@ -955,9 +968,9 @@ int open64(const char *pathname, int flags, ...)
     }
 
     if (real_open64)
-        return real_open64(pathname, flags, mode);
+        return real_open64(resolved, flags, mode);
     if (real_open)
-        return real_open(pathname, flags, mode);
+        return real_open(resolved, flags, mode);
     errno = ENOSYS;
     return -1;
 }
@@ -1000,9 +1013,9 @@ int openat64(int dirfd, const char *pathname, int flags, ...)
     }
 
     if (real_openat64)
-        return real_openat64(dirfd, pathname, flags, mode);
+        return real_openat64(dirfd, resolved, flags, mode);
     if (real_openat)
-        return real_openat(dirfd, pathname, flags, mode);
+        return real_openat(dirfd, resolved, flags, mode);
     errno = ENOSYS;
     return -1;
 }
@@ -1033,9 +1046,9 @@ FILE *fopen64(const char *pathname, const char *mode)
     }
 
     if (real_fopen64)
-        return real_fopen64(pathname, mode);
+        return real_fopen64(resolved, mode);
     if (real_fopen)
-        return real_fopen(pathname, mode);
+        return real_fopen(resolved, mode);
     errno = ENOSYS;
     return NULL;
 }
@@ -1068,7 +1081,7 @@ int unlinkat(int dirfd, const char *pathname, int flags)
     }
 
     if (!real_unlinkat) { errno = ENOSYS; return -1; }
-    return real_unlinkat(dirfd, pathname, flags);
+    return real_unlinkat(dirfd, resolved, flags);
 }
 
 int renameat(int olddirfd, const char *oldpath,
@@ -1108,7 +1121,7 @@ int renameat(int olddirfd, const char *oldpath,
     }
 
     if (!real_renameat) { errno = ENOSYS; return -1; }
-    return real_renameat(olddirfd, oldpath, newdirfd, newpath);
+    return real_renameat(olddirfd, resolved_old, newdirfd, resolved_new);
 }
 
 int renameat2(int olddirfd, const char *oldpath,
@@ -1148,7 +1161,7 @@ int renameat2(int olddirfd, const char *oldpath,
     }
 
     if (real_renameat2)
-        return real_renameat2(olddirfd, oldpath, newdirfd, newpath, flags);
+        return real_renameat2(olddirfd, resolved_old, newdirfd, resolved_new, flags);
     errno = ENOSYS;
     return -1;
 }
@@ -1177,7 +1190,7 @@ int mkdirat(int dirfd, const char *pathname, mode_t mode)
     }
 
     if (!real_mkdirat) { errno = ENOSYS; return -1; }
-    return real_mkdirat(dirfd, pathname, mode);
+    return real_mkdirat(dirfd, resolved, mode);
 }
 
 int symlinkat(const char *target, int newdirfd, const char *linkpath)
@@ -1221,7 +1234,12 @@ int symlinkat(const char *target, int newdirfd, const char *linkpath)
         char *slash = strrchr(link_parent, '/');
         if (slash) *slash = '\0';
         char full_target[PATH_MAX];
+        /* snprintf truncates safely + null-terminates by design; suppress the
+         * pedantic format-truncation diagnostic that modern GCC -Werror raises. */
+#pragma GCC diagnostic push
+#pragma GCC diagnostic ignored "-Wformat-truncation"
         snprintf(full_target, PATH_MAX, "%s/%s", link_parent, target);
+#pragma GCC diagnostic pop
         if (resolve_path(full_target, resolved_target) != 0) {
             report_blocked(target, "symlinkat", "target path resolution failed");
             errno = EACCES;
@@ -1236,7 +1254,9 @@ int symlinkat(const char *target, int newdirfd, const char *linkpath)
     }
 
     if (!real_symlinkat) { errno = ENOSYS; return -1; }
-    return real_symlinkat(target, newdirfd, linkpath);
+    /* Create the link at the resolved linkpath (TOCTOU). target is the link's
+     * CONTENTS, not a path to act on, so it is passed through unchanged. */
+    return real_symlinkat(target, newdirfd, resolved);
 }
 
 int linkat(int olddirfd, const char *oldpath,
@@ -1276,7 +1296,7 @@ int linkat(int olddirfd, const char *oldpath,
     }
 
     if (!real_linkat) { errno = ENOSYS; return -1; }
-    return real_linkat(olddirfd, oldpath, newdirfd, newpath, flags);
+    return real_linkat(olddirfd, resolved_old, newdirfd, resolved_new, flags);
 }
 
 /* ------------------------------------------------------------------ */
@@ -1309,9 +1329,9 @@ int creat(const char *pathname, mode_t mode)
     }
 
     if (real_creat)
-        return real_creat(pathname, mode);
+        return real_creat(resolved, mode);
     if (real_open)
-        return real_open(pathname, O_CREAT | O_WRONLY | O_TRUNC, mode);
+        return real_open(resolved, O_CREAT | O_WRONLY | O_TRUNC, mode);
     errno = ENOSYS;
     return -1;
 }
@@ -1357,7 +1377,12 @@ int symlink(const char *target, const char *linkpath)
         char *slash = strrchr(link_parent, '/');
         if (slash) *slash = '\0';
         char full_target[PATH_MAX];
+        /* snprintf truncates safely + null-terminates by design; suppress the
+         * pedantic format-truncation diagnostic that modern GCC -Werror raises. */
+#pragma GCC diagnostic push
+#pragma GCC diagnostic ignored "-Wformat-truncation"
         snprintf(full_target, PATH_MAX, "%s/%s", link_parent, target);
+#pragma GCC diagnostic pop
         if (resolve_path(full_target, resolved_target) != 0) {
             report_blocked(target, "symlink", "target path resolution failed");
             errno = EACCES;
@@ -1372,7 +1397,9 @@ int symlink(const char *target, const char *linkpath)
     }
 
     if (!real_symlink) { errno = ENOSYS; return -1; }
-    return real_symlink(target, linkpath);
+    /* Create the link at the resolved linkpath (TOCTOU). target is the link's
+     * CONTENTS, not a path to act on, so it is passed through unchanged. */
+    return real_symlink(target, resolved);
 }
 
 int link(const char *oldpath, const char *newpath)
@@ -1410,7 +1437,7 @@ int link(const char *oldpath, const char *newpath)
     }
 
     if (!real_link) { errno = ENOSYS; return -1; }
-    return real_link(oldpath, newpath);
+    return real_link(resolved_old, resolved_new);
 }
 
 int chmod(const char *pathname, mode_t mode)
@@ -1436,7 +1463,7 @@ int chmod(const char *pathname, mode_t mode)
     }
 
     if (!real_chmod) { errno = ENOSYS; return -1; }
-    return real_chmod(pathname, mode);
+    return real_chmod(resolved, mode);
 }
 
 int chown(const char *pathname, uid_t owner, gid_t group)
@@ -1462,7 +1489,7 @@ int chown(const char *pathname, uid_t owner, gid_t group)
     }
 
     if (!real_chown) { errno = ENOSYS; return -1; }
-    return real_chown(pathname, owner, group);
+    return real_chown(resolved, owner, group);
 }
 
 int truncate(const char *pathname, off_t length)
@@ -1488,7 +1515,7 @@ int truncate(const char *pathname, off_t length)
     }
 
     if (!real_truncate) { errno = ENOSYS; return -1; }
-    return real_truncate(pathname, length);
+    return real_truncate(resolved, length);
 }
 
 /* ------------------------------------------------------------------ */
