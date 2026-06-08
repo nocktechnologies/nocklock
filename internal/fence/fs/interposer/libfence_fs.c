@@ -390,9 +390,13 @@ static void report_blocked(const char *path, const char *operation,
     struct sockaddr_un addr;
     memset(&addr, 0, sizeof(addr));
     addr.sun_family = AF_UNIX;
-    /* snprintf truncates safely and null-terminates (memset zeroed the buffer);
-     * avoids the stringop-truncation diagnostic strncpy raises on modern GCC. */
+    /* snprintf truncates safely and null-terminates (memset zeroed the buffer).
+     * The socket path is bounded in practice but GCC can't prove it, so suppress
+     * the pedantic format-truncation diagnostic locally. */
+#pragma GCC diagnostic push
+#pragma GCC diagnostic ignored "-Wformat-truncation"
     snprintf(addr.sun_path, sizeof(addr.sun_path), "%s", g_config.socket_path);
+#pragma GCC diagnostic pop
 
     if (connect(fd, (struct sockaddr *)&addr, sizeof(addr)) == 0) {
         /* Write the full buffer; best-effort. Explicitly ignore the result
