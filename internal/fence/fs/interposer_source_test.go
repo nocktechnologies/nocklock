@@ -96,3 +96,42 @@ func TestInterposerSourceBypassesATEmptyPathForNonPathFileDescriptors(t *testing
 		}
 	}
 }
+
+// TestInterposerSourceUsesResolvedPathForWriteFamily guards the #32 TOCTOU fix.
+// Every write/mutate hook must hand the real syscall the canonical *resolved*
+// path that check_path() authorized — never the caller's original pathname — so
+// a symlink swap between the check and the real call cannot redirect the
+// operation outside the fence. If any hook regresses to passing the original
+// pathname, the matching `resolved` pattern below stops matching and this fails.
+func TestInterposerSourceUsesResolvedPathForWriteFamily(t *testing.T) {
+	source, err := os.ReadFile("interposer/libfence_fs.c")
+	if err != nil {
+		t.Fatalf("read interposer source: %v", err)
+	}
+	text := string(source)
+
+	for _, pattern := range []string{
+		`return\s+real_open\s*\(\s*resolved\s*,\s*flags\s*,\s*mode\s*\)\s*;`,
+		`return\s+real_openat\s*\(\s*dirfd\s*,\s*resolved\s*,\s*flags\s*,\s*mode\s*\)\s*;`,
+		`return\s+real_fopen\s*\(\s*resolved\s*,\s*mode\s*\)\s*;`,
+		`return\s+real_unlink\s*\(\s*resolved\s*\)\s*;`,
+		`return\s+real_rename\s*\(\s*resolved_old\s*,\s*resolved_new\s*\)\s*;`,
+		`return\s+real_mkdir\s*\(\s*resolved\s*,\s*mode\s*\)\s*;`,
+		`return\s+real_rmdir\s*\(\s*resolved\s*\)\s*;`,
+		`return\s+real_open64\s*\(\s*resolved\s*,\s*flags\s*,\s*mode\s*\)\s*;`,
+		`return\s+real_openat64\s*\(\s*dirfd\s*,\s*resolved\s*,\s*flags\s*,\s*mode\s*\)\s*;`,
+		`return\s+real_fopen64\s*\(\s*resolved\s*,\s*mode\s*\)\s*;`,
+		`return\s+real_unlinkat\s*\(\s*dirfd\s*,\s*resolved\s*,\s*flags\s*\)\s*;`,
+		`return\s+real_renameat\s*\(\s*olddirfd\s*,\s*resolved_old\s*,\s*newdirfd\s*,\s*resolved_new\s*\)\s*;`,
+		`return\s+real_renameat2\s*\(\s*olddirfd\s*,\s*resolved_old\s*,\s*newdirfd\s*,\s*resolved_new\s*,\s*flags\s*\)\s*;`,
+		`return\s+real_mkdirat\s*\(\s*dirfd\s*,\s*resolved\s*,\s*mode\s*\)\s*;`,
+		// symlinkat: target is the link's CONTENTS (passed through unchanged); the
+		// linkpath being created is the resolved one.
+		`return\s+real_symlinkat\s*\(\s*target\s*,\s*newdirfd\s*,\s*resolved\s*\)\s*;`,
+		`return\s+real_linkat\s*\(\s*olddirfd\s*,\s*resolved_old\s*,\s*newdirfd\s*,\s*resolved_new\s*,\s*flags\s*\)\s*;`,
+	} {
+		if !regexp.MustCompile(pattern).MatchString(text) {
+			t.Fatalf("libfence_fs.c missing TOCTOU-safe resolved-path call (regression of #32?): %q", pattern)
+		}
+	}
+}
