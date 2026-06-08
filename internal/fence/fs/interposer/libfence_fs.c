@@ -390,11 +390,15 @@ static void report_blocked(const char *path, const char *operation,
     struct sockaddr_un addr;
     memset(&addr, 0, sizeof(addr));
     addr.sun_family = AF_UNIX;
-    strncpy(addr.sun_path, g_config.socket_path, sizeof(addr.sun_path) - 1);
+    /* snprintf truncates safely and null-terminates (memset zeroed the buffer);
+     * avoids the stringop-truncation diagnostic strncpy raises on modern GCC. */
+    snprintf(addr.sun_path, sizeof(addr.sun_path), "%s", g_config.socket_path);
 
     if (connect(fd, (struct sockaddr *)&addr, sizeof(addr)) == 0) {
-        /* Write the full buffer; best-effort, ignore partial writes. */
-        (void)write(fd, buf, (size_t)len);
+        /* Write the full buffer; best-effort. Explicitly ignore the result
+         * (checking it satisfies warn_unused_result on modern GCC). */
+        ssize_t wr = write(fd, buf, (size_t)len);
+        (void)wr;
     }
     close(fd);
 }
@@ -1226,7 +1230,12 @@ int symlinkat(const char *target, int newdirfd, const char *linkpath)
         char *slash = strrchr(link_parent, '/');
         if (slash) *slash = '\0';
         char full_target[PATH_MAX];
+        /* snprintf truncates safely + null-terminates by design; suppress the
+         * pedantic format-truncation diagnostic that modern GCC -Werror raises. */
+#pragma GCC diagnostic push
+#pragma GCC diagnostic ignored "-Wformat-truncation"
         snprintf(full_target, PATH_MAX, "%s/%s", link_parent, target);
+#pragma GCC diagnostic pop
         if (resolve_path(full_target, resolved_target) != 0) {
             report_blocked(target, "symlinkat", "target path resolution failed");
             errno = EACCES;
@@ -1364,7 +1373,12 @@ int symlink(const char *target, const char *linkpath)
         char *slash = strrchr(link_parent, '/');
         if (slash) *slash = '\0';
         char full_target[PATH_MAX];
+        /* snprintf truncates safely + null-terminates by design; suppress the
+         * pedantic format-truncation diagnostic that modern GCC -Werror raises. */
+#pragma GCC diagnostic push
+#pragma GCC diagnostic ignored "-Wformat-truncation"
         snprintf(full_target, PATH_MAX, "%s/%s", link_parent, target);
+#pragma GCC diagnostic pop
         if (resolve_path(full_target, resolved_target) != 0) {
             report_blocked(target, "symlink", "target path resolution failed");
             errno = EACCES;
