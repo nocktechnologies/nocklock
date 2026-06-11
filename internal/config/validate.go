@@ -47,6 +47,19 @@ func Validate(cfg *Config) []ValidationError {
 		})
 	}
 
+	// filesystem.linux_enforcement controls the Linux kernel-enforced Landlock
+	// layer. Empty is accepted for old configs and defaults to "required".
+	switch cfg.Filesystem.LinuxEnforcement {
+	case "required", "preferred", "off", "":
+		// valid
+	default:
+		errs = append(errs, ValidationError{
+			Field:    "filesystem.linux_enforcement",
+			Message:  fmt.Sprintf("invalid value %q: must be \"required\", \"preferred\", \"off\", or \"\"", cfg.Filesystem.LinuxEnforcement),
+			Severity: "error",
+		})
+	}
+
 	// cloud.enabled=true requires api_key.
 	if cfg.Cloud.Enabled && cfg.Cloud.APIKey == "" {
 		errs = append(errs, ValidationError{
@@ -106,11 +119,15 @@ func (cfg *Config) EffectivePolicy() string {
 	if mode == "" {
 		mode = "read-write"
 	}
+	linuxEnforcement := cfg.Filesystem.LinuxEnforcement
+	if linuxEnforcement == "" {
+		linuxEnforcement = "required"
+	}
 	root := cfg.Filesystem.Root
 	if root == "" {
 		root = "."
 	}
-	fmt.Fprintf(&b, "  Filesystem: root=%s mode=%s", root, mode)
+	fmt.Fprintf(&b, "  Filesystem: root=%s mode=%s linux_enforcement=%s", root, mode, linuxEnforcement)
 	if len(cfg.Filesystem.Deny) > 0 {
 		fmt.Fprintf(&b, " deny=%d path(s)", len(cfg.Filesystem.Deny))
 	}

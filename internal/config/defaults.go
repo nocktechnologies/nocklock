@@ -8,8 +8,9 @@ func DefaultConfig() Config {
 			Root: ".",
 		},
 		Filesystem: FilesystemConfig{
-			Root: ".",
-			Mode: "read-write",
+			Root:             ".",
+			Mode:             "read-write",
+			LinuxEnforcement: "required",
 			Allow: []string{
 				"~/.claude/",
 				"/tmp/",
@@ -74,6 +75,7 @@ root = "."
 [filesystem]
 root = "."
 mode = "read-write"
+linux_enforcement = "required"
 allow = [
     "~/.claude/",
     "/tmp/",
