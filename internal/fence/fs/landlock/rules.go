@@ -3,6 +3,7 @@ package landlock
 import (
 	"encoding/json"
 	"fmt"
+	"os"
 	"path/filepath"
 
 	fsfence "github.com/nocktechnologies/nocklock/internal/fence/fs"
@@ -141,12 +142,25 @@ func RulesFromConfig(cfg *fsfence.FenceConfig, extra []AllowPath, abi int) (Spec
 }
 
 func pathRule(path, access string, abi int) PathRule {
+	rights := rightsForPath(path, access)
+	rights &= RightsForABI(abi)
+	return PathRule{Path: filepath.Clean(path), Access: access, Rights: rights}
+}
+
+func rightsForPath(path, access string) uint64 {
 	rights := readRights
+	info, err := os.Stat(path)
+	if err == nil && !info.IsDir() {
+		rights = RightExecute | RightReadFile
+		if access == AccessReadWrite {
+			rights |= RightWriteFile | RightTruncate
+		}
+		return rights
+	}
 	if access == AccessReadWrite {
 		rights |= writeRights
 	}
-	rights &= RightsForABI(abi)
-	return PathRule{Path: filepath.Clean(path), Access: access, Rights: rights}
+	return rights
 }
 
 func MarshalSpec(spec Spec) (string, error) {

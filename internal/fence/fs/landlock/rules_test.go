@@ -1,6 +1,7 @@
 package landlock
 
 import (
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -57,6 +58,30 @@ func TestRulesFromConfigMapsReadOnlyAndReadWriteRights(t *testing.T) {
 	}
 	if spec.Paths[2].Path != readWrite || spec.Paths[2].Access != AccessReadWrite {
 		t.Fatalf("extra rule = %+v, want read-write %s", spec.Paths[2], readWrite)
+	}
+}
+
+func TestRulesFromConfigLimitsRegularFileRights(t *testing.T) {
+	root := t.TempDir()
+	dbPath := filepath.Join(root, "events.db")
+	if err := os.WriteFile(dbPath, []byte(""), 0o600); err != nil {
+		t.Fatalf("write db placeholder: %v", err)
+	}
+
+	spec, err := RulesFromConfig(&fsfence.FenceConfig{
+		Root: root,
+		Mode: "read-write",
+	}, []AllowPath{{Path: dbPath, Access: AccessReadWrite}}, 5)
+	if err != nil {
+		t.Fatalf("RulesFromConfig failed: %v", err)
+	}
+
+	fileRule := spec.Paths[1]
+	if fileRule.Rights&RightMakeDir != 0 || fileRule.Rights&RightRemoveDir != 0 || fileRule.Rights&RightRefer != 0 {
+		t.Fatalf("regular file rule should not include directory-only rights: %#x", fileRule.Rights)
+	}
+	if fileRule.Rights&RightWriteFile == 0 || fileRule.Rights&RightTruncate == 0 {
+		t.Fatalf("regular read-write file rule should include write/truncate: %#x", fileRule.Rights)
 	}
 }
 
