@@ -37,6 +37,28 @@ func TestValidateValidFilesystemModes(t *testing.T) {
 	}
 }
 
+func TestValidateLinuxEnforcement(t *testing.T) {
+	for _, mode := range []string{"required", "preferred", "off", ""} {
+		cfg := DefaultConfig()
+		cfg.Filesystem.LinuxEnforcement = mode
+		errs := Validate(&cfg)
+		for _, e := range errs {
+			if e.Severity == "error" && e.Field == "filesystem.linux_enforcement" {
+				t.Errorf("linux_enforcement %q should be valid, got error: %s", mode, e.Message)
+			}
+		}
+	}
+}
+
+func TestValidateInvalidLinuxEnforcement(t *testing.T) {
+	cfg := DefaultConfig()
+	cfg.Filesystem.LinuxEnforcement = "optional"
+	errs := Validate(&cfg)
+	if !hasError(errs, "filesystem.linux_enforcement") {
+		t.Error("expected validation error for invalid filesystem.linux_enforcement")
+	}
+}
+
 func TestValidateInvalidLoggingLevel(t *testing.T) {
 	cfg := DefaultConfig()
 	cfg.Logging.Level = "verbose" // invalid
@@ -126,6 +148,9 @@ func TestEffectivePolicySummary(t *testing.T) {
 	}
 	if !strings.Contains(summary, "read-write") {
 		t.Error("effective policy should mention filesystem mode")
+	}
+	if !strings.Contains(summary, "linux_enforcement=required") {
+		t.Error("effective policy should mention Linux enforcement mode")
 	}
 	if !strings.Contains(summary, "DENY") {
 		t.Error("effective policy should mention default policy DENY")

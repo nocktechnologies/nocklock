@@ -41,10 +41,11 @@ type ProjectConfig struct {
 
 // FilesystemConfig defines filesystem access boundaries.
 type FilesystemConfig struct {
-	Root  string   `toml:"root"`
-	Mode  string   `toml:"mode"`
-	Allow []string `toml:"allow"`
-	Deny  []string `toml:"deny"`
+	Root             string   `toml:"root"`
+	Mode             string   `toml:"mode"`
+	LinuxEnforcement string   `toml:"linux_enforcement"`
+	Allow            []string `toml:"allow"`
+	Deny             []string `toml:"deny"`
 }
 
 // NetworkConfig defines network egress boundaries.
