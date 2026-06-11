@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"sort"
 
 	fsfence "github.com/nocktechnologies/nocklock/internal/fence/fs"
 )
@@ -125,13 +126,17 @@ func RulesFromConfig(cfg *fsfence.FenceConfig, extra []AllowPath, abi int) (Spec
 	spec := Spec{
 		ABI:             abi,
 		HandledAccessFS: handled,
-		Paths:           make([]PathRule, 0, 1+len(cfg.AllowPaths)+len(extra)),
+		Paths:           make([]PathRule, 0, len(cfg.AllowPaths)+len(extra)),
 	}
 	rootAccess := AccessReadWrite
 	if cfg.Mode == "read-only" {
 		rootAccess = AccessReadOnly
 	}
-	spec.Paths = append(spec.Paths, pathRule(cfg.Root, rootAccess, abi))
+	rootRules, err := rootPathRules(cfg.Root, rootAccess, abi)
+	if err != nil {
+		return Spec{}, err
+	}
+	spec.Paths = append(spec.Paths, rootRules...)
 	for _, p := range cfg.AllowPaths {
 		spec.Paths = append(spec.Paths, pathRule(p, rootAccess, abi))
 	}
@@ -139,6 +144,28 @@ func RulesFromConfig(cfg *fsfence.FenceConfig, extra []AllowPath, abi int) (Spec
 		spec.Paths = append(spec.Paths, pathRule(filepath.Clean(p.Path), p.Access, abi))
 	}
 	return spec, nil
+}
+
+func rootPathRules(root, access string, abi int) ([]PathRule, error) {
+	entries, err := os.ReadDir(root)
+	if err != nil {
+		return nil, fmt.Errorf("read Landlock root %q: %w", root, err)
+	}
+
+	paths := make([]string, 0, len(entries))
+	for _, entry := range entries {
+		if entry.Name() == ".nock" {
+			continue
+		}
+		paths = append(paths, filepath.Join(root, entry.Name()))
+	}
+	sort.Strings(paths)
+
+	rules := make([]PathRule, 0, len(paths))
+	for _, path := range paths {
+		rules = append(rules, pathRule(path, access, abi))
+	}
+	return rules, nil
 }
 
 func pathRule(path, access string, abi int) PathRule {

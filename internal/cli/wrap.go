@@ -217,8 +217,7 @@ var wrapCmd = &cobra.Command{
 							if err != nil {
 								return fmt.Errorf("cannot resolve nocklock executable for Landlock shim: %w", err)
 							}
-							extraAllow := landlock.ExistingExtraAllowPaths(landlockAuditAllowPaths(dbPath)...)
-							spec, err := landlock.RulesFromConfig(fsCfg, extraAllow, abi)
+							spec, err := landlock.RulesFromConfig(fsCfg, nil, abi)
 							if err != nil {
 								return fmt.Errorf("failed to build Landlock rules: %w", err)
 							}

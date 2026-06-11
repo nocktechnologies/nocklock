@@ -834,6 +834,78 @@ endpoint = "https://cc.nocktechnologies.io/api/fence/events/"
 	}
 }
 
+func TestLandlockBlocksAuditDirWriteAfterChildClearsLDPreload(t *testing.T) {
+	if runtime.GOOS != "linux" {
+		t.Skip("Landlock filesystem fence is Linux-only")
+	}
+	if preloadClearWriteProbeBin == "" {
+		t.Fatal("LD_PRELOAD clear/write probe helper was not built")
+	}
+
+	config := `[project]
+name = "integration-test-landlock-audit"
+root = "."
+
+[filesystem]
+root = "."
+mode = "read-write"
+linux_enforcement = "required"
+allow = []
+deny = []
+
+[network]
+allow = []
+allow_all = true
+
+[secrets]
+pass = ["HOME", "PATH", "SHELL", "USER", "LANG", "TERM"]
+block = []
+
+[logging]
+db = ".nock/audit.db"
+level = "info"
+
+[cloud]
+enabled = false
+api_key = ""
+endpoint = "https://cc.nocktechnologies.io/api/fence/events/"
+`
+
+	dir := setupTestDirWithConfig(t, config)
+	helper := filepath.Join(dir, "preload-clear-write")
+	if err := copyFile(preloadClearWriteProbeBin, helper); err != nil {
+		t.Fatalf("copy static helper into fenced root: %v", err)
+	}
+
+	for _, target := range []string{
+		filepath.Join(dir, ".nock", "landlock-bypass.txt"),
+		filepath.Join(dir, ".nock", "events.db"),
+	} {
+		target := target
+		t.Run(filepath.Base(target), func(t *testing.T) {
+			if err := os.Remove(target); err != nil && !os.IsNotExist(err) {
+				t.Fatalf("remove existing target: %v", err)
+			}
+
+			stdout, stderr, exitCode := runNocklock(t, dir, nil, "wrap", "--", helper, target)
+			if exitCode == 0 {
+				t.Fatalf("expected Landlock to deny audit write after LD_PRELOAD clear, got success stdout=%q stderr=%q", stdout, stderr)
+			}
+			if strings.Contains(stderr, "requires Linux Landlock") || strings.Contains(stderr, "Landlock unavailable") {
+				t.Skipf("kernel does not expose Landlock in this environment: %s", stderr)
+			}
+			if _, err := os.Stat(target); err == nil {
+				t.Fatalf("audit target was created despite Landlock denial: %s", target)
+			} else if !os.IsNotExist(err) {
+				t.Fatalf("unexpected stat error for audit target: %v", err)
+			}
+			if !strings.Contains(stderr, "permission denied") && !strings.Contains(strings.ToLower(stderr), "operation not permitted") {
+				t.Fatalf("expected kernel denial in stderr, got exit=%d stdout=%q stderr=%q", exitCode, stdout, stderr)
+			}
+		})
+	}
+}
+
 // ---------------------------------------------------------------------------
 // Test 10: Exit code passthrough
 // ---------------------------------------------------------------------------

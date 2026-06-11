@@ -30,6 +30,9 @@ func TestRightsForABIMasksUnknownBits(t *testing.T) {
 func TestRulesFromConfigMapsReadOnlyAndReadWriteRights(t *testing.T) {
 	root := t.TempDir()
 	readOnly := filepath.Join(root, "readonly")
+	if err := os.Mkdir(readOnly, 0o755); err != nil {
+		t.Fatalf("mkdir readonly: %v", err)
+	}
 	readWrite := filepath.Join(root, "readwrite")
 
 	spec, err := RulesFromConfig(&fsfence.FenceConfig{
@@ -48,10 +51,10 @@ func TestRulesFromConfigMapsReadOnlyAndReadWriteRights(t *testing.T) {
 		t.Fatalf("ABI v3 handled rights should include truncate: %#x", spec.HandledAccessFS)
 	}
 	if len(spec.Paths) != 3 {
-		t.Fatalf("expected root + allow + extra paths, got %d: %+v", len(spec.Paths), spec.Paths)
+		t.Fatalf("expected enumerated root child + allow + extra paths, got %d: %+v", len(spec.Paths), spec.Paths)
 	}
-	if spec.Paths[0].Path != root || spec.Paths[0].Access != AccessReadOnly {
-		t.Fatalf("root rule = %+v, want read-only root %s", spec.Paths[0], root)
+	if spec.Paths[0].Path != readOnly || spec.Paths[0].Access != AccessReadOnly {
+		t.Fatalf("root child rule = %+v, want read-only %s", spec.Paths[0], readOnly)
 	}
 	if spec.Paths[1].Path != readOnly || spec.Paths[1].Access != AccessReadOnly {
 		t.Fatalf("allow rule = %+v, want read-only %s", spec.Paths[1], readOnly)
@@ -63,6 +66,10 @@ func TestRulesFromConfigMapsReadOnlyAndReadWriteRights(t *testing.T) {
 
 func TestRulesFromConfigLimitsRegularFileRights(t *testing.T) {
 	root := t.TempDir()
+	allowedPath := filepath.Join(root, "allowed.txt")
+	if err := os.WriteFile(allowedPath, []byte("allowed"), 0o600); err != nil {
+		t.Fatalf("write allowed placeholder: %v", err)
+	}
 	dbPath := filepath.Join(root, "events.db")
 	if err := os.WriteFile(dbPath, []byte(""), 0o600); err != nil {
 		t.Fatalf("write db placeholder: %v", err)
@@ -76,12 +83,48 @@ func TestRulesFromConfigLimitsRegularFileRights(t *testing.T) {
 		t.Fatalf("RulesFromConfig failed: %v", err)
 	}
 
-	fileRule := spec.Paths[1]
+	fileRule := spec.Paths[0]
 	if fileRule.Rights&RightMakeDir != 0 || fileRule.Rights&RightRemoveDir != 0 || fileRule.Rights&RightRefer != 0 {
 		t.Fatalf("regular file rule should not include directory-only rights: %#x", fileRule.Rights)
 	}
 	if fileRule.Rights&RightWriteFile == 0 || fileRule.Rights&RightTruncate == 0 {
 		t.Fatalf("regular read-write file rule should include write/truncate: %#x", fileRule.Rights)
+	}
+}
+
+func TestRulesFromConfigEnumeratesRootButSkipsNockAuditDir(t *testing.T) {
+	root := t.TempDir()
+	if err := os.Mkdir(filepath.Join(root, ".nock"), 0o700); err != nil {
+		t.Fatalf("mkdir .nock: %v", err)
+	}
+	src := filepath.Join(root, "src")
+	if err := os.Mkdir(src, 0o755); err != nil {
+		t.Fatalf("mkdir src: %v", err)
+	}
+	readme := filepath.Join(root, "README.md")
+	if err := os.WriteFile(readme, []byte("readme"), 0o644); err != nil {
+		t.Fatalf("write readme: %v", err)
+	}
+
+	spec, err := RulesFromConfig(&fsfence.FenceConfig{
+		Root: root,
+		Mode: "read-write",
+	}, nil, 5)
+	if err != nil {
+		t.Fatalf("RulesFromConfig failed: %v", err)
+	}
+
+	got := map[string]bool{}
+	for _, rule := range spec.Paths {
+		got[rule.Path] = true
+		if rule.Path == root || rule.Path == filepath.Join(root, ".nock") || strings.HasPrefix(rule.Path, filepath.Join(root, ".nock")+string(os.PathSeparator)) {
+			t.Fatalf("ruleset granted audit path %q in %+v", rule.Path, spec.Paths)
+		}
+	}
+	for _, want := range []string{readme, src} {
+		if !got[want] {
+			t.Fatalf("missing root child rule %q in %+v", want, spec.Paths)
+		}
 	}
 }
 
