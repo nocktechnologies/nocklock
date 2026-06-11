@@ -144,6 +144,23 @@ func TestAuditDenyPathSymlinkedRoot(t *testing.T) {
 	}
 }
 
+func TestLandlockAuditAllowPaths(t *testing.T) {
+	db := filepath.Join(t.TempDir(), ".nock", "events.db")
+	paths := landlockAuditAllowPaths(db)
+	want := []string{db, db + "-wal", db + "-shm", db + "-journal"}
+	if len(paths) != len(want) {
+		t.Fatalf("got %d paths, want %d: %+v", len(paths), len(want), paths)
+	}
+	for i := range want {
+		if paths[i].Path != want[i] {
+			t.Fatalf("path %d = %q, want %q", i, paths[i].Path, want[i])
+		}
+		if paths[i].Access != "read-write" {
+			t.Fatalf("path %d access = %q, want read-write", i, paths[i].Access)
+		}
+	}
+}
+
 func TestWrapDryRunRejectsMalformedConfig(t *testing.T) {
 	dir := t.TempDir()
 	writeTestConfig(t, dir, "[network]\nallow_all = \"sometimes\"\n")

@@ -83,6 +83,9 @@ func TestDefaultConfig(t *testing.T) {
 	if cfg.Cloud.Enabled != false {
 		t.Error("expected cloud to be disabled by default")
 	}
+	if cfg.Filesystem.LinuxEnforcement != "required" {
+		t.Errorf("expected default linux_enforcement 'required', got %q", cfg.Filesystem.LinuxEnforcement)
+	}
 
 	// Verify sensitive dirs are denied by default
 	found := false
@@ -239,6 +242,9 @@ func TestDefaultConfigFilesystemRootAndMode(t *testing.T) {
 	}
 	if cfg.Filesystem.Mode != "read-write" {
 		t.Errorf("expected default filesystem mode 'read-write', got %q", cfg.Filesystem.Mode)
+	}
+	if cfg.Filesystem.LinuxEnforcement != "required" {
+		t.Errorf("expected default linux_enforcement 'required', got %q", cfg.Filesystem.LinuxEnforcement)
 	}
 }
 
