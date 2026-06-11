@@ -20,6 +20,7 @@ import (
 var nocklockBin string
 var statProbeBin string
 var fenceLibPath string
+var preloadClearWriteProbeBin string
 
 // TestMain builds the nocklock binary (and the filesystem fence interposer on
 // Linux) once, then runs the integration suite. Cleanup happens after all tests.
@@ -67,6 +68,14 @@ func TestMain(m *testing.M) {
 			os.Exit(1)
 		}
 		statProbeBin = statProbePath
+
+		preloadClearWriteProbePath := filepath.Join(tmp, "preload-clear-write")
+		if err := buildPreloadClearWriteProbe(tmp, preloadClearWriteProbePath); err != nil {
+			fmt.Fprintf(os.Stderr, "Failed to build LD_PRELOAD clear/write probe helper: %v\n", err)
+			os.RemoveAll(tmp)
+			os.Exit(1)
+		}
+		preloadClearWriteProbeBin = preloadClearWriteProbePath
 	}
 
 	code := m.Run()
@@ -188,6 +197,7 @@ int main(int argc, char **argv) {
     printf("ERRNO=%d:%s\n", errno, strerror(errno));
     return 12;
 }
+
 `
 	if err := os.WriteFile(sourcePath, []byte(source), 0o600); err != nil {
 		return err
@@ -196,6 +206,43 @@ int main(int argc, char **argv) {
 	cmd.Dir = dir
 	if out, err := cmd.CombinedOutput(); err != nil {
 		return fmt.Errorf("%w\n%s", err, out)
+	}
+	return nil
+}
+
+func buildPreloadClearWriteProbe(dir, binPath string) error {
+	sourcePath := filepath.Join(dir, "preload_clear_write.go")
+	source := `package main
+
+import (
+	"fmt"
+	"os"
+)
+
+func main() {
+	if len(os.Args) != 2 {
+		fmt.Fprintln(os.Stderr, "usage: preload-clear-write <path>")
+		os.Exit(2)
+	}
+	if err := os.Unsetenv("LD_PRELOAD"); err != nil {
+		fmt.Fprintf(os.Stderr, "unset LD_PRELOAD: %v\n", err)
+		os.Exit(3)
+	}
+	if err := os.WriteFile(os.Args[1], []byte("escaped\n"), 0o644); err != nil {
+		fmt.Fprintf(os.Stderr, "write failed: %v\n", err)
+		os.Exit(10)
+	}
+	fmt.Println("write succeeded")
+}
+`
+	if err := os.WriteFile(sourcePath, []byte(source), 0o644); err != nil {
+		return err
+	}
+	cmd := exec.Command("go", "build", "-o", binPath, sourcePath)
+	cmd.Env = append(os.Environ(), "CGO_ENABLED=0")
+	cmd.Dir = dir
+	if out, err := cmd.CombinedOutput(); err != nil {
+		return fmt.Errorf("go build failed: %w\n%s", err, out)
 	}
 	return nil
 }
@@ -573,6 +620,7 @@ root = "."
 [filesystem]
 root = "."
 mode = "read-write"
+linux_enforcement = "off"
 allow = ["/tmp/"]
 deny = [%q]
 
@@ -632,6 +680,7 @@ root = "."
 [filesystem]
 root = "."
 mode = "read-write"
+linux_enforcement = "off"
 allow = ["/tmp/"]
 deny = [%q]
 
@@ -724,6 +773,69 @@ func TestFilesystemFenceFstatFamilyReturnsENOENTForInheritedDeniedFD(t *testing.
 					mode, exitCode, stdout, stderr)
 			}
 		})
+	}
+}
+
+func TestLandlockBlocksWriteAfterChildClearsLDPreload(t *testing.T) {
+	if runtime.GOOS != "linux" {
+		t.Skip("Landlock filesystem fence is Linux-only")
+	}
+	if preloadClearWriteProbeBin == "" {
+		t.Fatal("LD_PRELOAD clear/write probe helper was not built")
+	}
+
+	sensitiveDir := t.TempDir()
+	sensitiveFile := filepath.Join(sensitiveDir, "escaped.txt")
+
+	config := `[project]
+name = "integration-test-landlock"
+root = "."
+
+[filesystem]
+root = "."
+mode = "read-write"
+linux_enforcement = "required"
+allow = []
+deny = []
+
+[network]
+allow = []
+allow_all = true
+
+[secrets]
+pass = ["HOME", "PATH", "SHELL", "USER", "LANG", "TERM"]
+block = []
+
+[logging]
+db = ".nock/events.db"
+level = "info"
+
+[cloud]
+enabled = false
+api_key = ""
+endpoint = "https://cc.nocktechnologies.io/api/fence/events/"
+`
+
+	dir := setupTestDirWithConfig(t, config)
+	helper := filepath.Join(dir, "preload-clear-write")
+	if err := copyFile(preloadClearWriteProbeBin, helper); err != nil {
+		t.Fatalf("copy static helper into fenced root: %v", err)
+	}
+
+	stdout, stderr, exitCode := runNocklock(t, dir, nil, "wrap", "--", helper, sensitiveFile)
+	if exitCode == 0 {
+		t.Fatalf("expected Landlock to deny write outside root after LD_PRELOAD clear, got success stdout=%q stderr=%q", stdout, stderr)
+	}
+	if strings.Contains(stderr, "requires Linux Landlock") || strings.Contains(stderr, "Landlock unavailable") {
+		t.Skipf("kernel does not expose Landlock in this environment: %s", stderr)
+	}
+	if _, err := os.Stat(sensitiveFile); err == nil {
+		t.Fatalf("sensitive file was created despite Landlock denial")
+	} else if !os.IsNotExist(err) {
+		t.Fatalf("unexpected stat error for sensitive file: %v", err)
+	}
+	if !strings.Contains(stderr, "permission denied") && !strings.Contains(strings.ToLower(stderr), "operation not permitted") {
+		t.Fatalf("expected kernel denial in stderr, got exit=%d stdout=%q stderr=%q", exitCode, stdout, stderr)
 	}
 }
 
