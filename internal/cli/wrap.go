@@ -16,6 +16,7 @@ import (
 	"github.com/google/uuid"
 	"github.com/nocktechnologies/nocklock/internal/config"
 	fsfence "github.com/nocktechnologies/nocklock/internal/fence/fs"
+	"github.com/nocktechnologies/nocklock/internal/fence/fs/landlock"
 	"github.com/nocktechnologies/nocklock/internal/fence/network"
 	"github.com/nocktechnologies/nocklock/internal/fence/secrets"
 	"github.com/nocktechnologies/nocklock/internal/logging"
@@ -148,6 +149,7 @@ var wrapCmd = &cobra.Command{
 		var fsFence *fsfence.Fence
 		var fsFenceCancel context.CancelFunc
 		var fsSandboxPrefix []string
+		var landlockPrefix []string
 		if cfg.Filesystem.Root != "" {
 			// Fence the audit log from the CHILD so the fenced agent can't delete
 			// or corrupt the record of its own actions (the unfenced parent still
@@ -196,6 +198,39 @@ var wrapCmd = &cobra.Command{
 						}
 					}
 					childEnv = append(childEnv, fenceEnv...)
+
+					enforcement := linuxEnforcementMode(cfg.Filesystem.LinuxEnforcement)
+					if enforcement != linuxEnforcementOff {
+						abi, detectErr := landlock.DetectABI()
+						if detectErr != nil {
+							return fmt.Errorf("failed to detect Landlock support: %w", detectErr)
+						}
+						if abi == 0 {
+							msg := "NockLock: warning: Linux Landlock unavailable; filesystem fence is userspace-only"
+							if enforcement == linuxEnforcementRequired {
+								return fmt.Errorf("filesystem fence requires Linux Landlock, but this kernel does not support it")
+							}
+							fmt.Fprintln(os.Stderr, msg)
+							logEvent(logging.EventFilePassed, "filesystem", "kernel fence unavailable, userspace-only", false)
+						} else {
+							exe, err := os.Executable()
+							if err != nil {
+								return fmt.Errorf("cannot resolve nocklock executable for Landlock shim: %w", err)
+							}
+							spec, err := landlock.RulesFromConfig(fsCfg, nil, abi)
+							if err != nil {
+								return fmt.Errorf("failed to build Landlock rules: %w", err)
+							}
+							encoded, err := landlock.MarshalSpec(spec)
+							if err != nil {
+								return fmt.Errorf("failed to serialize Landlock rules: %w", err)
+							}
+							childEnv = append(removeEnvVars(childEnv, landlockRulesEnv), landlockRulesEnv+"="+encoded)
+							landlockPrefix = []string{exe, "__landlock-exec", "--"}
+							fmt.Fprintf(os.Stderr, "NockLock: Linux Landlock filesystem fence active — ABI v%d\n", spec.ABI)
+							logEvent(logging.EventFilePassed, "filesystem", fmt.Sprintf("landlock abi=%d paths=%d", spec.ABI, len(spec.Paths)), false)
+						}
+					}
 
 					// Start listening for events.
 					var ctx context.Context
@@ -308,6 +343,9 @@ var wrapCmd = &cobra.Command{
 		// (kernel-enforced, inherited by all descendants). On Linux fsSandboxPrefix
 		// is empty and the child runs directly with the LD_PRELOAD env above.
 		childArgv := args
+		if len(landlockPrefix) > 0 {
+			childArgv = append(append([]string{}, landlockPrefix...), childArgv...)
+		}
 		if len(fsSandboxPrefix) > 0 {
 			childArgv = append(append([]string{}, fsSandboxPrefix...), args...)
 		}
@@ -436,6 +474,30 @@ func validateWrapRuntimeConfig(cfg *config.Config) error {
 	}
 
 	return nil
+}
+
+type linuxEnforcement string
+
+const (
+	linuxEnforcementRequired  linuxEnforcement = "required"
+	linuxEnforcementPreferred linuxEnforcement = "preferred"
+	linuxEnforcementOff       linuxEnforcement = "off"
+)
+
+func linuxEnforcementMode(raw string) linuxEnforcement {
+	if raw == "" {
+		return linuxEnforcementRequired
+	}
+	return linuxEnforcement(raw)
+}
+
+func landlockAuditAllowPaths(dbPath string) []landlock.AllowPath {
+	return []landlock.AllowPath{
+		{Path: dbPath, Access: landlock.AccessReadWrite},
+		{Path: dbPath + "-wal", Access: landlock.AccessReadWrite},
+		{Path: dbPath + "-shm", Access: landlock.AccessReadWrite},
+		{Path: dbPath + "-journal", Access: landlock.AccessReadWrite},
+	}
 }
 
 // findLibFenceFS searches for the filesystem fence shared library.
