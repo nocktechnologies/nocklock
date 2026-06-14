@@ -12,6 +12,7 @@ on:
 
 jobs:
   claude-review:
+    if: github.event.pull_request.draft == false && github.event.pull_request.user.login != 'dependabot[bot]'
     # Optional: Filter by PR author
     # if: |
     #   github.event.pull_request.user.login == 'external-contributor' ||
@@ -31,7 +32,25 @@ jobs:
         with:
           fetch-depth: 1
 
+      - name: Detect Claude workflow changes
+        id: claude_workflow_change
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          if gh api --paginate \
+            "repos/${{ github.repository }}/pulls/${{ github.event.pull_request.number }}/files" \
+            --jq '.[].filename' | grep -Fxq '.github/workflows/claude-code-review.yml'; then
+            echo "changed=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "changed=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Skip Claude review for workflow self-change
+        if: steps.claude_workflow_change.outputs.changed == 'true'
+        run: echo "Skipping Claude Code Review because this PR changes the Claude workflow itself."
+
       - name: Run Claude Code Review
+        if: steps.claude_workflow_change.outputs.changed != 'true'
         id: claude-review
         uses: anthropics/claude-code-action@v1
         with:
@@ -41,4 +60,3 @@ jobs:
           prompt: '/code-review:code-review ${{ github.repository }}/pull/${{ github.event.pull_request.number }}'
           # See https://github.com/anthropics/claude-code-action/blob/main/docs/usage.md
           # or https://code.claude.com/docs/en/cli-reference for available options
-
