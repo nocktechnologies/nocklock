@@ -32,7 +32,25 @@ jobs:
         with:
           fetch-depth: 1
 
+      - name: Detect Claude workflow changes
+        id: claude_workflow_change
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          if gh api --paginate \
+            "repos/${{ github.repository }}/pulls/${{ github.event.pull_request.number }}/files" \
+            --jq '.[].filename' | grep -Fxq '.github/workflows/claude-code-review.yml'; then
+            echo "changed=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "changed=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Skip Claude review for workflow self-change
+        if: steps.claude_workflow_change.outputs.changed == 'true'
+        run: echo "Skipping Claude Code Review because this PR changes the Claude workflow itself."
+
       - name: Run Claude Code Review
+        if: steps.claude_workflow_change.outputs.changed != 'true'
         id: claude-review
         uses: anthropics/claude-code-action@v1
         with:
