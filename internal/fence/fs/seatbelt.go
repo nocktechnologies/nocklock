@@ -30,6 +30,15 @@ func DefaultSensitivePaths() []string {
 		".kube",
 		".config/gcloud",
 		filepath.Join("Library", "Keychains"),
+		// Pure credential stores an autonomously-fenced agent never needs to
+		// READ — consistent with .ssh/.kube already being fenced (the agent
+		// operates without the user's SSH/k8s creds, so it should not reach
+		// these either). Mixed config+credential paths (~/.npmrc, ~/.pypirc)
+		// are intentionally NOT defaulted — fencing them breaks legitimate
+		// package installs; users opt those in via config.
+		".netrc",           // plaintext curl/git/ftp credentials — classic exfil target
+		".docker",          // registry auth tokens (same class as the already-fenced .kube)
+		".git-credentials", // plaintext git HTTPS credentials (consistent with .ssh fenced)
 	}
 	out := make([]string, 0, len(rel))
 	for _, r := range rel {
