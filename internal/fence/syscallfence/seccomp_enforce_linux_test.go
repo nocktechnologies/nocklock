@@ -36,13 +36,56 @@ func TestMain(m *testing.M) {
 
 // Exit codes the helper uses so the parent can assert precise outcomes.
 const (
-	exitDeniedEPERM  = 10 // syscall returned EPERM (denied as expected)
-	exitDeniedENOSYS = 11 // syscall returned ENOSYS
-	exitAllowed      = 12 // syscall succeeded / was permitted
-	exitOtherErrno   = 13 // some other errno (still "not allowed", but unexpected)
-	exitApplyFailed  = 20 // Apply itself failed
-	exitUnsupported  = 21 // seccomp unsupported on this kernel
+	exitDeniedEPERM       = 10 // syscall returned EPERM (denied as expected)
+	exitDeniedENOSYS      = 11 // syscall returned ENOSYS
+	exitAllowed           = 12 // syscall succeeded / was permitted
+	exitOtherErrno        = 13 // some other errno (still "not allowed", but unexpected)
+	exitApplyFailed       = 20 // Apply itself failed
+	exitUnsupported       = 21 // seccomp unsupported on this kernel
+	exitFenceNotInstalled = 22 // Apply returned nil but OUR filter is provably not the gate
 )
+
+// canaryPolicy is the policy every fenced deny scenario applies. It is the
+// baseline denylist PLUS a socket-family allowlist, so that the OUR-filter
+// liveness probe (fenceInstalled) has a non-ambient canary to fire on. AF_NETLINK
+// is deliberately NOT in the allowlist.
+var canaryPolicy = Policy{
+	Mode:                  ModeRequired,
+	AllowedSocketFamilies: []string{"unix", "inet", "inet6"},
+}
+
+// fenceInstalled PROVES that OUR seccomp-BPF filter — not merely some ambient
+// filter — is the active gate, via an active canary syscall.
+//
+// PR_GET_SECCOMP is NOT sufficient: a sandboxed CI (Docker's default profile,
+// gVisor, a hardened GitHub runner) installs its OWN seccomp filter, so
+// PR_GET_SECCOMP already reports SECCOMP_MODE_FILTER(2) even when our Apply() was
+// a complete no-op. (Verified: in golang:bookworm under Docker, PR_GET_SECCOMP==2
+// before we install anything.) Relying on the mode alone re-opens the exact gap
+// being closed — a no-op fence would still look "installed".
+//
+// Instead we fire a CANARY that:
+//   - OUR canaryPolicy denies (socket(AF_NETLINK) is outside the family allowlist,
+//     so the deny-the-complement filter returns EPERM), and
+//   - is AMBIENTLY ALLOWED: creating an AF_NETLINK socket needs no capability and
+//     is permitted by Docker's default seccomp profile, so a process WITHOUT our
+//     filter creates it successfully.
+//
+// Therefore: canary EPERM <=> our filter is the gate. canary success <=> our
+// filter is absent (no-op Apply), which is a hard failure, never a pass.
+func fenceInstalled() bool {
+	fd, err := unix.Socket(unix.AF_NETLINK, unix.SOCK_RAW, unix.NETLINK_ROUTE)
+	if err == nil {
+		// The canary syscall SUCCEEDED — our family-allowlist filter is NOT the
+		// gate. Either Apply() was a no-op or the filter does not actually deny the
+		// complement. Not installed (for our purposes).
+		unix.Close(fd)
+		return false
+	}
+	// AF_NETLINK is ambiently allowed, so the ONLY thing that turns it into EPERM
+	// is our deny-the-complement socket filter. EPERM => our filter is live.
+	return err == unix.EPERM
+}
 
 func runScenario(scenario string) int {
 	if !Supported() {
@@ -50,22 +93,36 @@ func runScenario(scenario string) int {
 	}
 	switch scenario {
 	case "init_module":
-		if err := Apply(Policy{Mode: ModeRequired}); err != nil {
+		if err := Apply(canaryPolicy); err != nil {
 			return exitApplyFailed
+		}
+		// init_module returns EPERM ambiently in an unprivileged process (no
+		// CAP_SYS_MODULE), so EPERM alone does NOT prove the fence did anything.
+		// Require OUR filter to be the live gate (proven by the AF_NETLINK canary)
+		// first; only then is the EPERM below provably fence-caused rather than the
+		// ambient capability check.
+		if !fenceInstalled() {
+			return exitFenceNotInstalled
 		}
 		_, _, errno := unix.Syscall(uintptr(mustNr("init_module")), 0, 0, 0)
 		return classifyErrno(errno)
 
 	case "unshare_newuser":
-		if err := Apply(Policy{Mode: ModeRequired}); err != nil {
+		if err := Apply(canaryPolicy); err != nil {
 			return exitApplyFailed
+		}
+		if !fenceInstalled() {
+			return exitFenceNotInstalled
 		}
 		err := unix.Unshare(unix.CLONE_NEWUSER)
 		return classifyErr(err)
 
 	case "ptrace":
-		if err := Apply(Policy{Mode: ModeRequired}); err != nil {
+		if err := Apply(canaryPolicy); err != nil {
 			return exitApplyFailed
+		}
+		if !fenceInstalled() {
+			return exitFenceNotInstalled
 		}
 		// PTRACE_TRACEME is the simplest call that must be blocked.
 		_, _, errno := unix.Syscall6(uintptr(mustNr("ptrace")),
@@ -73,8 +130,15 @@ func runScenario(scenario string) int {
 		return classifyErrno(errno)
 
 	case "socket_packet_denied":
-		if err := Apply(Policy{Mode: ModeRequired, AllowedSocketFamilies: []string{"unix", "inet", "inet6"}}); err != nil {
+		if err := Apply(canaryPolicy); err != nil {
 			return exitApplyFailed
+		}
+		// socket(AF_PACKET, SOCK_RAW) returns EPERM ambiently without CAP_NET_RAW,
+		// so — like init_module — the EPERM must be proven to come from the
+		// installed filter, not the missing capability. Require the fence live via
+		// the AF_NETLINK canary (ambiently allowed, denied only by our filter).
+		if !fenceInstalled() {
+			return exitFenceNotInstalled
 		}
 		fd, err := unix.Socket(unix.AF_PACKET, unix.SOCK_RAW, 0)
 		if err == nil {
@@ -84,8 +148,14 @@ func runScenario(scenario string) int {
 		return classifyErr(err)
 
 	case "socket_inet_allowed":
-		if err := Apply(Policy{Mode: ModeRequired, AllowedSocketFamilies: []string{"unix", "inet", "inet6"}}); err != nil {
+		if err := Apply(canaryPolicy); err != nil {
 			return exitApplyFailed
+		}
+		// Allowed half of the socket-family delta: AF_INET must SUCCEED even with
+		// the filter live. Verify the fence is installed so this allow is proven to
+		// pass THROUGH the filter (the deny half, socket_packet_denied, fails it).
+		if !fenceInstalled() {
+			return exitFenceNotInstalled
 		}
 		fd, err := unix.Socket(unix.AF_INET, unix.SOCK_STREAM, 0)
 		if err == nil {
@@ -93,6 +163,30 @@ func runScenario(scenario string) int {
 			return exitAllowed
 		}
 		return classifyErr(err)
+
+	case "socket_packet_unfenced":
+		// CONTROL (no Apply): perform socket(AF_PACKET, SOCK_RAW) with NO fence
+		// installed. On a CAP_NET_RAW-granted runner this SUCCEEDS (exitAllowed),
+		// which — paired with socket_packet_denied returning EPERM under the fence —
+		// is a genuine red->green: the same syscall flips from allowed to denied
+		// solely because of the filter. On a runner WITHOUT CAP_NET_RAW it returns
+		// EPERM ambiently; the parent only demands the success delta when the
+		// NOCKLOCK_TEST_CAP_NET_RAW gate says the capability is present.
+		fd, err := unix.Socket(unix.AF_PACKET, unix.SOCK_RAW, 0)
+		if err == nil {
+			unix.Close(fd)
+			return exitAllowed
+		}
+		return classifyErr(err)
+
+	case "init_module_unfenced":
+		// CONTROL (no Apply): init_module with NO fence. In an unprivileged process
+		// this is ambiently EPERM (no CAP_SYS_MODULE), so it does not by itself
+		// prove anything — it exists to document the baseline next to the fenced
+		// scenario, whose fence-causation is established by the AF_NETLINK canary
+		// (fenceInstalled) rather than by this control.
+		_, _, errno := unix.Syscall(uintptr(mustNr("init_module")), 0, 0, 0)
+		return classifyErrno(errno)
 
 	case "pthread_create":
 		// pthread_create uses clone(2) (no CLONE_NEW*) and, on glibc>=2.34,
@@ -187,21 +281,59 @@ func runHelper(t *testing.T, scenario string) int {
 	return -1
 }
 
+// requireSupported gates the live assertions. The ONLY green-skip condition is a
+// kernel that genuinely lacks seccomp-BPF (CONFIG_SECCOMP off). Everything else —
+// an Apply that failed, or an Apply that returned nil but did NOT install a live
+// filter — is a HARD FAILURE. Previously these were t.Skip, which meant a
+// completely broken / no-op fence produced a green suite (a silent no-op fence
+// would skip all four scenarios rather than fail). A skip is not a pass.
 func requireSupported(t *testing.T, code int) {
 	t.Helper()
 	if code == exitUnsupported {
-		t.Skip("seccomp-BPF unsupported on this kernel/CI runner")
+		t.Skip("seccomp-BPF unsupported on this kernel (CONFIG_SECCOMP off)")
 	}
 	if code == exitApplyFailed {
-		t.Skip("Apply failed (likely no NO_NEW_PRIVS permission in this CI sandbox)")
+		t.Fatalf("Apply() failed to install the seccomp filter — fence is not enforcing (exit %d). "+
+			"A broken/no-op fence must FAIL, not skip.", code)
+	}
+	if code == exitFenceNotInstalled {
+		t.Fatalf("Apply() returned nil but the AF_NETLINK canary proved OUR filter is not the gate (exit %d) — "+
+			"the fence never installed (or does not deny the complement), so any EPERM observed is "+
+			"ambient, not fence-caused.", code)
 	}
 }
 
 func TestEnforce_InitModuleDenied(t *testing.T) {
 	code := runHelper(t, "init_module")
 	requireSupported(t, code)
+	// EPERM here is provably fence-caused: the scenario first fires the AF_NETLINK
+	// canary (ambiently ALLOWED, denied ONLY by our family-allowlist filter); if
+	// the canary is not blocked the scenario exits exitFenceNotInstalled, which
+	// requireSupported turns into a hard FAILURE. So a no-op Apply can no longer
+	// pass this test on the ambient CAP_SYS_MODULE EPERM.
 	if code != exitDeniedEPERM {
 		t.Errorf("init_module: exit %d, want EPERM(%d)", code, exitDeniedEPERM)
+	}
+}
+
+// TestEnforce_InitModuleUnfencedBaseline documents that init_module is ambiently
+// EPERM for an unprivileged process WITHOUT any fence. It exists so the suite is
+// explicit that the fenced scenario's fence-causation rests on the
+// PR_GET_SECCOMP==2 check, not on a deny/no-deny errno delta (which init_module
+// cannot provide without CAP_SYS_MODULE). On the rare runner that DOES hold
+// CAP_SYS_MODULE the unfenced call could succeed; we only assert it is NOT a
+// crash/unexpected errno, never that it must be EPERM.
+func TestEnforce_InitModuleUnfencedBaseline(t *testing.T) {
+	if !Supported() {
+		t.Skip("seccomp-BPF unsupported on this kernel (CONFIG_SECCOMP off)")
+	}
+	code := runHelper(t, "init_module_unfenced")
+	switch code {
+	case exitDeniedEPERM, exitDeniedENOSYS, exitAllowed:
+		// All acceptable baselines: EPERM (no CAP_SYS_MODULE, the common case),
+		// ENOSYS (no module support), or ALLOWED (privileged runner).
+	default:
+		t.Errorf("init_module UNFENCED control: unexpected exit %d", code)
 	}
 }
 
@@ -226,6 +358,22 @@ func TestEnforce_RawPacketSocketDenied(t *testing.T) {
 	requireSupported(t, code)
 	if code != exitDeniedEPERM {
 		t.Errorf("socket(AF_PACKET): exit %d, want EPERM(%d)", code, exitDeniedEPERM)
+	}
+	// The fenced EPERM above is proven fence-caused by the in-scenario
+	// PR_GET_SECCOMP==SECCOMP_MODE_FILTER check (a no-op Apply would have exited
+	// exitFenceNotInstalled and failed via requireSupported). On a runner that
+	// grants CAP_NET_RAW, also assert the genuine red->green: the SAME syscall
+	// SUCCEEDS unfenced (control) and is DENIED fenced — the flip is solely the
+	// filter, not the missing capability. Gate the control on the capability so it
+	// is meaningful (an unprivileged runner returns ambient EPERM either way).
+	if os.Getenv("NOCKLOCK_TEST_CAP_NET_RAW") == "1" {
+		ctrl := runHelper(t, "socket_packet_unfenced")
+		requireSupported(t, ctrl)
+		if ctrl != exitAllowed {
+			t.Errorf("control socket(AF_PACKET) UNFENCED: exit %d, want ALLOWED(%d) — "+
+				"with CAP_NET_RAW the unfenced call must succeed so the fenced EPERM is a true red->green",
+				ctrl, exitAllowed)
+		}
 	}
 }
 
