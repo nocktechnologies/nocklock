@@ -35,6 +35,31 @@ import (
 // The profile is deterministic: paths are canonicalized, de-duplicated, and
 // sorted, so the same input always yields byte-identical output (testable).
 func GenerateProfile(sensitivePaths []string) (string, error) {
+	return generateProfile(sensitivePaths, false)
+}
+
+// GenerateHardenedProfile is the opt-in ([filesystem] hardened = true) variant.
+// It produces the same allow-default path denylist as GenerateProfile and ADDS a
+// curated set of non-filesystem syscall-surface denials that approximate, on
+// macOS, what the Linux seccomp fence does:
+//
+//	(deny mach-priv-host-port)  — block privileged host-port lookups (a step
+//	                              toward task_for_pid / cross-process control)
+//	(deny iokit-open)           — block opening IOKit device user-clients (raw
+//	                              hardware / driver attack surface, ~ Linux ioperm)
+//	(deny system-socket)        — block PF_SYSTEM / kernel-control sockets (raw
+//	                              kernel I/O, ~ Linux AF_PACKET/AF_NETLINK denial)
+//
+// plus a tightened /dev (read-only, denying the raw/BSD device nodes a fenced
+// agent never needs). Crucially it does NOT flip the base to (deny default):
+// that SIGABRTs every process on macOS (documented above), so hardening stays
+// additive on top of (allow default). No-op on non-macOS callers (they never set
+// hardened=true).
+func GenerateHardenedProfile(sensitivePaths []string) (string, error) {
+	return generateProfile(sensitivePaths, true)
+}
+
+func generateProfile(sensitivePaths []string, hardened bool) (string, error) {
 	if len(sensitivePaths) == 0 {
 		return "", fmt.Errorf("refusing to generate a fence profile with no sensitive paths (would be a no-op fence)")
 	}
@@ -74,6 +99,29 @@ func GenerateProfile(sensitivePaths []string) (string, error) {
 		b.WriteString(")\n")
 	}
 	b.WriteString(")\n")
+
+	if hardened {
+		b.WriteString(";; hardened = true: additive syscall-surface denials. This is\n")
+		b.WriteString(";; NOT a deny-default flip, which SIGABRTs every macOS process.\n")
+		b.WriteString("(deny mach-priv-host-port)\n")
+		b.WriteString("(deny iokit-open)\n")
+		b.WriteString("(deny system-socket)\n")
+		b.WriteString(";; tighten /dev: deny write to the raw/BSD device nodes a fenced\n")
+		b.WriteString(";; agent never needs, while leaving the common pseudo-devices.\n")
+		b.WriteString("(deny file-write*\n")
+		b.WriteString("    (subpath \"/dev\"))\n")
+		b.WriteString("(allow file-write-data\n")
+		b.WriteString("    (literal \"/dev/null\")\n")
+		b.WriteString("    (literal \"/dev/zero\")\n")
+		b.WriteString("    (literal \"/dev/random\")\n")
+		b.WriteString("    (literal \"/dev/urandom\")\n")
+		b.WriteString("    (literal \"/dev/tty\")\n")
+		b.WriteString("    (regex #\"^/dev/tty[a-z0-9]+$\")\n")
+		b.WriteString("    (regex #\"^/dev/pty[a-z0-9]+$\")\n")
+		b.WriteString("    (regex #\"^/dev/ptmx$\")\n")
+		b.WriteString("    (regex #\"^/dev/fd/\"))\n")
+	}
+
 	return b.String(), nil
 }
 
