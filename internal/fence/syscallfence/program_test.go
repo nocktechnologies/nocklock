@@ -263,6 +263,25 @@ func TestProgram_ForeignArchDoesNotMatchNativeRules(t *testing.T) {
 	}
 }
 
+func TestProgram_SocketcallDeniedOn386ABI(t *testing.T) {
+	if secondaryArch(nativeArch) != "386" {
+		t.Skip("386 compat ABI is only emitted by an amd64 binary")
+	}
+
+	p := Policy{Mode: ModeRequired}
+	prog, _ := buildTestProgram(t, p)
+
+	auditArch, _ := auditArchFor("386")
+	socketcallNr, _ := syscallNr("socketcall", "386")
+	got, err := simulate(prog, seccompData{nr: socketcallNr, arch: auditArch})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got != eperm() {
+		t.Errorf("socketcall on 386 ABI: got %#x, want EPERM", got)
+	}
+}
+
 func TestProgram_PtraceAndProcessVMDenied(t *testing.T) {
 	p := Policy{Mode: ModeRequired}
 	prog, native := buildTestProgram(t, p)

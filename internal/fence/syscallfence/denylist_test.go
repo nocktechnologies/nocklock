@@ -39,6 +39,95 @@ func TestResolveNames_KnownSyscallsResolveToCanonicalNumbers(t *testing.T) {
 	}
 }
 
+func TestSyscallTable_NumbersMatchSupportedABIs(t *testing.T) {
+	// Full-table assertions keep compat ABI constants reviewable on non-Linux CI.
+	// These are stable Linux UAPI numbers; changes should be explicit.
+	expected := map[string]map[string]uint32{
+		"amd64": {
+			"init_module": 175, "finit_module": 313, "delete_module": 176,
+			"mount": 165, "umount2": 166, "pivot_root": 155, "mount_setattr": 442,
+			"move_mount": 429, "fsopen": 430, "fsconfig": 431, "fsmount": 432, "open_tree": 428,
+			"open_by_handle_at": 304, "name_to_handle_at": 303,
+			"add_key": 248, "request_key": 249, "keyctl": 250,
+			"bpf": 321, "perf_event_open": 298, "userfaultfd": 323,
+			"unshare": 272, "setns": 308,
+			"settimeofday": 164, "clock_settime": 227, "clock_adjtime": 305, "adjtimex": 159,
+			"reboot": 169, "kexec_load": 246, "kexec_file_load": 320,
+			"ioperm": 173, "iopl": 172,
+			"ptrace": 101, "process_vm_readv": 310, "process_vm_writev": 311,
+			"clone": 56, "clone3": 435, "socket": 41,
+		},
+		"arm64": {
+			"init_module": 105, "finit_module": 273, "delete_module": 106,
+			"mount": 40, "umount2": 39, "pivot_root": 41, "mount_setattr": 442,
+			"move_mount": 429, "fsopen": 430, "fsconfig": 431, "fsmount": 432, "open_tree": 428,
+			"open_by_handle_at": 265, "name_to_handle_at": 264,
+			"add_key": 217, "request_key": 218, "keyctl": 219,
+			"bpf": 280, "perf_event_open": 241, "userfaultfd": 282,
+			"unshare": 97, "setns": 268,
+			"settimeofday": 170, "clock_settime": 112, "clock_adjtime": 266, "adjtimex": 171,
+			"reboot": 142, "kexec_load": 104, "kexec_file_load": 294,
+			"ptrace": 117, "process_vm_readv": 270, "process_vm_writev": 271,
+			"clone": 220, "clone3": 435, "socket": 198,
+		},
+		"386": {
+			"init_module": 128, "finit_module": 350, "delete_module": 129,
+			"mount": 21, "umount2": 52, "pivot_root": 217, "mount_setattr": 442,
+			"move_mount": 429, "fsopen": 430, "fsconfig": 431, "fsmount": 432, "open_tree": 428,
+			"open_by_handle_at": 342, "name_to_handle_at": 341,
+			"add_key": 286, "request_key": 287, "keyctl": 288,
+			"bpf": 357, "perf_event_open": 336, "userfaultfd": 374,
+			"unshare": 310, "setns": 346,
+			"settimeofday": 79, "stime": 25, "clock_settime": 264, "clock_adjtime": 343, "adjtimex": 124,
+			"reboot": 88, "kexec_load": 283,
+			"ioperm": 101, "iopl": 110,
+			"ptrace": 26, "process_vm_readv": 347, "process_vm_writev": 348,
+			"clone": 120, "clone3": 435, "socket": 359, "socketcall": 102,
+		},
+		"arm": {
+			"init_module": 128, "finit_module": 379, "delete_module": 129,
+			"mount": 21, "umount2": 52, "pivot_root": 218, "mount_setattr": 442,
+			"move_mount": 429, "fsopen": 430, "fsconfig": 431, "fsmount": 432, "open_tree": 428,
+			"open_by_handle_at": 371, "name_to_handle_at": 370,
+			"add_key": 309, "request_key": 310, "keyctl": 311,
+			"bpf": 386, "perf_event_open": 364, "userfaultfd": 388,
+			"unshare": 337, "setns": 375,
+			"settimeofday": 79, "clock_settime": 262, "clock_adjtime": 372, "adjtimex": 124,
+			"reboot": 88, "kexec_load": 347, "kexec_file_load": 401,
+			"ptrace": 26, "process_vm_readv": 376, "process_vm_writev": 377,
+			"clone": 120, "clone3": 435, "socket": 281,
+		},
+	}
+
+	if len(syscallTable) != len(expected) {
+		t.Fatalf("syscallTable has %d arch tables, want %d", len(syscallTable), len(expected))
+	}
+	for arch, wantTable := range expected {
+		gotTable, ok := syscallTable[arch]
+		if !ok {
+			t.Fatalf("syscallTable missing arch %q", arch)
+		}
+		if len(gotTable) != len(wantTable) {
+			t.Errorf("syscallTable[%q] has %d entries, want %d", arch, len(gotTable), len(wantTable))
+		}
+		for name, want := range wantTable {
+			got, ok := syscallNr(name, arch)
+			if !ok {
+				t.Errorf("syscallNr(%q, %q): not found, want %d", name, arch, want)
+				continue
+			}
+			if got != want {
+				t.Errorf("syscallNr(%q, %q) = %d, want %d", name, arch, got, want)
+			}
+		}
+		for name := range gotTable {
+			if _, ok := wantTable[name]; !ok {
+				t.Errorf("syscallTable[%q] has unexpected syscall %q", arch, name)
+			}
+		}
+	}
+}
+
 func TestResolveNames_UnknownNameIsSkipped_ForwardCompat(t *testing.T) {
 	// A made-up syscall and a real syscall that does not exist on the target arch
 	// must both be SKIPPED, not error. This is the forward-compat contract: a
@@ -114,6 +203,7 @@ func TestBaselineDenylist_CoversRequiredSubsystems(t *testing.T) {
 		"reboot", "kexec_load", "kexec_file_load",
 		"ioperm", "iopl",
 		"ptrace", "process_vm_readv", "process_vm_writev",
+		"socketcall",
 	}
 	set := make(map[string]struct{}, len(BaselineDenylist))
 	for _, n := range BaselineDenylist {

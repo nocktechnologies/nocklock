@@ -89,6 +89,11 @@ var BaselineDenylist = []string{
 	"ptrace",
 	"process_vm_readv",
 	"process_vm_writev",
+
+	// --- i386 socket multiplexer: defense-in-depth for the secondary ABI path.
+	// On i386, socket-family syscalls are multiplexed through socketcall(2), so
+	// deny the multiplexer when the compat ABI is reachable from a 64-bit child.
+	"socketcall",
 }
 
 // namespaceDenylist is the subset of the baseline that is suppressed when the
