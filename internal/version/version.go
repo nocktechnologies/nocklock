@@ -3,10 +3,16 @@ package version
 
 import "fmt"
 
-// Version defaults to "0.1.0" and can be overridden at build time via ldflags.
-var Version = "0.1.0"
+// Version defaults to "dev" and is overridden at build time via ldflags.
+// Tagged/release builds set this to the semver string (e.g. "0.2.0").
+var Version = "dev"
 
-// BuildInfo returns a human-readable version string in the form "NockLock vX.Y.Z (dev)".
+// BuildInfo returns a human-readable version string.
+// Dev builds (Version == "dev") return "NockLock (dev)".
+// Tagged builds return "NockLock vX.Y.Z".
 func BuildInfo() string {
-	return fmt.Sprintf("NockLock v%s (dev)", Version)
+	if Version == "dev" {
+		return "NockLock (dev)"
+	}
+	return fmt.Sprintf("NockLock v%s", Version)
 }
