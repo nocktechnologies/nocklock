@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"runtime"
 
 	"github.com/nocktechnologies/nocklock/internal/fence/fs/landlock"
 	"github.com/nocktechnologies/nocklock/internal/fence/syscallfence"
@@ -39,6 +40,16 @@ var landlockExecCmd = &cobra.Command{
 	Hidden:             true,
 	DisableFlagParsing: true,
 	RunE: func(cmd *cobra.Command, args []string) error {
+		// Pin this goroutine to its OS thread for the whole shim. Landlock's
+		// restrict_self is per-THREAD (unlike seccomp's TSYNC, which syncs the
+		// filter to every thread); if the Go runtime migrated this goroutine to a
+		// different OS thread between restrict_self and execve, the child would
+		// execve on an UN-restricted task — a silent FS-fence fail-open. Locking
+		// (and never unlocking, since the goroutine ends in execve) guarantees
+		// restrict_self and execve run on the same task. No UnlockOSThread: execve
+		// replaces the process image, so the locked thread is never returned.
+		runtime.LockOSThread()
+
 		if len(args) > 0 && args[0] == "--" {
 			args = args[1:]
 		}
