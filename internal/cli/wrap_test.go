@@ -209,6 +209,18 @@ func TestEffectiveWrapConfigPreservesAllowPrivateRanges(t *testing.T) {
 	}
 }
 
+func TestComposeChildArgvAddsPrefixesWithoutDroppingPriorShim(t *testing.T) {
+	got := composeChildArgv(
+		[]string{"agent", "--task"},
+		[]string{"nocklock", "__landlock-exec"},
+		[]string{"sandbox-exec", "-f", "profile.sb"},
+	)
+	want := []string{"sandbox-exec", "-f", "profile.sb", "nocklock", "__landlock-exec", "agent", "--task"}
+	if strings.Join(got, "\x00") != strings.Join(want, "\x00") {
+		t.Fatalf("composeChildArgv = %q, want %q", got, want)
+	}
+}
+
 func TestValidateWrapRuntimeConfigRejectsUnsupportedFilesystemFence(t *testing.T) {
 	if fsfence.IsSupported() {
 		t.Skip("filesystem fence is supported on this platform")

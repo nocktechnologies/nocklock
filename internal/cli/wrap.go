@@ -380,13 +380,7 @@ var wrapCmd = &cobra.Command{
 		// On macOS the filesystem fence wraps the child argv with sandbox-exec
 		// (kernel-enforced, inherited by all descendants). On Linux fsSandboxPrefix
 		// is empty and the child runs directly with the LD_PRELOAD env above.
-		childArgv := args
-		if len(landlockPrefix) > 0 {
-			childArgv = append(append([]string{}, landlockPrefix...), childArgv...)
-		}
-		if len(fsSandboxPrefix) > 0 {
-			childArgv = append(append([]string{}, fsSandboxPrefix...), args...)
-		}
+		childArgv := composeChildArgv(args, landlockPrefix, fsSandboxPrefix)
 		child := exec.CommandContext(childCtx, childArgv[0], childArgv[1:]...)
 		child.Env = childEnv
 		child.Stdin = os.Stdin
@@ -476,6 +470,17 @@ func effectiveWrapConfig(cfg *config.Config, flags WrapFlags) config.Config {
 	// CLI flag is additive: if either config-file or flag permits private ranges, allow them.
 	effective.Network.AllowPrivateRanges = cfg.Network.AllowPrivateRanges || flags.AllowPrivateRanges
 	return effective
+}
+
+func composeChildArgv(args []string, prefixes ...[]string) []string {
+	childArgv := append([]string{}, args...)
+	for _, prefix := range prefixes {
+		if len(prefix) == 0 {
+			continue
+		}
+		childArgv = append(append([]string{}, prefix...), childArgv...)
+	}
+	return childArgv
 }
 
 // removeEnvVars returns env with any entries whose key matches one of the given

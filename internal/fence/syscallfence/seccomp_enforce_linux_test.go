@@ -318,8 +318,8 @@ func TestEnforce_InitModuleDenied(t *testing.T) {
 
 // TestEnforce_InitModuleUnfencedBaseline documents that init_module is ambiently
 // EPERM for an unprivileged process WITHOUT any fence. It exists so the suite is
-// explicit that the fenced scenario's fence-causation rests on the
-// PR_GET_SECCOMP==2 check, not on a deny/no-deny errno delta (which init_module
+// explicit that the fenced scenario's fence-causation rests on the AF_NETLINK
+// canary in fenceInstalled, not on a deny/no-deny errno delta (which init_module
 // cannot provide without CAP_SYS_MODULE). On the rare runner that DOES hold
 // CAP_SYS_MODULE the unfenced call could succeed; we only assert it is NOT a
 // crash/unexpected errno, never that it must be EPERM.
@@ -360,7 +360,7 @@ func TestEnforce_RawPacketSocketDenied(t *testing.T) {
 		t.Errorf("socket(AF_PACKET): exit %d, want EPERM(%d)", code, exitDeniedEPERM)
 	}
 	// The fenced EPERM above is proven fence-caused by the in-scenario
-	// PR_GET_SECCOMP==SECCOMP_MODE_FILTER check (a no-op Apply would have exited
+	// AF_NETLINK canary in fenceInstalled (a no-op Apply would have exited
 	// exitFenceNotInstalled and failed via requireSupported). On a runner that
 	// grants CAP_NET_RAW, also assert the genuine red->green: the SAME syscall
 	// SUCCEEDS unfenced (control) and is DENIED fenced — the flip is solely the
