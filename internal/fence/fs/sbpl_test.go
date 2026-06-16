@@ -38,6 +38,56 @@ func TestGenerateProfile_Structure(t *testing.T) {
 	}
 }
 
+func TestGenerateProfile_PlainHasNoHardeningRules(t *testing.T) {
+	dir := t.TempDir()
+	prof, err := GenerateProfile([]string{dir})
+	if err != nil {
+		t.Fatalf("GenerateProfile: %v", err)
+	}
+	for _, mustNotHave := range []string{"mach-priv-host-port", "iokit-open", "system-socket"} {
+		if strings.Contains(prof, mustNotHave) {
+			t.Errorf("non-hardened profile must NOT contain %q (opt-in only):\n%s", mustNotHave, prof)
+		}
+	}
+}
+
+func TestGenerateHardenedProfile_AddsDenialsWithoutDenyDefault(t *testing.T) {
+	dir := t.TempDir()
+	prof, err := GenerateHardenedProfile([]string{dir})
+	if err != nil {
+		t.Fatalf("GenerateHardenedProfile: %v", err)
+	}
+	// Still allow-default based (deny-default SIGABRTs every macOS process).
+	if !strings.Contains(prof, "(allow default)") {
+		t.Errorf("hardened profile must keep (allow default):\n%s", prof)
+	}
+	if strings.Contains(prof, "(deny default)") {
+		t.Errorf("hardened profile must NOT flip to (deny default) — it SIGABRTs:\n%s", prof)
+	}
+	// The additive syscall-surface denials must be present.
+	for _, want := range []string{
+		"(deny mach-priv-host-port)",
+		"(deny iokit-open)",
+		"(deny system-socket)",
+		"(deny file-write*",
+		"/dev",
+	} {
+		if !strings.Contains(prof, want) {
+			t.Errorf("hardened profile missing %q:\n%s", want, prof)
+		}
+	}
+	// The path denylist from the base profile must still be there.
+	if !strings.Contains(prof, "(deny file-read* file-write*") {
+		t.Errorf("hardened profile must still carry the path denylist:\n%s", prof)
+	}
+}
+
+func TestGenerateHardenedProfile_EmptyErrors(t *testing.T) {
+	if _, err := GenerateHardenedProfile(nil); err == nil {
+		t.Fatal("expected error for empty path list, got nil")
+	}
+}
+
 func TestGenerateProfile_DeterministicAndDeduped(t *testing.T) {
 	a := t.TempDir()
 	b := t.TempDir()

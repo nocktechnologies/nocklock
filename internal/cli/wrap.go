@@ -251,7 +251,14 @@ var wrapCmd = &cobra.Command{
 						return fmt.Errorf("filesystem fence cannot be enforced (fail-closed): %w", err)
 					}
 					sensitive := append(fsfence.DefaultSensitivePaths(), fsCfg.DenyPaths...)
-					profile, err := fsfence.GenerateProfile(sensitive)
+					var profile string
+					if cfg.Filesystem.Hardened {
+						// Opt-in: ADD the syscall-surface denials + tightened /dev
+						// on top of the path denylist, WITHOUT a (deny default) flip.
+						profile, err = fsfence.GenerateHardenedProfile(sensitive)
+					} else {
+						profile, err = fsfence.GenerateProfile(sensitive)
+					}
 					if err != nil {
 						return fmt.Errorf("filesystem fence profile generation failed (fail-closed): %w", err)
 					}
@@ -262,12 +269,43 @@ var wrapCmd = &cobra.Command{
 					defer os.Remove(profilePath)
 					fsSandboxPrefix = []string{fsfence.SandboxExecPath, "-f", profilePath}
 
-					fmt.Fprintf(os.Stderr, "NockLock: filesystem fence active (macOS Seatbelt, denylist interim) — %d path(s) fenced\n", len(sensitive))
-					logEvent(logging.EventFilePassed, "filesystem", fmt.Sprintf("seatbelt deny_paths=%d", len(sensitive)), false)
+					hardenedNote := ""
+					if cfg.Filesystem.Hardened {
+						hardenedNote = ", hardened"
+					}
+					fmt.Fprintf(os.Stderr, "NockLock: filesystem fence active (macOS Seatbelt, denylist interim%s) — %d path(s) fenced\n", hardenedNote, len(sensitive))
+					logEvent(logging.EventFilePassed, "filesystem", fmt.Sprintf("seatbelt deny_paths=%d hardened=%t", len(sensitive), cfg.Filesystem.Hardened), false)
 
 				default:
 					return fmt.Errorf("filesystem fence configured but not supported on %s", runtime.GOOS)
 				}
+			}
+		}
+
+		// Apply syscall fence (Linux seccomp-BPF). Opt-in and nil-safe: when
+		// enforcement is "off" buildSyscallPolicy returns ok=false and nothing
+		// changes. On Linux, when active, it routes the child through the same
+		// __landlock-exec shim that applies Landlock — extended to apply the
+		// seccomp filter just before execve (see landlock_exec.go). On non-Linux
+		// the syscall fence is a no-op and we skip the wiring entirely.
+		if runtime.GOOS == "linux" {
+			if policy, ok := buildSyscallPolicy(cfg); ok {
+				encoded, err := marshalSyscallPolicy(policy)
+				if err != nil {
+					return fmt.Errorf("failed to serialize syscall policy: %w", err)
+				}
+				childEnv = append(removeEnvVars(childEnv, syscallPolicyEnv), syscallPolicyEnv+"="+encoded)
+				// Ensure the child runs through the shim even when Landlock was
+				// unavailable or the filesystem fence is disabled.
+				if len(landlockPrefix) == 0 {
+					exe, err := os.Executable()
+					if err != nil {
+						return fmt.Errorf("cannot resolve nocklock executable for syscall fence shim: %w", err)
+					}
+					landlockPrefix = []string{exe, "__landlock-exec", "--"}
+				}
+				fmt.Fprintf(os.Stderr, "NockLock: Linux syscall fence active — seccomp-BPF (%s)\n", policy.Mode)
+				logEvent(logging.EventFilePassed, "syscall", fmt.Sprintf("seccomp mode=%s socket_families=%d allow_namespaces=%t", policy.Mode, len(policy.AllowedSocketFamilies), policy.AllowNamespaces), false)
 			}
 		}
 

@@ -29,6 +29,7 @@ type Config struct {
 	Filesystem FilesystemConfig `toml:"filesystem"`
 	Network    NetworkConfig    `toml:"network"`
 	Secrets    SecretsConfig    `toml:"secrets"`
+	Syscall    SyscallConfig    `toml:"syscall"`
 	Logging    LoggingConfig    `toml:"logging"`
 	Cloud      CloudConfig      `toml:"cloud"`
 }
@@ -46,6 +47,30 @@ type FilesystemConfig struct {
 	LinuxEnforcement string   `toml:"linux_enforcement"`
 	Allow            []string `toml:"allow"`
 	Deny             []string `toml:"deny"`
+	// Hardened opts in to the stricter macOS Seatbelt rules (deny
+	// mach-priv-host-port, iokit-open, system-socket; tightened /dev). It is a
+	// no-op on Linux. Absent/false = no behaviour change.
+	Hardened bool `toml:"hardened"`
+}
+
+// SyscallConfig defines the syscall-surface fence (Linux seccomp-BPF). It is
+// opt-in and nil-safe: an absent [syscall] table leaves Enforcement empty, which
+// defaults to "preferred" — install the fence where seccomp is available, but do
+// not fail closed on a kernel that lacks it.
+type SyscallConfig struct {
+	// Enforcement is one of "required", "preferred", or "off". Empty defaults to
+	// "preferred". On non-Linux platforms the syscall fence is always a no-op.
+	Enforcement string `toml:"enforcement"`
+	// AllowNamespaces, when true, leaves unshare/setns and namespace-creating
+	// clone() flags permitted (the rest of the baseline still applies). Default
+	// false denies namespace creation.
+	AllowNamespaces bool `toml:"allow_namespaces"`
+	// SocketFamilies is the allowlist of socket(2) address families the child may
+	// create (e.g. "unix", "inet", "inet6"). Empty means no socket restriction.
+	SocketFamilies []string `toml:"socket_families"`
+	// ExtraDeny appends additional syscall NAMES to deny beyond the baseline.
+	// Unknown names are skipped (forward-compat).
+	ExtraDeny []string `toml:"extra_deny"`
 }
 
 // NetworkConfig defines network egress boundaries.

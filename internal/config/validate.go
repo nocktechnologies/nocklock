@@ -60,6 +60,33 @@ func Validate(cfg *Config) []ValidationError {
 		})
 	}
 
+	// syscall.enforcement controls the Linux seccomp-BPF syscall fence. Empty is
+	// accepted (defaults to "preferred").
+	switch cfg.Syscall.Enforcement {
+	case "required", "preferred", "off", "":
+		// valid
+	default:
+		errs = append(errs, ValidationError{
+			Field:    "syscall.enforcement",
+			Message:  fmt.Sprintf("invalid value %q: must be \"required\", \"preferred\", \"off\", or \"\"", cfg.Syscall.Enforcement),
+			Severity: "error",
+		})
+	}
+
+	// syscall.socket_families entries must be recognised address-family names.
+	for _, fam := range cfg.Syscall.SocketFamilies {
+		switch fam {
+		case "unix", "local", "inet", "ipv4", "inet6", "ipv6", "netlink":
+			// valid
+		default:
+			errs = append(errs, ValidationError{
+				Field:    "syscall.socket_families",
+				Message:  fmt.Sprintf("unknown socket family %q: must be one of unix, inet, inet6, netlink", fam),
+				Severity: "error",
+			})
+		}
+	}
+
 	// cloud.enabled=true requires api_key.
 	if cfg.Cloud.Enabled && cfg.Cloud.APIKey == "" {
 		errs = append(errs, ValidationError{
@@ -131,7 +158,22 @@ func (cfg *Config) EffectivePolicy() string {
 	if len(cfg.Filesystem.Deny) > 0 {
 		fmt.Fprintf(&b, " deny=%d path(s)", len(cfg.Filesystem.Deny))
 	}
+	if cfg.Filesystem.Hardened {
+		b.WriteString(" hardened=true")
+	}
 	b.WriteString("\n")
+
+	// Syscall (Linux seccomp-BPF). Empty enforcement defaults to "preferred".
+	syscallEnforcement := cfg.Syscall.Enforcement
+	if syscallEnforcement == "" {
+		syscallEnforcement = "preferred"
+	}
+	if syscallEnforcement == "off" {
+		b.WriteString("  Syscall: off\n")
+	} else {
+		fmt.Fprintf(&b, "  Syscall: enforcement=%s allow_namespaces=%t socket_families=%d (Linux only)\n",
+			syscallEnforcement, cfg.Syscall.AllowNamespaces, len(cfg.Syscall.SocketFamilies))
+	}
 
 	// Secrets
 	fmt.Fprintf(&b, "  Secrets: block=%d pattern(s), pass=%d pattern(s)\n",
