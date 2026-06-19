@@ -2,6 +2,7 @@ package cli
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
@@ -586,7 +587,7 @@ func findLibFenceFS() (string, error) {
 	return findTrustedLibFenceFS(exePath, cwd, nil, fileExists)
 }
 
-func findTrustedLibFenceFS(exePath, workingDir string, extraCandidates []string, exists func(string) bool) (string, error) {
+func findTrustedLibFenceFS(exePath, workingDir string, extraCandidates []string, exists func(string) (bool, error)) (string, error) {
 	if exists == nil {
 		exists = fileExists
 	}
@@ -606,7 +607,11 @@ func findTrustedLibFenceFS(exePath, workingDir string, extraCandidates []string,
 		if err != nil {
 			continue
 		}
-		if !exists(abs) {
+		ok, err := exists(abs)
+		if err != nil {
+			return "", fmt.Errorf("cannot inspect trusted filesystem fence library candidate %q: %w", abs, err)
+		}
+		if !ok {
 			continue
 		}
 		if pathIsWithinDir(abs, workingDir) {
@@ -615,12 +620,18 @@ func findTrustedLibFenceFS(exePath, workingDir string, extraCandidates []string,
 		return abs, nil
 	}
 
-	return "", fmt.Errorf("trusted filesystem fence library not found. Install libfence_fs.so next to the nocklock binary or under /usr/local/lib/nocklock; refusing to launch with an untrusted LD_PRELOAD path")
+	return "", fmt.Errorf("trusted filesystem fence library not found. Install libfence_fs.so next to the nocklock binary, at /usr/local/lib/nocklock/libfence_fs.so, or at /usr/lib/nocklock/libfence_fs.so; refusing to launch with an untrusted LD_PRELOAD path")
 }
 
-func fileExists(path string) bool {
+func fileExists(path string) (bool, error) {
 	_, err := os.Stat(path)
-	return err == nil
+	if err == nil {
+		return true, nil
+	}
+	if errors.Is(err, os.ErrNotExist) {
+		return false, nil
+	}
+	return false, err
 }
 
 func pathIsWithinDir(path, dir string) bool {
@@ -629,6 +640,9 @@ func pathIsWithinDir(path, dir string) bool {
 	}
 	resolvedPath := resolvePathBestEffort(path)
 	resolvedDir := resolvePathBestEffort(dir)
+	if resolvedDir == filepath.Dir(resolvedDir) {
+		return false
+	}
 	rel, err := filepath.Rel(resolvedDir, resolvedPath)
 	if err != nil {
 		return false

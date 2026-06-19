@@ -174,13 +174,13 @@ func TestFindTrustedLibFenceFSRejectsProjectRelativeLibrary(t *testing.T) {
 	got, err := findTrustedLibFenceFS(
 		filepath.Join(t.TempDir(), "nocklock"),
 		projectRoot,
-		nil,
-		func(path string) bool { return path == projectLib },
+		[]string{projectLib},
+		func(path string) (bool, error) { return path == projectLib, nil },
 	)
 	if err == nil {
 		t.Fatalf("expected project-relative libfence_fs.so to be rejected, got %q", got)
 	}
-	if strings.Contains(got, "internal/fence/fs/interposer/libfence_fs.so") {
+	if got != "" {
 		t.Fatalf("project-relative libfence_fs.so must never be selected for LD_PRELOAD, got %q", got)
 	}
 }
@@ -190,7 +190,7 @@ func TestFindTrustedLibFenceFSFailsClosedWhenNoTrustedLibraryExists(t *testing.T
 		filepath.Join(t.TempDir(), "nocklock"),
 		t.TempDir(),
 		nil,
-		func(string) bool { return false },
+		func(string) (bool, error) { return false, nil },
 	)
 	if err == nil {
 		t.Fatalf("expected fail-closed error when no trusted libfence_fs.so exists, got %q", got)
@@ -201,6 +201,11 @@ func TestFindTrustedLibFenceFSFailsClosedWhenNoTrustedLibraryExists(t *testing.T
 	if !strings.Contains(err.Error(), "trusted filesystem fence library not found") {
 		t.Fatalf("expected actionable trusted-library error, got: %v", err)
 	}
+	if !strings.Contains(err.Error(), "/usr/local/lib/nocklock/libfence_fs.so") ||
+		!strings.Contains(err.Error(), "/usr/lib/nocklock/libfence_fs.so") ||
+		!strings.Contains(err.Error(), "next to the nocklock binary") {
+		t.Fatalf("expected error to list accepted install locations, got: %v", err)
+	}
 }
 
 func TestFindTrustedLibFenceFSSelectsInstalledPath(t *testing.T) {
@@ -209,13 +214,49 @@ func TestFindTrustedLibFenceFSSelectsInstalledPath(t *testing.T) {
 		filepath.Join(t.TempDir(), "nocklock"),
 		t.TempDir(),
 		[]string{installed},
-		func(path string) bool { return path == installed },
+		func(path string) (bool, error) { return path == installed, nil },
 	)
 	if err != nil {
 		t.Fatalf("expected installed trusted path to be selected: %v", err)
 	}
 	if got != installed {
 		t.Fatalf("got %q, want %q", got, installed)
+	}
+}
+
+func TestFindTrustedLibFenceFSAcceptsSystemPathFromRootWorkingDir(t *testing.T) {
+	systemLib := filepath.Join(string(os.PathSeparator), "usr", "lib", "nocklock", "libfence_fs.so")
+	got, err := findTrustedLibFenceFS(
+		filepath.Join(t.TempDir(), "nocklock"),
+		string(os.PathSeparator),
+		nil,
+		func(path string) (bool, error) { return path == systemLib, nil },
+	)
+	if err != nil {
+		t.Fatalf("expected system libfence_fs.so to be accepted when cwd is filesystem root: %v", err)
+	}
+	if got != systemLib {
+		t.Fatalf("got %q, want %q", got, systemLib)
+	}
+}
+
+func TestFindTrustedLibFenceFSSurfacesStatErrors(t *testing.T) {
+	statErr := os.ErrPermission
+	got, err := findTrustedLibFenceFS(
+		"",
+		t.TempDir(),
+		[]string{filepath.Join(t.TempDir(), "libfence_fs.so")},
+		func(string) (bool, error) { return false, statErr },
+	)
+	if err == nil {
+		t.Fatalf("expected stat error to fail closed, got %q", got)
+	}
+	if got != "" {
+		t.Fatalf("expected no path when stat fails, got %q", got)
+	}
+	if !strings.Contains(err.Error(), "cannot inspect trusted filesystem fence library candidate") ||
+		!strings.Contains(err.Error(), statErr.Error()) {
+		t.Fatalf("expected actionable stat error, got: %v", err)
 	}
 }
 
