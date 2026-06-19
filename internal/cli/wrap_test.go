@@ -161,6 +161,64 @@ func TestLandlockAuditAllowPaths(t *testing.T) {
 	}
 }
 
+func TestFindTrustedLibFenceFSRejectsProjectRelativeLibrary(t *testing.T) {
+	projectRoot := t.TempDir()
+	projectLib := filepath.Join(projectRoot, "internal", "fence", "fs", "interposer", "libfence_fs.so")
+	if err := os.MkdirAll(filepath.Dir(projectLib), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(projectLib, []byte("not a trusted shared library"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	got, err := findTrustedLibFenceFS(
+		filepath.Join(t.TempDir(), "nocklock"),
+		projectRoot,
+		nil,
+		func(path string) bool { return path == projectLib },
+	)
+	if err == nil {
+		t.Fatalf("expected project-relative libfence_fs.so to be rejected, got %q", got)
+	}
+	if strings.Contains(got, "internal/fence/fs/interposer/libfence_fs.so") {
+		t.Fatalf("project-relative libfence_fs.so must never be selected for LD_PRELOAD, got %q", got)
+	}
+}
+
+func TestFindTrustedLibFenceFSFailsClosedWhenNoTrustedLibraryExists(t *testing.T) {
+	got, err := findTrustedLibFenceFS(
+		filepath.Join(t.TempDir(), "nocklock"),
+		t.TempDir(),
+		nil,
+		func(string) bool { return false },
+	)
+	if err == nil {
+		t.Fatalf("expected fail-closed error when no trusted libfence_fs.so exists, got %q", got)
+	}
+	if got != "" {
+		t.Fatalf("expected no path when resolver fails closed, got %q", got)
+	}
+	if !strings.Contains(err.Error(), "trusted filesystem fence library not found") {
+		t.Fatalf("expected actionable trusted-library error, got: %v", err)
+	}
+}
+
+func TestFindTrustedLibFenceFSSelectsInstalledPath(t *testing.T) {
+	installed := filepath.Join(t.TempDir(), "libfence_fs.so")
+	got, err := findTrustedLibFenceFS(
+		filepath.Join(t.TempDir(), "nocklock"),
+		t.TempDir(),
+		[]string{installed},
+		func(path string) bool { return path == installed },
+	)
+	if err != nil {
+		t.Fatalf("expected installed trusted path to be selected: %v", err)
+	}
+	if got != installed {
+		t.Fatalf("got %q, want %q", got, installed)
+	}
+}
+
 func TestWrapDryRunRejectsMalformedConfig(t *testing.T) {
 	dir := t.TempDir()
 	writeTestConfig(t, dir, "[network]\nallow_all = \"sometimes\"\n")

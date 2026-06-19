@@ -165,9 +165,9 @@ var wrapCmd = &cobra.Command{
 				switch runtime.GOOS {
 				case "linux":
 					// Look for the shared library next to the nocklock binary or in standard paths.
-					libPath := findLibFenceFS()
-					if _, err := os.Stat(libPath); err != nil {
-						return fmt.Errorf("filesystem fence library not found at %s. Build it with: make build-fence-fs", libPath)
+					libPath, err := findLibFenceFS()
+					if err != nil {
+						return err
 					}
 
 					fsFence, err = fsfence.NewFence(fsCfg, libPath)
@@ -534,18 +534,6 @@ func linuxEnforcementMode(raw string) linuxEnforcement {
 	return linuxEnforcement(raw)
 }
 
-func landlockAuditAllowPaths(dbPath string) []landlock.AllowPath {
-	return []landlock.AllowPath{
-		{Path: dbPath, Access: landlock.AccessReadWrite},
-		{Path: dbPath + "-wal", Access: landlock.AccessReadWrite},
-		{Path: dbPath + "-shm", Access: landlock.AccessReadWrite},
-		{Path: dbPath + "-journal", Access: landlock.AccessReadWrite},
-	}
-}
-
-// findLibFenceFS searches for the filesystem fence shared library.
-// Security: check trusted paths first (next to binary, system paths)
-// before falling back to working directory paths.
 // auditDenyPath returns the path to add to the filesystem fence's deny list so a
 // fenced child cannot tamper with its own audit log. It denies the whole audit
 // directory (covering the db and blocking rename/delete of the log) unless the
@@ -574,33 +562,76 @@ func resolvePathBestEffort(p string) string {
 	return filepath.Clean(p)
 }
 
-func findLibFenceFS() string {
-	// 1. Next to the current executable.
+func landlockAuditAllowPaths(dbPath string) []landlock.AllowPath {
+	return []landlock.AllowPath{
+		{Path: dbPath, Access: landlock.AccessReadWrite},
+		{Path: dbPath + "-wal", Access: landlock.AccessReadWrite},
+		{Path: dbPath + "-shm", Access: landlock.AccessReadWrite},
+		{Path: dbPath + "-journal", Access: landlock.AccessReadWrite},
+	}
+}
+
+// findLibFenceFS searches only trusted locations for the filesystem fence shared
+// library. It never falls back to project-relative or bare paths because the
+// result feeds LD_PRELOAD before Linux kernel fences are applied.
+func findLibFenceFS() (string, error) {
+	var exePath string
 	if exe, err := os.Executable(); err == nil {
-		candidate := filepath.Join(filepath.Dir(exe), "libfence_fs.so")
-		if _, err := os.Stat(candidate); err == nil {
-			return candidate
-		}
+		exePath = exe
+	}
+	cwd, err := os.Getwd()
+	if err != nil {
+		return "", fmt.Errorf("cannot resolve current working directory for filesystem fence library trust check: %w", err)
+	}
+	return findTrustedLibFenceFS(exePath, cwd, nil, fileExists)
+}
+
+func findTrustedLibFenceFS(exePath, workingDir string, extraCandidates []string, exists func(string) bool) (string, error) {
+	if exists == nil {
+		exists = fileExists
 	}
 
-	// 2. Standard system paths.
-	for _, dir := range []string{"/usr/local/lib/nocklock", "/usr/lib/nocklock"} {
-		candidate := filepath.Join(dir, "libfence_fs.so")
-		if _, err := os.Stat(candidate); err == nil {
-			return candidate
-		}
+	candidates := make([]string, 0, len(extraCandidates)+3)
+	if exePath != "" {
+		candidates = append(candidates, filepath.Join(filepath.Dir(exePath), "libfence_fs.so"))
 	}
+	candidates = append(candidates,
+		filepath.Join("/usr/local/lib/nocklock", "libfence_fs.so"),
+		filepath.Join("/usr/lib/nocklock", "libfence_fs.so"),
+	)
+	candidates = append(candidates, extraCandidates...)
 
-	// 3. Build output directory (least trusted — only for development).
-	candidate := filepath.Join("internal", "fence", "fs", "interposer", "libfence_fs.so")
-	if _, err := os.Stat(candidate); err == nil {
+	for _, candidate := range candidates {
 		abs, err := filepath.Abs(candidate)
-		if err == nil {
-			return abs
+		if err != nil {
+			continue
 		}
-		return candidate
+		if !exists(abs) {
+			continue
+		}
+		if pathIsWithinDir(abs, workingDir) {
+			continue
+		}
+		return abs, nil
 	}
 
-	// Default: bare name (will fail os.Stat check in caller).
-	return "libfence_fs.so"
+	return "", fmt.Errorf("trusted filesystem fence library not found. Install libfence_fs.so next to the nocklock binary or under /usr/local/lib/nocklock; refusing to launch with an untrusted LD_PRELOAD path")
+}
+
+func fileExists(path string) bool {
+	_, err := os.Stat(path)
+	return err == nil
+}
+
+func pathIsWithinDir(path, dir string) bool {
+	if dir == "" {
+		return false
+	}
+	resolvedPath := resolvePathBestEffort(path)
+	resolvedDir := resolvePathBestEffort(dir)
+	rel, err := filepath.Rel(resolvedDir, resolvedPath)
+	if err != nil {
+		return false
+	}
+	return rel == "." || (rel != ".." && !strings.HasPrefix(rel, ".."+string(os.PathSeparator)))
 }
