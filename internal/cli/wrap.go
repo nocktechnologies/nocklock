@@ -178,27 +178,10 @@ var wrapCmd = &cobra.Command{
 					defer fsFence.Close()
 
 					// Add LD_PRELOAD and NOCKLOCK_FS_ALLOWED to child env.
-					// Merge LD_PRELOAD with any existing value in childEnv.
-					fenceEnv := fsFence.EnvVars()
-					for i, fenceVar := range fenceEnv {
-						if strings.HasPrefix(fenceVar, "LD_PRELOAD=") {
-							fenceLib := strings.TrimPrefix(fenceVar, "LD_PRELOAD=")
-							for j, childVar := range childEnv {
-								if strings.HasPrefix(childVar, "LD_PRELOAD=") {
-									existing := strings.TrimPrefix(childVar, "LD_PRELOAD=")
-									if existing == "" {
-										childEnv[j] = "LD_PRELOAD=" + fenceLib
-									} else {
-										childEnv[j] = "LD_PRELOAD=" + fenceLib + ":" + existing
-									}
-									fenceEnv = append(fenceEnv[:i], fenceEnv[i+1:]...)
-									break
-								}
-							}
-							break
-						}
-					}
-					childEnv = append(childEnv, fenceEnv...)
+					// mergeFSFenceEnv strips any inherited NOCKLOCK_FS_ALLOWED
+					// (security: glibc getenv first-match — see N8185) and merges
+					// the fence's LD_PRELOAD ahead of any inherited value.
+					childEnv = mergeFSFenceEnv(childEnv, fsFence.EnvVars())
 
 					enforcement := linuxEnforcementMode(cfg.Filesystem.LinuxEnforcement)
 					if enforcement != linuxEnforcementOff {
@@ -482,6 +465,53 @@ func composeChildArgv(args []string, prefixes ...[]string) []string {
 		childArgv = append(append([]string{}, prefix...), childArgv...)
 	}
 	return childArgv
+}
+
+// mergeFSFenceEnv merges the filesystem fence's environment (fenceEnv, from
+// fsfence.Fence.EnvVars) into the child's environment (childEnv) for the Linux
+// userspace (LD_PRELOAD) fence.
+//
+// Security (N8185): the interposer reads its SOLE policy from
+// NOCKLOCK_FS_ALLOWED via glibc getenv(), which returns the FIRST matching
+// entry in the environment block. childEnv comes from
+// secrets.Filter(os.Environ()), so an inherited / attacker-controlled
+// NOCKLOCK_FS_ALLOWED sits EARLIER than the fence's own and would win — forging
+// an allow-all policy and neutering the fence. We therefore strip any inherited
+// NOCKLOCK_FS_ALLOWED from childEnv before appending the fence's value, so
+// exactly one entry (the fence's) remains effective. This mirrors the sibling
+// landlock (landlockRulesEnv) and syscall (syscallPolicyEnv) paths, which
+// already removeEnvVars before appending.
+//
+// LD_PRELOAD is handled differently: a legitimately inherited LD_PRELOAD is
+// preserved by prepending the fence library (it must load first) rather than
+// dropped, so it is merged in place instead of stripped.
+func mergeFSFenceEnv(childEnv, fenceEnv []string) []string {
+	// Strip any inherited NOCKLOCK_FS_ALLOWED so only the fence's value is
+	// effective (getenv first-match). LD_PRELOAD is intentionally NOT stripped
+	// here — it is merged below to preserve a legitimate inherited value.
+	childEnv = removeEnvVars(childEnv, fsfence.EnvFSAllowed)
+
+	// Merge the fence's LD_PRELOAD with any existing value in childEnv so the
+	// fence library loads first.
+	for i, fenceVar := range fenceEnv {
+		if strings.HasPrefix(fenceVar, fsfence.EnvLDPreload+"=") {
+			fenceLib := strings.TrimPrefix(fenceVar, fsfence.EnvLDPreload+"=")
+			for j, childVar := range childEnv {
+				if strings.HasPrefix(childVar, fsfence.EnvLDPreload+"=") {
+					existing := strings.TrimPrefix(childVar, fsfence.EnvLDPreload+"=")
+					if existing == "" {
+						childEnv[j] = fsfence.EnvLDPreload + "=" + fenceLib
+					} else {
+						childEnv[j] = fsfence.EnvLDPreload + "=" + fenceLib + ":" + existing
+					}
+					fenceEnv = append(fenceEnv[:i], fenceEnv[i+1:]...)
+					break
+				}
+			}
+			break
+		}
+	}
+	return append(childEnv, fenceEnv...)
 }
 
 // removeEnvVars returns env with any entries whose key matches one of the given
