@@ -32,6 +32,17 @@ func CheckSupported() error {
 	)
 }
 
+// Environment variable names used to activate the userspace (LD_PRELOAD)
+// filesystem fence in a child process. EnvFSAllowed is the SOLE policy source
+// read by the interposer (libfence_fs.c getenv("NOCKLOCK_FS_ALLOWED")), so the
+// wrap command must guarantee the fence's own value is the effective one — an
+// inherited, attacker-controlled value sitting earlier in the child environment
+// would otherwise win under glibc getenv (first-match) and neuter the fence.
+const (
+	EnvLDPreload = "LD_PRELOAD"
+	EnvFSAllowed = "NOCKLOCK_FS_ALLOWED"
+)
+
 // FenceEvent represents a filesystem access event reported by the C library.
 // Events are sent as newline-delimited JSON over the Unix domain socket.
 type FenceEvent struct {
@@ -95,8 +106,8 @@ func NewFence(cfg *FenceConfig, libPath string) (*Fence, error) {
 // the interposer library and NOCKLOCK_FS_ALLOWED with the serialized config.
 func (f *Fence) EnvVars() []string {
 	return []string{
-		"LD_PRELOAD=" + f.LibPath,
-		"NOCKLOCK_FS_ALLOWED=" + f.Config.Serialize(f.SocketPath),
+		EnvLDPreload + "=" + f.LibPath,
+		EnvFSAllowed + "=" + f.Config.Serialize(f.SocketPath),
 	}
 }
 

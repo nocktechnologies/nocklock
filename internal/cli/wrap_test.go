@@ -65,6 +65,123 @@ func TestRemoveEnvVarsExactKeyWithoutEquals(t *testing.T) {
 	}
 }
 
+// fsAllowedEntries returns every NOCKLOCK_FS_ALLOWED=... entry in env, in order.
+func fsAllowedEntries(env []string) []string {
+	var out []string
+	for _, e := range env {
+		if strings.HasPrefix(e, fsfence.EnvFSAllowed+"=") {
+			out = append(out, e)
+		}
+	}
+	return out
+}
+
+// TestMergeFSFenceEnvStripsInheritedFSAllowed is the N8185 regression test.
+//
+// The userspace filesystem fence reads its policy from a SINGLE env var,
+// NOCKLOCK_FS_ALLOWED, via glibc getenv() in the LD_PRELOAD interposer. glibc
+// getenv() returns the FIRST matching entry in the child environment block.
+// childEnv is built from secrets.Filter(os.Environ()), so an attacker who sets
+// NOCKLOCK_FS_ALLOWED in the parent environment lands an entry that sits EARLIER
+// in childEnv than the fence's own value — and therefore wins, forging an
+// allow-all (root=/ rw) policy and silently neutering the fence.
+//
+// mergeFSFenceEnv must strip any inherited NOCKLOCK_FS_ALLOWED before appending
+// the fence's own, so exactly ONE entry remains and it is the fence's.
+func TestMergeFSFenceEnvStripsInheritedFSAllowed(t *testing.T) {
+	const attacker = "/=rw" // forged allow-all the attacker tries to inject
+	const fenceVal = "/srv/project=ro;sock=/tmp/fence.sock"
+
+	childEnv := []string{
+		"HOME=/home/agent",
+		fsfence.EnvFSAllowed + "=" + attacker, // inherited / attacker-controlled
+		"PATH=/usr/bin",
+	}
+	fenceEnv := []string{
+		fsfence.EnvLDPreload + "=/usr/local/lib/nocklock/libfence_fs.so",
+		fsfence.EnvFSAllowed + "=" + fenceVal,
+	}
+
+	merged := mergeFSFenceEnv(childEnv, fenceEnv)
+
+	got := fsAllowedEntries(merged)
+	if len(got) != 1 {
+		t.Fatalf("expected exactly 1 %s entry after merge, got %d: %v",
+			fsfence.EnvFSAllowed, len(got), got)
+	}
+	want := fsfence.EnvFSAllowed + "=" + fenceVal
+	if got[0] != want {
+		t.Fatalf("effective %s = %q, want the fence's value %q (inherited attacker value not stripped)",
+			fsfence.EnvFSAllowed, got[0], want)
+	}
+	for _, e := range merged {
+		if e == fsfence.EnvFSAllowed+"="+attacker {
+			t.Fatalf("inherited attacker %s=%s survived the merge: %v",
+				fsfence.EnvFSAllowed, attacker, merged)
+		}
+	}
+}
+
+// TestMergeFSFenceEnvMergesInheritedLDPreload guards the LD_PRELOAD merge
+// behavior the fix must preserve: a legitimately inherited LD_PRELOAD is kept
+// but the fence library is loaded FIRST (prepended), and there is still exactly
+// one LD_PRELOAD entry.
+func TestMergeFSFenceEnvMergesInheritedLDPreload(t *testing.T) {
+	const fenceLib = "/usr/local/lib/nocklock/libfence_fs.so"
+	const inherited = "/opt/other/libthing.so"
+
+	childEnv := []string{
+		"HOME=/home/agent",
+		fsfence.EnvLDPreload + "=" + inherited,
+	}
+	fenceEnv := []string{
+		fsfence.EnvLDPreload + "=" + fenceLib,
+		fsfence.EnvFSAllowed + "=/srv=ro",
+	}
+
+	merged := mergeFSFenceEnv(childEnv, fenceEnv)
+
+	var ld []string
+	for _, e := range merged {
+		if strings.HasPrefix(e, fsfence.EnvLDPreload+"=") {
+			ld = append(ld, e)
+		}
+	}
+	if len(ld) != 1 {
+		t.Fatalf("expected exactly 1 %s entry, got %d: %v", fsfence.EnvLDPreload, len(ld), ld)
+	}
+	want := fsfence.EnvLDPreload + "=" + fenceLib + ":" + inherited
+	if ld[0] != want {
+		t.Fatalf("merged %s = %q, want %q (fence lib must load first, inherited preserved)",
+			fsfence.EnvLDPreload, ld[0], want)
+	}
+}
+
+// TestMergeFSFenceEnvNoInheritedValues confirms the common, clean case: with no
+// inherited fence vars the fence's LD_PRELOAD and FS_ALLOWED are simply added.
+func TestMergeFSFenceEnvNoInheritedValues(t *testing.T) {
+	childEnv := []string{"HOME=/home/agent", "PATH=/usr/bin"}
+	fenceEnv := []string{
+		fsfence.EnvLDPreload + "=/usr/local/lib/nocklock/libfence_fs.so",
+		fsfence.EnvFSAllowed + "=/srv=ro",
+	}
+
+	merged := mergeFSFenceEnv(childEnv, fenceEnv)
+
+	if entries := fsAllowedEntries(merged); len(entries) != 1 {
+		t.Fatalf("expected 1 %s entry, got %v", fsfence.EnvFSAllowed, entries)
+	}
+	var ldCount int
+	for _, e := range merged {
+		if strings.HasPrefix(e, fsfence.EnvLDPreload+"=") {
+			ldCount++
+		}
+	}
+	if ldCount != 1 {
+		t.Fatalf("expected 1 %s entry, got %d", fsfence.EnvLDPreload, ldCount)
+	}
+}
+
 func TestWrapDryRunValidatesConfigWithoutCommand(t *testing.T) {
 	dir := t.TempDir()
 	writeTestConfig(t, dir, dryRunTestTOML())
