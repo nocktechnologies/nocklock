@@ -64,6 +64,46 @@ func TestRulesFromConfigMapsReadOnlyAndReadWriteRights(t *testing.T) {
 	}
 }
 
+func TestRulesFromConfigKeepsAllowPathsReadOnlyWhenRootIsReadWrite(t *testing.T) {
+	root := t.TempDir()
+	if err := os.Mkdir(filepath.Join(root, "src"), 0o755); err != nil {
+		t.Fatalf("mkdir src: %v", err)
+	}
+	allowPath := filepath.Join(t.TempDir(), "external-cache")
+	if err := os.Mkdir(allowPath, 0o755); err != nil {
+		t.Fatalf("mkdir allow path: %v", err)
+	}
+
+	spec, err := RulesFromConfig(&fsfence.FenceConfig{
+		Root:       root,
+		Mode:       "read-write",
+		AllowPaths: []string{allowPath},
+	}, nil, 5)
+	if err != nil {
+		t.Fatalf("RulesFromConfig failed: %v", err)
+	}
+
+	var allowRule *PathRule
+	for i := range spec.Paths {
+		if spec.Paths[i].Path == allowPath {
+			allowRule = &spec.Paths[i]
+			break
+		}
+	}
+	if allowRule == nil {
+		t.Fatalf("missing allow path rule %q in %+v", allowPath, spec.Paths)
+	}
+	if allowRule.Access != AccessReadOnly {
+		t.Fatalf("allow path access = %q, want %q", allowRule.Access, AccessReadOnly)
+	}
+	if allowRule.Rights&writeRights != 0 {
+		t.Fatalf("allow path must not include write/create/remove rights: %#x", allowRule.Rights)
+	}
+	if allowRule.Rights&RightTruncate != 0 {
+		t.Fatalf("allow path must not include truncate: %#x", allowRule.Rights)
+	}
+}
+
 func TestRulesFromConfigLimitsRegularFileRights(t *testing.T) {
 	root := t.TempDir()
 	allowedPath := filepath.Join(root, "allowed.txt")

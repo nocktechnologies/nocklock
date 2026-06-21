@@ -138,7 +138,7 @@ func RulesFromConfig(cfg *fsfence.FenceConfig, extra []AllowPath, abi int) (Spec
 	}
 	spec.Paths = append(spec.Paths, rootRules...)
 	for _, p := range cfg.AllowPaths {
-		spec.Paths = append(spec.Paths, pathRule(p, rootAccess, abi))
+		spec.Paths = append(spec.Paths, pathRule(p, AccessReadOnly, abi))
 	}
 	for _, p := range extra {
 		spec.Paths = append(spec.Paths, pathRule(filepath.Clean(p.Path), p.Access, abi))
