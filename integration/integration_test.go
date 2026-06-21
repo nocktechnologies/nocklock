@@ -21,6 +21,7 @@ var nocklockBin string
 var statProbeBin string
 var fenceLibPath string
 var preloadClearWriteProbeBin string
+var metadataMutatorProbeBin string
 
 // TestMain builds the nocklock binary (and the filesystem fence interposer on
 // Linux) once, then runs the integration suite. Cleanup happens after all tests.
@@ -69,6 +70,14 @@ func TestMain(m *testing.M) {
 		}
 		statProbeBin = statProbePath
 
+		metadataMutatorProbePath := filepath.Join(tmp, "metadata-mutator-probe")
+		if err := buildMetadataMutatorProbe(tmp, metadataMutatorProbePath); err != nil {
+			fmt.Fprintf(os.Stderr, "Failed to build metadata mutator probe helper: %v\n", err)
+			os.RemoveAll(tmp)
+			os.Exit(1)
+		}
+		metadataMutatorProbeBin = metadataMutatorProbePath
+
 		preloadClearWriteProbePath := filepath.Join(tmp, "preload-clear-write")
 		if err := buildPreloadClearWriteProbe(tmp, preloadClearWriteProbePath); err != nil {
 			fmt.Fprintf(os.Stderr, "Failed to build LD_PRELOAD clear/write probe helper: %v\n", err)
@@ -111,6 +120,89 @@ func copyFile(src, dst string) error {
 
 	_, err = io.Copy(out, in)
 	return err
+}
+
+func buildMetadataMutatorProbe(dir, binPath string) error {
+	sourcePath := filepath.Join(dir, "metadata_mutator_probe.c")
+	source := `#define _GNU_SOURCE
+#include <errno.h>
+#include <fcntl.h>
+#include <stdio.h>
+#include <string.h>
+#include <sys/stat.h>
+#include <sys/types.h>
+#include <time.h>
+#include <unistd.h>
+
+int main(int argc, char **argv) {
+    if (argc != 3) {
+        fprintf(stderr, "usage: metadata-mutator-probe <mode> <path>\n");
+        return 2;
+    }
+
+    const char *mode = argv[1];
+    const char *path = argv[2];
+    int rc = -1;
+
+    if (strcmp(mode, "fchmod") == 0 || strcmp(mode, "fchown") == 0 || strcmp(mode, "futimens") == 0) {
+        int fd = open(path, O_RDONLY);
+        if (fd < 0) {
+            printf("OPEN_ERRNO=%d:%s\n", errno, strerror(errno));
+            return 12;
+        }
+        if (strcmp(mode, "fchmod") == 0) {
+            rc = fchmod(fd, 0600);
+        } else if (strcmp(mode, "fchown") == 0) {
+            rc = fchown(fd, getuid(), getgid());
+        } else {
+            struct timespec ts[2];
+            ts[0].tv_sec = 1;
+            ts[0].tv_nsec = 0;
+            ts[1].tv_sec = 1;
+            ts[1].tv_nsec = 0;
+            rc = futimens(fd, ts);
+        }
+        close(fd);
+    } else if (strcmp(mode, "fchmodat") == 0 || strcmp(mode, "fchownat") == 0 || strcmp(mode, "utimensat") == 0) {
+        if (strcmp(mode, "fchmodat") == 0) {
+            rc = fchmodat(AT_FDCWD, path, 0600, 0);
+        } else if (strcmp(mode, "fchownat") == 0) {
+            rc = fchownat(AT_FDCWD, path, getuid(), getgid(), 0);
+        } else {
+            struct timespec ts[2];
+            ts[0].tv_sec = 1;
+            ts[0].tv_nsec = 0;
+            ts[1].tv_sec = 1;
+            ts[1].tv_nsec = 0;
+            rc = utimensat(AT_FDCWD, path, ts, 0);
+        }
+    } else {
+        fprintf(stderr, "unknown mode: %s\n", mode);
+        return 2;
+    }
+
+    if (rc == 0) {
+        puts("MUTATED");
+        return 0;
+    }
+    if (errno == EACCES || errno == EPERM) {
+        puts("DENIED");
+        return 10;
+    }
+
+    printf("ERRNO=%d:%s\n", errno, strerror(errno));
+    return 12;
+}
+`
+	if err := os.WriteFile(sourcePath, []byte(source), 0o600); err != nil {
+		return err
+	}
+	cmd := exec.Command("gcc", "-Wall", "-Wextra", "-Werror", "-O2", "-o", binPath, sourcePath)
+	cmd.Dir = dir
+	if out, err := cmd.CombinedOutput(); err != nil {
+		return fmt.Errorf("%w\n%s", err, out)
+	}
+	return nil
 }
 
 func buildStatProbe(dir, binPath string) error {
@@ -769,6 +861,121 @@ func TestFilesystemFenceFstatFamilyReturnsENOENTForInheritedDeniedFD(t *testing.
 			}
 		})
 	}
+}
+
+func TestFilesystemFenceDeniesMetadataMutatorsOnReadOnlyPaths(t *testing.T) {
+	if runtime.GOOS != "linux" {
+		t.Skip("filesystem fence is Linux-only")
+	}
+	if metadataMutatorProbeBin == "" {
+		t.Fatal("metadata mutator probe helper was not built")
+	}
+
+	modes := []string{"fchmod", "fchmodat", "fchown", "fchownat", "futimens", "utimensat"}
+
+	t.Run("read_only_root", func(t *testing.T) {
+		config := `[project]
+name = "integration-test-fs-metadata-root"
+root = "."
+
+[filesystem]
+root = "."
+mode = "read-only"
+linux_enforcement = "off"
+allow = []
+deny = []
+
+[network]
+allow = []
+allow_all = true
+
+[secrets]
+pass = ["HOME", "PATH", "SHELL", "USER", "LANG", "TERM"]
+block = []
+
+[logging]
+db = ".nock/events.db"
+level = "info"
+
+[cloud]
+enabled = false
+api_key = ""
+endpoint = "https://cc.nocktechnologies.io/api/fence/events/"
+`
+		dir := setupTestDirWithConfig(t, config)
+		target := filepath.Join(dir, "readonly-root-target.txt")
+		if err := os.WriteFile(target, []byte("content"), 0o644); err != nil {
+			t.Fatalf("write target: %v", err)
+		}
+		helper := filepath.Join(dir, "metadata-mutator-probe")
+		if err := copyFile(metadataMutatorProbeBin, helper); err != nil {
+			t.Fatalf("copy metadata mutator probe into fenced root: %v", err)
+		}
+
+		for _, mode := range modes {
+			mode := mode
+			t.Run(mode, func(t *testing.T) {
+				stdout, stderr, exitCode := runNocklock(t, dir, nil, "wrap", "--", helper, mode, target)
+				if exitCode != 10 || !strings.Contains(stdout, "DENIED") {
+					t.Fatalf("expected %s denied on read-only root, got exit=%d stdout=%q stderr=%q",
+						mode, exitCode, stdout, stderr)
+				}
+			})
+		}
+	})
+
+	t.Run("read_only_allow_list", func(t *testing.T) {
+		allowedDir := t.TempDir()
+		target := filepath.Join(allowedDir, "allow-list-target.txt")
+		if err := os.WriteFile(target, []byte("content"), 0o644); err != nil {
+			t.Fatalf("write allow-list target: %v", err)
+		}
+
+		config := fmt.Sprintf(`[project]
+name = "integration-test-fs-metadata-allow"
+root = "."
+
+[filesystem]
+root = "."
+mode = "read-write"
+linux_enforcement = "off"
+allow = [%q]
+deny = []
+
+[network]
+allow = []
+allow_all = true
+
+[secrets]
+pass = ["HOME", "PATH", "SHELL", "USER", "LANG", "TERM"]
+block = []
+
+[logging]
+db = ".nock/events.db"
+level = "info"
+
+[cloud]
+enabled = false
+api_key = ""
+endpoint = "https://cc.nocktechnologies.io/api/fence/events/"
+`, allowedDir)
+		dir := setupTestDirWithConfig(t, config)
+		helper := filepath.Join(dir, "metadata-mutator-probe")
+		if err := copyFile(metadataMutatorProbeBin, helper); err != nil {
+			t.Fatalf("copy metadata mutator probe into fenced root: %v", err)
+		}
+
+		for _, mode := range modes {
+			mode := mode
+			t.Run(mode, func(t *testing.T) {
+				stdout, stderr, exitCode := runNocklock(t, dir, nil, "wrap", "--", helper, mode, target)
+				if exitCode != 10 || !strings.Contains(stdout, "DENIED") {
+					t.Fatalf("expected %s denied on read-only allow-list path, got exit=%d stdout=%q stderr=%q",
+						mode, exitCode, stdout, stderr)
+				}
+			})
+		}
+	})
 }
 
 func TestLandlockBlocksWriteAfterChildClearsLDPreload(t *testing.T) {
