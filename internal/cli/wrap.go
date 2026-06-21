@@ -507,11 +507,11 @@ func validateWrapRuntimeConfig(cfg *config.Config) error {
 	}
 
 	if cfg.Filesystem.Root != "" {
-		if !fsfence.IsSupported() {
-			return fmt.Errorf("filesystem fence configured but not supported on %s", runtime.GOOS)
-		}
 		if runtime.GOOS == "darwin" {
 			return fmt.Errorf("filesystem.root cannot be enforced as a root-only sandbox on macOS with Seatbelt; refusing to start rather than run an allow-default denylist. Run on Linux Landlock for filesystem-root isolation or disable [filesystem].root")
+		}
+		if !fsfence.IsSupported() {
+			return fmt.Errorf("filesystem fence configured but not supported on %s", runtime.GOOS)
 		}
 		if _, err := fsfence.ProcessConfig(cfg.Filesystem); err != nil {
 			return fmt.Errorf("invalid filesystem fence config: %w", err)

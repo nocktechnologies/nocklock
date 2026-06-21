@@ -3,6 +3,7 @@
 package fs
 
 import (
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -76,14 +77,17 @@ func resolvePath(p string) (string, error) {
 	// so we must store the real path for rules to match.
 	if resolved, err := filepath.EvalSymlinks(cleaned); err == nil {
 		return resolved, nil
+	} else if !errors.Is(err, os.ErrNotExist) {
+		return "", fmt.Errorf("cannot resolve path %q: %w", p, err)
 	}
-	dir := cleaned
-	var tail []string
-	for {
+	tail := []string{filepath.Base(cleaned)}
+	for dir := filepath.Dir(cleaned); ; {
 		resolved, err := filepath.EvalSymlinks(dir)
 		if err == nil {
 			parts := append([]string{resolved}, reversePathTail(tail)...)
 			return filepath.Join(parts...), nil
+		} else if !errors.Is(err, os.ErrNotExist) {
+			return "", fmt.Errorf("cannot resolve path ancestor %q for %q: %w", dir, p, err)
 		}
 		parent := filepath.Dir(dir)
 		if parent == dir {

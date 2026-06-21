@@ -245,6 +245,8 @@ func TestAuditDenyPath(t *testing.T) {
 	}
 }
 
+// TestLinuxEnforcementModePreferredFailsClosed verifies empty/preferred/required
+// all resolve to required, while off remains off.
 func TestLinuxEnforcementModePreferredFailsClosed(t *testing.T) {
 	for _, raw := range []string{"", "preferred", "required"} {
 		if got := linuxEnforcementMode(raw); got != linuxEnforcementRequired {
@@ -463,6 +465,8 @@ func TestValidateWrapRuntimeConfigRejectsUnsupportedFilesystemFence(t *testing.T
 	}
 }
 
+// TestWrapDryRunFailsClosedForMacOSFilesystemRoot verifies dry-run rejects the
+// macOS Seatbelt path when filesystem.root asks for Linux-style root isolation.
 func TestWrapDryRunFailsClosedForMacOSFilesystemRoot(t *testing.T) {
 	if runtime.GOOS != "darwin" {
 		t.Skip("macOS Seatbelt posture only applies on darwin")

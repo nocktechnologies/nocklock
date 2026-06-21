@@ -36,14 +36,14 @@ func buildSyscallPolicy(cfg *config.Config) (syscallfence.Policy, bool) {
 	if mode == syscallfence.ModeOff {
 		return syscallfence.Policy{}, false
 	}
-	extraDeny := append([]string(nil), cfg.Syscall.ExtraDeny...)
+	socketFamilies := append([]string(nil), cfg.Syscall.SocketFamilies...)
 	if !cfg.Network.AllowAll {
-		extraDeny = append(extraDeny, "connect")
+		socketFamilies = []string{"unix"}
 	}
 	return syscallfence.Policy{
-		AllowedSocketFamilies: append([]string(nil), cfg.Syscall.SocketFamilies...),
+		AllowedSocketFamilies: socketFamilies,
 		AllowNamespaces:       cfg.Syscall.AllowNamespaces,
-		ExtraDenySyscalls:     extraDeny,
+		ExtraDenySyscalls:     append([]string(nil), cfg.Syscall.ExtraDeny...),
 		Mode:                  mode,
 	}, true
 }

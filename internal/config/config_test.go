@@ -275,8 +275,8 @@ func TestDefaultSyscallConfig(t *testing.T) {
 
 func TestSyscallConfigParsesAndIsOptIn(t *testing.T) {
 	// An explicit [syscall] block parses; an ABSENT one leaves the zero value
-	// (which the wiring treats as "preferred" only when present in defaults — a
-	// minimal config with no [syscall] block must not error).
+	// (which the wiring treats as "required" for fail-closed behavior — a minimal
+	// config with no [syscall] block must not error).
 	const minimal = `
 [project]
 name = "x"

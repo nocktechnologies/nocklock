@@ -19,7 +19,6 @@ func TestResolveNames_KnownSyscallsResolveToCanonicalNumbers(t *testing.T) {
 		{"amd64", "ptrace", 101},
 		{"amd64", "bpf", 321},
 		{"amd64", "socket", 41},
-		{"amd64", "connect", 42},
 		{"amd64", "unshare", 272},
 		{"arm64", "init_module", 105},
 		{"arm64", "ptrace", 117},
@@ -56,7 +55,7 @@ func TestSyscallTable_NumbersMatchSupportedABIs(t *testing.T) {
 			"reboot": 169, "kexec_load": 246, "kexec_file_load": 320,
 			"ioperm": 173, "iopl": 172,
 			"ptrace": 101, "process_vm_readv": 310, "process_vm_writev": 311,
-			"clone": 56, "clone3": 435, "socket": 41, "connect": 42,
+			"clone": 56, "clone3": 435, "socket": 41,
 		},
 		"arm64": {
 			"init_module": 105, "finit_module": 273, "delete_module": 106,
@@ -69,7 +68,7 @@ func TestSyscallTable_NumbersMatchSupportedABIs(t *testing.T) {
 			"settimeofday": 170, "clock_settime": 112, "clock_adjtime": 266, "adjtimex": 171,
 			"reboot": 142, "kexec_load": 104, "kexec_file_load": 294,
 			"ptrace": 117, "process_vm_readv": 270, "process_vm_writev": 271,
-			"clone": 220, "clone3": 435, "socket": 198, "connect": 203,
+			"clone": 220, "clone3": 435, "socket": 198,
 		},
 		"386": {
 			"init_module": 128, "finit_module": 350, "delete_module": 129,
@@ -83,7 +82,7 @@ func TestSyscallTable_NumbersMatchSupportedABIs(t *testing.T) {
 			"reboot": 88, "kexec_load": 283,
 			"ioperm": 101, "iopl": 110,
 			"ptrace": 26, "process_vm_readv": 347, "process_vm_writev": 348,
-			"clone": 120, "clone3": 435, "socket": 359, "socketcall": 102, "connect": 362,
+			"clone": 120, "clone3": 435, "socket": 359, "socketcall": 102,
 		},
 		"arm": {
 			"init_module": 128, "finit_module": 379, "delete_module": 129,
@@ -96,7 +95,7 @@ func TestSyscallTable_NumbersMatchSupportedABIs(t *testing.T) {
 			"settimeofday": 79, "clock_settime": 262, "clock_adjtime": 372, "adjtimex": 124,
 			"reboot": 88, "kexec_load": 347, "kexec_file_load": 401,
 			"ptrace": 26, "process_vm_readv": 376, "process_vm_writev": 377,
-			"clone": 120, "clone3": 435, "socket": 281, "connect": 283,
+			"clone": 120, "clone3": 435, "socket": 281,
 		},
 	}
 
@@ -213,14 +212,6 @@ func TestBaselineDenylist_CoversRequiredSubsystems(t *testing.T) {
 	for _, r := range required {
 		if _, ok := set[r]; !ok {
 			t.Errorf("BaselineDenylist is missing required syscall %q", r)
-		}
-	}
-}
-
-func TestConnectSyscallResolvesForExtraDeny(t *testing.T) {
-	for _, arch := range []string{"amd64", "arm64", "386", "arm"} {
-		if _, ok := syscallNr("connect", arch); !ok {
-			t.Errorf("connect must resolve on %s so wrap can deny direct sockets when network fence is active", arch)
 		}
 	}
 }

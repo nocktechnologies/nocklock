@@ -29,7 +29,7 @@ That's it. Four commands. Your agent is fenced.
 
 1. **Filters environment variables** based on pass/block lists with glob patterns — Linux, macOS
 2. **Fences the filesystem** — Linux: Landlock applies a kernel allowlist and LD_PRELOAD records blocked-access events. Fails closed: if the required fence can't be enforced, the agent doesn't start.
-3. **Routes network traffic** through a local proxy that enforces a domain allowlist. On Linux, the syscall fence also denies direct `connect(2)` while the network fence is active so raw sockets cannot bypass the proxy. For HTTPS, only the hostname is inspected — no certificate injection, no payload decryption. If the proxy is not confirmed healthy, the agent does not start.
+3. **Routes network traffic** through a local proxy that enforces a domain allowlist. On Linux, when the syscall fence is enabled and the network fence is active, IP socket creation is denied so native code cannot bypass the proxy; this is a fail-closed no-network posture. Disable `[syscall]` only if you accept the proxy as a userspace boundary. For HTTPS, only the hostname is inspected — no certificate injection, no payload decryption. If the proxy is not confirmed healthy, the agent does not start.
 
 Every blocked access is logged to `.nock/events.db`. Blocked file opens and access-style checks return EACCES (permission denied); denied stat-family probes return ENOENT to avoid existence enumeration. Blocked domains return 403.
 
@@ -195,7 +195,7 @@ NockLock is a fence, not guardrails. The distinction matters.
 
 **Guardrails** tell the agent what not to do. The agent can ignore them, work around them, or hallucinate past them. Guardrails are prompts.
 
-**A fence** sits between the agent and the resource. How hard the boundary is depends on the fence. The **secret fence** is absolute — a blocked variable is gone from the environment before the agent starts. On **Linux the filesystem fence** is kernel-enforced with Landlock by default and composes with LD_PRELOAD logging; static binaries and children that clear `LD_PRELOAD` are still denied by the kernel. On **macOS filesystem-root isolation is not claimed**; NockLock fails closed instead of launching an allow-default denylist. The **network fence** stops normal and prompt-injected attempts to reach unapproved domains and logs every try; on Linux, seccomp also denies direct `connect(2)` while the proxy allowlist is active.
+**A fence** sits between the agent and the resource. How hard the boundary is depends on the fence. The **secret fence** is absolute — a blocked variable is gone from the environment before the agent starts. On **Linux the filesystem fence** is kernel-enforced with Landlock by default and composes with LD_PRELOAD logging; static binaries and children that clear `LD_PRELOAD` are still denied by the kernel. On **macOS filesystem-root isolation is not claimed**; NockLock fails closed instead of launching an allow-default denylist. The **network fence** stops normal and prompt-injected attempts to reach unapproved domains and logs every try; on Linux with syscall fencing enabled, network-fenced runs allow only Unix-domain sockets, so the bypass-resistant posture is no IP sockets rather than proxy-based allowlisting.
 
 NockLock doesn't restrict how your agent works. It restricts what your agent can reach. Your agent still has full permissions — inside the fence.
 

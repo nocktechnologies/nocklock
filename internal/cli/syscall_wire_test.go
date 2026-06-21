@@ -70,27 +70,29 @@ func TestBuildSyscallPolicy_MapsAllFields(t *testing.T) {
 	}
 }
 
-func TestBuildSyscallPolicy_NetworkFenceAddsConnectDeny(t *testing.T) {
+func TestBuildSyscallPolicy_NetworkFenceRestrictsSocketsToUnix(t *testing.T) {
 	cfg := config.DefaultConfig()
 	cfg.Network.AllowAll = false
+	cfg.Syscall.SocketFamilies = []string{"unix", "inet", "inet6"}
 	policy, ok := buildSyscallPolicy(&cfg)
 	if !ok {
 		t.Fatal("default syscall policy should be active")
 	}
-	if !containsString(policy.ExtraDenySyscalls, "connect") {
-		t.Fatalf("network allowlist must deny direct connect(2), got extras %v", policy.ExtraDenySyscalls)
+	if len(policy.AllowedSocketFamilies) != 1 || policy.AllowedSocketFamilies[0] != "unix" {
+		t.Fatalf("network-fenced syscall policy must allow only unix sockets, got %v", policy.AllowedSocketFamilies)
 	}
 }
 
-func TestBuildSyscallPolicy_AllowAllDoesNotAddConnectDeny(t *testing.T) {
+func TestBuildSyscallPolicy_AllowAllPreservesConfiguredSocketFamilies(t *testing.T) {
 	cfg := config.DefaultConfig()
 	cfg.Network.AllowAll = true
+	cfg.Syscall.SocketFamilies = []string{"unix", "inet", "inet6"}
 	policy, ok := buildSyscallPolicy(&cfg)
 	if !ok {
 		t.Fatal("default syscall policy should be active")
 	}
-	if containsString(policy.ExtraDenySyscalls, "connect") {
-		t.Fatalf("network allow_all=true should not add connect(2) deny, got extras %v", policy.ExtraDenySyscalls)
+	if len(policy.AllowedSocketFamilies) != 3 {
+		t.Fatalf("network allow_all=true should preserve configured socket families, got %v", policy.AllowedSocketFamilies)
 	}
 }
 
@@ -115,13 +117,4 @@ func TestMarshalSyscallPolicy_RoundTrips(t *testing.T) {
 	if len(out.AllowedSocketFamilies) != 3 || len(out.ExtraDenySyscalls) != 1 {
 		t.Errorf("round-trip lost slice data: %+v", out)
 	}
-}
-
-func containsString(values []string, want string) bool {
-	for _, value := range values {
-		if value == want {
-			return true
-		}
-	}
-	return false
 }
