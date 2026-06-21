@@ -183,6 +183,42 @@ func TestProcessConfig_SymlinkedRoot(t *testing.T) {
 	}
 }
 
+func TestProcessConfig_NonexistentAllowPathResolvesSymlinkedAncestor(t *testing.T) {
+	base := t.TempDir()
+	realAllow := filepath.Join(base, "real-allow")
+	if err := os.Mkdir(realAllow, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	linkAllow := filepath.Join(base, "link-allow")
+	if err := os.Symlink(realAllow, linkAllow); err != nil {
+		t.Skipf("symlink unsupported: %v", err)
+	}
+	resolvedAllow, err := filepath.EvalSymlinks(realAllow)
+	if err != nil {
+		t.Fatal(err)
+	}
+	root := filepath.Join(base, "root")
+	if err := os.Mkdir(root, 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	fc, err := ProcessConfig(config.FilesystemConfig{
+		Root:  root,
+		Mode:  "read-write",
+		Allow: []string{filepath.Join(linkAllow, "future", "file.txt")},
+	})
+	if err != nil {
+		t.Fatalf("ProcessConfig: %v", err)
+	}
+	want := filepath.Join(resolvedAllow, "future", "file.txt")
+	if len(fc.AllowPaths) != 1 || fc.AllowPaths[0] != want {
+		t.Fatalf("AllowPaths = %v, want [%q]", fc.AllowPaths, want)
+	}
+	if strings.Contains(fc.AllowPaths[0], linkAllow) {
+		t.Fatalf("allow path kept symlinked ancestor %q, creating a ruleset TOCTOU: %v", linkAllow, fc.AllowPaths)
+	}
+}
+
 // --- Task 3: Rule Serialization Tests ---
 
 func TestSerialize_RoundTrip(t *testing.T) {

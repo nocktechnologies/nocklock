@@ -261,8 +261,8 @@ func TestDefaultTOMLMatchesDefaultConfig(t *testing.T) {
 
 func TestDefaultSyscallConfig(t *testing.T) {
 	cfg := DefaultConfig()
-	if cfg.Syscall.Enforcement != "preferred" {
-		t.Errorf("default syscall.enforcement = %q, want preferred", cfg.Syscall.Enforcement)
+	if cfg.Syscall.Enforcement != "required" {
+		t.Errorf("default syscall.enforcement = %q, want required", cfg.Syscall.Enforcement)
 	}
 	if cfg.Syscall.AllowNamespaces {
 		t.Error("default syscall.allow_namespaces should be false")

@@ -61,7 +61,7 @@ func Validate(cfg *Config) []ValidationError {
 	}
 
 	// syscall.enforcement controls the Linux seccomp-BPF syscall fence. Empty is
-	// accepted (defaults to "preferred").
+	// accepted (defaults to "required").
 	switch cfg.Syscall.Enforcement {
 	case "required", "preferred", "off", "":
 		// valid
@@ -147,7 +147,7 @@ func (cfg *Config) EffectivePolicy() string {
 		mode = "read-write"
 	}
 	linuxEnforcement := cfg.Filesystem.LinuxEnforcement
-	if linuxEnforcement == "" {
+	if linuxEnforcement == "" || linuxEnforcement == "preferred" {
 		linuxEnforcement = "required"
 	}
 	root := cfg.Filesystem.Root
@@ -163,10 +163,10 @@ func (cfg *Config) EffectivePolicy() string {
 	}
 	b.WriteString("\n")
 
-	// Syscall (Linux seccomp-BPF). Empty enforcement defaults to "preferred".
+	// Syscall (Linux seccomp-BPF). Empty enforcement defaults to "required".
 	syscallEnforcement := cfg.Syscall.Enforcement
 	if syscallEnforcement == "" {
-		syscallEnforcement = "preferred"
+		syscallEnforcement = "required"
 	}
 	if syscallEnforcement == "off" {
 		b.WriteString("  Syscall: off\n")

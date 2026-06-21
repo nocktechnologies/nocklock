@@ -245,6 +245,17 @@ func TestAuditDenyPath(t *testing.T) {
 	}
 }
 
+func TestLinuxEnforcementModePreferredFailsClosed(t *testing.T) {
+	for _, raw := range []string{"", "preferred", "required"} {
+		if got := linuxEnforcementMode(raw); got != linuxEnforcementRequired {
+			t.Fatalf("linuxEnforcementMode(%q) = %q, want required", raw, got)
+		}
+	}
+	if got := linuxEnforcementMode("off"); got != linuxEnforcementOff {
+		t.Fatalf("linuxEnforcementMode(off) = %q, want off", got)
+	}
+}
+
 // A symlinked project root must be recognized as the root via symlink resolution
 // (macOS /tmp -> /private/tmp). Without it, a string compare would see the audit
 // dir and the symlinked root as different and DENY THE WHOLE ROOT, breaking the
@@ -449,6 +460,25 @@ func TestValidateWrapRuntimeConfigRejectsUnsupportedFilesystemFence(t *testing.T
 	}
 	if !strings.Contains(err.Error(), "filesystem fence configured but not supported on "+runtime.GOOS) {
 		t.Fatalf("expected unsupported filesystem fence error, got: %v", err)
+	}
+}
+
+func TestWrapDryRunFailsClosedForMacOSFilesystemRoot(t *testing.T) {
+	if runtime.GOOS != "darwin" {
+		t.Skip("macOS Seatbelt posture only applies on darwin")
+	}
+
+	dir := t.TempDir()
+	writeTestConfig(t, dir, config.DefaultTOML())
+	withWorkingDir(t, dir)
+
+	cmd := &cobra.Command{}
+	err := wrapCmd.RunE(cmd, []string{"--dry-run"})
+	if err == nil {
+		t.Fatal("expected macOS filesystem.root dry run to fail closed")
+	}
+	if !strings.Contains(err.Error(), "filesystem.root cannot be enforced as a root-only sandbox on macOS") {
+		t.Fatalf("expected macOS root-only fail-closed error, got: %v", err)
 	}
 }
 

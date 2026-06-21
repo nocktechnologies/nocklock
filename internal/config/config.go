@@ -54,12 +54,11 @@ type FilesystemConfig struct {
 }
 
 // SyscallConfig defines the syscall-surface fence (Linux seccomp-BPF). It is
-// opt-in and nil-safe: an absent [syscall] table leaves Enforcement empty, which
-// defaults to "preferred" — install the fence where seccomp is available, but do
-// not fail closed on a kernel that lacks it.
+// nil-safe: an absent [syscall] table leaves Enforcement empty, which defaults
+// to "required" so Linux launches fail closed when seccomp-BPF is unavailable.
 type SyscallConfig struct {
 	// Enforcement is one of "required", "preferred", or "off". Empty defaults to
-	// "preferred". On non-Linux platforms the syscall fence is always a no-op.
+	// "required". On non-Linux platforms the syscall fence is always a no-op.
 	Enforcement string `toml:"enforcement"`
 	// AllowNamespaces, when true, leaves unshare/setns and namespace-creating
 	// clone() flags permitted (the rest of the baseline still applies). Default

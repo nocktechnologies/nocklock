@@ -126,7 +126,7 @@ var syscallTable = map[string]map[string]uint32{
 		"reboot": 169, "kexec_load": 246, "kexec_file_load": 320,
 		"ioperm": 173, "iopl": 172,
 		"ptrace": 101, "process_vm_readv": 310, "process_vm_writev": 311,
-		"clone": 56, "clone3": 435, "socket": 41,
+		"clone": 56, "clone3": 435, "socket": 41, "connect": 42,
 	},
 	"arm64": {
 		"init_module": 105, "finit_module": 273, "delete_module": 106,
@@ -140,7 +140,7 @@ var syscallTable = map[string]map[string]uint32{
 		"reboot": 142, "kexec_load": 104, "kexec_file_load": 294,
 		// ioperm/iopl: arm64 has no I/O-port syscalls — absent on purpose.
 		"ptrace": 117, "process_vm_readv": 270, "process_vm_writev": 271,
-		"clone": 220, "clone3": 435, "socket": 198,
+		"clone": 220, "clone3": 435, "socket": 198, "connect": 203,
 	},
 	// 386 is the secondary ABI on amd64. socket() goes through socketcall(2) on
 	// i386, so a direct socket() filter is not meaningful there; socketcall is
@@ -158,7 +158,7 @@ var syscallTable = map[string]map[string]uint32{
 		"reboot": 88, "kexec_load": 283,
 		"ioperm": 101, "iopl": 110,
 		"ptrace": 26, "process_vm_readv": 347, "process_vm_writev": 348,
-		"clone": 120, "clone3": 435, "socket": 359, "socketcall": 102,
+		"clone": 120, "clone3": 435, "socket": 359, "socketcall": 102, "connect": 362,
 	},
 	// arm (32-bit) is the secondary ABI on arm64.
 	"arm": {
@@ -172,7 +172,7 @@ var syscallTable = map[string]map[string]uint32{
 		"settimeofday": 79, "clock_settime": 262, "clock_adjtime": 372, "adjtimex": 124,
 		"reboot": 88, "kexec_load": 347, "kexec_file_load": 401,
 		"ptrace": 26, "process_vm_readv": 376, "process_vm_writev": 377,
-		"clone": 120, "clone3": 435, "socket": 281,
+		"clone": 120, "clone3": 435, "socket": 281, "connect": 283,
 	},
 }
 
