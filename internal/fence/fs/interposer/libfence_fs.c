@@ -21,6 +21,7 @@
 #include <limits.h>
 #include <pthread.h>
 #include <stdarg.h>
+#include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -88,8 +89,14 @@ typedef int    (*real_creat_t)(const char *, mode_t);
 typedef int    (*real_symlink_t)(const char *, const char *);
 typedef int    (*real_link_t)(const char *, const char *);
 typedef int    (*real_chmod_t)(const char *, mode_t);
+typedef int    (*real_fchmod_t)(int, mode_t);
+typedef int    (*real_fchmodat_t)(int, const char *, mode_t, int);
 typedef int    (*real_chown_t)(const char *, uid_t, gid_t);
+typedef int    (*real_fchown_t)(int, uid_t, gid_t);
+typedef int    (*real_fchownat_t)(int, const char *, uid_t, gid_t, int);
 typedef int    (*real_truncate_t)(const char *, off_t);
+typedef int    (*real_futimens_t)(int, const struct timespec *);
+typedef int    (*real_utimensat_t)(int, const char *, const struct timespec *, int);
 
 /* chdir family */
 typedef int    (*real_chdir_t)(const char *);
@@ -124,8 +131,14 @@ static real_creat_t    real_creat;
 static real_symlink_t  real_symlink;
 static real_link_t     real_link;
 static real_chmod_t    real_chmod;
+static real_fchmod_t   real_fchmod;
+static real_fchmodat_t real_fchmodat;
 static real_chown_t    real_chown;
+static real_fchown_t   real_fchown;
+static real_fchownat_t real_fchownat;
 static real_truncate_t real_truncate;
+static real_futimens_t real_futimens;
+static real_utimensat_t real_utimensat;
 
 /* chdir family */
 static real_chdir_t    real_chdir;
@@ -158,6 +171,10 @@ static int path_starts_with(const char *path, const char *prefix)
 }
 
 static int resolve_lstat_path(const char *path, char *resolved);
+static int resolve_openat_lstat_path(int dirfd, const char *pathname, char *resolved);
+static int resolve_fd_path(int fd, char *resolved);
+static int fd_target_is_path(const char *resolved);
+static int is_null_pathname(const char *pathname);
 
 /*
  * resolve_path resolves `path` to an absolute path. For existing paths we use
@@ -308,6 +325,11 @@ static int is_write_fopen(const char *mode)
     if (strchr(mode, 'w') || strchr(mode, 'a') || strchr(mode, '+'))
         return 1;
     return 0;
+}
+
+static int is_null_pathname(const char *pathname)
+{
+    return (uintptr_t)pathname == (uintptr_t)NULL;
 }
 
 /* ------------------------------------------------------------------ */
@@ -503,8 +525,14 @@ static void fence_init(void)
     real_symlink   = (real_symlink_t)dlsym(RTLD_NEXT, "symlink");
     real_link      = (real_link_t)dlsym(RTLD_NEXT, "link");
     real_chmod     = (real_chmod_t)dlsym(RTLD_NEXT, "chmod");
+    real_fchmod    = (real_fchmod_t)dlsym(RTLD_NEXT, "fchmod");
+    real_fchmodat  = (real_fchmodat_t)dlsym(RTLD_NEXT, "fchmodat");
     real_chown     = (real_chown_t)dlsym(RTLD_NEXT, "chown");
+    real_fchown    = (real_fchown_t)dlsym(RTLD_NEXT, "fchown");
+    real_fchownat  = (real_fchownat_t)dlsym(RTLD_NEXT, "fchownat");
     real_truncate  = (real_truncate_t)dlsym(RTLD_NEXT, "truncate");
+    real_futimens  = (real_futimens_t)dlsym(RTLD_NEXT, "futimens");
+    real_utimensat = (real_utimensat_t)dlsym(RTLD_NEXT, "utimensat");
 
     /* chdir family */
     real_chdir     = (real_chdir_t)dlsym(RTLD_NEXT, "chdir");
@@ -1466,6 +1494,97 @@ int chmod(const char *pathname, mode_t mode)
     return real_chmod(resolved, mode);
 }
 
+int fchmod(int fd, mode_t mode)
+{
+    if (!ensure_init()) {
+        if (real_fchmod) return real_fchmod(fd, mode);
+        errno = ENOSYS;
+        return -1;
+    }
+
+    char resolved[PATH_MAX];
+    if (resolve_fd_path(fd, resolved) != 0) {
+        if (fcntl(fd, F_GETFD) == -1 && errno == EBADF) {
+            return -1;
+        }
+        report_blocked("(fd)", "fchmod", "fd path resolution failed");
+        errno = EACCES;
+        return -1;
+    }
+
+    if (!fd_target_is_path(resolved)) {
+        if (real_fchmod) return real_fchmod(fd, mode);
+        errno = ENOSYS;
+        return -1;
+    }
+
+    char reason[512];
+    if (check_path(resolved, 1 /* always write */, reason, sizeof(reason)) != 0) {
+        report_blocked(resolved, "fchmod", reason);
+        errno = EACCES;
+        return -1;
+    }
+
+    if (!real_fchmod) { errno = ENOSYS; return -1; }
+    return real_fchmod(fd, mode);
+}
+
+int fchmodat(int dirfd, const char *pathname, mode_t mode, int flags)
+{
+    if (!ensure_init()) {
+        if (real_fchmodat) return real_fchmodat(dirfd, pathname, mode, flags);
+        errno = ENOSYS;
+        return -1;
+    }
+
+    if (is_null_pathname(pathname)) {
+        if (real_fchmodat) return real_fchmodat(dirfd, pathname, mode, flags);
+        errno = EFAULT;
+        return -1;
+    }
+
+    char resolved[PATH_MAX];
+    if (pathname[0] == '\0' && (flags & AT_EMPTY_PATH)) {
+        if (resolve_fd_path(dirfd, resolved) != 0) {
+            if (fcntl(dirfd, F_GETFD) == -1 && errno == EBADF) {
+                return -1;
+            }
+            report_blocked("(fd)", "fchmodat", "fd path resolution failed");
+            errno = EACCES;
+            return -1;
+        }
+    } else if (flags & AT_SYMLINK_NOFOLLOW) {
+        if (resolve_openat_lstat_path(dirfd, pathname, resolved) != 0) {
+            report_blocked(pathname, "fchmodat", "path resolution failed");
+            errno = EACCES;
+            return -1;
+        }
+    } else if (resolve_openat_path(dirfd, pathname, resolved) != 0) {
+        report_blocked(pathname, "fchmodat", "path resolution failed");
+        errno = EACCES;
+        return -1;
+    }
+
+    if (!fd_target_is_path(resolved)) {
+        if (real_fchmodat) return real_fchmodat(dirfd, pathname, mode, flags);
+        errno = ENOSYS;
+        return -1;
+    }
+
+    char reason[512];
+    if (check_path(resolved, 1 /* always write */, reason, sizeof(reason)) != 0) {
+        report_blocked((pathname[0] == '\0' && (flags & AT_EMPTY_PATH)) ? "(fd)" : pathname,
+                       "fchmodat", reason);
+        errno = EACCES;
+        return -1;
+    }
+
+    if (!real_fchmodat) { errno = ENOSYS; return -1; }
+    if (pathname[0] == '\0' && (flags & AT_EMPTY_PATH))
+        return real_fchmodat(dirfd, pathname, mode, flags);
+    return real_fchmodat(AT_FDCWD, resolved, mode, flags & ~AT_EMPTY_PATH);
+}
+
 int chown(const char *pathname, uid_t owner, gid_t group)
 {
     if (!ensure_init()) {
@@ -1492,6 +1611,97 @@ int chown(const char *pathname, uid_t owner, gid_t group)
     return real_chown(resolved, owner, group);
 }
 
+int fchown(int fd, uid_t owner, gid_t group)
+{
+    if (!ensure_init()) {
+        if (real_fchown) return real_fchown(fd, owner, group);
+        errno = ENOSYS;
+        return -1;
+    }
+
+    char resolved[PATH_MAX];
+    if (resolve_fd_path(fd, resolved) != 0) {
+        if (fcntl(fd, F_GETFD) == -1 && errno == EBADF) {
+            return -1;
+        }
+        report_blocked("(fd)", "fchown", "fd path resolution failed");
+        errno = EACCES;
+        return -1;
+    }
+
+    if (!fd_target_is_path(resolved)) {
+        if (real_fchown) return real_fchown(fd, owner, group);
+        errno = ENOSYS;
+        return -1;
+    }
+
+    char reason[512];
+    if (check_path(resolved, 1 /* always write */, reason, sizeof(reason)) != 0) {
+        report_blocked(resolved, "fchown", reason);
+        errno = EACCES;
+        return -1;
+    }
+
+    if (!real_fchown) { errno = ENOSYS; return -1; }
+    return real_fchown(fd, owner, group);
+}
+
+int fchownat(int dirfd, const char *pathname, uid_t owner, gid_t group, int flags)
+{
+    if (!ensure_init()) {
+        if (real_fchownat) return real_fchownat(dirfd, pathname, owner, group, flags);
+        errno = ENOSYS;
+        return -1;
+    }
+
+    if (is_null_pathname(pathname)) {
+        if (real_fchownat) return real_fchownat(dirfd, pathname, owner, group, flags);
+        errno = EFAULT;
+        return -1;
+    }
+
+    char resolved[PATH_MAX];
+    if (pathname[0] == '\0' && (flags & AT_EMPTY_PATH)) {
+        if (resolve_fd_path(dirfd, resolved) != 0) {
+            if (fcntl(dirfd, F_GETFD) == -1 && errno == EBADF) {
+                return -1;
+            }
+            report_blocked("(fd)", "fchownat", "fd path resolution failed");
+            errno = EACCES;
+            return -1;
+        }
+    } else if (flags & AT_SYMLINK_NOFOLLOW) {
+        if (resolve_openat_lstat_path(dirfd, pathname, resolved) != 0) {
+            report_blocked(pathname, "fchownat", "path resolution failed");
+            errno = EACCES;
+            return -1;
+        }
+    } else if (resolve_openat_path(dirfd, pathname, resolved) != 0) {
+        report_blocked(pathname, "fchownat", "path resolution failed");
+        errno = EACCES;
+        return -1;
+    }
+
+    if (!fd_target_is_path(resolved)) {
+        if (real_fchownat) return real_fchownat(dirfd, pathname, owner, group, flags);
+        errno = ENOSYS;
+        return -1;
+    }
+
+    char reason[512];
+    if (check_path(resolved, 1 /* always write */, reason, sizeof(reason)) != 0) {
+        report_blocked((pathname[0] == '\0' && (flags & AT_EMPTY_PATH)) ? "(fd)" : pathname,
+                       "fchownat", reason);
+        errno = EACCES;
+        return -1;
+    }
+
+    if (!real_fchownat) { errno = ENOSYS; return -1; }
+    if (pathname[0] == '\0' && (flags & AT_EMPTY_PATH))
+        return real_fchownat(dirfd, pathname, owner, group, flags);
+    return real_fchownat(AT_FDCWD, resolved, owner, group, flags & ~AT_EMPTY_PATH);
+}
+
 int truncate(const char *pathname, off_t length)
 {
     if (!ensure_init()) {
@@ -1516,6 +1726,97 @@ int truncate(const char *pathname, off_t length)
 
     if (!real_truncate) { errno = ENOSYS; return -1; }
     return real_truncate(resolved, length);
+}
+
+int futimens(int fd, const struct timespec times[2])
+{
+    if (!ensure_init()) {
+        if (real_futimens) return real_futimens(fd, times);
+        errno = ENOSYS;
+        return -1;
+    }
+
+    char resolved[PATH_MAX];
+    if (resolve_fd_path(fd, resolved) != 0) {
+        if (fcntl(fd, F_GETFD) == -1 && errno == EBADF) {
+            return -1;
+        }
+        report_blocked("(fd)", "futimens", "fd path resolution failed");
+        errno = EACCES;
+        return -1;
+    }
+
+    if (!fd_target_is_path(resolved)) {
+        if (real_futimens) return real_futimens(fd, times);
+        errno = ENOSYS;
+        return -1;
+    }
+
+    char reason[512];
+    if (check_path(resolved, 1 /* always write */, reason, sizeof(reason)) != 0) {
+        report_blocked(resolved, "futimens", reason);
+        errno = EACCES;
+        return -1;
+    }
+
+    if (!real_futimens) { errno = ENOSYS; return -1; }
+    return real_futimens(fd, times);
+}
+
+int utimensat(int dirfd, const char *pathname, const struct timespec times[2], int flags)
+{
+    if (!ensure_init()) {
+        if (real_utimensat) return real_utimensat(dirfd, pathname, times, flags);
+        errno = ENOSYS;
+        return -1;
+    }
+
+    if (is_null_pathname(pathname)) {
+        if (real_utimensat) return real_utimensat(dirfd, pathname, times, flags);
+        errno = EFAULT;
+        return -1;
+    }
+
+    char resolved[PATH_MAX];
+    if (pathname[0] == '\0' && (flags & AT_EMPTY_PATH)) {
+        if (resolve_fd_path(dirfd, resolved) != 0) {
+            if (fcntl(dirfd, F_GETFD) == -1 && errno == EBADF) {
+                return -1;
+            }
+            report_blocked("(fd)", "utimensat", "fd path resolution failed");
+            errno = EACCES;
+            return -1;
+        }
+    } else if (flags & AT_SYMLINK_NOFOLLOW) {
+        if (resolve_openat_lstat_path(dirfd, pathname, resolved) != 0) {
+            report_blocked(pathname, "utimensat", "path resolution failed");
+            errno = EACCES;
+            return -1;
+        }
+    } else if (resolve_openat_path(dirfd, pathname, resolved) != 0) {
+        report_blocked(pathname, "utimensat", "path resolution failed");
+        errno = EACCES;
+        return -1;
+    }
+
+    if (!fd_target_is_path(resolved)) {
+        if (real_utimensat) return real_utimensat(dirfd, pathname, times, flags);
+        errno = ENOSYS;
+        return -1;
+    }
+
+    char reason[512];
+    if (check_path(resolved, 1 /* always write */, reason, sizeof(reason)) != 0) {
+        report_blocked((pathname[0] == '\0' && (flags & AT_EMPTY_PATH)) ? "(fd)" : pathname,
+                       "utimensat", reason);
+        errno = EACCES;
+        return -1;
+    }
+
+    if (!real_utimensat) { errno = ENOSYS; return -1; }
+    if (pathname[0] == '\0' && (flags & AT_EMPTY_PATH))
+        return real_utimensat(dirfd, pathname, times, flags);
+    return real_utimensat(AT_FDCWD, resolved, times, flags & ~AT_EMPTY_PATH);
 }
 
 /* ------------------------------------------------------------------ */
@@ -1903,9 +2204,15 @@ int fstatat(int dirfd, const char *pathname, struct stat *buf, int flags)
         errno = ENOSYS; return -1;
     }
 
+    if (is_null_pathname(pathname)) {
+        if (real_fstatat) return real_fstatat(dirfd, pathname, buf, flags);
+        errno = EFAULT;
+        return -1;
+    }
+
     char resolved[PATH_MAX];
     /* AT_EMPTY_PATH: operates on dirfd itself — resolve from /proc/self/fd */
-    if (pathname != NULL && pathname[0] == '\0' && (flags & AT_EMPTY_PATH)) {
+    if (pathname[0] == '\0' && (flags & AT_EMPTY_PATH)) {
         /* AT_EMPTY_PATH — check the fd itself */
         if (!real_readlink) { errno = EACCES; return -1; }
         char fdpath[64];
@@ -1935,7 +2242,8 @@ int fstatat(int dirfd, const char *pathname, struct stat *buf, int flags)
 
     char reason[512];
     if (check_path(resolved, 0 /* read */, reason, sizeof(reason)) != 0) {
-        report_blocked(pathname ? pathname : "(fd)", "fstatat", reason);
+        report_blocked((pathname[0] == '\0' && (flags & AT_EMPTY_PATH)) ? "(fd)" : pathname,
+                       "fstatat", reason);
         errno = ENOENT;
         return -1;
     }
@@ -2153,8 +2461,15 @@ int __fxstatat(int vers, int dirfd, const char *pathname, struct stat *buf, int 
         errno = ENOSYS; return -1;
     }
 
+    if (is_null_pathname(pathname)) {
+        if (real___fxstatat) return real___fxstatat(vers, dirfd, pathname, buf, flags);
+        if (real_fstatat) return real_fstatat(dirfd, pathname, buf, flags);
+        errno = EFAULT;
+        return -1;
+    }
+
     char resolved[PATH_MAX];
-    if (pathname != NULL && pathname[0] == '\0' && (flags & AT_EMPTY_PATH)) {
+    if (pathname[0] == '\0' && (flags & AT_EMPTY_PATH)) {
         /* AT_EMPTY_PATH: operates on dirfd itself — resolve from /proc/self/fd */
         if (!real_readlink) { errno = EACCES; return -1; }
         char fdpath[64];
@@ -2185,7 +2500,8 @@ int __fxstatat(int vers, int dirfd, const char *pathname, struct stat *buf, int 
 
     char reason[512];
     if (check_path(resolved, 0 /* read */, reason, sizeof(reason)) != 0) {
-        report_blocked(pathname, "__fxstatat", reason);
+        report_blocked((pathname[0] == '\0' && (flags & AT_EMPTY_PATH)) ? "(fd)" : pathname,
+                       "__fxstatat", reason);
         errno = ENOENT;
         return -1;
     }
@@ -2219,9 +2535,15 @@ int statx(int dirfd, const char *pathname, int flags,
         errno = ENOSYS; return -1;
     }
 
+    if (is_null_pathname(pathname)) {
+        if (real_statx) return real_statx(dirfd, pathname, flags, mask, statxbuf);
+        errno = EFAULT;
+        return -1;
+    }
+
     char resolved[PATH_MAX];
     /* AT_EMPTY_PATH: operates on dirfd */
-    if (pathname != NULL && pathname[0] == '\0' && (flags & AT_EMPTY_PATH)) {
+    if (pathname[0] == '\0' && (flags & AT_EMPTY_PATH)) {
         if (!real_readlink) { errno = EACCES; return -1; }
         char fdpath[64];
         snprintf(fdpath, sizeof(fdpath), "/proc/self/fd/%d", dirfd);
@@ -2250,7 +2572,8 @@ int statx(int dirfd, const char *pathname, int flags,
 
     char reason[512];
     if (check_path(resolved, 0 /* read */, reason, sizeof(reason)) != 0) {
-        report_blocked(pathname ? pathname : "(fd)", "statx", reason);
+        report_blocked((pathname[0] == '\0' && (flags & AT_EMPTY_PATH)) ? "(fd)" : pathname,
+                       "statx", reason);
         errno = ENOENT;
         return -1;
     }
