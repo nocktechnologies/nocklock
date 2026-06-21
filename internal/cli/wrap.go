@@ -226,39 +226,7 @@ var wrapCmd = &cobra.Command{
 					logEvent(logging.EventFilePassed, "filesystem", fmt.Sprintf("root=%s mode=%s", fsCfg.Root, fsCfg.Mode), false)
 
 				case "darwin":
-					// Seatbelt (sandbox-exec) interim. NOTE: this enforces a DENYLIST
-					// (deny sensitive paths, allow the rest), not the Linux allowlist
-					// (allow root only). Documented interim divergence; the strict
-					// allowlist returns with the Endpoint Security implementation.
-					// Fail closed at every step.
-					if err := fsfence.EnsureSandboxExecAvailable(); err != nil {
-						return fmt.Errorf("filesystem fence cannot be enforced (fail-closed): %w", err)
-					}
-					sensitive := append(fsfence.DefaultSensitivePaths(), fsCfg.DenyPaths...)
-					var profile string
-					if cfg.Filesystem.Hardened {
-						// Opt-in: ADD the syscall-surface denials + tightened /dev
-						// on top of the path denylist, WITHOUT a (deny default) flip.
-						profile, err = fsfence.GenerateHardenedProfile(sensitive)
-					} else {
-						profile, err = fsfence.GenerateProfile(sensitive)
-					}
-					if err != nil {
-						return fmt.Errorf("filesystem fence profile generation failed (fail-closed): %w", err)
-					}
-					profilePath, err := fsfence.WriteProfile(profile)
-					if err != nil {
-						return fmt.Errorf("filesystem fence profile write failed (fail-closed): %w", err)
-					}
-					defer os.Remove(profilePath)
-					fsSandboxPrefix = []string{fsfence.SandboxExecPath, "-f", profilePath}
-
-					hardenedNote := ""
-					if cfg.Filesystem.Hardened {
-						hardenedNote = ", hardened"
-					}
-					fmt.Fprintf(os.Stderr, "NockLock: filesystem fence active (macOS Seatbelt, denylist interim%s) — %d path(s) fenced\n", hardenedNote, len(sensitive))
-					logEvent(logging.EventFilePassed, "filesystem", fmt.Sprintf("seatbelt deny_paths=%d hardened=%t", len(sensitive), cfg.Filesystem.Hardened), false)
+					return fmt.Errorf("filesystem.root cannot be enforced as a root-only sandbox on macOS with Seatbelt; refusing to start rather than run an allow-default denylist. Run on Linux Landlock for filesystem-root isolation or disable [filesystem].root")
 
 				default:
 					return fmt.Errorf("filesystem fence configured but not supported on %s", runtime.GOOS)
@@ -539,6 +507,9 @@ func validateWrapRuntimeConfig(cfg *config.Config) error {
 	}
 
 	if cfg.Filesystem.Root != "" {
+		if runtime.GOOS == "darwin" {
+			return fmt.Errorf("filesystem.root cannot be enforced as a root-only sandbox on macOS with Seatbelt; refusing to start rather than run an allow-default denylist. Run on Linux Landlock for filesystem-root isolation or disable [filesystem].root")
+		}
 		if !fsfence.IsSupported() {
 			return fmt.Errorf("filesystem fence configured but not supported on %s", runtime.GOOS)
 		}
@@ -559,7 +530,7 @@ const (
 )
 
 func linuxEnforcementMode(raw string) linuxEnforcement {
-	if raw == "" {
+	if raw == "" || raw == string(linuxEnforcementPreferred) {
 		return linuxEnforcementRequired
 	}
 	return linuxEnforcement(raw)

@@ -55,7 +55,7 @@ func DefaultConfig() Config {
 			},
 		},
 		Syscall: SyscallConfig{
-			Enforcement:     "preferred",
+			Enforcement:     "required",
 			AllowNamespaces: false,
 			SocketFamilies:  []string{"unix", "inet", "inet6"},
 		},
@@ -128,7 +128,7 @@ block = [
 # Linux seccomp-BPF syscall fence (no-op on macOS).
 # enforcement: "required" (fail closed), "preferred" (install if supported),
 # or "off" (disabled).
-enforcement = "preferred"
+enforcement = "required"
 allow_namespaces = false
 socket_families = [
     "unix",

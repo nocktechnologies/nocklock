@@ -3,6 +3,7 @@
 package fs
 
 import (
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -57,10 +58,11 @@ func ExpandTilde(path string) (string, error) {
 	return path, nil
 }
 
-// resolvePath expands tilde, converts to absolute, and cleans the path.
-// If the path exists on disk, symlinks are resolved so that rules match
-// the real paths used by the C interposer's realpath calls.
-// The resolved path does not need to exist on disk.
+// resolvePath expands tilde, converts to absolute, and cleans the path. Symlinks
+// are resolved so rules match the real paths used by the C interposer's realpath
+// calls. For not-yet-existing paths, the deepest existing ancestor is resolved
+// and the missing tail is re-appended; this prevents a symlinked parent from
+// being swapped after config load to point outside the intended ruleset.
 func resolvePath(p string) (string, error) {
 	expanded, err := ExpandTilde(p)
 	if err != nil {
@@ -75,8 +77,25 @@ func resolvePath(p string) (string, error) {
 	// so we must store the real path for rules to match.
 	if resolved, err := filepath.EvalSymlinks(cleaned); err == nil {
 		return resolved, nil
+	} else if !errors.Is(err, os.ErrNotExist) {
+		return "", fmt.Errorf("cannot resolve path %q: %w", p, err)
 	}
-	return cleaned, nil
+	tail := []string{filepath.Base(cleaned)}
+	for dir := filepath.Dir(cleaned); ; {
+		resolved, err := filepath.EvalSymlinks(dir)
+		if err == nil {
+			parts := append([]string{resolved}, reversePathTail(tail)...)
+			return filepath.Join(parts...), nil
+		} else if !errors.Is(err, os.ErrNotExist) {
+			return "", fmt.Errorf("cannot resolve path ancestor %q for %q: %w", dir, p, err)
+		}
+		parent := filepath.Dir(dir)
+		if parent == dir {
+			return "", fmt.Errorf("cannot resolve any existing ancestor for path %q", p)
+		}
+		tail = append(tail, filepath.Base(dir))
+		dir = parent
+	}
 }
 
 // ProcessConfig validates and resolves a FilesystemConfig into a FenceConfig.
@@ -213,4 +232,12 @@ func ParseSerialized(s string) (*SerializedConfig, error) {
 	}
 
 	return sc, nil
+}
+
+func reversePathTail(in []string) []string {
+	out := make([]string, len(in))
+	for i, v := range in {
+		out[len(in)-1-i] = v
+	}
+	return out
 }

@@ -261,8 +261,8 @@ func TestDefaultTOMLMatchesDefaultConfig(t *testing.T) {
 
 func TestDefaultSyscallConfig(t *testing.T) {
 	cfg := DefaultConfig()
-	if cfg.Syscall.Enforcement != "preferred" {
-		t.Errorf("default syscall.enforcement = %q, want preferred", cfg.Syscall.Enforcement)
+	if cfg.Syscall.Enforcement != "required" {
+		t.Errorf("default syscall.enforcement = %q, want required", cfg.Syscall.Enforcement)
 	}
 	if cfg.Syscall.AllowNamespaces {
 		t.Error("default syscall.allow_namespaces should be false")
@@ -275,8 +275,8 @@ func TestDefaultSyscallConfig(t *testing.T) {
 
 func TestSyscallConfigParsesAndIsOptIn(t *testing.T) {
 	// An explicit [syscall] block parses; an ABSENT one leaves the zero value
-	// (which the wiring treats as "preferred" only when present in defaults — a
-	// minimal config with no [syscall] block must not error).
+	// (which the wiring treats as "required" for fail-closed behavior — a minimal
+	// config with no [syscall] block must not error).
 	const minimal = `
 [project]
 name = "x"

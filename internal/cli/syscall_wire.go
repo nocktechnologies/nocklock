@@ -8,16 +8,18 @@ import (
 )
 
 // syscallEnforcementMode resolves the configured enforcement string to a Mode.
-// An empty value defaults to "preferred" (install where supported; do not fail
-// closed on a kernel that lacks seccomp).
+// An empty value defaults to "required" so absent legacy config still fails
+// closed on a kernel that lacks seccomp.
 func syscallEnforcementMode(raw string) syscallfence.Mode {
 	switch raw {
 	case "required":
 		return syscallfence.ModeRequired
 	case "off":
 		return syscallfence.ModeOff
-	case "preferred", "":
+	case "preferred":
 		return syscallfence.ModePreferred
+	case "":
+		return syscallfence.ModeRequired
 	default:
 		// Unknown values are rejected by config validation before we get here;
 		// treat anything else conservatively as off (no behaviour change).
@@ -34,8 +36,12 @@ func buildSyscallPolicy(cfg *config.Config) (syscallfence.Policy, bool) {
 	if mode == syscallfence.ModeOff {
 		return syscallfence.Policy{}, false
 	}
+	socketFamilies := append([]string(nil), cfg.Syscall.SocketFamilies...)
+	if !cfg.Network.AllowAll {
+		socketFamilies = []string{"unix"}
+	}
 	return syscallfence.Policy{
-		AllowedSocketFamilies: append([]string(nil), cfg.Syscall.SocketFamilies...),
+		AllowedSocketFamilies: socketFamilies,
 		AllowNamespaces:       cfg.Syscall.AllowNamespaces,
 		ExtraDenySyscalls:     append([]string(nil), cfg.Syscall.ExtraDeny...),
 		Mode:                  mode,
