@@ -21,6 +21,7 @@
 #include <limits.h>
 #include <pthread.h>
 #include <stdarg.h>
+#include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -173,6 +174,7 @@ static int resolve_lstat_path(const char *path, char *resolved);
 static int resolve_openat_lstat_path(int dirfd, const char *pathname, char *resolved);
 static int resolve_fd_path(int fd, char *resolved);
 static int fd_target_is_path(const char *resolved);
+static int is_null_pathname(const char *pathname);
 
 /*
  * resolve_path resolves `path` to an absolute path. For existing paths we use
@@ -323,6 +325,11 @@ static int is_write_fopen(const char *mode)
     if (strchr(mode, 'w') || strchr(mode, 'a') || strchr(mode, '+'))
         return 1;
     return 0;
+}
+
+static int is_null_pathname(const char *pathname)
+{
+    return (uintptr_t)pathname == (uintptr_t)NULL;
 }
 
 /* ------------------------------------------------------------------ */
@@ -1497,6 +1504,9 @@ int fchmod(int fd, mode_t mode)
 
     char resolved[PATH_MAX];
     if (resolve_fd_path(fd, resolved) != 0) {
+        if (fcntl(fd, F_GETFD) == -1 && errno == EBADF) {
+            return -1;
+        }
         report_blocked("(fd)", "fchmod", "fd path resolution failed");
         errno = EACCES;
         return -1;
@@ -1527,9 +1537,18 @@ int fchmodat(int dirfd, const char *pathname, mode_t mode, int flags)
         return -1;
     }
 
+    if (is_null_pathname(pathname)) {
+        if (real_fchmodat) return real_fchmodat(dirfd, pathname, mode, flags);
+        errno = EFAULT;
+        return -1;
+    }
+
     char resolved[PATH_MAX];
     if (pathname[0] == '\0' && (flags & AT_EMPTY_PATH)) {
         if (resolve_fd_path(dirfd, resolved) != 0) {
+            if (fcntl(dirfd, F_GETFD) == -1 && errno == EBADF) {
+                return -1;
+            }
             report_blocked("(fd)", "fchmodat", "fd path resolution failed");
             errno = EACCES;
             return -1;
@@ -1561,6 +1580,8 @@ int fchmodat(int dirfd, const char *pathname, mode_t mode, int flags)
     }
 
     if (!real_fchmodat) { errno = ENOSYS; return -1; }
+    if (pathname[0] == '\0' && (flags & AT_EMPTY_PATH))
+        return real_fchmodat(dirfd, pathname, mode, flags);
     return real_fchmodat(AT_FDCWD, resolved, mode, flags & ~AT_EMPTY_PATH);
 }
 
@@ -1600,6 +1621,9 @@ int fchown(int fd, uid_t owner, gid_t group)
 
     char resolved[PATH_MAX];
     if (resolve_fd_path(fd, resolved) != 0) {
+        if (fcntl(fd, F_GETFD) == -1 && errno == EBADF) {
+            return -1;
+        }
         report_blocked("(fd)", "fchown", "fd path resolution failed");
         errno = EACCES;
         return -1;
@@ -1630,9 +1654,18 @@ int fchownat(int dirfd, const char *pathname, uid_t owner, gid_t group, int flag
         return -1;
     }
 
+    if (is_null_pathname(pathname)) {
+        if (real_fchownat) return real_fchownat(dirfd, pathname, owner, group, flags);
+        errno = EFAULT;
+        return -1;
+    }
+
     char resolved[PATH_MAX];
     if (pathname[0] == '\0' && (flags & AT_EMPTY_PATH)) {
         if (resolve_fd_path(dirfd, resolved) != 0) {
+            if (fcntl(dirfd, F_GETFD) == -1 && errno == EBADF) {
+                return -1;
+            }
             report_blocked("(fd)", "fchownat", "fd path resolution failed");
             errno = EACCES;
             return -1;
@@ -1664,6 +1697,8 @@ int fchownat(int dirfd, const char *pathname, uid_t owner, gid_t group, int flag
     }
 
     if (!real_fchownat) { errno = ENOSYS; return -1; }
+    if (pathname[0] == '\0' && (flags & AT_EMPTY_PATH))
+        return real_fchownat(dirfd, pathname, owner, group, flags);
     return real_fchownat(AT_FDCWD, resolved, owner, group, flags & ~AT_EMPTY_PATH);
 }
 
@@ -1703,6 +1738,9 @@ int futimens(int fd, const struct timespec times[2])
 
     char resolved[PATH_MAX];
     if (resolve_fd_path(fd, resolved) != 0) {
+        if (fcntl(fd, F_GETFD) == -1 && errno == EBADF) {
+            return -1;
+        }
         report_blocked("(fd)", "futimens", "fd path resolution failed");
         errno = EACCES;
         return -1;
@@ -1733,9 +1771,18 @@ int utimensat(int dirfd, const char *pathname, const struct timespec times[2], i
         return -1;
     }
 
+    if (is_null_pathname(pathname)) {
+        if (real_utimensat) return real_utimensat(dirfd, pathname, times, flags);
+        errno = EFAULT;
+        return -1;
+    }
+
     char resolved[PATH_MAX];
     if (pathname[0] == '\0' && (flags & AT_EMPTY_PATH)) {
         if (resolve_fd_path(dirfd, resolved) != 0) {
+            if (fcntl(dirfd, F_GETFD) == -1 && errno == EBADF) {
+                return -1;
+            }
             report_blocked("(fd)", "utimensat", "fd path resolution failed");
             errno = EACCES;
             return -1;
@@ -1767,6 +1814,8 @@ int utimensat(int dirfd, const char *pathname, const struct timespec times[2], i
     }
 
     if (!real_utimensat) { errno = ENOSYS; return -1; }
+    if (pathname[0] == '\0' && (flags & AT_EMPTY_PATH))
+        return real_utimensat(dirfd, pathname, times, flags);
     return real_utimensat(AT_FDCWD, resolved, times, flags & ~AT_EMPTY_PATH);
 }
 
@@ -2155,6 +2204,12 @@ int fstatat(int dirfd, const char *pathname, struct stat *buf, int flags)
         errno = ENOSYS; return -1;
     }
 
+    if (is_null_pathname(pathname)) {
+        if (real_fstatat) return real_fstatat(dirfd, pathname, buf, flags);
+        errno = EFAULT;
+        return -1;
+    }
+
     char resolved[PATH_MAX];
     /* AT_EMPTY_PATH: operates on dirfd itself — resolve from /proc/self/fd */
     if (pathname[0] == '\0' && (flags & AT_EMPTY_PATH)) {
@@ -2406,6 +2461,13 @@ int __fxstatat(int vers, int dirfd, const char *pathname, struct stat *buf, int 
         errno = ENOSYS; return -1;
     }
 
+    if (is_null_pathname(pathname)) {
+        if (real___fxstatat) return real___fxstatat(vers, dirfd, pathname, buf, flags);
+        if (real_fstatat) return real_fstatat(dirfd, pathname, buf, flags);
+        errno = EFAULT;
+        return -1;
+    }
+
     char resolved[PATH_MAX];
     if (pathname[0] == '\0' && (flags & AT_EMPTY_PATH)) {
         /* AT_EMPTY_PATH: operates on dirfd itself — resolve from /proc/self/fd */
@@ -2438,7 +2500,8 @@ int __fxstatat(int vers, int dirfd, const char *pathname, struct stat *buf, int 
 
     char reason[512];
     if (check_path(resolved, 0 /* read */, reason, sizeof(reason)) != 0) {
-        report_blocked(pathname, "__fxstatat", reason);
+        report_blocked((pathname[0] == '\0' && (flags & AT_EMPTY_PATH)) ? "(fd)" : pathname,
+                       "__fxstatat", reason);
         errno = ENOENT;
         return -1;
     }
@@ -2470,6 +2533,12 @@ int statx(int dirfd, const char *pathname, int flags,
     if (!ensure_stat_init()) {
         if (real_statx) return real_statx(dirfd, pathname, flags, mask, statxbuf);
         errno = ENOSYS; return -1;
+    }
+
+    if (is_null_pathname(pathname)) {
+        if (real_statx) return real_statx(dirfd, pathname, flags, mask, statxbuf);
+        errno = EFAULT;
+        return -1;
     }
 
     char resolved[PATH_MAX];
