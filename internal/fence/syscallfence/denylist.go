@@ -192,6 +192,22 @@ func secondaryArch(nativeArch string) string {
 	}
 }
 
+// x32SyscallBit is __X32_SYSCALL_BIT from the kernel UAPI (arch/x86/include/uapi/
+// asm/unistd.h). On x86-64, the x32 ABI shares the AUDIT_ARCH_X86_64 token with
+// the native 64-bit ABI; the ONLY thing distinguishing an x32 syscall is this bit
+// being OR'd into the syscall number. A filter that compares nr directly against
+// the native denylist numbers therefore misses the x32 variant of every denied
+// syscall (bpf, perf_event_open, ptrace, keyctl, …), which a wrapped process can
+// invoke with the bit set to escape the fence. We deny the whole bit.
+const x32SyscallBit = uint32(0x40000000)
+
+// archUsesX32Bit reports whether an ABI carries x32 syscalls under the same
+// AUDIT_ARCH token as its 64-bit native ABI. Only x86-64 does: the x32 ABI is the
+// 32-bit-pointer mode of the x86-64 instruction set and is multiplexed onto
+// AUDIT_ARCH_X86_64 via __X32_SYSCALL_BIT. arm64 has no analogous shared-token
+// ABI (arm/aarch64 carry distinct AUDIT_ARCH tokens), so this is amd64-only.
+func archUsesX32Bit(arch string) bool { return arch == "amd64" }
+
 // resolvedSyscall is a baseline/extra entry resolved to its number on one ABI.
 type resolvedSyscall struct {
 	Name string

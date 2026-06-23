@@ -282,6 +282,71 @@ func TestProgram_SocketcallDeniedOn386ABI(t *testing.T) {
 	}
 }
 
+func TestProgram_X32SyscallBitDeniedOnX86_64ABI(t *testing.T) {
+	// REGRESSION (N8332): Linux treats x86-64 and x32 as the SAME AUDIT_ARCH_X86_64
+	// token; the x32 ABI is distinguished only by __X32_SYSCALL_BIT (0x40000000)
+	// being set in nr. A native-only filter that compares nr directly lets a wrapped
+	// process re-issue any denied syscall (bpf, perf_event_open, ptrace, keyctl)
+	// with the x32 bit set and fall through to ALLOW. The amd64 block must DENY any
+	// nr with the x32 bit set BEFORE the native denylist comparison.
+	if nativeArch != "amd64" {
+		t.Skip("x32 bypass is specific to the AUDIT_ARCH_X86_64 (amd64) ABI")
+	}
+
+	p := Policy{Mode: ModeRequired}
+	prog, native := buildTestProgram(t, p)
+
+	const x32Bit = uint32(0x40000000) // __X32_SYSCALL_BIT
+
+	// A denied native syscall re-issued with the x32 bit set must STILL be EPERM.
+	for _, name := range []string{"bpf", "perf_event_open", "ptrace", "keyctl"} {
+		nr, ok := syscallNr(name, native.arch)
+		if !ok {
+			t.Fatalf("%s should resolve on %s", name, native.arch)
+		}
+		got, err := simulate(prog, seccompData{nr: nr | x32Bit, arch: native.auditArch})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got != eperm() {
+			t.Errorf("%s with __X32_SYSCALL_BIT (nr=%#x): got %#x, want EPERM %#x — x32 fence bypass",
+				name, nr|x32Bit, got, eperm())
+		}
+	}
+
+	// Even a benign syscall number with the x32 bit set must be denied: the x32 ABI
+	// as a whole is not part of the fenced process's expected execution, and any
+	// reachable x32 entry is a way around the native filter. Deny the whole bit.
+	readNr := uint32(0) // read(2) is allowed natively
+	got, err := simulate(prog, seccompData{nr: readNr | x32Bit, arch: native.auditArch})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got != eperm() {
+		t.Errorf("read with __X32_SYSCALL_BIT (nr=%#x): got %#x, want EPERM (whole x32 ABI denied)",
+			readNr|x32Bit, got)
+	}
+
+	// Sanity: the SAME native syscall numbers WITHOUT the x32 bit keep their normal
+	// disposition (denied stays denied, allowed stays allowed) — the x32 guard must
+	// not perturb the native path.
+	bpfNr, _ := syscallNr("bpf", native.arch)
+	got, err = simulate(prog, seccompData{nr: bpfNr, arch: native.auditArch})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got != eperm() {
+		t.Errorf("native bpf (nr=%#x): got %#x, want EPERM", bpfNr, got)
+	}
+	got, err = simulate(prog, seccompData{nr: readNr, arch: native.auditArch})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got != retAllow {
+		t.Errorf("native read (nr=%#x): got %#x, want ALLOW", readNr, got)
+	}
+}
+
 func TestProgram_PtraceAndProcessVMDenied(t *testing.T) {
 	p := Policy{Mode: ModeRequired}
 	prog, native := buildTestProgram(t, p)
