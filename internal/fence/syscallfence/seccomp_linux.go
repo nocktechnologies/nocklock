@@ -63,6 +63,10 @@ type abiFilter struct {
 	deny        []resolvedSyscall
 	clone       cloneInfo
 	socketAllow socketInfo
+	// denyX32 denies any syscall carrying __X32_SYSCALL_BIT. Set only for the
+	// x86-64 ABI, where x32 syscalls share AUDIT_ARCH_X86_64 with the 64-bit ABI
+	// and would otherwise bypass the number-based denylist (see archUsesX32Bit).
+	denyX32 bool
 }
 
 type cloneInfo struct {
@@ -202,6 +206,7 @@ func (p Policy) buildABIFilters() ([]abiFilter, error) {
 			arch:      arch,
 			auditArch: auditArch,
 			deny:      resolveNames(denyNames, arch),
+			denyX32:   archUsesX32Bit(arch),
 		}
 		if nr, ok := syscallNr("clone", arch); ok && !p.AllowNamespaces {
 			f.clone.cloneNr = nr
@@ -281,6 +286,21 @@ func abiBody(f abiFilter) []unix.SockFilter {
 	body := make([]unix.SockFilter, 0, 16)
 	// load nr into A
 	body = append(body, stmt(bpfLD|bpfW|bpfABS, offNr))
+
+	// x32 ABI guard (x86-64 only). The x32 ABI shares AUDIT_ARCH_X86_64 with the
+	// 64-bit ABI and is distinguished ONLY by __X32_SYSCALL_BIT being set in nr.
+	// Without this, a wrapped process can re-issue ANY denied syscall (bpf,
+	// perf_event_open, ptrace, keyctl, …) with the x32 bit set and fall through to
+	// ALLOW, since nr|0x40000000 never equals the native denylist numbers. Deny the
+	// whole bit BEFORE any number comparison: a fenced process has no legitimate
+	// need for the x32 ABI, and the clone3/clone/denylist checks below run on the
+	// native nr only. BPF_JSET takes the jt branch when any masked bit is set.
+	if f.denyX32 {
+		body = append(body,
+			jump(bpfJMP|bpfJSET|bpfK, x32SyscallBit, 0, 1),
+			stmt(bpfRET|bpfK, retErrnoAction(uint32(unix.EPERM))),
+		)
+	}
 
 	// clone3 -> ENOSYS (NOT EPERM). glibc>=2.34 probes clone3 and, on ENOSYS,
 	// falls back to the legacy arg-filtered clone; returning EPERM here instead
