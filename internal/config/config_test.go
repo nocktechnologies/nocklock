@@ -68,6 +68,48 @@ endpoint = "https://cc.nocktechnologies.io/api/fence/events/"
 	}
 }
 
+func TestLoadPartialConfigPreservesSecurityDefaults(t *testing.T) {
+	tomlContent := `
+[project]
+name = "legacy-project"
+root = "."
+
+[network]
+allow = ["github.com"]
+`
+	dir := t.TempDir()
+	nockDir := filepath.Join(dir, ".nock")
+	if err := os.MkdirAll(nockDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	configPath := filepath.Join(nockDir, "config.toml")
+	if err := os.WriteFile(configPath, []byte(tomlContent), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	cfg, err := Load(configPath)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	defaults := DefaultConfig()
+	if !reflect.DeepEqual(cfg.Secrets.Pass, defaults.Secrets.Pass) {
+		t.Fatalf("secrets.pass = %v, want default pass list %v", cfg.Secrets.Pass, defaults.Secrets.Pass)
+	}
+	if !reflect.DeepEqual(cfg.Secrets.Block, defaults.Secrets.Block) {
+		t.Fatalf("secrets.block = %v, want default block list %v", cfg.Secrets.Block, defaults.Secrets.Block)
+	}
+	if cfg.Filesystem.Root != defaults.Filesystem.Root {
+		t.Fatalf("filesystem.root = %q, want default %q", cfg.Filesystem.Root, defaults.Filesystem.Root)
+	}
+	if cfg.Filesystem.Mode != defaults.Filesystem.Mode {
+		t.Fatalf("filesystem.mode = %q, want default %q", cfg.Filesystem.Mode, defaults.Filesystem.Mode)
+	}
+	if !reflect.DeepEqual(cfg.Filesystem.Deny, defaults.Filesystem.Deny) {
+		t.Fatalf("filesystem.deny = %v, want default deny list %v", cfg.Filesystem.Deny, defaults.Filesystem.Deny)
+	}
+}
+
 func TestDefaultConfig(t *testing.T) {
 	cfg := DefaultConfig()
 
