@@ -134,7 +134,7 @@ func Load(path string) (*Config, error) {
 		return nil, fmt.Errorf("failed to read config at %s: %w", path, err)
 	}
 
-	var cfg Config
+	cfg := DefaultConfig()
 	md, err := toml.Decode(string(data), &cfg)
 	if err != nil {
 		return nil, fmt.Errorf("failed to parse config at %s: %w", path, err)
