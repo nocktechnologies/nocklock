@@ -1,0 +1,72 @@
+[project]
+name = "claude-code"
+root = "."
+
+[filesystem]
+root = "."
+mode = "read-write"
+linux_enforcement = "required"
+allow = [
+    "~/.claude/",
+    "~/.cache/",
+    "/tmp/",
+]
+deny = [
+    "~/.ssh/",
+    "~/.aws/",
+    "~/.gnupg/",
+    "~/.nock/",
+]
+hardened = true
+
+[network]
+allow = [
+    "github.com",
+    "api.github.com",
+    "api.anthropic.com",
+    "registry.npmjs.org",
+    "pypi.org",
+]
+allow_all = false
+allow_private_ranges = false
+
+[secrets]
+# Claude Code's OWN provider key passes so the agent works for API-key users;
+# subscription/OAuth users simply won't have it set (harmless). Every OTHER
+# provider's key and all infra secrets stay blocked.
+pass = [
+    "HOME",
+    "PATH",
+    "SHELL",
+    "USER",
+    "LANG",
+    "TERM",
+    "ANTHROPIC_API_KEY",
+]
+block = [
+    "AWS_*",
+    "STRIPE_*",
+    "DATABASE_URL",
+    "OPENAI_API_KEY",
+    "*_SECRET*",
+    "*_PASSWORD*",
+    "*_TOKEN*",
+]
+
+[syscall]
+enforcement = "required"
+allow_namespaces = false
+socket_families = [
+    "unix",
+    "inet",
+    "inet6",
+]
+
+[logging]
+db = ".nock/events.db"
+level = "info"
+
+[cloud]
+enabled = false
+api_key = ""
+endpoint = "https://cc.nocktechnologies.io/api/fence/events/"

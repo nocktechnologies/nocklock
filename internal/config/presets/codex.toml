@@ -1,0 +1,72 @@
+[project]
+name = "codex"
+root = "."
+
+[filesystem]
+root = "."
+mode = "read-write"
+linux_enforcement = "required"
+allow = [
+    "~/.codex/",
+    "~/.cache/",
+    "/tmp/",
+]
+deny = [
+    "~/.ssh/",
+    "~/.aws/",
+    "~/.gnupg/",
+    "~/.nock/",
+]
+hardened = true
+
+[network]
+allow = [
+    "github.com",
+    "api.github.com",
+    "api.openai.com",
+    "registry.npmjs.org",
+    "pypi.org",
+]
+allow_all = false
+allow_private_ranges = false
+
+[secrets]
+# Codex's OWN provider key passes so the agent works for API-key users;
+# subscription/OAuth users simply won't have it set (harmless). Every OTHER
+# provider's key and all infra secrets stay blocked.
+pass = [
+    "HOME",
+    "PATH",
+    "SHELL",
+    "USER",
+    "LANG",
+    "TERM",
+    "OPENAI_API_KEY",
+]
+block = [
+    "AWS_*",
+    "STRIPE_*",
+    "DATABASE_URL",
+    "ANTHROPIC_API_KEY",
+    "*_SECRET*",
+    "*_PASSWORD*",
+    "*_TOKEN*",
+]
+
+[syscall]
+enforcement = "required"
+allow_namespaces = false
+socket_families = [
+    "unix",
+    "inet",
+    "inet6",
+]
+
+[logging]
+db = ".nock/events.db"
+level = "info"
+
+[cloud]
+enabled = false
+api_key = ""
+endpoint = "https://cc.nocktechnologies.io/api/fence/events/"

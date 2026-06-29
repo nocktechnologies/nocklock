@@ -8,6 +8,7 @@ import "fmt"
 type WrapFlags struct {
 	AllowPrivateRanges bool // --allow-private-ranges: permit RFC1918/loopback connections
 	DryRun             bool // --dry-run: validate config without starting fences or child process
+	Profile            string
 }
 
 // parseWrapFlags splits wrap command args into NockLock flags and child args.
@@ -52,7 +53,8 @@ func parseWrapFlags(args []string) (WrapFlags, []string, error) {
 		}
 	}
 
-	for _, a := range nockArgs {
+	for i := 0; i < len(nockArgs); i++ {
+		a := nockArgs[i]
 		switch a {
 		case "--allow-unfenced":
 			return WrapFlags{}, nil, fmt.Errorf("--allow-unfenced has been removed: NockLock now fails closed when the network fence is unavailable")
@@ -60,7 +62,20 @@ func parseWrapFlags(args []string) (WrapFlags, []string, error) {
 			flags.AllowPrivateRanges = true
 		case "--dry-run":
 			flags.DryRun = true
+		case "--profile":
+			if i+1 >= len(nockArgs) {
+				return WrapFlags{}, nil, fmt.Errorf("--profile requires a profile name")
+			}
+			i++
+			flags.Profile = nockArgs[i]
 		default:
+			if value, ok := splitWrapFlagValue(a, "--profile="); ok {
+				if value == "" {
+					return WrapFlags{}, nil, fmt.Errorf("--profile requires a profile name")
+				}
+				flags.Profile = value
+				continue
+			}
 			return WrapFlags{}, nil, fmt.Errorf("unknown nocklock flag %q (place child flags after --)", a)
 		}
 	}
@@ -72,12 +87,27 @@ func allRecognizedWrapFlags(args []string) bool {
 	if len(args) == 0 {
 		return false
 	}
-	for _, a := range args {
+	for i := 0; i < len(args); i++ {
+		a := args[i]
 		switch a {
 		case "--allow-unfenced", "--allow-private-ranges", "--dry-run":
+		case "--profile":
+			if i+1 >= len(args) {
+				return false
+			}
+			i++
 		default:
-			return false
+			if _, ok := splitWrapFlagValue(a, "--profile="); !ok {
+				return false
+			}
 		}
 	}
 	return true
+}
+
+func splitWrapFlagValue(arg, prefix string) (string, bool) {
+	if len(arg) < len(prefix) || arg[:len(prefix)] != prefix {
+		return "", false
+	}
+	return arg[len(prefix):], true
 }

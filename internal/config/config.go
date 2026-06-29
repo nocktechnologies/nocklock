@@ -25,13 +25,14 @@ func ResolveDBPath(cfg *Config, configPath string) (dbPath string, projectRoot s
 
 // Config is the top-level NockLock configuration.
 type Config struct {
-	Project    ProjectConfig    `toml:"project"`
-	Filesystem FilesystemConfig `toml:"filesystem"`
-	Network    NetworkConfig    `toml:"network"`
-	Secrets    SecretsConfig    `toml:"secrets"`
-	Syscall    SyscallConfig    `toml:"syscall"`
-	Logging    LoggingConfig    `toml:"logging"`
-	Cloud      CloudConfig      `toml:"cloud"`
+	ProfileName string           `toml:"-"`
+	Project     ProjectConfig    `toml:"project"`
+	Filesystem  FilesystemConfig `toml:"filesystem"`
+	Network     NetworkConfig    `toml:"network"`
+	Secrets     SecretsConfig    `toml:"secrets"`
+	Syscall     SyscallConfig    `toml:"syscall"`
+	Logging     LoggingConfig    `toml:"logging"`
+	Cloud       CloudConfig      `toml:"cloud"`
 }
 
 // ProjectConfig identifies the project being fenced.
@@ -129,27 +130,58 @@ func FindConfig() (string, error) {
 
 // Load reads and parses a TOML config file at the given path.
 func Load(path string) (*Config, error) {
+	cfg := DefaultConfig()
+	if err := loadInto(&cfg, path); err != nil {
+		return nil, err
+	}
+
+	return &cfg, nil
+}
+
+// LoadOverlay reads a TOML config file over base, keeping only changes that do
+// not widen the fence relative to base.
+func LoadOverlay(base Config, path string) (*Config, error) {
+	baseCopy := cloneConfig(base)
+	overlay := cloneConfig(base)
+	fields, err := overlayDefinedFields(path)
+	if err != nil {
+		return nil, err
+	}
+	md, err := loadIntoWithMetadata(&overlay, path)
+	if err != nil {
+		return nil, err
+	}
+	addMetadataFields(fields, md)
+	cfg := restrictOverlay(baseCopy, overlay, fields)
+	return &cfg, nil
+}
+
+func loadInto(cfg *Config, path string) error {
+	_, err := loadIntoWithMetadata(cfg, path)
+	return err
+}
+
+func loadIntoWithMetadata(cfg *Config, path string) (toml.MetaData, error) {
 	data, err := os.ReadFile(path)
 	if err != nil {
-		return nil, fmt.Errorf("failed to read config at %s: %w", path, err)
+		return toml.MetaData{}, fmt.Errorf("failed to read config at %s: %w", path, err)
 	}
 
-	cfg := DefaultConfig()
-	md, err := toml.Decode(string(data), &cfg)
+	md, err := toml.Decode(string(data), cfg)
 	if err != nil {
-		return nil, fmt.Errorf("failed to parse config at %s: %w", path, err)
+		return toml.MetaData{}, fmt.Errorf("failed to parse config at %s: %w", path, err)
 	}
 	if undecoded := md.Undecoded(); len(undecoded) > 0 {
-		return nil, fmt.Errorf("unknown config keys at %s: %v", path, undecoded)
+		return toml.MetaData{}, fmt.Errorf("unknown config keys at %s: %v", path, undecoded)
 	}
 
-	if errs := Validate(&cfg); len(errs) > 0 {
+	if errs := Validate(cfg); len(errs) > 0 {
 		for _, e := range errs {
 			if e.Severity == "error" {
-				return nil, fmt.Errorf("invalid config at %s: %s", path, e.Error())
+				return toml.MetaData{}, fmt.Errorf("invalid config at %s: %s", path, e.Error())
 			}
 		}
 	}
 
-	return &cfg, nil
+	return md, nil
 }

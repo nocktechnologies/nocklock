@@ -423,6 +423,50 @@ func TestWrapDryRunPrintsAllowPrivateRangesFlag(t *testing.T) {
 	}
 }
 
+func TestWrapProfileListPrintsEmbeddedProfiles(t *testing.T) {
+	cmd := &cobra.Command{}
+	var runErr error
+	stdout := captureStdout(t, func() {
+		runErr = wrapCmd.RunE(cmd, []string{"--profile", "list"})
+	})
+	if runErr != nil {
+		t.Fatalf("profile list should not require config or command: %v", runErr)
+	}
+	for _, want := range []string{"NockLock profiles:", "claude-code", "codex"} {
+		if !strings.Contains(stdout, want) {
+			t.Fatalf("profile list missing %q:\n%s", want, stdout)
+		}
+	}
+}
+
+func TestWrapDryRunProfileUsesEmbeddedBaseWithoutConfig(t *testing.T) {
+	dir := t.TempDir()
+	withWorkingDir(t, dir)
+
+	cmd := &cobra.Command{}
+	var runErr error
+	stdout := captureStdout(t, func() {
+		runErr = wrapCmd.RunE(cmd, []string{"--profile", "codex", "--dry-run"})
+	})
+	if runErr != nil {
+		t.Fatalf("dry run profile should not require project config: %v", runErr)
+	}
+	if !strings.Contains(stdout, "Profile: codex") || !strings.Contains(stdout, "api.openai.com") {
+		t.Fatalf("dry run did not show codex profile policy:\n%s", stdout)
+	}
+}
+
+func TestWrapProfileUnknownFailsClosed(t *testing.T) {
+	cmd := &cobra.Command{}
+	err := wrapCmd.RunE(cmd, []string{"--profile", "missing", "--dry-run"})
+	if err == nil {
+		t.Fatal("expected unknown profile to fail")
+	}
+	if !strings.Contains(err.Error(), `unknown profile "missing"`) {
+		t.Fatalf("expected clear unknown profile error, got: %v", err)
+	}
+}
+
 func TestEffectiveWrapConfigPreservesAllowPrivateRanges(t *testing.T) {
 	cfg := config.DefaultConfig()
 

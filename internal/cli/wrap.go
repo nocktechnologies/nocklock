@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -38,20 +39,18 @@ var wrapCmd = &cobra.Command{
 			return flagErr
 		}
 
+		if wrapFlags.Profile == "list" {
+			printProfiles(os.Stdout)
+			return nil
+		}
 		if len(args) == 0 && !wrapFlags.DryRun {
-			return fmt.Errorf("no command specified. Usage: nocklock wrap [--dry-run] [--allow-private-ranges] -- <command> [args...]")
+			return fmt.Errorf("no command specified. Usage: nocklock wrap [--profile <name>] [--dry-run] [--allow-private-ranges] -- <command> [args...]")
 		}
 
-		// Find and load config — fail closed if missing or invalid.
-		configPath, err := config.FindConfig()
+		cfg, configPath, err := loadWrapConfig(wrapFlags)
 		if err != nil {
 			cmd.SilenceUsage = true
-			return fmt.Errorf("no NockLock config found. Run 'nocklock init' first to create %s/%s", config.Dir, config.File)
-		}
-		cfg, err := config.Load(configPath)
-		if err != nil {
-			cmd.SilenceUsage = true
-			return fmt.Errorf("failed to load config at %s: %w", configPath, err)
+			return err
 		}
 		if err := validateWrapRuntimeConfig(cfg); err != nil {
 			cmd.SilenceUsage = true
@@ -60,6 +59,9 @@ var wrapCmd = &cobra.Command{
 		effectiveCfg := effectiveWrapConfig(cfg, wrapFlags)
 		if wrapFlags.DryRun {
 			fmt.Fprintln(os.Stdout, effectiveCfg.EffectivePolicy())
+			if wrapFlags.Profile != "" {
+				fmt.Fprintf(os.Stderr, "NockLock: profile %q is the base; %s overlays may only tighten it\n", wrapFlags.Profile, filepath.Join(config.Dir, config.File))
+			}
 			fmt.Fprintf(os.Stderr, "NockLock: dry run OK (%s)\n", configPath)
 			return nil
 		}
@@ -415,6 +417,44 @@ var wrapCmd = &cobra.Command{
 
 func init() {
 	rootCmd.AddCommand(wrapCmd)
+}
+
+func loadWrapConfig(flags WrapFlags) (*config.Config, string, error) {
+	if flags.Profile == "" {
+		configPath, err := config.FindConfig()
+		if err != nil {
+			return nil, "", fmt.Errorf("no NockLock config found. Run 'nocklock init' first to create %s/%s", config.Dir, config.File)
+		}
+		cfg, err := config.Load(configPath)
+		if err != nil {
+			return nil, configPath, fmt.Errorf("failed to load config at %s: %w", configPath, err)
+		}
+		return cfg, configPath, nil
+	}
+
+	base, err := config.LoadProfile(flags.Profile)
+	if err != nil {
+		return nil, "", err
+	}
+	configPath, findErr := config.FindConfig()
+	if findErr != nil {
+		if !errors.Is(findErr, os.ErrNotExist) {
+			return nil, "", fmt.Errorf("failed to find config overlay: %w", findErr)
+		}
+		return base, "embedded profile " + flags.Profile, nil
+	}
+	cfg, err := config.LoadOverlay(*base, configPath)
+	if err != nil {
+		return nil, configPath, fmt.Errorf("failed to load config overlay at %s: %w", configPath, err)
+	}
+	return cfg, configPath, nil
+}
+
+func printProfiles(w io.Writer) {
+	fmt.Fprintln(w, "NockLock profiles:")
+	for _, profile := range config.Profiles() {
+		fmt.Fprintf(w, "  %s: %s\n", profile.Name, profile.Summary)
+	}
 }
 
 func effectiveWrapConfig(cfg *config.Config, flags WrapFlags) config.Config {

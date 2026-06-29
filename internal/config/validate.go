@@ -126,6 +126,9 @@ func (cfg *Config) EffectivePolicy() string {
 	var b strings.Builder
 
 	b.WriteString("NockLock effective policy:\n")
+	if cfg.ProfileName != "" {
+		fmt.Fprintf(&b, "  Profile: %s (embedded base; project config overlays can only tighten)\n", cfg.ProfileName)
+	}
 
 	// Network
 	privateRanges := "blocked"
