@@ -184,8 +184,10 @@ socket_families = ["unix", "netlink"]
 	if cfg.Filesystem.Mode != "read-only" {
 		t.Fatalf("filesystem.mode = %q, want read-only", cfg.Filesystem.Mode)
 	}
-	if !reflect.DeepEqual(cfg.Secrets.Pass, []string{"HOME"}) {
-		t.Fatalf("secrets.pass = %v, want only HOME", cfg.Secrets.Pass)
+	// Base codex pass now includes OPENAI_API_KEY (the runtime's own key), so an
+	// overlay requesting [HOME, OPENAI_API_KEY] tightens to exactly those two.
+	if !reflect.DeepEqual(cfg.Secrets.Pass, []string{"HOME", "OPENAI_API_KEY"}) {
+		t.Fatalf("secrets.pass = %v, want [HOME OPENAI_API_KEY]", cfg.Secrets.Pass)
 	}
 	if !containsString(cfg.Secrets.Block, "NOCKLOCK_TEST_*") {
 		t.Fatalf("secrets.block did not add overlay block: %v", cfg.Secrets.Block)
@@ -195,6 +197,60 @@ socket_families = ["unix", "netlink"]
 	}
 	if !reflect.DeepEqual(cfg.Syscall.SocketFamilies, []string{"unix"}) {
 		t.Fatalf("syscall.socket_families = %v, want only unix", cfg.Syscall.SocketFamilies)
+	}
+}
+
+// TestOverlayDisjointInvertedListsFailClosed guards the fail-OPEN edge case where
+// an overlay's pass / socket_families list is disjoint from the profile's: a naive
+// intersection would be EMPTY, and empty has INVERTED semantics for these two
+// fields (pass-everything / no-socket-restriction). The overlay must never loosen
+// the fence that way — a disjoint overlay keeps the (restrictive) base.
+func TestOverlayDisjointInvertedListsFailClosed(t *testing.T) {
+	base, err := LoadProfile("codex")
+	if err != nil {
+		t.Fatalf("LoadProfile(codex): %v", err)
+	}
+	dir := t.TempDir()
+	nockDir := filepath.Join(dir, ".nock")
+	if err := os.MkdirAll(nockDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	configPath := filepath.Join(nockDir, "config.toml")
+	// Both lists are disjoint from the codex profile -> intersection is empty.
+	tomlContent := `
+[secrets]
+pass = ["TOTALLY_UNRELATED_VAR"]
+
+[syscall]
+socket_families = ["netlink"]
+
+[logging]
+db = "/tmp/attacker-controlled.db"
+`
+	if err := os.WriteFile(configPath, []byte(tomlContent), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := LoadOverlay(*base, configPath)
+	if err != nil {
+		t.Fatalf("LoadOverlay: %v", err)
+	}
+	// pass must NOT collapse to empty (which would pass every non-blocked var).
+	if len(cfg.Secrets.Pass) == 0 {
+		t.Fatal("secrets.pass collapsed to empty (= pass-all): fence LOOSENED by a disjoint overlay")
+	}
+	if !reflect.DeepEqual(cfg.Secrets.Pass, base.Secrets.Pass) {
+		t.Fatalf("secrets.pass = %v, want fail-closed to base %v", cfg.Secrets.Pass, base.Secrets.Pass)
+	}
+	// socket_families must NOT collapse to empty (which would lift all socket restriction).
+	if len(cfg.Syscall.SocketFamilies) == 0 {
+		t.Fatal("syscall.socket_families collapsed to empty (= no restriction): fence LOOSENED")
+	}
+	if !reflect.DeepEqual(cfg.Syscall.SocketFamilies, base.Syscall.SocketFamilies) {
+		t.Fatalf("socket_families = %v, want fail-closed to base %v", cfg.Syscall.SocketFamilies, base.Syscall.SocketFamilies)
+	}
+	// The audit-log path must stay the profile's — an overlay cannot redirect it.
+	if cfg.Logging.DB != base.Logging.DB {
+		t.Fatalf("logging.db = %q, want profile path %q (audit redirect must be blocked)", cfg.Logging.DB, base.Logging.DB)
 	}
 }
 

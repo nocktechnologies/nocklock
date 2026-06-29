@@ -31,6 +31,9 @@ allow_all = false
 allow_private_ranges = false
 
 [secrets]
+# Claude Code's OWN provider key passes so the agent works for API-key users;
+# subscription/OAuth users simply won't have it set (harmless). Every OTHER
+# provider's key and all infra secrets stay blocked.
 pass = [
     "HOME",
     "PATH",
@@ -38,12 +41,12 @@ pass = [
     "USER",
     "LANG",
     "TERM",
+    "ANTHROPIC_API_KEY",
 ]
 block = [
     "AWS_*",
     "STRIPE_*",
     "DATABASE_URL",
-    "ANTHROPIC_API_KEY",
     "OPENAI_API_KEY",
     "*_SECRET*",
     "*_PASSWORD*",

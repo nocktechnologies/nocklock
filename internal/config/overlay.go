@@ -36,7 +36,11 @@ func restrictOverlay(base, overlay Config, fields map[string]bool) Config {
 	cfg.Network.AllowPrivateRanges = base.Network.AllowPrivateRanges && overlay.Network.AllowPrivateRanges
 
 	if fields["secrets.pass"] {
-		cfg.Secrets.Pass = intersectStrings(base.Secrets.Pass, overlay.Secrets.Pass)
+		// secrets.pass has INVERTED semantics: an empty pass list means "pass
+		// every non-blocked var" (secrets.go Rule 2). A disjoint overlay must
+		// never collapse a restrictive (non-empty) base to that permissive empty
+		// sentinel — that would LOOSEN the secret fence. Fail closed to base.
+		cfg.Secrets.Pass = tightenInvertedAllowlist(base.Secrets.Pass, overlay.Secrets.Pass)
 	}
 	if fields["secrets.block"] {
 		cfg.Secrets.Block = unionStrings(base.Secrets.Block, overlay.Secrets.Block)
@@ -47,11 +51,18 @@ func restrictOverlay(base, overlay Config, fields map[string]bool) Config {
 	}
 	cfg.Syscall.AllowNamespaces = base.Syscall.AllowNamespaces && overlay.Syscall.AllowNamespaces
 	if fields["syscall.socket_families"] {
-		cfg.Syscall.SocketFamilies = intersectStrings(base.Syscall.SocketFamilies, overlay.Syscall.SocketFamilies)
+		// socket_families also has INVERTED semantics: empty means "no socket
+		// restriction" (config.go). Same fail-closed-to-base guard as pass.
+		cfg.Syscall.SocketFamilies = tightenInvertedAllowlist(base.Syscall.SocketFamilies, overlay.Syscall.SocketFamilies)
 	}
 	if fields["syscall.extra_deny"] {
 		cfg.Syscall.ExtraDeny = unionStrings(base.Syscall.ExtraDeny, overlay.Syscall.ExtraDeny)
 	}
+
+	// The audit-log DB path is the accountability anchor of a profile. A user
+	// overlay must not be able to redirect it (e.g. to /dev/null) and silently
+	// defeat the preset's audit guarantee — keep the profile's logging path.
+	cfg.Logging.DB = base.Logging.DB
 
 	if overlay.Cloud.Enabled && !base.Cloud.Enabled {
 		cfg.Cloud.Enabled = false
@@ -60,6 +71,19 @@ func restrictOverlay(base, overlay Config, fields map[string]bool) Config {
 	}
 
 	return cfg
+}
+
+// tightenInvertedAllowlist intersects an allowlist whose EMPTY value means "no
+// restriction" (secrets.pass, syscall.socket_families). Intersection can only
+// narrow such a list, EXCEPT when a disjoint overlay empties a non-empty base —
+// which flips it to the permissive empty sentinel and LOOSENS the fence. In that
+// case keep the (more restrictive) base. An overlay can tighten, never loosen.
+func tightenInvertedAllowlist(base, overlay []string) []string {
+	result := intersectStrings(base, overlay)
+	if len(base) > 0 && len(result) == 0 {
+		return append([]string(nil), base...)
+	}
+	return result
 }
 
 func cloneConfig(cfg Config) Config {
