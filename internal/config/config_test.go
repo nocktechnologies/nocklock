@@ -110,6 +110,94 @@ allow = ["github.com"]
 	}
 }
 
+func TestLoadProfileCodex(t *testing.T) {
+	cfg, err := LoadProfile("codex")
+	if err != nil {
+		t.Fatalf("LoadProfile(codex): %v", err)
+	}
+	if cfg.ProfileName != "codex" {
+		t.Fatalf("ProfileName = %q, want codex", cfg.ProfileName)
+	}
+	if !containsString(cfg.Network.Allow, "api.openai.com") {
+		t.Fatalf("codex profile should allow api.openai.com, got %v", cfg.Network.Allow)
+	}
+	if cfg.Network.AllowAll {
+		t.Fatal("codex profile must stay default-deny for network")
+	}
+}
+
+func TestLoadOverlayCanTightenButNotLoosenProfile(t *testing.T) {
+	base, err := LoadProfile("codex")
+	if err != nil {
+		t.Fatalf("LoadProfile(codex): %v", err)
+	}
+
+	dir := t.TempDir()
+	nockDir := filepath.Join(dir, ".nock")
+	if err := os.MkdirAll(nockDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	configPath := filepath.Join(nockDir, "config.toml")
+	tomlContent := `
+[network]
+allow = ["api.openai.com", "example.com"]
+allow_all = true
+allow_private_ranges = true
+
+[filesystem]
+allow = ["/tmp/", "/"]
+deny = ["~/work/private/"]
+mode = "read-only"
+
+[secrets]
+pass = ["HOME", "OPENAI_API_KEY"]
+block = ["NOCKLOCK_TEST_*"]
+
+[syscall]
+enforcement = "off"
+allow_namespaces = true
+socket_families = ["unix", "netlink"]
+`
+	if err := os.WriteFile(configPath, []byte(tomlContent), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	cfg, err := LoadOverlay(*base, configPath)
+	if err != nil {
+		t.Fatalf("LoadOverlay: %v", err)
+	}
+	if cfg.ProfileName != "codex" {
+		t.Fatalf("ProfileName = %q, want codex", cfg.ProfileName)
+	}
+	if !reflect.DeepEqual(cfg.Network.Allow, []string{"api.openai.com"}) {
+		t.Fatalf("network.allow = %v, want only api.openai.com", cfg.Network.Allow)
+	}
+	if cfg.Network.AllowAll || cfg.Network.AllowPrivateRanges {
+		t.Fatalf("network loosening survived: allow_all=%t private=%t", cfg.Network.AllowAll, cfg.Network.AllowPrivateRanges)
+	}
+	if !reflect.DeepEqual(cfg.Filesystem.Allow, []string{"/tmp/"}) {
+		t.Fatalf("filesystem.allow = %v, want only /tmp/", cfg.Filesystem.Allow)
+	}
+	if !containsString(cfg.Filesystem.Deny, "~/work/private/") {
+		t.Fatalf("filesystem.deny did not add overlay deny: %v", cfg.Filesystem.Deny)
+	}
+	if cfg.Filesystem.Mode != "read-only" {
+		t.Fatalf("filesystem.mode = %q, want read-only", cfg.Filesystem.Mode)
+	}
+	if !reflect.DeepEqual(cfg.Secrets.Pass, []string{"HOME"}) {
+		t.Fatalf("secrets.pass = %v, want only HOME", cfg.Secrets.Pass)
+	}
+	if !containsString(cfg.Secrets.Block, "NOCKLOCK_TEST_*") {
+		t.Fatalf("secrets.block did not add overlay block: %v", cfg.Secrets.Block)
+	}
+	if cfg.Syscall.Enforcement != "required" || cfg.Syscall.AllowNamespaces {
+		t.Fatalf("syscall loosening survived: %+v", cfg.Syscall)
+	}
+	if !reflect.DeepEqual(cfg.Syscall.SocketFamilies, []string{"unix"}) {
+		t.Fatalf("syscall.socket_families = %v, want only unix", cfg.Syscall.SocketFamilies)
+	}
+}
+
 func TestDefaultConfig(t *testing.T) {
 	cfg := DefaultConfig()
 
@@ -152,6 +240,15 @@ func TestDefaultConfig(t *testing.T) {
 	if !found {
 		t.Error("expected AWS_* in default block list")
 	}
+}
+
+func containsString(values []string, want string) bool {
+	for _, value := range values {
+		if value == want {
+			return true
+		}
+	}
+	return false
 }
 
 func TestConfigNotFound(t *testing.T) {
