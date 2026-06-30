@@ -208,3 +208,90 @@ func TestSpecRoundTrip(t *testing.T) {
 		}
 	}
 }
+
+// N8441: a deny path that overlaps a Landlock-granted tree cannot be enforced
+// by the allow-only Landlock layer (a static binary or a child that clears
+// LD_PRELOAD would reach it). RulesFromConfig must fail closed instead of
+// silently emitting a ruleset that grants the denied path.
+func TestRulesFromConfigRejectsDenyPathInsideRoot(t *testing.T) {
+	root := t.TempDir()
+	src := filepath.Join(root, "src")
+	if err := os.Mkdir(src, 0o755); err != nil {
+		t.Fatalf("mkdir src: %v", err)
+	}
+	deny := filepath.Join(src, "secret") // under the granted root child "src"
+
+	_, err := RulesFromConfig(&fsfence.FenceConfig{
+		Root:      root,
+		Mode:      "read-write",
+		DenyPaths: []string{deny},
+	}, nil, 5)
+	if err == nil {
+		t.Fatal("expected deny path inside the granted root to be rejected")
+	}
+	if !strings.Contains(err.Error(), "cannot be enforced by Landlock") {
+		t.Fatalf("expected Landlock deny-enforcement error, got: %v", err)
+	}
+}
+
+func TestRulesFromConfigRejectsDenyPathInsideAllow(t *testing.T) {
+	root := t.TempDir()
+	allow := t.TempDir()
+	deny := filepath.Join(allow, ".ssh") // under an explicitly allowed tree
+
+	_, err := RulesFromConfig(&fsfence.FenceConfig{
+		Root:       root,
+		Mode:       "read-only",
+		AllowPaths: []string{allow},
+		DenyPaths:  []string{deny},
+	}, nil, 5)
+	if err == nil {
+		t.Fatal("expected deny path inside an allow path to be rejected")
+	}
+	if !strings.Contains(err.Error(), "cannot be enforced by Landlock") {
+		t.Fatalf("expected Landlock deny-enforcement error, got: %v", err)
+	}
+}
+
+// A deny path that does not overlap any granted tree needs no Landlock rule:
+// Landlock denies everything not explicitly allowed, so the config is valid.
+func TestRulesFromConfigAllowsNonOverlappingDenyPath(t *testing.T) {
+	root := t.TempDir()
+	if err := os.Mkdir(filepath.Join(root, "src"), 0o755); err != nil {
+		t.Fatalf("mkdir src: %v", err)
+	}
+
+	spec, err := RulesFromConfig(&fsfence.FenceConfig{
+		Root:      root,
+		Mode:      "read-write",
+		DenyPaths: []string{"/home/someone-else/.ssh", "/etc/shadow"},
+	}, nil, 5)
+	if err != nil {
+		t.Fatalf("non-overlapping deny path should be accepted: %v", err)
+	}
+	for _, rule := range spec.Paths {
+		if pathsOverlap("/etc/shadow", rule.Path) || pathsOverlap("/home/someone-else/.ssh", rule.Path) {
+			t.Fatalf("did not expect a deny path to overlap a granted rule %q", rule.Path)
+		}
+	}
+}
+
+func TestPathsOverlapComponentBoundary(t *testing.T) {
+	cases := []struct {
+		a, b string
+		want bool
+	}{
+		{"/a/b", "/a/b", true},   // identical
+		{"/a/b", "/a/b/c", true}, // ancestor
+		{"/a/b/c", "/a/b", true}, // descendant
+		{"/a/b", "/a/bc", false}, // not a component boundary
+		{"/a/b", "/a/c", false},  // siblings
+		{"/", "/a/b", true},      // root is an ancestor of everything
+		{"/a", "/", true},        // descendant of root
+	}
+	for _, c := range cases {
+		if got := pathsOverlap(c.a, c.b); got != c.want {
+			t.Errorf("pathsOverlap(%q, %q) = %v, want %v", c.a, c.b, got, c.want)
+		}
+	}
+}
