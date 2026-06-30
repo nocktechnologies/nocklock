@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"strings"
 
 	fsfence "github.com/nocktechnologies/nocklock/internal/fence/fs"
 )
@@ -143,7 +144,60 @@ func RulesFromConfig(cfg *fsfence.FenceConfig, extra []AllowPath, abi int) (Spec
 	for _, p := range extra {
 		spec.Paths = append(spec.Paths, pathRule(filepath.Clean(p.Path), p.Access, abi))
 	}
+	if err := assertDenyPathsEnforceable(cfg.DenyPaths, spec.Paths); err != nil {
+		return Spec{}, err
+	}
 	return spec, nil
+}
+
+// assertDenyPathsEnforceable fails closed when a configured deny path cannot be
+// honored by Landlock.
+//
+// Landlock is allow-only: every rule GRANTS access to a path subtree and the
+// kernel rejects a zero-access rule, so there is no way to express a deny that
+// carves a hole out of a granted tree (see Apply in landlock_linux.go). The
+// LD_PRELOAD interposer does enforce DenyPaths, but a static binary or a child
+// that clears LD_PRELOAD relies solely on Landlock. If a deny path overlaps a
+// Landlock-granted tree (a root child, an allow path, or an extra rule),
+// Landlock would silently grant access to the very path the operator asked to
+// deny. Refuse to build such a ruleset rather than ship a fence that ignores
+// the deny. Deny paths that do not overlap any grant need no rule: Landlock
+// denies everything that is not explicitly allowed.
+func assertDenyPathsEnforceable(denyPaths []string, granted []PathRule) error {
+	for _, deny := range denyPaths {
+		d := filepath.Clean(deny)
+		if d == "" || d == "." {
+			continue
+		}
+		for _, rule := range granted {
+			if pathsOverlap(d, rule.Path) {
+				return fmt.Errorf(
+					"deny path %q overlaps Landlock-granted tree %q and cannot be enforced by Landlock (allow-only); "+
+						"narrow the root/allow grant so it does not include the deny path", d, rule.Path)
+			}
+		}
+	}
+	return nil
+}
+
+// pathsOverlap reports whether two cleaned paths refer to the same location or
+// one is an ancestor directory of the other. Comparison is component-boundary
+// aware so "/a/bc" does not overlap "/a/b".
+func pathsOverlap(a, b string) bool {
+	return a == b || isAncestor(a, b) || isAncestor(b, a)
+}
+
+// isAncestor reports whether ancestor is a strict parent directory of
+// descendant (both cleaned).
+func isAncestor(ancestor, descendant string) bool {
+	if ancestor == descendant {
+		return false
+	}
+	sep := string(os.PathSeparator)
+	if ancestor == sep {
+		return strings.HasPrefix(descendant, sep)
+	}
+	return strings.HasPrefix(descendant, ancestor+sep)
 }
 
 func rootPathRules(root, access string, abi int) ([]PathRule, error) {
