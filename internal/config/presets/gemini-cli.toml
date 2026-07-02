@@ -1,0 +1,72 @@
+[project]
+name = "gemini-cli"
+root = "."
+
+[filesystem]
+root = "."
+mode = "read-write"
+linux_enforcement = "required"
+allow = [
+    "~/.gemini/",
+    "~/.cache/",
+    "/tmp/",
+]
+deny = [
+    "~/.ssh/",
+    "~/.aws/",
+    "~/.gnupg/",
+    "~/.nock/",
+]
+hardened = true
+
+[network]
+allow = [
+    "github.com",
+    "api.github.com",
+    "generativelanguage.googleapis.com",
+    "registry.npmjs.org",
+]
+allow_all = false
+allow_private_ranges = false
+
+[secrets]
+# This preset targets Gemini CLI's API-key path. OAuth/Vertex setups need an
+# explicit operator review before widening filesystem or egress.
+pass = [
+    "HOME",
+    "PATH",
+    "SHELL",
+    "USER",
+    "LANG",
+    "TERM",
+    "GEMINI_API_KEY",
+]
+block = [
+    "AWS_*",
+    "STRIPE_*",
+    "DATABASE_URL",
+    "ANTHROPIC_API_KEY",
+    "OPENAI_API_KEY",
+    "OPENCODE_API_KEY",
+    "*_SECRET*",
+    "*_PASSWORD*",
+    "*_TOKEN*",
+]
+
+[syscall]
+enforcement = "required"
+allow_namespaces = false
+socket_families = [
+    "unix",
+    "inet",
+    "inet6",
+]
+
+[logging]
+db = ".nock/events.db"
+level = "info"
+
+[cloud]
+enabled = false
+api_key = ""
+endpoint = "https://cc.nocktechnologies.io/api/fence/events/"

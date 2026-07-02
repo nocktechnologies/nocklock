@@ -18,8 +18,11 @@ type Profile struct {
 }
 
 var profileSummaries = map[string]string{
+	"aider":       "default-deny aider draft: project filesystem root, OpenAI/Anthropic/npm/PyPI/GitHub egress, own provider keys only, required Linux fences",
 	"claude-code": "default-deny Claude Code draft: project filesystem root, Claude/npm/PyPI/GitHub egress, secret-token blocks, required Linux fences",
 	"codex":       "default-deny Codex draft: project filesystem root, OpenAI/npm/PyPI/GitHub egress, secret-token blocks, required Linux fences",
+	"gemini-cli":  "default-deny Gemini CLI API-key draft: project filesystem root, Gemini API/npm/GitHub egress, Gemini key only, required Linux fences",
+	"opencode":    "default-deny OpenCode Zen draft: project filesystem root, OpenCode/npm/GitHub egress, OpenCode key only, required Linux fences",
 }
 
 // Profiles returns the embedded runtime profiles in stable name order.
@@ -39,20 +42,13 @@ func Profiles() []Profile {
 
 // LoadProfile loads an embedded runtime profile by name.
 func LoadProfile(name string) (*Config, error) {
-	if name == "" {
-		return nil, fmt.Errorf("profile name is required")
-	}
-	if _, ok := profileSummaries[name]; !ok {
-		return nil, fmt.Errorf("unknown profile %q", name)
-	}
-
-	data, err := profileFS.ReadFile("presets/" + name + ".toml")
+	data, err := ProfileTOML(name)
 	if err != nil {
-		return nil, fmt.Errorf("embedded profile %q is unavailable: %w", name, err)
+		return nil, err
 	}
 
 	cfg := DefaultConfig()
-	md, err := toml.Decode(string(data), &cfg)
+	md, err := toml.Decode(data, &cfg)
 	if err != nil {
 		return nil, fmt.Errorf("embedded profile %q is invalid: %w", name, err)
 	}
@@ -68,4 +64,21 @@ func LoadProfile(name string) (*Config, error) {
 	}
 	cfg.ProfileName = name
 	return &cfg, nil
+}
+
+// ProfileTOML returns the embedded TOML for a runtime profile after confirming
+// the profile name is known.
+func ProfileTOML(name string) (string, error) {
+	if name == "" {
+		return "", fmt.Errorf("profile name is required")
+	}
+	if _, ok := profileSummaries[name]; !ok {
+		return "", fmt.Errorf("unknown profile %q", name)
+	}
+
+	data, err := profileFS.ReadFile("presets/" + name + ".toml")
+	if err != nil {
+		return "", fmt.Errorf("embedded profile %q is unavailable: %w", name, err)
+	}
+	return string(data), nil
 }
