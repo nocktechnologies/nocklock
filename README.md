@@ -23,6 +23,15 @@ nocklock wrap -- claude
 
 That's it. Four commands. Your agent is fenced.
 
+For a runtime-specific first run, scaffold from a preset:
+
+```bash
+nocklock init --runtime codex
+nocklock init --runtime aider
+nocklock init --runtime gemini-cli
+nocklock init --runtime opencode
+```
+
 ## How It Works
 
 `nocklock wrap` does three things before spawning your agent:
@@ -110,12 +119,21 @@ endpoint = "https://cc.nocktechnologies.io/api/fence/events/"
 
 Defaults are deliberately safe. Customize per project.
 
+Runtime presets are available for `claude-code`, `codex`, `aider`, `gemini-cli`, and `opencode`. Each preset keeps network default-deny, blocks private ranges, keeps Linux filesystem and syscall enforcement required, and only passes the runtime's documented first-party provider key(s). `gemini-cli` targets the API-key path; OAuth and Vertex AI setups need explicit operator review before widening filesystem or egress. `opencode` targets OpenCode Zen/Go through `opencode.ai`; direct third-party providers should use a reviewed custom config.
+
+Candidate runtimes intentionally not preset here:
+
+- `cursor-agent`: first-party egress endpoints are not documented clearly enough to pin without guessing.
+- `continue`: provider endpoints are user-configurable and can include hosted or self-hosted providers, so there is no honest single default allowlist.
+
 ## Commands
 
 | Command | Description |
 |---------|-------------|
 | `nocklock init` | Create `.nock/config.toml` with safe defaults |
+| `nocklock init --runtime <name>` | Create `.nock/config.toml` from an embedded runtime preset |
 | `nocklock wrap -- <cmd>` | Run a command inside the fence |
+| `nocklock wrap --profile list` | List embedded runtime presets |
 | `nocklock wrap --dry-run` | Validate config without starting fences or a command |
 | `nocklock validate [config-path]` | Validate a config file and print the effective policy |
 | `nocklock status` | Show fence state and event log summary |
