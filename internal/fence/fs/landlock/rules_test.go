@@ -168,6 +168,26 @@ func TestRulesFromConfigEnumeratesRootButSkipsNockAuditDir(t *testing.T) {
 	}
 }
 
+func TestRulesFromConfigRejectsRootChildSymlinkOutsideRoot(t *testing.T) {
+	root := t.TempDir()
+	outside := t.TempDir()
+	link := filepath.Join(root, "loot")
+	if err := os.Symlink(outside, link); err != nil {
+		t.Skipf("symlinks unsupported: %v", err)
+	}
+
+	_, err := RulesFromConfig(&fsfence.FenceConfig{
+		Root: root,
+		Mode: "read-write",
+	}, nil, 5)
+	if err == nil {
+		t.Fatal("expected symlinked root child outside root to be rejected")
+	}
+	if !strings.Contains(err.Error(), "resolves outside Landlock root") {
+		t.Fatalf("expected outside-root symlink error, got: %v", err)
+	}
+}
+
 func TestRulesFromConfigRejectsEmptyABI(t *testing.T) {
 	_, err := RulesFromConfig(&fsfence.FenceConfig{Root: t.TempDir(), Mode: "read-write"}, nil, 0)
 	if err == nil {

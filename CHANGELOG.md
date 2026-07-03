@@ -8,6 +8,10 @@ All notable changes to NockLock will be documented in this file.
 - Branch-lock PreToolUse hook (`.claude/hooks/branch-lock.sh`, task 144) — prevents agent sessions from switching branches mid-session by inspecting `git checkout` / `git switch` commands. Scope limited to branch switches; `git merge` and `git rebase` remain unrestricted. Lock file `.branch-lock` at repo root is gitignored; remove to reset.
 
 ### Security (hotfix/security-139-142)
+- **HIGH — N8537 Landlock symlink escape closed.** Linux Landlock rule
+  generation now resolves symlinked root children and rejects any child whose
+  canonical target leaves the configured filesystem root, preventing a project
+  symlink from granting host paths outside the fence.
 - **MAJOR** — Nock 8186 hardening: Linux seccomp-BPF now defaults to `required` and absent `[syscall]` tables fail closed on kernels without seccomp. Linux filesystem `preferred` is treated as fail-closed at runtime, macOS `filesystem.root` launches are rejected because Seatbelt cannot enforce root-only isolation, filesystem allow/deny paths with non-existent tails resolve symlinked ancestors before rule emission, and network-fenced runs with syscall enforcement active allow only Unix-domain sockets so IP sockets cannot bypass the proxy. Existing trusted `libfence_fs.so` search hardening remains enforced.
 - **CRITICAL** — Network proxy now fails closed (task 139): if the proxy cannot bind, fails readiness, or crashes, NockLock exits non-zero and the child never runs. A health/readiness probe gates child startup, and a proxy watchdog monitors health during the session.
 - **CRITICAL** — Process group isolation (Codex gate): wrapped child is placed in its own process group (`Setpgid: true`). On context cancellation the entire process group is killed via `SIGKILL` — descendants cannot escape the fence by forking before the parent dies. On Linux, `Pdeathsig: SIGKILL` additionally kills the child if the nocklock wrapper exits unexpectedly.

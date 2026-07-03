@@ -201,6 +201,10 @@ func isAncestor(ancestor, descendant string) bool {
 }
 
 func rootPathRules(root, access string, abi int) ([]PathRule, error) {
+	cleanRoot, err := filepath.EvalSymlinks(filepath.Clean(root))
+	if err != nil {
+		return nil, fmt.Errorf("resolve Landlock root %q: %w", root, err)
+	}
 	entries, err := os.ReadDir(root)
 	if err != nil {
 		return nil, fmt.Errorf("read Landlock root %q: %w", root, err)
@@ -211,7 +215,18 @@ func rootPathRules(root, access string, abi int) ([]PathRule, error) {
 		if entry.Name() == ".nock" {
 			continue
 		}
-		paths = append(paths, filepath.Join(root, entry.Name()))
+		child := filepath.Join(cleanRoot, entry.Name())
+		if entry.Type()&os.ModeSymlink != 0 {
+			resolved, err := filepath.EvalSymlinks(child)
+			if err != nil {
+				return nil, fmt.Errorf("resolve Landlock root child %q: %w", child, err)
+			}
+			if !pathInsideRoot(cleanRoot, resolved) {
+				return nil, fmt.Errorf("Landlock root child %q resolves outside Landlock root %q to %q", child, cleanRoot, resolved)
+			}
+			child = resolved
+		}
+		paths = append(paths, child)
 	}
 	sort.Strings(paths)
 
@@ -220,6 +235,19 @@ func rootPathRules(root, access string, abi int) ([]PathRule, error) {
 		rules = append(rules, pathRule(path, access, abi))
 	}
 	return rules, nil
+}
+
+func pathInsideRoot(root, path string) bool {
+	root = filepath.Clean(root)
+	path = filepath.Clean(path)
+	if path == root {
+		return true
+	}
+	rel, err := filepath.Rel(root, path)
+	if err != nil {
+		return false
+	}
+	return rel != ".." && !strings.HasPrefix(rel, ".."+string(os.PathSeparator))
 }
 
 func pathRule(path, access string, abi int) PathRule {
