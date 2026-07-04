@@ -73,7 +73,12 @@ func ProfileTOML(name string) (string, error) {
 		return "", fmt.Errorf("profile name is required")
 	}
 	if _, ok := profileSummaries[name]; !ok {
-		return "", fmt.Errorf("unknown profile %q", name)
+		names := make([]string, 0, len(profileSummaries))
+		for profileName := range profileSummaries {
+			names = append(names, profileName)
+		}
+		sort.Strings(names)
+		return "", fmt.Errorf("unknown profile %q (valid profiles: %v)", name, names)
 	}
 
 	data, err := profileFS.ReadFile("presets/" + name + ".toml")

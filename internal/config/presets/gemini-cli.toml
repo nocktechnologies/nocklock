@@ -8,7 +8,6 @@ mode = "read-write"
 linux_enforcement = "required"
 allow = [
     "~/.gemini/",
-    "~/.cache/",
     "/tmp/",
 ]
 deny = [

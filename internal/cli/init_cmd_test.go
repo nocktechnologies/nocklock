@@ -32,6 +32,9 @@ func TestInitConfigBodyUnknownRuntimeFailsClosed(t *testing.T) {
 	if !strings.Contains(err.Error(), `unknown profile "missing"`) {
 		t.Fatalf("unexpected error: %v", err)
 	}
+	if !strings.Contains(err.Error(), "valid profiles: [aider claude-code codex gemini-cli opencode]") {
+		t.Fatalf("error did not list valid profiles: %v", err)
+	}
 }
 
 func TestInitRuntimeRoundTripsThroughConfigLoad(t *testing.T) {

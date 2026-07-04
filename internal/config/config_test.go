@@ -127,12 +127,12 @@ func TestLoadProfileCodex(t *testing.T) {
 }
 
 func TestLoadProfilesValidateEmbeddedPresets(t *testing.T) {
-	wantNetwork := map[string]string{
-		"aider":       "api.anthropic.com",
-		"claude-code": "api.anthropic.com",
-		"codex":       "api.openai.com",
-		"gemini-cli":  "generativelanguage.googleapis.com",
-		"opencode":    "opencode.ai",
+	wantNetwork := map[string][]string{
+		"aider":       {"api.anthropic.com", "api.openai.com"},
+		"claude-code": {"api.anthropic.com"},
+		"codex":       {"api.openai.com"},
+		"gemini-cli":  {"generativelanguage.googleapis.com"},
+		"opencode":    {"opencode.ai"},
 	}
 
 	profiles := Profiles()
@@ -141,7 +141,7 @@ func TestLoadProfilesValidateEmbeddedPresets(t *testing.T) {
 	}
 
 	for _, profile := range profiles {
-		wantHost, ok := wantNetwork[profile.Name]
+		wantHosts, ok := wantNetwork[profile.Name]
 		if !ok {
 			t.Fatalf("unexpected profile %q", profile.Name)
 		}
@@ -155,8 +155,10 @@ func TestLoadProfilesValidateEmbeddedPresets(t *testing.T) {
 		if cfg.Network.AllowAll || cfg.Network.AllowPrivateRanges {
 			t.Fatalf("%s profile widened network: allow_all=%t allow_private_ranges=%t", profile.Name, cfg.Network.AllowAll, cfg.Network.AllowPrivateRanges)
 		}
-		if !containsString(cfg.Network.Allow, wantHost) {
-			t.Fatalf("%s profile missing expected host %q: %v", profile.Name, wantHost, cfg.Network.Allow)
+		for _, wantHost := range wantHosts {
+			if !containsString(cfg.Network.Allow, wantHost) {
+				t.Fatalf("%s profile missing expected host %q: %v", profile.Name, wantHost, cfg.Network.Allow)
+			}
 		}
 		if cfg.Filesystem.LinuxEnforcement != "required" {
 			t.Fatalf("%s filesystem.linux_enforcement = %q, want required", profile.Name, cfg.Filesystem.LinuxEnforcement)

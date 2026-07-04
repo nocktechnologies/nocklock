@@ -8,7 +8,7 @@ mode = "read-write"
 linux_enforcement = "required"
 allow = [
     "~/.config/opencode/",
-    "~/.cache/",
+    "~/.cache/opencode/",
     "/tmp/",
 ]
 deny = [
