@@ -1,0 +1,74 @@
+[project]
+name = "aider"
+root = "."
+
+[filesystem]
+root = "."
+mode = "read-write"
+linux_enforcement = "required"
+allow = [
+    "~/.aider/",
+    "/tmp/",
+]
+deny = [
+    "~/.ssh/",
+    "~/.aws/",
+    "~/.gnupg/",
+    "~/.nock/",
+]
+hardened = true
+
+[network]
+allow = [
+    "github.com",
+    "api.github.com",
+    "api.openai.com",
+    "api.anthropic.com",
+    "registry.npmjs.org",
+    "pypi.org",
+]
+allow_all = false
+allow_private_ranges = false
+
+[secrets]
+# aider has first-class OpenAI and Anthropic key support. Other provider keys
+# stay blocked unless the operator deliberately writes a reviewed custom config.
+pass = [
+    "HOME",
+    "PATH",
+    "SHELL",
+    "USER",
+    "LANG",
+    "TERM",
+    "OPENAI_API_KEY",
+    "ANTHROPIC_API_KEY",
+    "AIDER_MODEL",
+]
+block = [
+    "AWS_*",
+    "STRIPE_*",
+    "DATABASE_URL",
+    "GEMINI_API_KEY",
+    "OPENCODE_API_KEY",
+    "*_SECRET*",
+    "*_PASSWORD*",
+    "*_TOKEN*",
+]
+
+[syscall]
+enforcement = "required"
+allow_namespaces = false
+socket_families = [
+    "unix",
+    "inet",
+    "inet6",
+]
+
+[logging]
+db = ".nock/events.db"
+level = "info"
+
+[cloud]
+enabled = false
+api_key = ""
+endpoint = "https://cc.nocktechnologies.io/api/fence/events/"

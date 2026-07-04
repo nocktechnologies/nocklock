@@ -5,6 +5,7 @@ All notable changes to NockLock will be documented in this file.
 ## [Unreleased]
 
 ### Added
+- Runtime onboarding presets for `aider`, `gemini-cli`, and `opencode`, plus `nocklock init --runtime <name>` to scaffold `.nock/config.toml` directly from an embedded preset. The presets stay network default-deny, keep Linux filesystem/syscall enforcement required, and only include documented first-party/provider egress. `cursor-agent` and `continue` were intentionally skipped because their default egress cannot be pinned honestly from first-party docs.
 - Branch-lock PreToolUse hook (`.claude/hooks/branch-lock.sh`, task 144) — prevents agent sessions from switching branches mid-session by inspecting `git checkout` / `git switch` commands. Scope limited to branch switches; `git merge` and `git rebase` remain unrestricted. Lock file `.branch-lock` at repo root is gitignored; remove to reset.
 
 ### Security (hotfix/security-139-142)
