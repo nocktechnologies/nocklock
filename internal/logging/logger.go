@@ -128,10 +128,52 @@ func NewLogger(dbPath string, projectRoot string) (*Logger, error) {
 		return nil, fmt.Errorf("failed to create log directory %s: %w", dir, err)
 	}
 
-	// Pre-create file with correct permissions to avoid TOCTOU window.
-	f, err := os.OpenFile(dbPath, os.O_CREATE|os.O_RDWR, 0o600)
+	// Reject a symlink at the final DB path before touching it. A repository
+	// could commit .nock/events.db as a symlink pointing outside the project;
+	// following it would chmod and let SQLite write to (corrupt) the target.
+	// This early lstat gives a clear error; O_NOFOLLOW below is the authoritative
+	// guard that also closes the lstat->open TOCTOU window.
+	if fi, err := os.Lstat(dbPath); err == nil {
+		if fi.Mode()&os.ModeSymlink != 0 {
+			return nil, fmt.Errorf("refusing to open event log at %s: path is a symlink", dbPath)
+		}
+	} else if !os.IsNotExist(err) {
+		return nil, fmt.Errorf("failed to stat event log path %s: %w", dbPath, err)
+	}
+
+	// Pre-create file with correct permissions to avoid a TOCTOU window, and
+	// with O_NOFOLLOW so the open fails (ELOOP) rather than following a symlink
+	// swapped in after the lstat above.
+	f, err := os.OpenFile(dbPath, os.O_CREATE|os.O_RDWR|oNoFollow, 0o600)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create event log at %s: %w", dbPath, err)
+	}
+
+	// Re-validate the opened file: confirm it is a regular file and that the
+	// path entry still resolves to the same inode we hold open (defends against
+	// a symlink swap racing the open on platforms lacking O_NOFOLLOW).
+	openedInfo, err := f.Stat()
+	if err != nil {
+		f.Close()
+		return nil, fmt.Errorf("failed to stat opened event log at %s: %w", dbPath, err)
+	}
+	if !openedInfo.Mode().IsRegular() {
+		f.Close()
+		return nil, fmt.Errorf("refusing to open event log at %s: not a regular file", dbPath)
+	}
+	if pathInfo, err := os.Lstat(dbPath); err != nil {
+		f.Close()
+		return nil, fmt.Errorf("failed to re-stat event log path %s: %w", dbPath, err)
+	} else if pathInfo.Mode()&os.ModeSymlink != 0 || !os.SameFile(openedInfo, pathInfo) {
+		f.Close()
+		return nil, fmt.Errorf("refusing to open event log at %s: path changed after open", dbPath)
+	}
+
+	// Fix permissions through the file descriptor so we never chmod a symlink
+	// target by path.
+	if err := f.Chmod(0o600); err != nil {
+		f.Close()
+		return nil, fmt.Errorf("failed to set DB file permissions: %w", err)
 	}
 	f.Close()
 
