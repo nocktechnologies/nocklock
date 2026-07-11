@@ -11,7 +11,18 @@ permissions:
 
 jobs:
   anvil-review:
-    if: github.event.repository.private == true && github.event.pull_request.draft == false && github.event.pull_request.user.login != 'dependabot[bot]'
+    # Trust gate: this job mounts the runner-wide shared Codex (ChatGPT Pro)
+    # credential and runs a model over attacker-controlled PR diff on a
+    # self-hosted runner. Only ever expose that credential to PRs that
+    # originate from a branch in THIS repo (never a fork) and are authored by a
+    # trusted collaborator. A fork PR or an outside contributor must never be
+    # able to trigger a run that provisions the shared session.
+    if: >-
+      github.event.repository.private == true &&
+      github.event.pull_request.draft == false &&
+      github.event.pull_request.user.login != 'dependabot[bot]' &&
+      github.event.pull_request.head.repo.full_name == github.repository &&
+      contains(fromJSON('["OWNER","MEMBER","COLLABORATOR"]'), github.event.pull_request.author_association)
     runs-on: [self-hosted, macOS, ARM64]
 
     steps:
@@ -105,6 +116,41 @@ jobs:
             > /tmp/anvil-output.txt 2>&1
           CODEX_EXIT=$?
           echo "codex_exit=$CODEX_EXIT" >> "$GITHUB_OUTPUT"
+          # Defense-in-depth: strip any shared Codex auth material from the
+          # captured output before it is reflected into a PR comment, in case a
+          # prompt-injection payload in the PR coerces the reviewer into echoing
+          # credential bytes. Never fails the job; a missing/unreadable auth
+          # file simply yields no redactions.
+          python3 - "${HOME}/.codex/auth.json" /tmp/anvil-output.txt <<'PY'
+          import json, sys
+          auth_path, out_path = sys.argv[1], sys.argv[2]
+          try:
+              with open(out_path, "r", errors="replace") as fh:
+                  data = fh.read()
+          except OSError:
+              sys.exit(0)
+          secrets = set()
+          try:
+              with open(auth_path) as fh:
+                  auth = json.load(fh)
+          except Exception:
+              auth = None
+          def walk(node):
+              if isinstance(node, dict):
+                  for value in node.values():
+                      walk(value)
+              elif isinstance(node, list):
+                  for value in node:
+                      walk(value)
+              elif isinstance(node, str) and len(node) >= 8:
+                  secrets.add(node)
+          walk(auth)
+          for secret in sorted(secrets, key=len, reverse=True):
+              data = data.replace(secret, "[REDACTED-CODEX-AUTH]")
+          with open(out_path, "w") as fh:
+              fh.write(data)
+          sys.stderr.write("anvil: redacted %d shared-auth value(s) from output\n" % len(secrets))
+          PY
           {
             echo 'review<<ANVIL_REVIEW_EOF'
             head -c 60000 /tmp/anvil-output.txt
