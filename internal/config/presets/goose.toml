@@ -1,0 +1,89 @@
+[project]
+name = "goose"
+root = "."
+
+[filesystem]
+root = "."
+mode = "read-write"
+linux_enforcement = "required"
+# goose config/secrets live in ~/.config/goose/ (config.yaml, permission.yaml, secrets.yaml);
+# XDG session/log data in ~/.local/share/goose/. Goose defaults to the OS keyring; this preset
+# targets the FILE-secret path (secrets.yaml inside the already-allowed ~/.config/goose/) and
+# does NOT open the D-Bus/keyring socket by default — keyring users add an operator overlay.
+allow = [
+    "~/.config/goose/",
+    "~/.local/share/goose/",
+    "~/.cache/",
+    "/tmp/",
+]
+deny = [
+    "~/.ssh/",
+    "~/.aws/",
+    "~/.gnupg/",
+    "~/.nock/",
+]
+hardened = true
+
+[network]
+# multi-provider agent — broader than single-provider presets by design; covers Goose CORE
+# providers only. MCP extensions the user adds may need an operator-added allow entry.
+allow = [
+    "api.anthropic.com",
+    "api.openai.com",
+    "generativelanguage.googleapis.com",
+    "api.groq.com",
+    "openrouter.ai",
+    "github.com",
+    "api.github.com",
+    "registry.npmjs.org",
+    "pypi.org",
+]
+allow_all = false
+allow_private_ranges = false
+
+[secrets]
+# passes the SET of provider keys Goose natively supports; user sets one, the rest are unset
+# and harmless. All infra/cloud secrets stay blocked.
+pass = [
+    "HOME",
+    "PATH",
+    "SHELL",
+    "USER",
+    "LANG",
+    "TERM",
+    "ANTHROPIC_API_KEY",
+    "OPENAI_API_KEY",
+    "GOOGLE_API_KEY",
+    "GROQ_API_KEY",
+    "OPENROUTER_API_KEY",
+    "GOOSE_PROVIDER",
+    "GOOSE_MODEL",
+    "GOOSE_DISABLE_KEYRING",
+]
+block = [
+    "AWS_*",
+    "STRIPE_*",
+    "DATABASE_URL",
+    "*_SECRET*",
+    "*_PASSWORD*",
+    "*_TOKEN*",
+]
+
+[syscall]
+# goose runs shell + MCP-stdio servers → unix sockets; LLM APIs → inet/inet6.
+enforcement = "required"
+allow_namespaces = false
+socket_families = [
+    "unix",
+    "inet",
+    "inet6",
+]
+
+[logging]
+db = ".nock/events.db"
+level = "info"
+
+[cloud]
+enabled = false
+api_key = ""
+endpoint = "https://cc.nocktechnologies.io/api/fence/events/"

@@ -465,7 +465,7 @@ func TestWrapProfileUnknownFailsClosed(t *testing.T) {
 	if !strings.Contains(err.Error(), `unknown profile "missing"`) {
 		t.Fatalf("expected clear unknown profile error, got: %v", err)
 	}
-	if !strings.Contains(err.Error(), "valid profiles: [aider claude-code codex gemini-cli opencode]") {
+	if !strings.Contains(err.Error(), "valid profiles: [aider claude-code codex gemini-cli goose opencode]") {
 		t.Fatalf("expected valid profile names in error, got: %v", err)
 	}
 }

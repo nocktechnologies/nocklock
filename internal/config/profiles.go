@@ -22,6 +22,7 @@ var profileSummaries = map[string]string{
 	"claude-code": "default-deny Claude Code draft: project filesystem root, Claude/npm/PyPI/GitHub egress, secret-token blocks, required Linux fences",
 	"codex":       "default-deny Codex draft: project filesystem root, OpenAI/npm/PyPI/GitHub egress, secret-token blocks, required Linux fences",
 	"gemini-cli":  "default-deny Gemini CLI API-key draft: project filesystem root, Gemini API/npm/GitHub egress, Gemini key only, required Linux fences",
+	"goose":       "default-deny Goose draft: project filesystem root, multi-provider LLM API egress, Goose config/session dirs, required Linux fences",
 	"opencode":    "default-deny OpenCode Zen draft: project filesystem root, OpenCode/npm/GitHub egress, OpenCode key only, required Linux fences",
 }
 

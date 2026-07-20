@@ -126,12 +126,45 @@ func TestLoadProfileCodex(t *testing.T) {
 	}
 }
 
+func TestLoadProfileGoose(t *testing.T) {
+	cfg, err := LoadProfile("goose")
+	if err != nil {
+		t.Fatalf("LoadProfile(goose): %v", err)
+	}
+	if cfg.ProfileName != "goose" {
+		t.Fatalf("ProfileName = %q, want goose", cfg.ProfileName)
+	}
+	for _, host := range []string{"api.anthropic.com", "api.openai.com", "generativelanguage.googleapis.com"} {
+		if !containsString(cfg.Network.Allow, host) {
+			t.Fatalf("goose profile should allow %s, got %v", host, cfg.Network.Allow)
+		}
+	}
+	if cfg.Network.AllowAll {
+		t.Fatal("goose profile must stay default-deny for network")
+	}
+	if cfg.Network.AllowPrivateRanges {
+		t.Fatal("goose profile must not allow private ranges")
+	}
+	for _, key := range []string{"ANTHROPIC_API_KEY", "OPENAI_API_KEY", "GOOSE_PROVIDER", "GOOSE_MODEL"} {
+		if !containsString(cfg.Secrets.Pass, key) {
+			t.Fatalf("goose profile should pass %s, got %v", key, cfg.Secrets.Pass)
+		}
+	}
+	if cfg.Filesystem.LinuxEnforcement != "required" {
+		t.Fatalf("goose filesystem.linux_enforcement = %q, want required", cfg.Filesystem.LinuxEnforcement)
+	}
+	if cfg.Syscall.Enforcement != "required" {
+		t.Fatalf("goose syscall.enforcement = %q, want required", cfg.Syscall.Enforcement)
+	}
+}
+
 func TestLoadProfilesValidateEmbeddedPresets(t *testing.T) {
 	wantNetwork := map[string][]string{
 		"aider":       {"api.anthropic.com", "api.openai.com"},
 		"claude-code": {"api.anthropic.com"},
 		"codex":       {"api.openai.com"},
 		"gemini-cli":  {"generativelanguage.googleapis.com"},
+		"goose":       {"api.anthropic.com", "api.openai.com"},
 		"opencode":    {"opencode.ai"},
 	}
 
