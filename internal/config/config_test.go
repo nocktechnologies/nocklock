@@ -134,7 +134,7 @@ func TestLoadProfileGoose(t *testing.T) {
 	if cfg.ProfileName != "goose" {
 		t.Fatalf("ProfileName = %q, want goose", cfg.ProfileName)
 	}
-	for _, host := range []string{"api.anthropic.com", "api.openai.com", "generativelanguage.googleapis.com"} {
+	for _, host := range []string{"api.anthropic.com", "api.openai.com", "generativelanguage.googleapis.com", "api.groq.com", "openrouter.ai"} {
 		if !containsString(cfg.Network.Allow, host) {
 			t.Fatalf("goose profile should allow %s, got %v", host, cfg.Network.Allow)
 		}
@@ -145,7 +145,7 @@ func TestLoadProfileGoose(t *testing.T) {
 	if cfg.Network.AllowPrivateRanges {
 		t.Fatal("goose profile must not allow private ranges")
 	}
-	for _, key := range []string{"ANTHROPIC_API_KEY", "OPENAI_API_KEY", "GOOSE_PROVIDER", "GOOSE_MODEL"} {
+	for _, key := range []string{"ANTHROPIC_API_KEY", "OPENAI_API_KEY", "GOOSE_PROVIDER", "GOOSE_MODEL", "GOOGLE_API_KEY", "GROQ_API_KEY", "OPENROUTER_API_KEY", "GOOSE_DISABLE_KEYRING"} {
 		if !containsString(cfg.Secrets.Pass, key) {
 			t.Fatalf("goose profile should pass %s, got %v", key, cfg.Secrets.Pass)
 		}
@@ -164,7 +164,7 @@ func TestLoadProfilesValidateEmbeddedPresets(t *testing.T) {
 		"claude-code": {"api.anthropic.com"},
 		"codex":       {"api.openai.com"},
 		"gemini-cli":  {"generativelanguage.googleapis.com"},
-		"goose":       {"api.anthropic.com", "api.openai.com"},
+		"goose":       {"api.anthropic.com", "api.openai.com", "generativelanguage.googleapis.com", "api.groq.com", "openrouter.ai"},
 		"opencode":    {"opencode.ai"},
 	}
 

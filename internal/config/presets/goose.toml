@@ -6,14 +6,15 @@ root = "."
 root = "."
 mode = "read-write"
 linux_enforcement = "required"
-# goose config/secrets live in ~/.config/goose/ (config.yaml, permission.yaml, secrets.yaml);
-# XDG session/log data in ~/.local/share/goose/. Goose defaults to the OS keyring; this preset
-# targets the FILE-secret path (secrets.yaml inside the already-allowed ~/.config/goose/) and
-# does NOT open the D-Bus/keyring socket by default — keyring users add an operator overlay.
+# covers all three Goose XDG dirs: config/secrets in ~/.config/goose/ (config.yaml,
+# permission.yaml, secrets.yaml); shared data in ~/.local/share/goose/; runtime
+# state/logs in ~/.local/state/goose/. Goose defaults to the OS keyring; this preset
+# targets the FILE-secret path (secrets.yaml inside the already-allowed ~/.config/goose/)
+# and does NOT open the D-Bus/keyring socket by default — keyring users add an operator overlay.
 allow = [
     "~/.config/goose/",
     "~/.local/share/goose/",
-    "~/.cache/",
+    "~/.local/state/goose/",
     "/tmp/",
 ]
 deny = [
