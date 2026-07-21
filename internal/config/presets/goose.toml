@@ -1,0 +1,94 @@
+[project]
+name = "goose"
+root = "."
+
+[filesystem]
+root = "."
+mode = "read-write"
+linux_enforcement = "required"
+# covers all three Goose XDG dirs: config/secrets in ~/.config/goose/ (config.yaml,
+# permission.yaml, secrets.yaml); shared data in ~/.local/share/goose/; runtime
+# state/logs in ~/.local/state/goose/. This preset does NOT grant D-Bus / Secret-Service
+# access (the D-Bus socket path is not in the allow list), but it cannot disable Goose's
+# OS-keyring fallback automatically — the caller must export GOOSE_DISABLE_KEYRING=1 (this
+# preset forwards it via [secrets].pass) so Goose reads secrets.yaml from the already-
+# allowed ~/.config/goose/ instead. Operators who need the OS keyring must add an operator
+# overlay that grants the D-Bus / Secret-Service socket path.
+allow = [
+    "~/.config/goose/",
+    "~/.local/share/goose/",
+    "~/.local/state/goose/",
+    "/tmp/",
+]
+deny = [
+    "~/.ssh/",
+    "~/.aws/",
+    "~/.gnupg/",
+    "~/.nock/",
+]
+hardened = true
+
+[network]
+# multi-provider agent — broader than single-provider presets by design; covers Goose CORE
+# providers only. MCP extensions the user adds may need an operator-added allow entry.
+allow = [
+    "api.anthropic.com",
+    "api.openai.com",
+    "generativelanguage.googleapis.com",
+    "api.groq.com",
+    "openrouter.ai",
+    "github.com",
+    "api.github.com",
+    "registry.npmjs.org",
+    "pypi.org",
+]
+allow_all = false
+allow_private_ranges = false
+
+[secrets]
+# passes the SET of provider keys Goose natively supports; user sets one, the rest are unset
+# and harmless. All infra/cloud secrets stay blocked. GOOSE_DISABLE_KEYRING is forwarded
+# (not injected) — export it before invoking nocklock to keep Goose off the OS keyring.
+pass = [
+    "HOME",
+    "PATH",
+    "SHELL",
+    "USER",
+    "LANG",
+    "TERM",
+    "ANTHROPIC_API_KEY",
+    "OPENAI_API_KEY",
+    "GOOGLE_API_KEY",
+    "GROQ_API_KEY",
+    "OPENROUTER_API_KEY",
+    "GOOSE_PROVIDER",
+    "GOOSE_MODEL",
+    "GOOSE_DISABLE_KEYRING",
+]
+block = [
+    "AWS_*",
+    "STRIPE_*",
+    "DATABASE_URL",
+    "*_SECRET*",
+    "*_PASSWORD*",
+    "*_TOKEN*",
+]
+
+[syscall]
+# goose runs shell + MCP-stdio servers → unix sockets; LLM APIs → inet/inet6.
+enforcement = "required"
+allow_namespaces = false
+socket_families = [
+    "unix",
+    "inet",
+    "inet6",
+]
+
+[logging]
+db = ".nock/events.db"
+level = "info"
+
+[cloud]
+enabled = false
+api_key = ""
+endpoint = "https://cc.nocktechnologies.io/api/fence/events/"

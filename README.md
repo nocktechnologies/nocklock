@@ -30,6 +30,7 @@ nocklock init --runtime codex
 nocklock init --runtime aider
 nocklock init --runtime gemini-cli
 nocklock init --runtime opencode
+nocklock init --runtime goose
 ```
 
 ## How It Works
@@ -119,7 +120,7 @@ endpoint = "https://cc.nocktechnologies.io/api/fence/events/"
 
 Defaults are deliberately safe. Customize per project.
 
-Runtime presets are available for `claude-code`, `codex`, `aider`, `gemini-cli`, and `opencode`. Each preset keeps network default-deny, blocks private ranges, keeps Linux filesystem and syscall enforcement required, and only passes the runtime's documented first-party provider key(s). `gemini-cli` targets the API-key path; OAuth and Vertex AI setups need explicit operator review before widening filesystem or egress. `opencode` targets OpenCode Zen/Go through `opencode.ai`; direct third-party providers should use a reviewed custom config.
+Runtime presets are available for `claude-code`, `codex`, `aider`, `gemini-cli`, `opencode`, and `goose`. Each preset keeps network default-deny, blocks private ranges, keeps Linux filesystem and syscall enforcement required, and only passes the runtime's documented first-party provider key(s). `gemini-cli` targets the API-key path; OAuth and Vertex AI setups need explicit operator review before widening filesystem or egress. `opencode` targets OpenCode Zen/Go through `opencode.ai`; direct third-party providers should use a reviewed custom config. `goose` is a multi-provider preset covering Anthropic, OpenAI, Gemini, Groq, and OpenRouter; only the provider key the user has set is live, the rest are unset and harmless. MCP extensions that reach additional hosts need an operator overlay.
 
 Candidate runtimes intentionally not preset here:
 
