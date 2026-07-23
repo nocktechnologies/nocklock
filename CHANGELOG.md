@@ -4,6 +4,11 @@ All notable changes to NockLock will be documented in this file.
 
 ## [Unreleased]
 
+### Added
+
+- `nocklock verify`: adversarial fence self-test that runs benign proof-of-block
+  probes under the live wrap fence path.
+
 ## [0.4.0] - 2026-07-09
 
 Users on v0.3.0 should upgrade: this release closes ten bypass paths across
