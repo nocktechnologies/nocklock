@@ -27,6 +27,8 @@ func TestRunVerifyAggregatesPassFailSkip(t *testing.T) {
 	defer restore()
 	restoreFS := stubVerifyFilesystemBackend(nil)
 	defer restoreFS()
+	restoreControl := stubVerifyPositiveControl(nil)
+	defer restoreControl()
 
 	runner := func(_ context.Context, _ *config.Config, _ string, fence string, _ map[string]string) (probeResult, error) {
 		switch fence {
@@ -65,6 +67,8 @@ func TestRunVerifySkipsOffAndUnsupportedFences(t *testing.T) {
 	defer restore()
 	restoreFS := stubVerifyFilesystemBackend(errors.New("missing backend"))
 	defer restoreFS()
+	restoreControl := stubVerifyPositiveControl(nil)
+	defer restoreControl()
 
 	runs := 0
 	runner := func(_ context.Context, _ *config.Config, _ string, fence string, _ map[string]string) (probeResult, error) {
@@ -95,6 +99,14 @@ func stubVerifyFilesystemBackend(err error) func() {
 	return func() { verifyFilesystemBackend = orig }
 }
 
+func stubVerifyPositiveControl(err error) func() {
+	orig := verifyPositiveControlRunner
+	verifyPositiveControlRunner = func(context.Context, string, map[string]string) error {
+		return err
+	}
+	return func() { verifyPositiveControlRunner = orig }
+}
+
 func TestVerifyCheckFromProbeClassifiesOpenConfigEscape(t *testing.T) {
 	check := verifyCheckFromProbe("filesystem", probeResult{
 		Fence:     "filesystem",
@@ -114,12 +126,42 @@ func TestCreateFilesystemCanaryFallsBackForBroadAllow(t *testing.T) {
 	cfg.Filesystem.Root = dir
 	cfg.Filesystem.Allow = []string{"/"}
 
-	path, cleanup, err := createFilesystemCanary(&cfg, dir)
+	path, _, cleanup, err := createFilesystemCanary(&cfg, dir)
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer cleanup()
 	if pathWithinAny(path, []string{dir}) {
 		t.Fatalf("canary path %q is inside root %q", path, dir)
+	}
+}
+
+func TestVerifyReportSucceededRequiresAtLeastOnePass(t *testing.T) {
+	report := verifyReport{Summary: verifySummary{Skipped: 4}}
+	if verifyReportSucceeded(report) {
+		t.Fatal("all-skip report should not succeed")
+	}
+
+	report = verifyReport{Summary: verifySummary{Passed: 1, Skipped: 3}}
+	if !verifyReportSucceeded(report) {
+		t.Fatal("report with a pass and no failures should succeed")
+	}
+
+	report = verifyReport{Summary: verifySummary{Passed: 1, Failed: 1}}
+	if verifyReportSucceeded(report) {
+		t.Fatal("report with failures should not succeed")
+	}
+}
+
+func TestSelectOffAllowlistNetworkTargetSkipsAllowedHosts(t *testing.T) {
+	cfg := config.DefaultConfig()
+	cfg.Network.Allow = []string{"verify.nocklock.invalid", "*.invalid"}
+
+	target, err := selectOffAllowlistNetworkTarget(&cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(target, "nocklock-verify-canary.test") {
+		t.Fatalf("target = %q, want .test fallback", target)
 	}
 }

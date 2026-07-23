@@ -27,19 +27,31 @@ benign probe **under the live fences** that attempts to escape each one and asse
 
 2. **Per-fence probe (all benign — no exfiltration, no damage):**
    - **filesystem:** `verify` creates a canary file in a temp dir GUARANTEED outside the config's
-     allowed roots, passes its path to the probe via env; probe attempts `os.ReadFile` on it →
-     expect ENOENT/EACCES = PASS. Readable = FAIL. (Also attempt a fixed out-of-scope read like
-     `/etc/hostname` on Linux / a non-allowed path on macOS as a secondary.)
+     allowed roots, writes a random token, and first runs the probe unfenced as a positive control
+     proving the canary exists and is readable. If no outside temp location can be proven (for
+     example because the configured root is `/`), verification reports FAIL/SKIP with detail rather
+     than PASS. The fenced probe attempts `os.ReadFile` on the known-existing canary: EACCES/EPERM,
+     or backend ENOENT hiding for that known-existing path, is PASS; readable with the expected
+     token is FAIL; missing/unavailable without the positive-control marker is inconclusive.
    - **network:** probe attempts an HTTP GET to a fixed NON-allowlisted canary host
-     (`http://verify.nocklock.invalid` + a real off-allowlist domain e.g. `example.com`) through
-     the injected HTTP(S)_PROXY → expect proxy 403 / dial refused = PASS. 200 = FAIL.
+     selected from candidates that are verified against the active allowlist before launch. The
+     network self-test isolates the network proxy from syscall socket denial so a PASS proves the
+     proxy allowlist path specifically: only proxy-generated HTTP 403 with the NockLock marker is
+     PASS. DNS failures, connection refusal, proxy outage, or generic transport errors are
+     inconclusive/SKIP rather than proof of a block. Any non-fence response from the off-allowlist
+     target is FAIL.
    - **secret:** `verify` injects a canary env var `NOCKLOCK_VERIFY_SECRET=<random>` and adds its
-     NAME to the effective block list before building the child env; probe checks the var is ABSENT
-     in `os.Environ()` → absent = PASS, present = FAIL. (Proves the block-list filter holds.)
+     NAME to the effective block list before building the child env. It also injects a separate
+     non-secret control env var and first runs the probe unfenced to prove the intended child env
+     carries both values. Under the secret fence, the control var must still be present and the
+     secret canary must be absent; missing control is inconclusive, secret present is FAIL, and
+     control-present/secret-absent is PASS.
    - **syscall:** probe attempts ONE benign syscall present in the active denylist/seccomp policy
-     (choose a safe, side-effect-free denied call; e.g. a denied `ptrace`/`unshare`/config-driven
-     entry) → expect SIGSYS/EPERM = PASS. Succeeds = FAIL. Reuse `syscallfence.Policy` to pick a
-     denied-but-safe call; if none safely attemptable, SKIP with reason.
+     (`unshare(CLONE_NEWUSER)` when namespace creation is denied). `verify` first runs the same
+     syscall probe unfenced; if the host already denies it, the syscall check is inconclusive rather
+     than a PASS. After that positive control proves the syscall is attemptable, SIGSYS/EPERM under
+     the fence is PASS and success is FAIL. If the active policy has no safely attemptable denied
+     call, SKIP with reason.
 
 3. **Cross-platform:** reuse `doctor`'s backend detection (filesystem/syscall/network doctor checks).
    Where a fence is configured but NOT enforceable on this platform/host, `verify` reports **SKIP**
@@ -48,13 +60,16 @@ benign probe **under the live fences** that attempts to escape each one and asse
 
 4. **Output + exit codes:** per-fence line `[PASS]/[FAIL]/[SKIP] <fence>: <detail>` + a summary,
    plus `--json` (mirror `doctor`'s `--json` shape: `{checks:[{fence,result,detail}], summary}`).
-   **Exit 0 iff every configured+enforceable fence returned PASS.** Any FAIL (an escape succeeded)
-   → exit non-zero, so `nocklock init` onboarding and CI can gate on "the fence actually holds."
+   **Exit 0 iff at least one configured+enforceable fence returned PASS and no checks returned
+   FAIL.** Any FAIL (an escape succeeded or a required positive control failed) exits non-zero.
+   An all-SKIP/no-proof run also exits non-zero, so `nocklock init` onboarding and CI cannot
+   mistake "nothing was verified" for "the fence actually holds."
 
 5. **Safety contract (documented in `Long` help):** probes never exfiltrate, never write outside a
    temp dir, never touch real secrets — they read a self-created non-secret canary, dial an invalid/
    example host, check env absence, and attempt one side-effect-free denied syscall. `verify` is safe
-   to run in CI and onboarding.
+   to run in CI and onboarding. Each child probe has an overall timeout, and network requests have
+   their own request timeout.
 
 ## Files
 - `internal/cli/verify.go` (+ `verify_test.go`) — the command + result aggregation.

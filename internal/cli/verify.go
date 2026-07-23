@@ -9,6 +9,8 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net"
+	"net/url"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -51,6 +53,7 @@ type probeRunner func(context.Context, *config.Config, string, string, map[strin
 
 var currentProbeRunner probeRunner = runProbeUnderWrap
 var verifyFilesystemBackend = findLibFenceFS
+var verifyPositiveControlRunner = runProbePositiveControl
 
 var verifyCmd = &cobra.Command{
 	Use:   "verify",
@@ -73,7 +76,7 @@ var verifyCmd = &cobra.Command{
 		} else {
 			renderVerifyHuman(cmd.OutOrStdout(), report)
 		}
-		if report.Summary.Failed > 0 {
+		if !verifyReportSucceeded(report) {
 			cmd.SilenceErrors = true
 			cmd.SilenceUsage = true
 			return &exitCodeError{code: 1}
@@ -110,6 +113,7 @@ func runVerify(ctx context.Context, caps doctorCapabilities, runner probeRunner)
 		}
 		probeCfg := cloneVerifyConfig(cfg)
 		disableSkippedFences(&probeCfg, skipped)
+		isolateProbeFence(fence, &probeCfg)
 		env, cleanup, prepErr := prepareProbeEnv(fence, &probeCfg, projectRoot)
 		if prepErr != nil {
 			checks = append(checks, verifyCheck{Fence: fence, Result: verifyFail, Detail: prepErr.Error()})
@@ -117,6 +121,15 @@ func runVerify(ctx context.Context, caps doctorCapabilities, runner probeRunner)
 		}
 		if cleanup != nil {
 			defer cleanup()
+		}
+		if requiresPositiveControl(fence) {
+			if err := verifyPositiveControlRunner(ctx, fence, env); err != nil {
+				checks = append(checks, verifyCheck{Fence: fence, Result: verifyFail, Detail: err.Error()})
+				continue
+			}
+		}
+		if fence == "filesystem" {
+			env[verifyCanaryKnownEnv] = "1"
 		}
 		result, runErr := runner(ctx, &probeCfg, configPath, fence, env)
 		checks = append(checks, verifyCheckFromProbe(fence, result, runErr))
@@ -188,23 +201,76 @@ func disableSkippedFences(cfg *config.Config, skipped map[string]string) {
 	}
 }
 
+func requiresPositiveControl(fence string) bool {
+	switch fence {
+	case "filesystem", "secret", "syscall":
+		return true
+	default:
+		return false
+	}
+}
+
+func isolateProbeFence(fence string, cfg *config.Config) {
+	if fence == "network" {
+		cfg.Syscall.Enforcement = "off"
+	}
+}
+
 func prepareProbeEnv(fence string, cfg *config.Config, projectRoot string) (map[string]string, func(), error) {
 	env := map[string]string{}
 	switch fence {
 	case "filesystem":
-		path, cleanup, err := createFilesystemCanary(cfg, projectRoot)
+		path, token, cleanup, err := createFilesystemCanary(cfg, projectRoot)
 		if err != nil {
 			return nil, nil, err
 		}
 		env[verifyCanaryPathEnv] = path
+		env[verifyCanaryTokenEnv] = token
 		return env, cleanup, nil
+	case "network":
+		target, err := selectOffAllowlistNetworkTarget(cfg)
+		if err != nil {
+			return nil, nil, err
+		}
+		env[verifyNetworkURLEnv] = target
+		return env, nil, nil
 	case "secret":
 		env[verifySecretName] = randomHex(16)
+		env[verifySecretControlName] = randomHex(16)
 		cfg.Secrets.Block = appendUnique(cfg.Secrets.Block, verifySecretName)
 		return env, nil, nil
 	default:
 		return env, nil, nil
 	}
+}
+
+func runProbePositiveControl(ctx context.Context, fence string, extraEnv map[string]string) error {
+	exe, err := os.Executable()
+	if err != nil {
+		return fmt.Errorf("%s positive control setup failed: %w", fence, err)
+	}
+	childCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
+	defer cancel()
+	cmd := exec.CommandContext(childCtx, exe, "__probe", fence)
+	cmd.Env = envWithOverrides(os.Environ(), extraEnv)
+	var stdout, stderr bytes.Buffer
+	cmd.Stdout = &stdout
+	cmd.Stderr = &stderr
+	runErr := cmd.Run()
+	var result probeResult
+	if decodeErr := json.Unmarshal(bytes.TrimSpace(stdout.Bytes()), &result); decodeErr != nil {
+		if runErr != nil {
+			return fmt.Errorf("%s positive control failed: %v: %s", fence, runErr, strings.TrimSpace(stderr.String()))
+		}
+		return fmt.Errorf("%s positive control produced invalid output: %w", fence, decodeErr)
+	}
+	if !result.Attempted {
+		return fmt.Errorf("%s positive control was inconclusive: %s", fence, result.Detail)
+	}
+	if result.Blocked {
+		return fmt.Errorf("%s positive control was blocked before the fence: %s", fence, result.Detail)
+	}
+	return nil
 }
 
 func verifyCheckFromProbe(fence string, result probeResult, err error) verifyCheck {
@@ -249,10 +315,7 @@ func runProbeUnderWrap(ctx context.Context, cfg *config.Config, configPath, fenc
 	defer cancel()
 	cmd := exec.CommandContext(childCtx, exe, "wrap", "--", exe, "__probe", fence)
 	cmd.Dir = tmp
-	cmd.Env = os.Environ()
-	for key, value := range extraEnv {
-		cmd.Env = append(removeEnvVars(cmd.Env, key), key+"="+value)
-	}
+	cmd.Env = envWithOverrides(os.Environ(), extraEnv)
 	var stdout, stderr bytes.Buffer
 	cmd.Stdout = &stdout
 	cmd.Stderr = &stderr
@@ -268,6 +331,14 @@ func runProbeUnderWrap(ctx context.Context, cfg *config.Config, configPath, fenc
 		return result, nil
 	}
 	return result, err
+}
+
+func envWithOverrides(base []string, overrides map[string]string) []string {
+	out := append([]string(nil), base...)
+	for key, value := range overrides {
+		out = append(removeEnvVars(out, key), key+"="+value)
+	}
+	return out
 }
 
 func absolutizeConfigPaths(cfg *config.Config, projectRoot string) {
@@ -301,19 +372,19 @@ func writeConfigTOML(path string, cfg *config.Config) error {
 	return os.WriteFile(path, buf.Bytes(), 0o644)
 }
 
-func createFilesystemCanary(cfg *config.Config, projectRoot string) (string, func(), error) {
+func createFilesystemCanary(cfg *config.Config, projectRoot string) (string, string, func(), error) {
 	allowed := filesystemAllowedRoots(cfg, projectRoot)
-	if path, cleanup, ok := createCanaryOutside(allowed); ok {
-		return path, cleanup, nil
+	if path, token, cleanup, ok := createCanaryOutside(allowed); ok {
+		return path, token, cleanup, nil
 	}
 	rootOnly := filesystemRootOnly(cfg, projectRoot)
-	if path, cleanup, ok := createCanaryOutside(rootOnly); ok {
-		return path, cleanup, nil
+	if path, token, cleanup, ok := createCanaryOutside(rootOnly); ok {
+		return path, token, cleanup, nil
 	}
-	return "", nil, fmt.Errorf("could not create filesystem canary outside configured root")
+	return "", "", nil, fmt.Errorf("could not create filesystem canary outside configured root")
 }
 
-func createCanaryOutside(roots []string) (string, func(), bool) {
+func createCanaryOutside(roots []string) (string, string, func(), bool) {
 	for _, base := range []string{"/var/tmp", "/dev/shm", os.TempDir()} {
 		if base == "" || pathWithinAny(base, roots) {
 			continue
@@ -323,13 +394,59 @@ func createCanaryOutside(roots []string) (string, func(), bool) {
 			continue
 		}
 		path := filepath.Join(dir, "canary.txt")
-		if err := os.WriteFile(path, []byte("nocklock verify canary\n"), 0o600); err != nil {
+		token := randomHex(16)
+		if err := os.WriteFile(path, []byte(token+"\n"), 0o600); err != nil {
 			os.RemoveAll(dir)
 			continue
 		}
-		return path, func() { os.RemoveAll(dir) }, true
+		if data, err := os.ReadFile(path); err != nil || strings.TrimSpace(string(data)) != token {
+			os.RemoveAll(dir)
+			continue
+		}
+		return path, token, func() { os.RemoveAll(dir) }, true
 	}
-	return "", nil, false
+	return "", "", nil, false
+}
+
+func selectOffAllowlistNetworkTarget(cfg *config.Config) (string, error) {
+	for _, target := range []string{
+		"http://verify.nocklock.invalid",
+		"http://nocklock-verify.invalid",
+		"http://nocklock-verify-canary.test",
+	} {
+		u, err := url.Parse(target)
+		if err != nil {
+			continue
+		}
+		if !networkHostAllowed(u.Host, cfg.Network.Allow) {
+			return target, nil
+		}
+	}
+	return "", fmt.Errorf("could not select an off-allowlist network canary target")
+}
+
+func networkHostAllowed(hostname string, allowlist []string) bool {
+	host := hostname
+	if h, _, err := net.SplitHostPort(hostname); err == nil {
+		host = h
+	}
+	host = strings.ToLower(host)
+	if net.ParseIP(host) != nil {
+		return false
+	}
+	for _, entry := range allowlist {
+		entry = strings.ToLower(entry)
+		if strings.HasPrefix(entry, "*.") {
+			if strings.HasSuffix(host, entry[1:]) {
+				return true
+			}
+			continue
+		}
+		if host == entry || strings.HasSuffix(host, "."+entry) {
+			return true
+		}
+	}
+	return false
 }
 
 func filesystemAllowedRoots(cfg *config.Config, projectRoot string) []string {
@@ -386,6 +503,10 @@ func finishVerifyReport(checks []verifyCheck) verifyReport {
 		}
 	}
 	return verifyReport{Checks: checks, Summary: summary}
+}
+
+func verifyReportSucceeded(report verifyReport) bool {
+	return report.Summary.Failed == 0 && report.Summary.Passed > 0
 }
 
 func renderVerifyJSON(w io.Writer, report verifyReport) error {
