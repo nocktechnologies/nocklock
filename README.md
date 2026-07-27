@@ -137,6 +137,8 @@ Candidate runtimes intentionally not preset here:
 | `nocklock wrap --profile list` | List embedded runtime presets |
 | `nocklock wrap --dry-run` | Validate config without starting fences or a command |
 | `nocklock validate [config-path]` | Validate a config file and print the effective policy |
+| `nocklock doctor` | Check whether each fence can be enforced on this host |
+| `nocklock verify` | Run the adversarial fence self-test (proof-of-block) |
 | `nocklock status` | Show fence state and event log summary |
 | `nocklock log` | View fence event history |
 | `nocklock log --blocked` | Show only blocked events |
