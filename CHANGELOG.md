@@ -9,6 +9,18 @@ All notable changes to NockLock will be documented in this file.
 - `nocklock verify`: adversarial fence self-test that runs benign proof-of-block
   probes under the live wrap fence path.
 
+### Changed
+
+- CI now runs `go build`, `go vet`, a `gofmt` cleanliness check, and the full
+  `go test ./...` suite on every push and pull request (`.github/workflows/test.yml`,
+  GitHub-hosted `ubuntu-latest`). Until now no workflow ran the Go test suite, so
+  the unit tests that guard the fence layers had never gated a merge.
+
+### Fixed
+
+- Documented the previously-undocumented `nocklock doctor` and `nocklock verify`
+  commands in the README command table.
+
 ## [0.4.0] - 2026-07-09
 
 Users on v0.3.0 should upgrade: this release closes ten bypass paths across
