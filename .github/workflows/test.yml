@@ -39,3 +39,29 @@ jobs:
 
       - name: test
         run: go test ./... -count=1
+
+  fuzz-smoke:
+    name: fuzz smoke (fence decision surface)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      # Bounded continuous fuzzing of the security-critical decision surface.
+      # -fuzz runs one target per package, so each is invoked separately with a
+      # short budget; the seed corpus also runs as regression cases in the `test`
+      # job above (go test without -fuzz). Raise -fuzztime for deeper hunts.
+      - name: fuzz config load (fail-closed parse)
+        run: go test ./internal/config/ -run='^$' -fuzz=FuzzConfigLoad -fuzztime=25s
+
+      - name: fuzz fs fence path decision (symlink / fail-open)
+        run: go test ./internal/fence/fs/ -run='^$' -fuzz=FuzzFsFencePathDecision -fuzztime=25s
+
+      - name: fuzz landlock ruleset containment (grant/deny)
+        run: go test ./internal/fence/fs/landlock/ -run='^$' -fuzz=FuzzRulesFromConfigContainment -fuzztime=25s
