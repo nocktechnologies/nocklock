@@ -21,6 +21,29 @@ All notable changes to NockLock will be documented in this file.
 - Documented the previously-undocumented `nocklock doctor` and `nocklock verify`
   commands in the README command table.
 
+### Testing
+
+- **Fuzz coverage over the fence decision surface** — the project's first fuzz
+  targets, seeded from the v0.4.0 known-bypass regressions, hunt the next bypass
+  class continuously in CI (bounded `-fuzztime`, one target per package). The
+  seed corpus also runs as normal regression cases under `go test` (no `-fuzz`):
+  - `FuzzConfigLoad` (`internal/config`) fuzzes `Load` and `LoadOverlay` with
+    arbitrary bytes. Asserts untrusted-config parsing never panics, a rejected
+    config is returned nil (never a partially-populated, possibly permissive
+    one), and — differentially against a restrictive profile base — that an
+    overlay can only tighten the fence, never widen it (no boolean widener flips
+    on, no allowlist grows, no inverted allowlist collapses to its permissive
+    empty sentinel, the audit-log path stays immutable).
+  - `FuzzFsFencePathDecision` (`internal/fence/fs`) fuzzes `resolvePath`,
+    `canonicalizeForProfile`, `GenerateProfile`, and `ProcessConfig`. Generalises
+    the fail-open symlink regression (`sbpl_test.go`): every emitted rule path,
+    made differential against `filepath.EvalSymlinks`, must be symlink-free, so a
+    rule can never carry an unresolved symlink that silently never matches.
+  - `FuzzRulesFromConfigContainment` (`internal/fence/fs/landlock`) fuzzes
+    `RulesFromConfig` with adversarial root-child names. Asserts every emitted
+    grant stays inside the resolved root (N8537) and no configured deny overlaps
+    a granted tree (N8441) — the allow-only grant/deny decision fails closed.
+
 ## [0.4.0] - 2026-07-09
 
 Users on v0.3.0 should upgrade: this release closes ten bypass paths across
