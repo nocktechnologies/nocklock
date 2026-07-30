@@ -195,7 +195,14 @@ boundary. We do not claim a selective bypass-resistant allowlist we don't have.
     - **allowed HTTP(S) over TCP** to an allowlisted host → POSITIVE success
       (connection completes through the proxy); to a non-allowlisted host → 403/deny.
     - **DNS** for an allowed name → resolves via the stub; for a non-allowed name → fails closed.
-    - **direct-IP TCP, UDP/QUIC (UDP/443), SCTP, raw IP** → explicit DENY (dropped).
+      **Direct external-resolver bypass** (instrumented UDP *and* TCP queries aimed at an
+      off-namespace resolver) → assert no packet reaches the external endpoint and that every
+      answer originates only from the in-namespace stub (stub answers alone are not sufficient
+      proof; the bypass path must be exercised and shown to fail closed).
+    - **direct-IP TCP** (no SNI) → redirected to the transparent proxy and fails closed by being
+      **unable to complete / rejected for missing SNI** — assert the connection cannot establish,
+      not a packet-level drop (TCP is intercepted, not dropped).
+    - **UDP/QUIC (UDP/443), SCTP, raw IP** → explicit DENY (**packet dropped**).
     - **QUIC→TCP fallback** (curl/Node/Python) → still reaches an allowlisted host (Q7 exit criterion).
     - **proxy death mid-session** → child egress fails closed end-to-end (watchdog kills the child).
   Its result decides whether B is unprivileged-clean or needs a privileged helper.
