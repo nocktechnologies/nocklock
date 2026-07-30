@@ -145,12 +145,21 @@ boundary. We do not claim a selective bypass-resistant allowlist we don't have.
    (Debian VPS, macOS-is-out-of-scope, CI runners). If unprivileged netns is
    unavailable, B needs a privileged helper (`CAP_NET_ADMIN`) or a setuid path —
    a materially bigger ask that changes the recommendation's cost.
-2. **Transparent intercept:** `nftables tproxy` vs `REDIRECT` + `SO_ORIGINAL_DST`.
-   `tproxy` preserves the original TCP destination cleanly and is the modern
-   choice; confirm on the target kernels.
-3. **DNS:** in-namespace stub resolver answering only for allowed names, vs
-   forcing DNS through the proxy. Resolve the fail-closed behavior for a lookup
-   of a non-allowed name.
+2. **Transparent intercept — DECIDED: `nftables tproxy`.** `tproxy` and
+   `REDIRECT`+`SO_ORIGINAL_DST` are NOT interchangeable, so Phase 1 locks to one:
+   `tproxy` (with `fwmark` + an `ip rule`/`ip route` local-delivery pair). It
+   preserves the *original* destination to a non-local target without rewriting
+   the packet — `REDIRECT` DNATs to the local proxy and recovers the intended dst
+   only via `SO_ORIGINAL_DST`, which is loopback-scoped and loses IPv6/edge cases.
+   `REDIRECT` is rejected for Phase 1 (revisit only if a target kernel lacks
+   `tproxy`). Phase 0 confirms `tproxy` on the target kernels; the intercept
+   contract (fwmark value, rule/route, proxy `IP_TRANSPARENT` socket) is fixed
+   before Phase 1.
+3. **DNS — explicit path:** the ONLY UDP the base policy permits is DNS (dport 53,
+   UDP *and* TCP) redirected to the in-namespace stub resolver, which answers
+   only for allowed names and fails closed (NXDOMAIN/refused) for the rest; all
+   other outbound UDP is dropped. External resolvers are unreachable — the child
+   cannot DNS-exfil past the stub.
 4. **Hostname vs IP allowlist under intercept:** SNI + Host parsing (proxy
    already does this for `CONNECT`); raw-IP / no-SNI connects fail closed.
 5. **Layering:** keep env-`HTTP_PROXY` as convenience; netns as the enforcement
@@ -167,9 +176,12 @@ boundary. We do not claim a selective bypass-resistant allowlist we don't have.
    transports and IPv4+IPv6. v1 working scope = HTTP(S)-over-TCP (SNI/Host-gated)
    + DNS stub; **UDP/QUIC/SCTP are denied** (fail-closed; QUIC clients fall back
    to gated HTTP/2-over-TCP). A QUIC-aware gating proxy is a future extension, not
-   a v1 gap. The only remaining sub-question: confirm the QUIC→TCP fallback holds
-   for the target agent runtimes (curl/node/python HTTP stacks) so deny-QUIC does
-   not silently break a legitimate client.
+   a v1 gap. **Phase 0 EXIT CRITERION (not just a sub-question):** deny-QUIC is
+   only safe if legitimate clients actually fall back — so Phase 0 must *verify*
+   the QUIC→TCP fallback for the real agent runtimes (curl, Node, Python HTTP
+   stacks) reaches an allowlisted host after UDP/443 is dropped. If any runtime
+   hard-fails instead of falling back, deny-QUIC is revisited before Phase 1 (the
+   redirect-or-deny matrix must not pass while a legitimate client cannot connect).
 
 ## Phasing
 
@@ -177,11 +189,16 @@ boundary. We do not claim a selective bypass-resistant allowlist we don't have.
   that attempts userns+netns+`nftables` on each real target and reports. It also
   exercises two acceptance tests: (a) Q6 — after the helper configures the
   namespace and drops net-admin from all sets, confirm the child cannot flush
-  `nftables`/routes/interfaces; (b) a **protocol-matrix egress test** — attempt
-  bypass over direct IPv4/IPv6 TCP, UDP/QUIC, SCTP, raw IP, and DNS, and assert
-  each flow is either redirected to a tested proxy path or denied, including the
-  proxy-death/fail-closed case. Its result decides whether B is unprivileged-clean
-  or needs a privileged helper.
+  `nftables`/routes/interfaces; (b) a **protocol-matrix egress test with
+  protocol-specific outcomes** (a blanket "redirected or denied" would let a
+  deny-all build pass, so each row asserts its *specific* outcome):
+    - **allowed HTTP(S) over TCP** to an allowlisted host → POSITIVE success
+      (connection completes through the proxy); to a non-allowlisted host → 403/deny.
+    - **DNS** for an allowed name → resolves via the stub; for a non-allowed name → fails closed.
+    - **direct-IP TCP, UDP/QUIC (UDP/443), SCTP, raw IP** → explicit DENY (dropped).
+    - **QUIC→TCP fallback** (curl/Node/Python) → still reaches an allowlisted host (Q7 exit criterion).
+    - **proxy death mid-session** → child egress fails closed end-to-end (watchdog kills the child).
+  Its result decides whether B is unprivileged-clean or needs a privileged helper.
 - **Phase 1:** privileged-helper namespace setup with the child's net-admin
   dropped from every set; default-drop `nftables` base over IPv4+IPv6; HTTP(S)
   TCP redirected to the transparent proxy (SNI/Host allowlist, fail-closed on
