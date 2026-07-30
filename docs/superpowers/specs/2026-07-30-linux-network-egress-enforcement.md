@@ -1,0 +1,149 @@
+# Linux Network Egress Enforcement — Design
+
+**Date:** 2026-07-30
+**Status:** Proposed (Mira, product lead) — problem confirmed, mechanism recommended, Phase 0 gated on a feasibility probe
+**Author:** Mira Ashworth
+**Tracks:** Making NockLock's headline domain-allowlist feature both *working* and
+*bypass-resistant* on Linux. Mirrors the Landlock and seccomp decisions: a
+userspace boundary fails open against a determined child; the kernel-enforced
+backend is the real fence.
+
+---
+
+## The problem (confirmed, not hypothetical)
+
+NockLock advertises feature #3 as *"routes network traffic through a local proxy
+that enforces a domain allowlist."* On Linux, in the hardened default posture,
+**that allowlist does not work** — and the two ways it can behave are both wrong
+for the stated goal:
+
+1. **Syscall fence ON (the default).** `buildSyscallPolicy`
+   (`internal/cli/syscall_wire.go:40`) forces the child to **unix-only sockets**
+   whenever the network fence is active (`allow_all = false`). The proxy that
+   enforces `network.allow` listens on **TCP** `127.0.0.1:<port>`
+   (`internal/fence/network/proxy.go`, `net.Listen("tcp", …)`), which the child
+   can no longer reach. The posture collapses to **no IP network at all**: the
+   agent reaches *none* of the allowed domains, not a selective subset. This is
+   the documented "fail-closed no-network posture" (README §Fences) and is
+   asserted by `syscall_wire_test.go` — it is intended, but it means the curated
+   allowlist is inert. (`nocklock doctor` now surfaces this footgun — PR #67.)
+
+2. **Syscall fence OFF.** The child keeps `AF_INET` sockets and the proxy
+   allowlist functions — but it is now a **userspace boundary**: a child that
+   ignores `HTTP_PROXY` and dials an IP directly (raw socket, a non-proxy-aware
+   binary, prompt-injected exfil code) bypasses it entirely. The README says as
+   much: *"disable [syscall] only if you accept the proxy as a userspace
+   boundary."*
+
+**There is no third option today** — no posture that gives a *working, selective*
+allowlist that a hostile child cannot bypass. That is the gap this spec closes.
+
+### Why the obvious fix doesn't exist yet
+
+seccomp-BPF can filter `socket(family)` but **cannot** filter
+`connect(fd, sockaddr, …)`: classic seccomp-BPF cannot dereference the pointer
+argument, so it cannot inspect the destination address. The choice on `AF_INET`
+is therefore all-or-nothing — allow every IP or none. You cannot say "AF_INET,
+but only to the proxy." That single kernel constraint is the whole reason the
+allowlist and bypass-resistance are currently mutually exclusive.
+
+---
+
+## Candidate mechanisms (evaluated against the hostile-child threat model)
+
+NockLock's threat model is a **compromised or prompt-injected agent** — the child
+is adversarial, may be multithreaded, and may deliberately race the fence. Any
+mechanism that only stops an *honest* child is not a fence.
+
+### A. `SECCOMP_USER_NOTIF` connect-filter — REJECTED
+
+Install `SECCOMP_RET_USER_NOTIF` on `connect()`/`sendto()`; a supervisor reads
+the child's `sockaddr` and allows only permitted destinations.
+
+**Fatal flaw: TOCTOU.** The `sockaddr` is a pointer into the child's memory. A
+hostile multithreaded child can pass an allowed address, wait for the supervisor
+to read+approve it, then rewrite the memory before the kernel copies it in — the
+kernel's own seccomp-user-notif documentation warns explicitly against using it
+for security decisions on pointer arguments for exactly this reason. Since our
+child *is* the adversary, A is unsound. (This is the elegant-looking answer; it
+is the wrong one, and worth recording so we don't reach for it again.)
+
+### B. Network namespace + transparent redirect — RECOMMENDED
+
+Run the child in a new **network namespace**; use `nftables` `tproxy` (or
+`REDIRECT` + `SO_ORIGINAL_DST`) to force **all** outbound TCP to the proxy's
+listener, which recovers the original destination and applies the allowlist by
+**SNI** (HTTPS `ClientHello`) and **Host header** (HTTP) — parsing the proxy
+already does for the explicit-`CONNECT` path. DNS is forced through an in-namespace
+stub that only answers for allowed domains (or through the proxy).
+
+- **Bypass-resistant:** enforcement is in the kernel's packet path, not in any
+  env var or library the child could ignore. Raw-socket direct-IP dials are
+  redirected too; a connect with no SNI/Host fails closed (matches the existing
+  "raw IP blocked" rule).
+- **Composes with NockLock's philosophy:** kernel-enforced, not advisory —
+  Landlock for files, seccomp for syscalls, **netns for network**.
+- **Cost:** namespace + `nftables` setup, transparent-intercept handling in the
+  proxy, and a DNS story. More moving parts, but the *correct* architecture.
+
+### C. Proxy on a Unix socket + `LD_PRELOAD` `connect()` shim — REJECTED
+
+Keep unix-only sockets; the proxy listens on a Unix socket; the existing
+`LD_PRELOAD` interposer rewrites `AF_INET` connects to it.
+
+**Flaw:** `LD_PRELOAD` is bypassable by static binaries and any child that clears
+`LD_PRELOAD` — the README already disclaims it for the filesystem fence for this
+exact reason. It cannot be the *enforcement* layer for a hostile child, only a
+convenience/logging layer. Same verdict the fs fence already reached (Landlock
+over LD_PRELOAD).
+
+---
+
+## Recommendation
+
+**Adopt B (network namespace + transparent redirect).** It is the only candidate
+that is bypass-resistant against a hostile child (A is TOCTOU-unsound; C is
+`LD_PRELOAD`-bypassable), and it is the direct analogue of the kernel-enforced
+choice we already made for the filesystem and syscall fences. Keep the existing
+env-`HTTP_PROXY` path as a convenience/compatibility layer *on top of* the netns
+floor — never as the enforcement boundary.
+
+Until B ships, the honest posture is the current one, now made legible by the
+`doctor` warning (PR #67): hardened = no-network; working-allowlist = userspace
+boundary. We do not claim a selective bypass-resistant allowlist we don't have.
+
+## Open questions (gated before any build)
+
+1. **Unprivileged userns+netns feasibility — the make-or-break probe.** On the
+   dev VPS, `unprivileged_userns_clone=1` and `max_user_namespaces=56182`, yet
+   `unshare --user --net --map-root-user` **failed** (`uid_map` write: operation
+   not permitted). So unprivileged netns creation is **not guaranteed** on target
+   hosts. Phase 0 is a standalone probe across the fleet's real kernels/policies
+   (Debian VPS, macOS-is-out-of-scope, CI runners). If unprivileged netns is
+   unavailable, B needs a privileged helper (`CAP_NET_ADMIN`) or a setuid path —
+   a materially bigger ask that changes the recommendation's cost.
+2. **Transparent intercept:** `nftables tproxy` vs `REDIRECT` + `SO_ORIGINAL_DST`.
+   `tproxy` preserves the original TCP destination cleanly and is the modern
+   choice; confirm on the target kernels.
+3. **DNS:** in-namespace stub resolver answering only for allowed names, vs
+   forcing DNS through the proxy. Resolve the fail-closed behavior for a lookup
+   of a non-allowed name.
+4. **Hostname vs IP allowlist under intercept:** SNI + Host parsing (proxy
+   already does this for `CONNECT`); raw-IP / no-SNI connects fail closed.
+5. **Layering:** keep env-`HTTP_PROXY` as convenience; netns as the enforcement
+   floor. Confirm the watchdog/fail-closed semantics compose (proxy death still
+   kills the child).
+
+## Phasing
+
+- **Phase 0 (next, cheap):** fleet feasibility probe for Q1 — a one-file program
+  that attempts userns+netns+`nftables` on each real target and reports. Its
+  result decides whether B is unprivileged-clean or needs a privileged helper.
+- **Phase 1:** namespace + `tproxy` egress redirect to the transparent proxy,
+  IP/SNI allowlist, fail-closed on no-SNI; DNS stub.
+- **Phase 2:** collapse the env-proxy path to a convenience layer over the netns
+  floor; update the README threat model to claim the working+bypass-resistant
+  allowlist we will then actually have.
+
+Phase 0 is a self-contained probe, not a feature build; it is the right next
+NockLock increment on this track once the `doctor`-surface PR (#67) lands.
