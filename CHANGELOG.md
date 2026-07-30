@@ -8,6 +8,15 @@ All notable changes to NockLock will be documented in this file.
 
 - `nocklock verify`: adversarial fence self-test that runs benign proof-of-block
   probes under the live wrap fence path.
+- `nocklock doctor` now warns when a curated network allowlist is inert. On Linux,
+  when the network fence is active (`allow_all = false`) and the syscall fence is
+  on, the child is restricted to unix-domain sockets, so the TCP proxy that
+  enforces `network.allow` is unreachable and the posture collapses to no IP
+  network — the allowlist reaches *none* of the configured domains, not a subset.
+  This is the intended hardened no-network posture, but it silently defeats a user
+  who curated `network.allow` expecting selective access, so doctor surfaces it
+  with the fix (set `[syscall] enforcement = "off"` for a working, userspace
+  boundary, or accept no-network by design).
 
 ### Changed
 

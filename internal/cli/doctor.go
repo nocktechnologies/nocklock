@@ -147,7 +147,7 @@ func runDoctor(caps doctorCapabilities) doctorReport {
 	checks = append(checks, syscallDoctorCheck(cfg, caps))
 	checks = append(checks, networkDoctorCheck(cfg, caps))
 	checks = append(checks, secretDoctorCheck(cfg))
-	checks = append(checks, sanityDoctorChecks(cfg)...)
+	checks = append(checks, sanityDoctorChecks(cfg, caps)...)
 
 	activity := doctorActivityCheck(cfg, configPath, caps.now())
 	checks = append(checks, doctorCheck{
@@ -278,7 +278,7 @@ func secretDoctorCheck(cfg *config.Config) doctorCheck {
 	return doctorOKCheck("Fences", "secrets", "enforceable", fmt.Sprintf("Secret fence enforceable with %d blocked pattern(s).", len(cfg.Secrets.Block)))
 }
 
-func sanityDoctorChecks(cfg *config.Config) []doctorCheck {
+func sanityDoctorChecks(cfg *config.Config, caps doctorCapabilities) []doctorCheck {
 	var checks []doctorCheck
 	if cfg.Network.AllowAll {
 		checks = append(checks, doctorCheck{
@@ -288,6 +288,31 @@ func sanityDoctorChecks(cfg *config.Config) []doctorCheck {
 			Status:   "warning",
 			Message:  "Network fence is OFF — the agent can reach any host. Set network.allow and drop allow_all to fence it.",
 			Fix:      "set network.allow and allow_all = false",
+		})
+	}
+
+	// Inert-allowlist footgun: on Linux, when the network fence is active
+	// (allow_all = false) AND the syscall fence is on, buildSyscallPolicy forces
+	// the socket-family allowlist to unix-only (syscall_wire.go). The proxy that
+	// enforces network.allow listens on TCP 127.0.0.1, which the child can no
+	// longer reach — so the posture collapses to no-IP-network and the curated
+	// domain allowlist is inert (the agent reaches NONE of the allowed domains,
+	// not a selective subset). This is the intended hardened no-network posture,
+	// but a user who spent effort curating network.allow will not expect it, so
+	// surface it rather than let the allowlist silently do nothing.
+	if caps.goos == "linux" &&
+		!cfg.Network.AllowAll &&
+		len(cfg.Network.Allow) > 0 &&
+		syscallEnforcementMode(cfg.Syscall.Enforcement) != syscallfence.ModeOff {
+		checks = append(checks, doctorCheck{
+			Group:    "Sanity",
+			Name:     "network-allowlist-inert-under-syscall-fence",
+			Severity: doctorWarning,
+			Status:   "warning",
+			Message: fmt.Sprintf(
+				"Network allowlist is inert on Linux: the syscall fence restricts the child to unix-domain sockets while the network fence is active, so the agent gets no IP network at all — your %d allowed domain(s) are not selectively reachable. This is the hardened no-network posture.",
+				len(cfg.Network.Allow)),
+			Fix: "for a working (but userspace-bypassable) domain allowlist set [syscall] enforcement = \"off\"; otherwise the posture is no-network by design and network.allow is documentation-only",
 		})
 	}
 	if len(cfg.Secrets.Block) == 0 {

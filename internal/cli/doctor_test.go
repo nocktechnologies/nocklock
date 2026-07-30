@@ -77,6 +77,76 @@ func TestDoctorNetworkAllowAllWarnsButDoesNotFail(t *testing.T) {
 	}
 }
 
+func TestDoctorNetworkAllowlistInertUnderSyscallFenceWarns(t *testing.T) {
+	// Default config on Linux: syscall fence "required" + network fenced with a
+	// curated allowlist. The syscall fence forces unix-only sockets, so the TCP
+	// proxy that enforces the allowlist is unreachable and the allowlist is
+	// inert. Doctor must surface that footgun (as a warning, not a failure).
+	dir := t.TempDir()
+	writeTestConfig(t, dir, doctorTestTOML(false))
+	withWorkingDir(t, dir)
+
+	restore := stubDoctorCapabilities(doctorCapabilities{
+		goos:           "linux",
+		fsBackend:      func() error { return nil },
+		landlockABI:    func() (int, error) { return 3, nil },
+		syscallBackend: func() bool { return true },
+		networkBackend: func() error { return nil },
+		sandboxExec:    func() error { return nil },
+		now:            func() time.Time { return time.Date(2026, 6, 18, 12, 0, 0, 0, time.UTC) },
+	})
+	defer restore()
+
+	var out bytes.Buffer
+	cmd := &cobra.Command{}
+	cmd.SetOut(&out)
+	cmd.SetErr(&bytes.Buffer{})
+
+	if err := doctorCmd.RunE(cmd, nil); err != nil {
+		t.Fatalf("inert-allowlist warning should not fail doctor: %v", err)
+	}
+	if !strings.Contains(out.String(), "Network allowlist is inert on Linux") {
+		t.Fatalf("expected inert-allowlist warning, got:\n%s", out.String())
+	}
+	if !strings.Contains(out.String(), "VERDICT: PROTECTED") {
+		t.Fatalf("warning alone should keep protected verdict, got:\n%s", out.String())
+	}
+}
+
+func TestDoctorNetworkAllowlistNotInertWhenSyscallOff(t *testing.T) {
+	// With the syscall fence off, the child keeps IP sockets and the proxy-based
+	// allowlist actually functions — no inert-allowlist warning should appear.
+	dir := t.TempDir()
+	// Target the [syscall] enforcement line specifically (line-start), not the
+	// filesystem's linux_enforcement line which also contains the substring.
+	toml := strings.Replace(doctorTestTOML(false), "\nenforcement = \"required\"", "\nenforcement = \"off\"", 1)
+	writeTestConfig(t, dir, toml)
+	withWorkingDir(t, dir)
+
+	restore := stubDoctorCapabilities(doctorCapabilities{
+		goos:           "linux",
+		fsBackend:      func() error { return nil },
+		landlockABI:    func() (int, error) { return 3, nil },
+		syscallBackend: func() bool { return true },
+		networkBackend: func() error { return nil },
+		sandboxExec:    func() error { return nil },
+		now:            func() time.Time { return time.Date(2026, 6, 18, 12, 0, 0, 0, time.UTC) },
+	})
+	defer restore()
+
+	var out bytes.Buffer
+	cmd := &cobra.Command{}
+	cmd.SetOut(&out)
+	cmd.SetErr(&bytes.Buffer{})
+
+	if err := doctorCmd.RunE(cmd, nil); err != nil {
+		t.Fatalf("doctor should pass with syscall off: %v", err)
+	}
+	if strings.Contains(out.String(), "Network allowlist is inert") {
+		t.Fatalf("did not expect inert-allowlist warning with syscall off, got:\n%s", out.String())
+	}
+}
+
 func TestDoctorConfiguredFenceUnavailableFails(t *testing.T) {
 	dir := t.TempDir()
 	writeTestConfig(t, dir, doctorTestTOML(false))
