@@ -71,7 +71,7 @@ is the wrong one, and worth recording so we don't reach for it again.)
 ### B. Network namespace + transparent redirect — RECOMMENDED
 
 Run the child in a new **network namespace**; use `nftables` `tproxy` (or
-`REDIRECT` + `SO_ORIGINAL_DST`) to force **all** outbound TCP to the proxy's
+`REDIRECT` + `SO_ORIGINAL_DST`) to force outbound traffic to the proxy's
 listener, which recovers the original destination and applies the allowlist by
 **SNI** (HTTPS `ClientHello`) and **Host header** (HTTP) — parsing the proxy
 already does for the explicit-`CONNECT` path. DNS is forced through an in-namespace
@@ -81,10 +81,26 @@ stub that only answers for allowed domains (or through the proxy).
   env var or library the child could ignore. Raw-socket direct-IP dials are
   redirected too; a connect with no SNI/Host fails closed (matches the existing
   "raw IP blocked" rule).
+- **The child must NOT own the namespace's net-admin.** A netns created by the
+  *child* via `unshare --map-root-user` grants it `CAP_NET_ADMIN` *inside that
+  namespace* — enough to flush the very `nftables`/routes the fence depends on,
+  which is total bypass under our hostile-child model. So a **privileged parent
+  helper** creates and configures the namespace, then the child is `exec`'d into
+  it with net-admin capabilities **dropped** (bounding-set cleared, so it cannot
+  be regained). Phase 0 must prove, with the child's *real* post-drop
+  credentials, that it cannot mutate `nftables`, routes, or interfaces after
+  setup — a passing "child can't rewrite the fence" test is the acceptance bar.
+- **All-protocol, not TCP-only.** The `nftables` base policy is **default-drop
+  egress**, and the redirect covers every transport a child could exfil over —
+  UDP (incl. **QUIC / HTTP-3 on 443**) and SCTP redirected or dropped, both
+  **IPv4 and IPv6**. Anything the proxy cannot hostname-gate (raw IP, no-SNI,
+  non-HTTP protocols) is denied, not silently passed. The guarantee is a
+  fail-closed egress allowlist, not "TCP allowlisted, everything else open."
 - **Composes with NockLock's philosophy:** kernel-enforced, not advisory —
   Landlock for files, seccomp for syscalls, **netns for network**.
-- **Cost:** namespace + `nftables` setup, transparent-intercept handling in the
-  proxy, and a DNS story. More moving parts, but the *correct* architecture.
+- **Cost:** privileged-helper namespace setup + capability drop, all-protocol
+  `nftables` policy, transparent-intercept handling in the proxy, and a DNS
+  story. More moving parts, but the *correct* architecture.
 
 ### C. Proxy on a Unix socket + `LD_PRELOAD` `connect()` shim — REJECTED
 
@@ -133,14 +149,30 @@ boundary. We do not claim a selective bypass-resistant allowlist we don't have.
 5. **Layering:** keep env-`HTTP_PROXY` as convenience; netns as the enforcement
    floor. Confirm the watchdog/fail-closed semantics compose (proxy death still
    kills the child).
+6. **Capability model (load-bearing for bypass-resistance):** the child must not
+   hold `CAP_NET_ADMIN` in its own netns, or it rewrites the fence. Decide the
+   ownership split — privileged parent helper creates+configures the namespace,
+   child `exec`'d in with net-admin dropped from the bounding set. What is the
+   minimum privilege the helper needs, and does that survive the Q1 unprivileged
+   answer? Phase 0's acceptance test: the post-drop child cannot mutate
+   `nftables`/routes/interfaces.
+7. **All-protocol egress:** the base policy is default-drop; UDP/QUIC (HTTP-3 on
+   443), SCTP, and both IPv4+IPv6 are redirected or denied, never left open.
+   Decide QUIC handling — redirect to a QUIC-aware proxy path vs deny-and-force-
+   TCP-fallback — and whether the stated guarantee is full-egress or scoped to
+   HTTP(S)+DNS with everything else denied.
 
 ## Phasing
 
 - **Phase 0 (next, cheap):** fleet feasibility probe for Q1 — a one-file program
-  that attempts userns+netns+`nftables` on each real target and reports. Its
-  result decides whether B is unprivileged-clean or needs a privileged helper.
-- **Phase 1:** namespace + `tproxy` egress redirect to the transparent proxy,
-  IP/SNI allowlist, fail-closed on no-SNI; DNS stub.
+  that attempts userns+netns+`nftables` on each real target and reports. It also
+  exercises the Q6 acceptance test: after the helper configures the namespace and
+  drops net-admin, confirm the child cannot flush `nftables`/routes. Its result
+  decides whether B is unprivileged-clean or needs a privileged helper.
+- **Phase 1:** privileged-helper namespace setup with the child's net-admin
+  dropped; default-drop `nftables` base with all-protocol (UDP/QUIC, SCTP,
+  IPv4+IPv6) `tproxy` egress redirect to the transparent proxy; IP/SNI allowlist,
+  fail-closed on no-SNI; DNS stub.
 - **Phase 2:** collapse the env-proxy path to a convenience layer over the netns
   floor; update the README threat model to claim the working+bypass-resistant
   allowlist we will then actually have.
