@@ -1,7 +1,7 @@
 # Linux Network Egress Enforcement — Design
 
 **Date:** 2026-07-30
-**Status:** Proposed (Mira, product lead) — problem confirmed, mechanism recommended. **Phase 0 STARTED (2026-08-03): VPS target probed with receipts — unprivileged-clean netns RULED OUT (AppArmor gate), privileged-helper track CONFIRMED viable. See "Phase 0 results — VPS probe" below.**
+**Status:** Proposed (Mira, product lead) — problem confirmed, mechanism recommended. **Phase 0 STARTED (2026-08-03): VPS target probed with receipts — unprivileged-clean netns RULED OUT on the tested target (AppArmor indicated; toggle test pending), privileged-helper setup path CONFIRMED viable. See "Phase 0 results — VPS probe (2026-08-03)" below.**
 **Author:** Mira Ashworth
 **Tracks:** Making NockLock's headline domain-allowlist feature both *working* and
 *bypass-resistant* on Linux. Mirrors the Landlock and seccomp decisions: a
@@ -149,8 +149,9 @@ boundary. We do not claim a selective bypass-resistant allowlist we don't have.
    userns+netns is BLOCKED (symptom reproduced). The classic `unprivileged_userns_clone`
    sysctl is `=1`/permissive, so it is reproducibly NOT the blocker; the indicated cause
    is the Ubuntu 24.04+/26.04 AppArmor gate `apparmor_restrict_unprivileged_userns=1`
-   (documented signature, not toggle-isolated). The privileged-helper fallback is CONFIRMED
-   viable on the VPS. So on Ubuntu 26.04, B is the privileged-helper track, not
+   (documented signature, not toggle-isolated). The privileged-helper **setup path** is
+   CONFIRMED viable on the VPS — see "Phase 0 results" below for the receipts and what's
+   still open. So on Ubuntu 26.04, B is the privileged-helper track, not
    unprivileged-clean. CI-runner kernels still to probe.**
 2. **Transparent intercept — DECIDED: `nftables tproxy`.** `tproxy` and
    `REDIRECT`+`SO_ORIGINAL_DST` are NOT interchangeable, so Phase 1 locks to one:
@@ -203,7 +204,7 @@ kernel 7.0.0-27-generic). Findings are receipted (probe run inline, not modelled
 | `unshare --user --net --map-root-user` | FAIL (same) | **unpriv netns via userns is out (Q1 = no)** |
 | `nft` present | v1.1.6 + `nft_tproxy` module available | tproxy mechanism (Q2) is on this kernel |
 | `sudo -n` (NOPASSWD) | yes | privileged-helper path is reachable |
-| `sudo` netns add + `modprobe nft_tproxy` + in-netns default-drop `nft` | all OK | **privileged-helper track works end-to-end** |
+| `sudo ip netns add` + `modprobe nft_tproxy` + in-netns default-drop `nft` (via `ip netns exec`) | all OK | **privileged setup path is viable** — end-to-end `tproxy` traffic interception and the Q6 post-drop mutation test remain open |
 | Q6 pre-check: `capsh --drop=cap_net_admin` then `nft add table` | rejected (preliminary) | bypass-resistance premise holds; needs the real acceptance test |
 
 **Cause — symptom reproduced, mechanism indicated (not toggle-proven):** what is
@@ -217,13 +218,28 @@ mutate a live security control on the VPS). Treat it as the indicated cause pend
 toggle test in the committed probe, not a proven one.
 
 **Decision this unblocks:** on Ubuntu 26.04, **B ships on the privileged-helper
-track** — a `CAP_NET_ADMIN` parent helper (the VPS's `sudo`/NOPASSWD, or a setuid
-`nocklock-egress-helper`) creates + configures the netns and `nftables` policy,
+track** — a parent helper creates + configures the netns and `nftables` policy,
 then `exec`s the child with net-admin dropped from every set. Unprivileged-clean B
 (no helper) is not available here. Two live options for the helper, to settle in
-Phase 1: (a) setuid/sudo helper (confirmed working now), or (b) ship a NockLock
-AppArmor profile that grants `userns` so the unprivileged path reopens — heavier,
-distro-specific, deferred. (a) is the Phase 1 default.
+Phase 1: (a) setuid/sudo helper (setup path confirmed working now — see the
+capability contract below for how to scope its privileges), or (b) ship a
+NockLock AppArmor profile that grants `userns` so the unprivileged path
+reopens — heavier, distro-specific, deferred. (a) is the Phase 1 default.
+
+**Helper capability contract:** the VPS probe used the `sudo`/NOPASSWD path,
+which runs the helper as root. A setuid-root `nocklock-egress-helper` gets
+that same full set, so it is no more minimal than `sudo` — the least-privilege
+refinement of option (a) is a non-setuid binary with **file capabilities**
+(`setcap`) granting only what it needs: `CAP_SYS_ADMIN` to create the network
+namespace (`unshare`/`clone` with `CLONE_NEWNET` requires this, not
+`CAP_NET_ADMIN`), `CAP_NET_ADMIN` to configure the namespace's interfaces,
+routes, and `nftables` rules, and `CAP_SYS_MODULE` only if the helper itself
+loads `nft_tproxy` via `modprobe` (module loading is a global kernel action,
+not namespace-scoped, so this capability cannot be dropped into the
+namespace). `CAP_SYS_ADMIN` is near-root-equivalent on its own, so `setcap`
+narrows *identity* (no full root shell) more than it narrows *capability*.
+Real least privilege still means dropping all three once setup completes,
+same as the child's post-drop requirement above.
 
 **Still open (not yet probed):** CI-runner kernels (GitHub-hosted + the self-hosted
 Mac is out of scope for Linux netns), and the full Q6 acceptance test (post-drop
@@ -262,8 +278,10 @@ committed Phase 0 probe program, which is the next build increment (see Phasing)
   allowlist we will then actually have.
 
 Phase 0 is a self-contained probe, not a feature build. #67 (`doctor` surface) has
-landed and the **VPS leg of Phase 0 is done** (2026-08-03, above): unprivileged-clean
-is out on Ubuntu 26.04, privileged-helper confirmed. The next increment on this track
-is committing that probe as a repeatable `nocklock` tool — codifying the VPS runs plus
+landed and the **VPS feasibility leg of Phase 0 is done** (2026-08-03, above):
+unprivileged-clean is out on Ubuntu 26.04, the privileged-helper setup path is
+confirmed viable (see "Phase 0 results" above for what's still open). The next
+increment on this track is committing that probe as a repeatable `nocklock`
+tool — codifying the VPS runs plus
 the Q6 acceptance test and the protocol-matrix egress test — so the remaining fleet
 kernels (CI runners) are probed the same way before Phase 1 locks the helper design.
