@@ -1,7 +1,7 @@
 # Linux Network Egress Enforcement — Design
 
 **Date:** 2026-07-30
-**Status:** Proposed (Mira, product lead) — problem confirmed, mechanism recommended, Phase 0 gated on a feasibility probe
+**Status:** Proposed (Mira, product lead) — problem confirmed, mechanism recommended. **Phase 0 STARTED (2026-08-03): VPS target probed with receipts — unprivileged-clean netns RULED OUT (AppArmor gate), privileged-helper track CONFIRMED viable. See "Phase 0 results — VPS probe" below.**
 **Author:** Mira Ashworth
 **Tracks:** Making NockLock's headline domain-allowlist feature both *working* and
 *bypass-resistant* on Linux. Mirrors the Landlock and seccomp decisions: a
@@ -145,6 +145,13 @@ boundary. We do not claim a selective bypass-resistant allowlist we don't have.
    (Debian VPS, macOS-is-out-of-scope, CI runners). If unprivileged netns is
    unavailable, B needs a privileged helper (`CAP_NET_ADMIN`) or a setuid path —
    a materially bigger ask that changes the recommendation's cost.
+   **VPS VERDICT (2026-08-03, receipted — see "Phase 0 results" below): unprivileged
+   userns+netns is BLOCKED (symptom reproduced). The classic `unprivileged_userns_clone`
+   sysctl is `=1`/permissive, so it is reproducibly NOT the blocker; the indicated cause
+   is the Ubuntu 24.04+/26.04 AppArmor gate `apparmor_restrict_unprivileged_userns=1`
+   (documented signature, not toggle-isolated). The privileged-helper fallback is CONFIRMED
+   viable on the VPS. So on Ubuntu 26.04, B is the privileged-helper track, not
+   unprivileged-clean. CI-runner kernels still to probe.**
 2. **Transparent intercept — DECIDED: `nftables tproxy`.** `tproxy` and
    `REDIRECT`+`SO_ORIGINAL_DST` are NOT interchangeable, so Phase 1 locks to one:
    `tproxy` (with `fwmark` + an `ip rule`/`ip route` local-delivery pair). It
@@ -183,6 +190,46 @@ boundary. We do not claim a selective bypass-resistant allowlist we don't have.
    hard-fails instead of falling back, deny-QUIC is revisited before Phase 1 (the
    redirect-or-deny matrix must not pass while a legitimate client cannot connect).
 
+## Phase 0 results — VPS probe (2026-08-03)
+
+First real target probed (the Debian-family dev VPS is now **Ubuntu 26.04 LTS**,
+kernel 7.0.0-27-generic). Findings are receipted (probe run inline, not modelled):
+
+| Probe | Result | Meaning |
+|---|---|---|
+| `unprivileged_userns_clone` | `1` (permissive) | classic sysctl is NOT the blocker |
+| `apparmor_restrict_unprivileged_userns` | `1` | restrictive — matches the Ubuntu 24.04+ gate signature (indicated cause) |
+| `unshare --user --map-root-user` | FAIL — `uid_map: Operation not permitted` | unpriv userns denied |
+| `unshare --user --net --map-root-user` | FAIL (same) | **unpriv netns via userns is out (Q1 = no)** |
+| `nft` present | v1.1.6 + `nft_tproxy` module available | tproxy mechanism (Q2) is on this kernel |
+| `sudo -n` (NOPASSWD) | yes | privileged-helper path is reachable |
+| `sudo` netns add + `modprobe nft_tproxy` + in-netns default-drop `nft` | all OK | **privileged-helper track works end-to-end** |
+| Q6 pre-check: `capsh --drop=cap_net_admin` then `nft add table` | rejected (preliminary) | bypass-resistance premise holds; needs the real acceptance test |
+
+**Cause — symptom reproduced, mechanism indicated (not toggle-proven):** what is
+directly observed is that the `uid_map` write is denied *even though*
+`unprivileged_userns_clone=1` — so the classic sysctl is **reproducibly ruled out**
+as the blocker. The positive attribution to AppArmor's
+`apparmor_restrict_unprivileged_userns=1` (standard on Ubuntu 24.04+; an unconfined
+process has no profile granting the `userns` capability) is the documented cause of
+this exact signature, but I did **not** isolate it by toggling the sysctl (that would
+mutate a live security control on the VPS). Treat it as the indicated cause pending a
+toggle test in the committed probe, not a proven one.
+
+**Decision this unblocks:** on Ubuntu 26.04, **B ships on the privileged-helper
+track** — a `CAP_NET_ADMIN` parent helper (the VPS's `sudo`/NOPASSWD, or a setuid
+`nocklock-egress-helper`) creates + configures the netns and `nftables` policy,
+then `exec`s the child with net-admin dropped from every set. Unprivileged-clean B
+(no helper) is not available here. Two live options for the helper, to settle in
+Phase 1: (a) setuid/sudo helper (confirmed working now), or (b) ship a NockLock
+AppArmor profile that grants `userns` so the unprivileged path reopens — heavier,
+distro-specific, deferred. (a) is the Phase 1 default.
+
+**Still open (not yet probed):** CI-runner kernels (GitHub-hosted + the self-hosted
+Mac is out of scope for Linux netns), and the full Q6 acceptance test (post-drop
+child provably cannot flush `nftables`/routes/interfaces) — both belong in the
+committed Phase 0 probe program, which is the next build increment (see Phasing).
+
 ## Phasing
 
 - **Phase 0 (next, cheap):** fleet feasibility probe for Q1 — a one-file program
@@ -214,5 +261,9 @@ boundary. We do not claim a selective bypass-resistant allowlist we don't have.
   floor; update the README threat model to claim the working+bypass-resistant
   allowlist we will then actually have.
 
-Phase 0 is a self-contained probe, not a feature build; it is the right next
-NockLock increment on this track once the `doctor`-surface PR (#67) lands.
+Phase 0 is a self-contained probe, not a feature build. #67 (`doctor` surface) has
+landed and the **VPS leg of Phase 0 is done** (2026-08-03, above): unprivileged-clean
+is out on Ubuntu 26.04, privileged-helper confirmed. The next increment on this track
+is committing that probe as a repeatable `nocklock` tool — codifying the VPS runs plus
+the Q6 acceptance test and the protocol-matrix egress test — so the remaining fleet
+kernels (CI runners) are probed the same way before Phase 1 locks the helper design.
