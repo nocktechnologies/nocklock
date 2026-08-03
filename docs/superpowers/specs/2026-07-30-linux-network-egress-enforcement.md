@@ -142,7 +142,7 @@ boundary. We do not claim a selective bypass-resistant allowlist we don't have.
    `unshare --user --net --map-root-user` **failed** (`uid_map` write: operation
    not permitted). So unprivileged netns creation is **not guaranteed** on target
    hosts. Phase 0 is a standalone probe across the fleet's real kernels/policies
-   (Debian VPS, macOS-is-out-of-scope, CI runners). If unprivileged netns is
+   (Ubuntu VPS, macOS-is-out-of-scope, CI runners). If unprivileged netns is
    unavailable, B needs a privileged helper (`CAP_NET_ADMIN`) or a setuid path —
    a materially bigger ask that changes the recommendation's cost.
    **VPS VERDICT (2026-08-03, receipted — see "Phase 0 results" below): unprivileged
