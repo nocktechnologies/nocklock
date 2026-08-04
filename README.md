@@ -139,6 +139,7 @@ Candidate runtimes intentionally not preset here:
 | `nocklock validate [config-path]` | Validate a config file and print the effective policy |
 | `nocklock doctor` | Check whether each fence can be enforced on this host |
 | `nocklock verify` | Run the adversarial fence self-test (proof-of-block) |
+| `nocklock egress-probe` | Probe Linux network-egress enforcement feasibility on this host (structured `--json`) |
 | `nocklock status` | Show fence state and event log summary |
 | `nocklock log` | View fence event history |
 | `nocklock log --blocked` | Show only blocked events |
