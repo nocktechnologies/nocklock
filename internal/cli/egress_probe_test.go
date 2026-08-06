@@ -33,13 +33,13 @@ func baseCaps() egressProbeCapabilities {
 		arch:                 "amd64",
 		kernelRelease:        func() string { return "7.0.0-27-generic" },
 		distro:               func() string { return "Ubuntu 26.04 LTS" },
-		unprivUsernsClone:    func() (string, bool) { return "1", true },
-		apparmorRestrict:     func() (string, bool) { return "1", true },
+		unprivUsernsClone:    func() (string, string) { return "1", sysctlFound },
+		apparmorRestrict:     func() (string, string) { return "1", sysctlFound },
 		tryUsernsMapped:      func() nsAttemptResult { return blocked("uid_map: Operation not permitted") },
 		tryUserNetnsMapped:   func() nsAttemptResult { return blocked("uid_map: Operation not permitted") },
 		tryUserNetnsUnmapped: func() nsAttemptResult { return permitted("succeeded") },
 		nftVersion:           func() (string, bool) { return "nftables v1.1.6", true },
-		nftTproxyModule:      func() bool { return true },
+		nftTproxyModule:      func() string { return tproxyAvailable },
 		sudoNonInteractive:   func() bool { return true },
 	}
 }
@@ -109,7 +109,7 @@ func TestEgressProbeUnprivilegedCleanWhenMappedNetnsPermitted(t *testing.T) {
 	caps := baseCaps()
 	caps.tryUsernsMapped = func() nsAttemptResult { return permitted("succeeded") }
 	caps.tryUserNetnsMapped = func() nsAttemptResult { return permitted("succeeded") }
-	caps.apparmorRestrict = func() (string, bool) { return "0", true }
+	caps.apparmorRestrict = func() (string, string) { return "0", sysctlFound }
 
 	report := runEgressProbe(caps)
 
@@ -196,7 +196,7 @@ func TestEgressProbePrivilegedHelperWhenUnshareMissingButSudoPresent(t *testing.
 // the classic knob is not ruled out.
 func TestEgressProbeNoCauseWhenClassicSysctlRestrictive(t *testing.T) {
 	caps := baseCaps()
-	caps.unprivUsernsClone = func() (string, bool) { return "0", true }
+	caps.unprivUsernsClone = func() (string, string) { return "0", sysctlFound }
 
 	report := runEgressProbe(caps)
 	if hasCheck(report, "unprivileged-userns-cause") {
@@ -223,7 +223,7 @@ func TestEgressProbeAppArmorGateWhenUnmappedAlsoBlocked(t *testing.T) {
 func TestEgressProbeUnattributedCauseWhenAppArmorNotSet(t *testing.T) {
 	caps := baseCaps()
 	caps.tryUserNetnsUnmapped = func() nsAttemptResult { return blocked("Operation not permitted") }
-	caps.apparmorRestrict = func() (string, bool) { return "", false }
+	caps.apparmorRestrict = func() (string, string) { return "", sysctlAbsent }
 
 	report := runEgressProbe(caps)
 	cause := findCheck(t, report, "unprivileged-userns-cause")
@@ -236,8 +236,8 @@ func TestEgressProbeUnattributedCauseWhenAppArmorNotSet(t *testing.T) {
 // still completes with a verdict.
 func TestEgressProbeHandlesAbsentSysctls(t *testing.T) {
 	caps := baseCaps()
-	caps.unprivUsernsClone = func() (string, bool) { return "", false }
-	caps.apparmorRestrict = func() (string, bool) { return "", false }
+	caps.unprivUsernsClone = func() (string, string) { return "", sysctlAbsent }
+	caps.apparmorRestrict = func() (string, string) { return "", sysctlAbsent }
 
 	report := runEgressProbe(caps)
 	sc := findCheck(t, report, "unprivileged-userns-clone")
@@ -310,6 +310,189 @@ func TestEgressProbeHumanRender(t *testing.T) {
 		if !strings.Contains(s, want) {
 			t.Fatalf("human output missing %q:\n%s", want, s)
 		}
+	}
+}
+
+// uid-map-write-gate cause: AppArmor attribution must be conditional on the
+// sysctl actually being =1, not asserted unconditionally in this branch.
+func TestEgressProbeUidMapGateAttributesAppArmorWhenSysctlSet(t *testing.T) {
+	report := runEgressProbe(baseCaps()) // baseCaps has apparmorRestrict = "1", found
+	cause := findCheck(t, report, "unprivileged-userns-cause")
+	if cause.Status != "uid-map-write-gate" {
+		t.Fatalf("cause = %+v, want status uid-map-write-gate", cause)
+	}
+	if !strings.Contains(cause.Detail, "apparmor_restrict_unprivileged_userns=1 is the indicated cause") {
+		t.Fatalf("expected AppArmor attribution in detail, got: %s", cause.Detail)
+	}
+}
+
+func TestEgressProbeUidMapGateUnattributedWhenAppArmorNotSet(t *testing.T) {
+	caps := baseCaps()
+	caps.apparmorRestrict = func() (string, string) { return "", sysctlAbsent }
+
+	report := runEgressProbe(caps)
+	cause := findCheck(t, report, "unprivileged-userns-cause")
+	if cause.Status != "uid-map-write-gate" {
+		t.Fatalf("cause = %+v, want status uid-map-write-gate (still observed narrower blocker)", cause)
+	}
+	if strings.Contains(cause.Detail, "is the indicated cause of the map-write restriction") {
+		t.Fatalf("must not assert AppArmor as the cause when the sysctl isn't =1/present, got: %s", cause.Detail)
+	}
+	if !strings.Contains(cause.Detail, "unattributed on this host") {
+		t.Fatalf("expected unattributed wording, got: %s", cause.Detail)
+	}
+}
+
+// A host with a working namespace path but no nft_tproxy is not deployable —
+// the track must not silently ignore the tproxy result.
+func TestEgressProbeBlockedWhenTproxyAbsentDespitePermittedNetns(t *testing.T) {
+	caps := baseCaps()
+	caps.tryUsernsMapped = func() nsAttemptResult { return permitted("succeeded") }
+	caps.tryUserNetnsMapped = func() nsAttemptResult { return permitted("succeeded") }
+	caps.nftTproxyModule = func() string { return tproxyUnavailable }
+
+	report := runEgressProbe(caps)
+	if report.Track != trackBlocked {
+		t.Fatalf("track = %q, want %q (permitted netns without nft_tproxy is not deployable)", report.Track, trackBlocked)
+	}
+}
+
+// A host with sudo+nft reachable but no nft_tproxy is not a privileged-helper
+// track either — the mechanism itself is unavailable.
+func TestEgressProbeBlockedWhenTproxyAbsentDespiteSudoAndNft(t *testing.T) {
+	caps := baseCaps()
+	caps.nftTproxyModule = func() string { return tproxyUnavailable }
+
+	report := runEgressProbe(caps)
+	if report.Track != trackBlocked {
+		t.Fatalf("track = %q, want %q (sudo+nft without nft_tproxy is not a helper track)", report.Track, trackBlocked)
+	}
+}
+
+// A host where NEITHER path is reachable (unshare missing, no sudo/nft) but
+// nft_tproxy is CONFIRMED unavailable must still report blocked/observed —
+// nft_tproxy absence alone rules out both deployable tracks regardless of
+// path status, so it must not be silently dropped once neither path-specific
+// arm applies (that would fall through to "undetermined" with misleading
+// "install unshare" remediation text that can't actually fix a missing
+// nft_tproxy).
+func TestEgressProbeBlockedWhenTproxyConfirmedUnavailableAndNoPathReachable(t *testing.T) {
+	caps := baseCaps()
+	caps.tryUsernsMapped = toolMissing
+	caps.tryUserNetnsMapped = toolMissing
+	caps.tryUserNetnsUnmapped = toolMissing
+	caps.sudoNonInteractive = func() bool { return false }
+	caps.nftTproxyModule = func() string { return tproxyUnavailable }
+
+	report := runEgressProbe(caps)
+	if report.Track != trackBlocked {
+		t.Fatalf("track = %q, want %q (confirmed-unavailable nft_tproxy must block regardless of path status)", report.Track, trackBlocked)
+	}
+	track := findCheck(t, report, "track")
+	if track.Evidence != evidenceObserved {
+		t.Fatalf("track check = %+v, want evidence=%s", track, evidenceObserved)
+	}
+}
+
+// An "unproven" nft_tproxy result (no evidence either way) must not be treated
+// as available for track purposes — that would overclaim deployability — but
+// must also not be collapsed into a confirmed "blocked": unproven evidence
+// downgrades the verdict to undetermined, not to an observed block.
+func TestEgressProbeTproxyUnprovenIsNotAvailableForTrack(t *testing.T) {
+	caps := baseCaps()
+	caps.nftTproxyModule = func() string { return tproxyUnproven }
+
+	report := runEgressProbe(caps)
+	if report.Track != trackUndetermined {
+		t.Fatalf("track = %q, want %q (unproven tproxy must not count as available, and must not overclaim a confirmed block)", report.Track, trackUndetermined)
+	}
+	track := findCheck(t, report, "track")
+	if track.Evidence != evidenceNotProbed {
+		t.Fatalf("track check = %+v, want evidence=%s (must not assert observed from unproven input)", track, evidenceNotProbed)
+	}
+	tproxy := findCheck(t, report, "nftables-tproxy-module")
+	if tproxy.Status != "unproven" || tproxy.Evidence != evidenceNotProbed {
+		t.Fatalf("tproxy check = %+v, want status=unproven evidence=%s", tproxy, evidenceNotProbed)
+	}
+}
+
+// A permitted netns with an unproven (not confirmed-unavailable) nft_tproxy
+// also downgrades to undetermined, not a confirmed block.
+func TestEgressProbeUndeterminedWhenTproxyUnprovenDespitePermittedNetns(t *testing.T) {
+	caps := baseCaps()
+	caps.tryUsernsMapped = func() nsAttemptResult { return permitted("succeeded") }
+	caps.tryUserNetnsMapped = func() nsAttemptResult { return permitted("succeeded") }
+	caps.nftTproxyModule = func() string { return tproxyUnproven }
+
+	report := runEgressProbe(caps)
+	if report.Track != trackUndetermined {
+		t.Fatalf("track = %q, want %q", report.Track, trackUndetermined)
+	}
+}
+
+// A sysctl that exists but can't be read (permission/I-O error) must be
+// reported not-probed, not the observed "absent" a genuinely missing knob
+// gets — the two are different evidence claims.
+func TestEgressProbeSysctlUnreadableIsNotProbedNotAbsent(t *testing.T) {
+	caps := baseCaps()
+	caps.unprivUsernsClone = func() (string, string) { return "", sysctlUnreadable }
+
+	report := runEgressProbe(caps)
+	sc := findCheck(t, report, "unprivileged-userns-clone")
+	if sc.Status != "not-probed" || sc.Evidence != evidenceNotProbed {
+		t.Fatalf("unreadable sysctl check = %+v, want status=not-probed evidence=%s", sc, evidenceNotProbed)
+	}
+	// An unreadable classic sysctl must not be treated as the "found" state the
+	// AppArmor cause attribution requires (it can't rule the classic knob out).
+	if hasCheck(report, "unprivileged-userns-cause") {
+		t.Fatal("must not attribute a cause when the classic sysctl could not be read")
+	}
+}
+
+// scanKernelConfigForSymbol is the pure parser behind the CONFIG_NFT_TPROXY
+// built-in detection; exercise it directly with synthetic config text.
+func TestScanKernelConfigForSymbol(t *testing.T) {
+	cases := []struct {
+		name        string
+		config      string
+		wantEnabled bool
+		wantFound   bool
+	}{
+		{"builtin", "CONFIG_FOO=y\nCONFIG_NFT_TPROXY=y\nCONFIG_BAR=m\n", true, true},
+		{"module", "CONFIG_NFT_TPROXY=m\n", true, true},
+		{"explicitly-not-set", "# CONFIG_NFT_TPROXY is not set\n", false, true},
+		{"absent-from-config", "CONFIG_FOO=y\nCONFIG_BAR=m\n", false, false},
+		{"empty", "", false, false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			enabled, found := scanKernelConfigForSymbol(strings.NewReader(tc.config), "CONFIG_NFT_TPROXY")
+			if enabled != tc.wantEnabled || found != tc.wantFound {
+				t.Fatalf("scanKernelConfigForSymbol() = (%v, %v), want (%v, %v)", enabled, found, tc.wantEnabled, tc.wantFound)
+			}
+		})
+	}
+}
+
+// looksLikeUnshareUsageError is the pure classifier behind the
+// tool-incompatibility-vs-kernel-denial distinction in attemptUnshare.
+func TestLooksLikeUnshareUsageError(t *testing.T) {
+	cases := []struct {
+		name   string
+		output string
+		want   bool
+	}{
+		{"unrecognized-option", "unshare: unrecognized option '--map-root-user'\nTry 'unshare --help' for more information.", true},
+		{"invalid-option", "unshare: invalid option -- 'z'", true},
+		{"kernel-denial", "unshare: unshare failed: Operation not permitted", false},
+		{"uid-map-denial", "uid_map: Invalid argument", false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := looksLikeUnshareUsageError(tc.output); got != tc.want {
+				t.Fatalf("looksLikeUnshareUsageError(%q) = %v, want %v", tc.output, got, tc.want)
+			}
+		})
 	}
 }
 

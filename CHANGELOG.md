@@ -16,7 +16,8 @@ All notable changes to NockLock will be documented in this file.
   and detects `nft`/`nft_tproxy` and passwordless-sudo reachability, then emits
   a versioned JSON result (`--json`) with an `observed`/`indicated`/`not-probed`
   evidence field per check and a track verdict (`unprivileged-clean` /
-  `privileged-helper` / `blocked` / `undetermined`). The root-only acceptance
+  `privileged-helper` / `blocked` / `undetermined` on Linux, `unsupported` on
+  non-Linux hosts). The root-only acceptance
   tests (Q6 post-drop mutation, protocol-matrix egress, AppArmor toggle) are
   enumerated follow-ups and are intentionally out of this increment. On the
   dev VPS the probe reproduces the receipted root-mapping denial and
