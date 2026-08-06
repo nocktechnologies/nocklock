@@ -41,8 +41,8 @@ func defaultEgressProbeCapabilities() egressProbeCapabilities {
 // reported as nsToolMissing (a capability we could not probe), NOT nsBlocked (a
 // capability the kernel denied) — the two must not be conflated. A tool that
 // runs but rejects a flag it doesn't know (e.g. util-linux too old for
-// --map-root-user) is also nsToolMissing, not nsBlocked: that is a tooling
-// incompatibility, not a kernel capability denial.
+// --map-root-user) is also nsToolMissing. Any other failure without a
+// permission-denial diagnostic is nsUnproven, not nsBlocked.
 func attemptUnshare(args ...string) nsAttemptResult {
 	path, err := exec.LookPath("unshare")
 	if err != nil {
@@ -70,7 +70,7 @@ func attemptUnshare(args ...string) nsAttemptResult {
 		// The command couldn't even run (e.g. exec form error) — not a kernel
 		// capability decision.
 		return nsAttemptResult{
-			Status: nsToolMissing,
+			Status: nsUnproven,
 			Detail: fmt.Sprintf("`%s` could not be run: %s", cmdline, detail),
 		}
 	}
@@ -80,7 +80,11 @@ func attemptUnshare(args ...string) nsAttemptResult {
 			Detail: fmt.Sprintf("`%s` rejected by this unshare build (flag not supported — likely an older util-linux), not a kernel denial: %s", cmdline, detail),
 		}
 	}
-	return nsAttemptResult{Status: nsBlocked, Detail: fmt.Sprintf("`%s` denied: %s", cmdline, detail)}
+	lowerDetail := strings.ToLower(detail)
+	if strings.Contains(lowerDetail, "operation not permitted") || strings.Contains(lowerDetail, "permission denied") {
+		return nsAttemptResult{Status: nsBlocked, Detail: fmt.Sprintf("`%s` denied: %s", cmdline, detail)}
+	}
+	return nsAttemptResult{Status: nsUnproven, Detail: fmt.Sprintf("`%s` failed without a decisive kernel-denial diagnostic: %s", cmdline, detail)}
 }
 
 func readSysctl(path string) (string, string) {
@@ -117,17 +121,16 @@ func linuxDistro() string {
 	return ""
 }
 
-func detectNftVersion() (string, bool) {
+func detectNftVersion() (string, string) {
 	path, err := exec.LookPath("nft")
 	if err != nil {
-		return "", false
+		return "", nftUnavailable
 	}
 	out, err := exec.Command(path, "--version").Output()
 	if err != nil {
-		// Binary is present but the version query failed; still report presence.
-		return "present", true
+		return err.Error(), nftUnproven
 	}
-	return strings.TrimSpace(firstLine(out)), true
+	return strings.TrimSpace(firstLine(out)), nftAvailable
 }
 
 // detectNftTproxyModule reports whether nft_tproxy is available, without

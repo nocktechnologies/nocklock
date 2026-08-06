@@ -38,7 +38,7 @@ func baseCaps() egressProbeCapabilities {
 		tryUsernsMapped:      func() nsAttemptResult { return blocked("uid_map: Operation not permitted") },
 		tryUserNetnsMapped:   func() nsAttemptResult { return blocked("uid_map: Operation not permitted") },
 		tryUserNetnsUnmapped: func() nsAttemptResult { return permitted("succeeded") },
-		nftVersion:           func() (string, bool) { return "nftables v1.1.6", true },
+		nftVersion:           func() (string, string) { return "nftables v1.1.6", nftAvailable },
 		nftTproxyModule:      func() string { return tproxyAvailable },
 		sudoNonInteractive:   func() bool { return true },
 	}
@@ -145,12 +145,53 @@ func TestEgressProbeBlockedWhenNoPrivilegedPath(t *testing.T) {
 // redirect mechanism), not a false privileged-helper claim.
 func TestEgressProbeBlockedWhenNftAbsent(t *testing.T) {
 	caps := baseCaps()
-	caps.nftVersion = func() (string, bool) { return "", false }
+	caps.nftVersion = func() (string, string) { return "", nftUnavailable }
 
 	report := runEgressProbe(caps)
 
 	if report.Track != trackBlocked {
 		t.Fatalf("track = %q, want %q (sudo without nft is not a helper track)", report.Track, trackBlocked)
+	}
+}
+
+// An nft binary that cannot execute is not evidence that a privileged helper
+// can configure nftables. Its verdict must be unproven, not helper-reachable.
+func TestEgressProbeUndeterminedWhenNftIsUnproven(t *testing.T) {
+	caps := baseCaps()
+	caps.nftVersion = func() (string, string) { return "exit status 42", nftUnproven }
+
+	report := runEgressProbe(caps)
+	if report.Track != trackUndetermined {
+		t.Fatalf("track = %q, want %q", report.Track, trackUndetermined)
+	}
+	nft := findCheck(t, report, "nftables-binary")
+	if nft.Status != "unproven" || nft.Evidence != evidenceNotProbed {
+		t.Fatalf("nft check = %+v, want unproven/%s", nft, evidenceNotProbed)
+	}
+}
+
+func TestEgressProbeBlockedWhenOneNftPrerequisiteIsUnavailable(t *testing.T) {
+	for _, tc := range []struct {
+		name         string
+		nftStatus    string
+		tproxyStatus string
+	}{
+		{"nft-unavailable", nftUnavailable, tproxyUnproven},
+		{"tproxy-unavailable", nftUnproven, tproxyUnavailable},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			caps := baseCaps()
+			caps.nftVersion = func() (string, string) { return "", tc.nftStatus }
+			caps.nftTproxyModule = func() string { return tc.tproxyStatus }
+
+			report := runEgressProbe(caps)
+			if report.Track != trackBlocked {
+				t.Fatalf("track = %q, want %q", report.Track, trackBlocked)
+			}
+			if track := findCheck(t, report, "track"); track.Evidence != evidenceObserved {
+				t.Fatalf("track check = %+v, want evidence=%s", track, evidenceObserved)
+			}
+		})
 	}
 }
 
@@ -413,6 +454,23 @@ func TestEgressProbeTproxyUnprovenIsNotAvailableForTrack(t *testing.T) {
 	tproxy := findCheck(t, report, "nftables-tproxy-module")
 	if tproxy.Status != "unproven" || tproxy.Evidence != evidenceNotProbed {
 		t.Fatalf("tproxy check = %+v, want status=unproven evidence=%s", tproxy, evidenceNotProbed)
+	}
+}
+
+// An unexpected detector result has no confirmed availability evidence, so it
+// follows the same unproven path as the check renderer rather than asserting a
+// confirmed block.
+func TestEgressProbeUnexpectedTproxyStatusIsUnproven(t *testing.T) {
+	caps := baseCaps()
+	caps.nftTproxyModule = func() string { return "future-status" }
+
+	report := runEgressProbe(caps)
+	if report.Track != trackUndetermined {
+		t.Fatalf("track = %q, want %q (unexpected tproxy status is unproven)", report.Track, trackUndetermined)
+	}
+	track := findCheck(t, report, "track")
+	if track.Evidence != evidenceNotProbed {
+		t.Fatalf("track check = %+v, want evidence=%s", track, evidenceNotProbed)
 	}
 }
 

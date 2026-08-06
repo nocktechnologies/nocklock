@@ -60,13 +60,15 @@ const (
 	evidenceNotProbed = "not-probed" // requires a mutating/root/tool step not exercised here
 )
 
-// Namespace-attempt outcomes. "unavailable" (the `unshare` tool is missing) is
-// deliberately distinct from "blocked" (the kernel denied the capability): a
-// missing tool is not a denied capability and must not read as a hard block.
+// Namespace-attempt outcomes. "unavailable" (the `unshare` tool is missing) and
+// "unproven" (the probe failed without a decisive denial) are deliberately
+// distinct from "blocked" (the kernel denied the capability): neither missing
+// tooling nor an ambiguous probe failure is a hard block.
 const (
 	nsPermitted   = "permitted"
 	nsBlocked     = "blocked"
 	nsToolMissing = "unavailable"
+	nsUnproven    = "unproven"
 )
 
 // Sysctl read states. A missing knob (the file does not exist on this kernel)
@@ -91,6 +93,12 @@ const (
 	tproxyUnproven    = "unproven"
 )
 
+const (
+	nftAvailable   = "available"
+	nftUnavailable = "unavailable"
+	nftUnproven    = "unproven"
+)
+
 // Track verdicts — which Candidate B path this host supports.
 const (
 	trackUnprivilegedClean = "unprivileged-clean" // unprivileged userns+netns works; no helper needed
@@ -102,7 +110,7 @@ const (
 
 // nsAttemptResult is the outcome of a single `unshare` feasibility attempt.
 type nsAttemptResult struct {
-	Status string // nsPermitted | nsBlocked | nsToolMissing
+	Status string // nsPermitted | nsBlocked | nsToolMissing | nsUnproven
 	Detail string
 }
 
@@ -153,8 +161,8 @@ type egressProbeCapabilities struct {
 	tryUserNetnsUnmapped func() nsAttemptResult // unshare --user --net (no uid_map write)
 
 	// Mechanism + privileged-path detection (non-mutating).
-	nftVersion         func() (version string, ok bool)
-	nftTproxyModule    func() (status string) // tproxyAvailable | tproxyUnavailable | tproxyUnproven
+	nftVersion         func() (version, status string) // nftAvailable | nftUnavailable | nftUnproven
+	nftTproxyModule    func() (status string)          // tproxyAvailable | tproxyUnavailable | tproxyUnproven
 	sudoNonInteractive func() (ok bool)
 }
 
@@ -259,11 +267,8 @@ func runEgressProbe(caps egressProbeCapabilities) egressProbeReport {
 	}
 
 	// --- Mechanism + privileged-path detection -----------------------------
-	nftVer, nftOK := caps.nftVersion()
-	checks = append(checks, presenceCheck(
-		"nftables-binary", "nftables", nftOK,
-		fmt.Sprintf("nft present (%s) — tproxy mechanism candidate", nftVer),
-		"nft binary not found — tproxy redirect mechanism unavailable"))
+	nftVer, nftStatus := caps.nftVersion()
+	checks = append(checks, nftCheck(nftVer, nftStatus))
 
 	tproxyStatus := caps.nftTproxyModule()
 	checks = append(checks, tproxyCheck(tproxyStatus))
@@ -275,7 +280,7 @@ func runEgressProbe(caps egressProbeCapabilities) egressProbeReport {
 		"passwordless sudo unavailable — the sudo-based privileged-helper path is not reachable non-interactively here"))
 
 	// --- Track verdict ------------------------------------------------------
-	track, trackCheck := deriveEgressTrack(netnsMapped, sudoOK, nftOK, tproxyStatus)
+	track, trackCheck := deriveEgressTrack(netnsMapped, sudoOK, nftStatus, tproxyStatus)
 	checks = append(checks, trackCheck)
 
 	report.Track = track
@@ -350,59 +355,52 @@ func trackVerdict(track, evidence, detail string) (string, egressProbeCheck) {
 // reachability (sudo + nft observed) while leaving actual setup viability
 // not-probed — that proof is the integration-tagged follow-up.
 //
-// nft_tproxy is required for BOTH deployable tracks: without it, Candidate
-// B's chosen transparent-redirect mechanism isn't available, regardless of
-// the namespace/privilege path. tproxyStatus is threaded through (not
-// collapsed to a bool) so a merely tproxyUnproven host — no evidence either
-// way, possibly built in — downgrades to trackUndetermined rather than the
-// confirmed-observed trackBlocked a tproxyUnavailable host gets; collapsing
-// the two would assert "observed unavailable" from evidence that only says
-// "not probed".
-func deriveEgressTrack(netnsMapped nsAttemptResult, sudoOK, nftOK bool, tproxyStatus string) (string, egressProbeCheck) {
+// nft and nft_tproxy are required for both deployable tracks: an unproven
+// detector result downgrades the verdict rather than becoming observed absence.
+func deriveEgressTrack(netnsMapped nsAttemptResult, sudoOK bool, nftStatus, tproxyStatus string) (string, egressProbeCheck) {
+	nftOK := nftStatus == nftAvailable
+	nftUnknown := nftStatus != nftAvailable && nftStatus != nftUnavailable
 	tproxyOK := tproxyStatus == tproxyAvailable
-	tproxyUnknown := tproxyStatus == tproxyUnproven
+	tproxyUnknown := tproxyStatus != tproxyAvailable && tproxyStatus != tproxyUnavailable
 
 	switch {
-	case netnsMapped.Status == nsPermitted && tproxyOK:
+	case nftStatus == nftUnavailable || tproxyStatus == tproxyUnavailable:
+		return trackVerdict(trackBlocked, evidenceObserved,
+			"Required nftables support is confirmed unavailable on this kernel, so Candidate B is not deployable on this host regardless of the namespace/privileged-helper path status.")
+	case netnsMapped.Status == nsPermitted && nftOK && tproxyOK:
 		return trackVerdict(trackUnprivilegedClean, evidenceObserved,
-			"Unprivileged userns+netns creation with root-mapping succeeded here and nft_tproxy is available: Candidate B can run unprivileged-clean, no privileged helper required on this host.")
+			"Unprivileged userns+netns creation with root-mapping succeeded here and the required nftables support is available: Candidate B can run unprivileged-clean, no privileged helper required on this host.")
 	case sudoOK && nftOK && tproxyOK:
 		return trackVerdict(trackPrivilegedHelper, evidenceNotProbed,
-			"Unprivileged root-mapped netns is not available, but passwordless sudo, nft, and nft_tproxy are present, so the privileged-helper track is REACHABLE. "+
+			"Passwordless sudo, nft, and nft_tproxy are present, so the privileged-helper track is REACHABLE. "+
 				"Setup viability is NOT confirmed by this probe — it does not create a live namespace or nftables policy; "+
 				"that proof (plus the Q6 post-drop mutation acceptance test) is the integration follow-up.")
-	case netnsMapped.Status == nsPermitted && tproxyUnknown:
+	case netnsMapped.Status == nsPermitted && (nftUnknown || tproxyUnknown):
 		return trackVerdict(trackUndetermined, evidenceNotProbed,
-			"Unprivileged root-mapped netns creation succeeded, but nft_tproxy presence could not be determined on this kernel (see the nftables-tproxy-module check) — Candidate B's deployability is unproven, not confirmed blocked.")
-	case sudoOK && nftOK && tproxyUnknown:
+			"Unprivileged root-mapped netns creation succeeded, but required nftables support could not be determined on this kernel — Candidate B's deployability is unproven, not confirmed blocked.")
+	case sudoOK && (nftUnknown || tproxyUnknown):
 		return trackVerdict(trackUndetermined, evidenceNotProbed,
-			"Passwordless sudo and nft are present, but nft_tproxy presence could not be determined on this kernel (see the nftables-tproxy-module check) — the privileged-helper track's deployability is unproven, not confirmed blocked.")
+			"Passwordless sudo is present, but required nftables support could not be determined on this kernel — the privileged-helper track's deployability is unproven, not confirmed blocked.")
 	case netnsMapped.Status == nsPermitted:
 		return trackVerdict(trackBlocked, evidenceObserved,
-			"Unprivileged root-mapped netns creation succeeded, but nft_tproxy (the transparent-redirect mechanism Candidate B depends on) is confirmed unavailable on this kernel. "+
-				"Candidate B is not deployable without enabling nft_tproxy, even though the namespace path itself works.")
-	case sudoOK && nftOK:
+			"Unprivileged root-mapped netns creation succeeded, but required nftables support is confirmed unavailable on this kernel. "+
+				"Candidate B is not deployable until the missing support is installed or enabled.")
+	case sudoOK:
 		return trackVerdict(trackBlocked, evidenceObserved,
-			"Passwordless sudo and nft are present, but nft_tproxy (the transparent-redirect mechanism Candidate B depends on) is confirmed unavailable on this kernel. "+
-				"The privileged-helper track is not deployable without enabling nft_tproxy.")
-	case !tproxyOK && !tproxyUnknown:
-		// Neither namespace path nor privileged-helper path is reachable
-		// (both prior tproxy-gated arms already claimed every case where one
-		// was), and nft_tproxy is confirmed unavailable here — a universal
-		// blocker regardless of which path is or isn't reachable, so it must
-		// be checked before falling through to the path-specific arms below
-		// (which would otherwise report an unshare-tooling remediation that
-		// cannot actually fix a missing nft_tproxy).
-		return trackVerdict(trackBlocked, evidenceObserved,
-			"nft_tproxy (the transparent-redirect mechanism Candidate B depends on) is confirmed unavailable on this kernel, so Candidate B is not deployable on this host regardless of the namespace/privileged-helper path status.")
+			"Passwordless sudo is present, but required nftables support is confirmed unavailable on this kernel. "+
+				"The privileged-helper track is not deployable until the missing support is installed or enabled.")
 	case netnsMapped.Status == nsBlocked:
 		return trackVerdict(trackBlocked, evidenceObserved,
 			"Unprivileged root-mapped netns is denied and no privileged-helper path was detected (missing passwordless sudo and/or nft). "+
 				"Candidate B is not deployable on this host without further provisioning.")
-	default:
+	case netnsMapped.Status == nsToolMissing:
 		return trackVerdict(trackUndetermined, evidenceNotProbed,
 			"The unprivileged path could not be probed (the unshare tool is unavailable) and no privileged-helper path was detected. "+
 				"Install util-linux (unshare) to determine the unprivileged-clean track on this host.")
+	default:
+		return trackVerdict(trackUndetermined, evidenceNotProbed,
+			"The unprivileged namespace probe failed without a decisive kernel denial and no privileged-helper path was detected. "+
+				"Resolve the probe error before choosing a deployment track.")
 	}
 }
 
@@ -458,9 +456,31 @@ func tproxyCheck(status string) egressProbeCheck {
 	}
 }
 
+func nftCheck(version, status string) egressProbeCheck {
+	switch status {
+	case nftAvailable:
+		return presenceCheck(
+			"nftables-binary", "nftables", true,
+			fmt.Sprintf("nft present (%s) — tproxy mechanism candidate", version),
+			"")
+	case nftUnavailable:
+		return presenceCheck(
+			"nftables-binary", "nftables", false,
+			"", "nft binary not found — tproxy redirect mechanism unavailable")
+	default:
+		return egressProbeCheck{
+			ID:       "nftables-binary",
+			Category: "nftables",
+			Status:   "unproven",
+			Evidence: evidenceNotProbed,
+			Detail:   fmt.Sprintf("nft was found on PATH but could not run --version (%s) — availability is unproven, not confirmed absent.", version),
+		}
+	}
+}
+
 func attemptCheck(id, category, method string, r nsAttemptResult) egressProbeCheck {
 	evidence := evidenceObserved
-	if r.Status == nsToolMissing {
+	if r.Status != nsPermitted && r.Status != nsBlocked {
 		evidence = evidenceNotProbed
 	}
 	return egressProbeCheck{
