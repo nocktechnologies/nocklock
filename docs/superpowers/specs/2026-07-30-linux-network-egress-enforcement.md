@@ -146,7 +146,11 @@ boundary. We do not claim a selective bypass-resistant allowlist we don't have.
    unavailable, B needs a privileged helper (`CAP_NET_ADMIN`) or a setuid path —
    a materially bigger ask that changes the recommendation's cost.
    **VPS VERDICT (2026-08-03, receipted — see "Phase 0 results" below): unprivileged
-   userns+netns is BLOCKED (symptom reproduced). The classic `unprivileged_userns_clone`
+   userns+netns is BLOCKED (symptom reproduced). **[Narrowed 2026-08-06 by the
+   Amendment at the end of "Phase 0 results" below: the repeatable egress-probe (PR #70)
+   shows the gated operation is specifically the `uid_map` root-mapping write, NOT
+   user-namespace or network-namespace *creation* itself. The unprivileged-clean *track*
+   remains out on this VPS; only the mechanism of the block is narrowed.]** The classic `unprivileged_userns_clone`
    sysctl is `=1`/permissive, so it is reproducibly NOT the blocker; the indicated cause
    is the Ubuntu 24.04+/26.04 AppArmor gate `apparmor_restrict_unprivileged_userns=1`
    (documented signature, not toggle-isolated). The privileged-helper **setup path** is
@@ -201,7 +205,7 @@ kernel 7.0.0-27-generic). Findings are receipted (probe run inline, not modelled
 | `unprivileged_userns_clone` | `1` (permissive) | classic sysctl is NOT the blocker |
 | `apparmor_restrict_unprivileged_userns` | `1` | restrictive — matches the Ubuntu 24.04+ gate signature (indicated cause) |
 | `unshare --user --map-root-user` | FAIL — `uid_map: Operation not permitted` | unpriv userns denied |
-| `unshare --user --net --map-root-user` | FAIL (same) | **unpriv netns via userns is out (Q1 = no)** |
+| `unshare --user --net --map-root-user` | FAIL (same) | **unpriv netns via userns is out (Q1 = no)** — *narrowed 2026-08-06: the gated operation is the `uid_map` root-mapping write, not netns creation itself; see Amendment below* |
 | `nft` present | v1.1.6 + `nft_tproxy` module available | tproxy mechanism (Q2) is on this kernel |
 | `sudo -n` (NOPASSWD) | yes | privileged-helper path is reachable |
 | `sudo ip netns add` + `modprobe nft_tproxy` + in-netns default-drop `nft` (via `ip netns exec`) | all OK | **privileged setup path is viable** — end-to-end `tproxy` traffic interception and the Q6 post-drop mutation test remain open |
@@ -245,6 +249,50 @@ same as the child's post-drop requirement above.
 Mac is out of scope for Linux netns), and the full Q6 acceptance test (post-drop
 child provably cannot flush `nftables`/routes/interfaces) — both belong in the
 committed Phase 0 probe program, which is the next build increment (see Phasing).
+
+### Amendment 2026-08-06 — uid-map-write-gate narrows the Phase 0 finding
+
+The repeatable `nocklock egress-probe` (PR #70, in review — not yet on `main`)
+narrows the earlier one-off Phase 0 result. The "unprivileged netns is out"
+statement above — the Q1 VPS VERDICT and the `unshare --user --net --map-root-user`
+table row — was **too broad** as a mechanism claim; it is superseded/narrowed by the
+finding here. The *track* conclusion is unchanged: unprivileged-clean is out on this
+VPS, so B ships on the privileged-helper track.
+
+**Finding — the gate is the `uid_map` root-mapping write, not namespace creation
+(from the repeatable egress-probe, PR #70):** on the dev VPS, a bare unmapped
+`unshare --user --net` (no root-mapping `uid_map` write) **succeeds**; the operation
+actually gated is specifically the `uid_map` **root-mapping write**. So the blocker is
+narrower than "userns/netns creation is denied" — user-namespace and
+network-namespace *creation* itself is not blocked. The cause remains *indicated*, not
+toggle-proven: the documented signature points to
+`apparmor_restrict_unprivileged_userns=1` (standard on Ubuntu 24.04+), but it has not
+been isolated by a toggle test. The probe encodes exactly this as its
+`uid-map-write-gate` cause (evidence qualifier `indicated`).
+
+**Design decision (Q6 minimum-privilege direction) — DECIDED by owner:** Phase 1's
+child does **NOT** need to be root-in-namespace. The privileged helper — holding
+`CAP_SYS_ADMIN` to create the netns and `CAP_NET_ADMIN` to configure it (the split
+already fixed in "Helper capability contract" above) — creates and configures the
+network namespace, then hands a **non-root child with net-admin dropped from every
+set** into it. Because that child never performs the gated `uid_map` root-mapping
+write, the AppArmor restriction on unprivileged uid-map is **not on the child's path**.
+This scopes the helper to setup-only and keeps the child unprivileged. It also means
+`apparmor_restrict_unprivileged_userns` being on does **not** by itself block the
+privileged-helper track — which answers the second half of Q6 ("does the
+minimum-privilege split survive the Q1 unprivileged answer?"): yes for the track's
+*direction*. Q6's acceptance test stays open (see below); only its minimum-privilege
+direction is decided here.
+
+**Still open — restated for this amendment's scope, NOT resolved** (these remain the
+items in "Still open (not yet probed)" above; the amendment decides the Q6 *direction*
+only):
+- **(a) Prove the AppArmor cause** via a toggle test — upgrade *indicated* → *proven*
+  (still pending, per the status line and the Cause block above).
+- **(b) CI-runner kernel coverage for Q1** — run the now-repeatable `egress-probe` on
+  `ubuntu-latest` once PR #70 merges.
+- **(c) The Q6 acceptance test** — that the post-cap-drop child provably cannot mutate
+  `nftables`/routes/interfaces (Q6's acceptance bar stays open).
 
 ## Phasing
 
