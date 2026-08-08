@@ -6,6 +6,23 @@ All notable changes to NockLock will be documented in this file.
 
 ### Added
 
+- `nocklock egress-probe`: a repeatable, structured feasibility probe for the
+  Linux network-egress-enforcement track (Candidate B: netns + transparent
+  redirect). It codifies the Phase 0 VPS probe runs so every fleet kernel — CI
+  runners included — is measured the same way before Phase 1 locks the
+  privileged-helper design. Non-mutating: it attempts unprivileged
+  userns/userns+netns creation via throwaway `unshare` subprocesses (with the
+  receipted flags verbatim), reads the classic and AppArmor userns sysctls,
+  and detects `nft`/`nft_tproxy` and passwordless-sudo reachability, then emits
+  a versioned JSON result (`--json`) with an `observed`/`indicated`/`not-probed`
+  evidence field per check and a track verdict (`unprivileged-clean` /
+  `privileged-helper` / `blocked` / `undetermined` on Linux, `unsupported` on
+  non-Linux hosts). The root-only acceptance
+  tests (Q6 post-drop mutation, protocol-matrix egress, AppArmor toggle) are
+  enumerated follow-ups and are intentionally out of this increment. On the
+  dev VPS the probe reproduces the receipted root-mapping denial and
+  additionally records that bare unmapped userns+netns creation *succeeds* — a
+  narrower blocker than the one-off 2026-08-03 run captured.
 - `nocklock verify`: adversarial fence self-test that runs benign proof-of-block
   probes under the live wrap fence path.
 - `nocklock doctor` now warns when a curated network allowlist is inert. On Linux,
