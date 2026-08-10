@@ -20,7 +20,7 @@ package netns
 //     CAP_NET_ADMIN + CAP_SYS_ADMIN from all five capability sets (effective,
 //     permitted, inheritable, ambient, and bounding) before attempting one
 //     mutation. Each attempt must fail with EPERM.
-//   - Positive control: the privileged parent performs the same three ops in the
+//   - Positive control: the privileged parent performs the same four ops in the
 //     namespace via `ip netns exec` and each must SUCCEED, proving the drop — not
 //     a broken setup — is the cause of the child's denials.
 //
@@ -297,6 +297,9 @@ func setupNetns(t *testing.T) netnsHandle {
 		if strings.Contains(low, "not supported") ||
 			strings.Contains(low, "no such file") ||
 			strings.Contains(low, "protocol not supported") {
+			if strictlyRequired() {
+				t.Fatalf("nftables unsupported in required environment: %v\n%s", err, out)
+			}
 			t.Skipf("nftables unsupported in this environment: %v\n%s", err, out)
 		}
 		t.Fatalf("apply default-drop nftables base: %v\n%s", err, out)
@@ -357,7 +360,7 @@ func TestQ6_CappedChildCannotMutate(t *testing.T) {
 }
 
 // TestQ6_PrivilegedParentCanMutate_Control is the positive control: the SAME
-// three ops, performed by the privileged parent in the SAME kind of namespace,
+// four ops, performed by the privileged parent in the SAME kind of namespace,
 // must all succeed. It proves the child's denials come from the capability drop,
 // not from broken setup.
 func TestQ6_PrivilegedParentCanMutate_Control(t *testing.T) {
@@ -397,10 +400,10 @@ func runChildHelper(t *testing.T, scenario, nsPath string) int {
 	cmd.Env = append(os.Environ(),
 		scenarioEnv+"="+scenario,
 		netnsPathEnv+"="+nsPath,
-		"LC_ALL=C", "LANG=C",
+		"LC_ALL=C", "LANG=C", "LANGUAGE=",
 	)
 	out, err := cmd.CombinedOutput()
-	if len(out) > 0 && testing.Verbose() {
+	if len(out) > 0 {
 		t.Logf("child %q output:\n%s", scenario, strings.TrimSpace(string(out)))
 	}
 	if err == nil {
@@ -417,7 +420,7 @@ func runChildHelper(t *testing.T, scenario, nsPath string) int {
 // returns combined output.
 func run(name string, args ...string) (string, error) {
 	cmd := exec.Command(name, args...)
-	cmd.Env = append(os.Environ(), "LC_ALL=C", "LANG=C")
+	cmd.Env = append(os.Environ(), "LC_ALL=C", "LANG=C", "LANGUAGE=")
 	out, err := cmd.CombinedOutput()
 	return string(out), err
 }
@@ -425,7 +428,7 @@ func run(name string, args ...string) (string, error) {
 // runStdin is run with stdin fed from s.
 func runStdin(s, name string, args ...string) (string, error) {
 	cmd := exec.Command(name, args...)
-	cmd.Env = append(os.Environ(), "LC_ALL=C", "LANG=C")
+	cmd.Env = append(os.Environ(), "LC_ALL=C", "LANG=C", "LANGUAGE=")
 	cmd.Stdin = strings.NewReader(s)
 	out, err := cmd.CombinedOutput()
 	return string(out), err
