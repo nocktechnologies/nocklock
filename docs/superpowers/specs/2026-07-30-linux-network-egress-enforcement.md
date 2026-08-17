@@ -364,4 +364,33 @@ living as a one-off VPS run and a never-executed test:
 Item **(a)** (prove the AppArmor cause by toggling `apparmor_restrict_unprivileged_userns`)
 is unchanged — it mutates a live security control and stays out of CI.
 
-**First-run receipts (folded after the introducing PR's CI is green):** _pending._
+**First-run receipt — (b) Q1 CI-runner coverage (PR #76, egress-probe job, 2026-08-17, receipted):**
+The GitHub-hosted `ubuntu-latest` runner **independently reproduces the dev VPS's
+Q1 finding on a second, unrelated kernel** — the privileged-helper track is not a
+VPS artifact.
+
+| Check | ubuntu-latest (6.17.0-1022-azure, Ubuntu 24.04.4) | dev VPS (Ubuntu 26.04) |
+|---|---|---|
+| `unprivileged_userns_clone` | `1` (permissive — ruled out) | `1` (same) |
+| `apparmor_restrict_unprivileged_userns` | `1` | `1` (same) |
+| `unshare --user --net --map-root-user` | **blocked** | blocked (same) |
+| `unshare --user --net` (unmapped) | **permitted** | permitted (same) |
+| cause | `uid-map-write-gate` (indicated) | uid-map-write-gate (same) |
+| `nft` / `nft_tproxy` | available / available | available / available |
+| `sudo -n` | available | available |
+| **track** | **`privileged-helper`** | `privileged-helper` (same) |
+
+So on both Ubuntu 24.04+ kernels probed, unprivileged-clean B is out for the same
+narrow reason (the `uid_map` root-mapping write is gated, AppArmor-indicated), and
+the privileged-helper track is reachable (sudo + nft + tproxy present). Item (b) is
+**closed** for the GitHub-hosted CI kernel; the AppArmor cause remains *indicated*,
+not toggle-proven (item (a), still out of CI). Per-run JSON receipts (bare +
+provisioned) are attached to each `egress-probe` job as the `egress-probe-results`
+artifact.
+
+**Receipt — (c) Q6 acceptance test:** the `q6-acceptance` job's first run on PR #76
+was interrupted by a GitHub-side `actions/setup-go` download outage (429→503) during
+"Set up job", so the Go toolchain never installed and the test did not execute — an
+infrastructure failure, not a Q6 result. Awaiting a clean re-run to record the
+receipted pass (all four mutation scenarios denied EPERM + privileged-parent control
+succeeds).
