@@ -388,9 +388,27 @@ not toggle-proven (item (a), still out of CI). Per-run JSON receipts (bare +
 provisioned) are attached to each `egress-probe` job as the `egress-probe-results`
 artifact.
 
-**Receipt — (c) Q6 acceptance test:** the `q6-acceptance` job's first run on PR #76
-was interrupted by a GitHub-side `actions/setup-go` download outage (429→503) during
-"Set up job", so the Go toolchain never installed and the test did not execute — an
-infrastructure failure, not a Q6 result. Awaiting a clean re-run to record the
-receipted pass (all four mutation scenarios denied EPERM + privileged-parent control
-succeeds).
+**Receipt — (c) Q6 acceptance test PASSES (PR #76, q6-acceptance job, 2026-08-17,
+first execution ever):** #74's test is root-gated and had never run anywhere until
+this job ran it as root with `NOCKLOCK_Q6_REQUIRE=1`. On `ubuntu-24.04` it PASSED —
+Candidate B's bypass-resistance premise is now receipted, not merely asserted:
+
+- **`TestQ6_CappedChildCannotMutate`** — the child in the namespace with
+  `CAP_NET_ADMIN`+`CAP_SYS_ADMIN` dropped from every set was DENIED (EPERM) on all
+  four fence mutations: `nft add table` (*Operation not permitted*), `nft flush
+  ruleset` — the canonical fence-rewrite attack — (*Operation not permitted*),
+  `ip route add` (RTNETLINK *Operation not permitted*), and `ip link set up`
+  (RTNETLINK *Operation not permitted*).
+- **`TestQ6_PrivilegedParentCanMutate_Control`** — the privileged parent performed
+  the same four ops in the same namespace and each SUCCEEDED, proving the child's
+  denials are caused by the capability drop, not by broken setup.
+
+So a capped child provably cannot flush the `nftables`/routes/interfaces the fence
+depends on, and the bounding-set drop that makes it hold across `execve` is
+actually exercised. This closes item (c)'s acceptance bar as a receipted CI gate.
+
+_(CI note: GitHub's `actions/setup-go` download was intermittently rate-limited
+(429→503) during this window, so on any single run one of the two jobs may fail in
+"Set up job" before Go installs — an infra flake, not a job-logic failure. Both
+jobs passed green across runs 32042112358 (egress-probe) and 32042268453 (Q6); a
+re-run clears a setup-go flake.)_
