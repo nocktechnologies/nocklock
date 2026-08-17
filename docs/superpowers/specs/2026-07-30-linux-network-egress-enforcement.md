@@ -333,3 +333,35 @@ increment on this track is committing that probe as a repeatable `nocklock`
 tool — codifying the VPS runs plus
 the Q6 acceptance test and the protocol-matrix egress test — so the remaining fleet
 kernels (CI runners) are probed the same way before Phase 1 locks the helper design.
+
+### Amendment 2026-08-17 — CI activation: Q1 CI-runner coverage + the Q6 bar now execute
+
+The `.github/workflows/network-egress.yml` workflow wires two of the amendment's
+"still open" items into CI, so both are measured on every push/PR rather than
+living as a one-off VPS run and a never-executed test:
+
+- **(b) CI-runner kernel coverage for Q1 — WIRED.** The `egress-probe` job runs
+  the merged repeatable probe (#70) on `ubuntu-latest`, **twice**: once on the
+  bare runner image and once after `apt-get install nftables iproute2`. The bare
+  run reports `track=blocked` *only because `nft` is not preinstalled* — recorded
+  deliberately so "the image doesn't ship nftables" is never conflated with "this
+  kernel cannot host the fence." The provisioned run is the real Q1 receipt for
+  the GitHub-hosted kernel; both JSON reports are uploaded as an artifact and the
+  `track`/`nft`/userns-netns/cause values are surfaced in the job summary. The
+  probe always exits 0 on completion, so this job is a *receipt*, not a gate.
+  **Verdict values are folded in below once the first CI run on the introducing
+  PR is green — wiring is not a receipt.**
+- **(c) Q6 acceptance test — now ACTUALLY EXECUTES.** #74's post-drop mutation
+  test is root-gated and self-skips on the default `go test ./...` path, so until
+  now it has never run anywhere (a skip is not a pass). The `q6-acceptance` job
+  runs it as root with `NOCKLOCK_Q6_REQUIRE=1`, which turns the normally-green
+  non-root/tool-missing skips into HARD failures. This is the first venue where
+  Candidate B's bypass-resistance bar — capped child provably cannot flush
+  `nftables`/routes/interfaces, with the privileged-parent positive control —
+  is a receipted gate. It should be added to the branch's required checks so a
+  regression blocks merge.
+
+Item **(a)** (prove the AppArmor cause by toggling `apparmor_restrict_unprivileged_userns`)
+is unchanged — it mutates a live security control and stays out of CI.
+
+**First-run receipts (folded after the introducing PR's CI is green):** _pending._

@@ -41,6 +41,17 @@ All notable changes to NockLock will be documented in this file.
   `go test ./...` suite on every push and pull request (`.github/workflows/test.yml`,
   GitHub-hosted `ubuntu-latest`). Until now no workflow ran the Go test suite, so
   the unit tests that guard the fence layers had never gated a merge.
+- New `network-egress` CI workflow (`.github/workflows/network-egress.yml`) for the
+  Linux network-egress-enforcement track. It (1) runs the repeatable
+  `nocklock egress-probe` on `ubuntu-latest` — bare image and nftables-provisioned —
+  so the CI kernel's Q1 feasibility is measured identically to the dev VPS and kept
+  as an uploaded receipt (the bare run's `track=blocked` reflects only that the
+  runner image ships no `nft`, not a kernel that cannot host the fence); and (2)
+  **actually executes the Q6 post-drop mutation acceptance test** as root with
+  `NOCKLOCK_Q6_REQUIRE=1`. That test self-skips off the root path, so before this
+  it had never run anywhere — Candidate B's bypass-resistance bar (a capped child
+  cannot flush the `nftables`/routes/interfaces the fence depends on) is now a
+  receipted CI gate, not a green skip.
 
 ### Fixed
 
