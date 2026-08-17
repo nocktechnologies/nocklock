@@ -71,16 +71,18 @@ jobs:
           {
             echo "### egress-probe — Q1 CI-runner coverage"
             echo ""
-            echo "| image | track | nft | userns+netns (mapped) | userns+netns (unmapped) | cause |"
-            echo "|---|---|---|---|---|---|"
+            echo "| image | track | nft | userns | userns+netns (mapped) | userns+netns (unmapped) | cause evidence | cause detail |"
+            echo "|---|---|---|---|---|---|---|---|"
             for f in bare provisioned; do
               json="egress-probe-$f.json"
               track=$(jq -r '.track' "$json")
               nft=$(jq -r '(.checks[] | select(.id=="nftables-binary") | .status) // "n/a"' "$json")
+              userns=$(jq -r '(.checks[] | select(.id=="unprivileged-userns") | .status) // "n/a"' "$json")
               mapped=$(jq -r '(.checks[] | select(.id=="unprivileged-userns-netns") | .status) // "n/a"' "$json")
               unmapped=$(jq -r '(.checks[] | select(.id=="unprivileged-userns-netns-unmapped") | .status) // "n/a"' "$json")
-              cause=$(jq -r '(.checks[] | select(.id=="unprivileged-userns-cause") | .status) // "n/a"' "$json")
-              echo "| $f | \`$track\` | $nft | $mapped | $unmapped | $cause |"
+              causeEvidence=$(jq -r '(.checks[] | select(.id=="unprivileged-userns-cause") | .status) // "n/a"' "$json")
+              causeDetail=$(jq -r '(.checks[] | select(.id=="unprivileged-userns-cause") | .detail) // "n/a"' "$json")
+              echo "| $f | \`$track\` | $nft | $userns | $mapped | $unmapped | $causeEvidence | $causeDetail |"
             done
             echo ""
             echo "Full JSON receipts are attached as the \`egress-probe-results\` artifact."
