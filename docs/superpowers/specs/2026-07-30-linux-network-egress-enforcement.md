@@ -333,3 +333,82 @@ increment on this track is committing that probe as a repeatable `nocklock`
 tool — codifying the VPS runs plus
 the Q6 acceptance test and the protocol-matrix egress test — so the remaining fleet
 kernels (CI runners) are probed the same way before Phase 1 locks the helper design.
+
+### Amendment 2026-08-17 — CI activation: Q1 CI-runner coverage + the Q6 bar now execute
+
+The `.github/workflows/network-egress.yml` workflow wires two of the amendment's
+"still open" items into CI, so both are measured on every push/PR rather than
+living as a one-off VPS run and a never-executed test:
+
+- **(b) CI-runner kernel coverage for Q1 — WIRED.** The `egress-probe` job runs
+  the merged repeatable probe (#70) on `ubuntu-latest`, **twice**: once on the
+  bare runner image and once after `apt-get install nftables iproute2`. The bare
+  run reports `track=blocked` *only because `nft` is not preinstalled* — recorded
+  deliberately so "the image doesn't ship nftables" is never conflated with "this
+  kernel cannot host the fence." The provisioned run is the real Q1 receipt for
+  the GitHub-hosted kernel; both JSON reports are uploaded as an artifact and the
+  `track`/`nft`/userns-netns/cause values are surfaced in the job summary. The
+  probe always exits 0 on completion, so this job is a *receipt*, not a gate.
+  **Verdict values are folded in below once the first CI run on the introducing
+  PR is green — wiring is not a receipt.**
+- **(c) Q6 acceptance test — now ACTUALLY EXECUTES.** #74's post-drop mutation
+  test is root-gated and self-skips on the default `go test ./...` path, so until
+  now it has never run anywhere (a skip is not a pass). The `q6-acceptance` job
+  runs it as root with `NOCKLOCK_Q6_REQUIRE=1`, which turns the normally-green
+  non-root/tool-missing skips into HARD failures. This is the first venue where
+  Candidate B's bypass-resistance bar — capped child provably cannot flush
+  `nftables`/routes/interfaces, with the privileged-parent positive control —
+  is a receipted gate. It should be added to the branch's required checks so a
+  regression blocks merge.
+
+Item **(a)** (prove the AppArmor cause by toggling `apparmor_restrict_unprivileged_userns`)
+is unchanged — it mutates a live security control and stays out of CI.
+
+**First-run receipt — (b) Q1 CI-runner coverage (PR #76, egress-probe job, 2026-08-17, receipted):**
+The GitHub-hosted `ubuntu-latest` runner **independently reproduces the dev VPS's
+Q1 finding on a second, unrelated kernel** — the privileged-helper track is not a
+VPS artifact.
+
+| Check | ubuntu-latest (6.17.0-1022-azure, Ubuntu 24.04.4) | dev VPS (Ubuntu 26.04) |
+|---|---|---|
+| `unprivileged_userns_clone` | `1` (permissive — ruled out) | `1` (same) |
+| `apparmor_restrict_unprivileged_userns` | `1` | `1` (same) |
+| `unshare --user --net --map-root-user` | **blocked** | blocked (same) |
+| `unshare --user --net` (unmapped) | **permitted** | permitted (same) |
+| cause | `uid-map-write-gate` (indicated) | uid-map-write-gate (same) |
+| `nft` / `nft_tproxy` | available / available | available / available |
+| `sudo -n` | available | available |
+| **track** | **`privileged-helper`** | `privileged-helper` (same) |
+
+So on both Ubuntu 24.04+ kernels probed, unprivileged-clean B is out for the same
+narrow reason (the `uid_map` root-mapping write is gated, AppArmor-indicated), and
+the privileged-helper track is reachable (sudo + nft + tproxy present). Item (b) is
+**closed** for the GitHub-hosted CI kernel; the AppArmor cause remains *indicated*,
+not toggle-proven (item (a), still out of CI). Per-run JSON receipts (bare +
+provisioned) are attached to each `egress-probe` job as the `egress-probe-results`
+artifact.
+
+**Receipt — (c) Q6 acceptance test PASSES (PR #76, q6-acceptance job, 2026-08-17,
+first execution ever):** #74's test is root-gated and had never run anywhere until
+this job ran it as root with `NOCKLOCK_Q6_REQUIRE=1`. On `ubuntu-24.04` it PASSED —
+Candidate B's bypass-resistance premise is now receipted, not merely asserted:
+
+- **`TestQ6_CappedChildCannotMutate`** — the child in the namespace with
+  `CAP_NET_ADMIN`+`CAP_SYS_ADMIN` dropped from every set was DENIED (EPERM) on all
+  four fence mutations: `nft add table` (*Operation not permitted*), `nft flush
+  ruleset` — the canonical fence-rewrite attack — (*Operation not permitted*),
+  `ip route add` (RTNETLINK *Operation not permitted*), and `ip link set up`
+  (RTNETLINK *Operation not permitted*).
+- **`TestQ6_PrivilegedParentCanMutate_Control`** — the privileged parent performed
+  the same four ops in the same namespace and each SUCCEEDED, proving the child's
+  denials are caused by the capability drop, not by broken setup.
+
+So a capped child provably cannot flush the `nftables`/routes/interfaces the fence
+depends on, and the bounding-set drop that makes it hold across `execve` is
+actually exercised. This closes item (c)'s acceptance bar as a receipted CI gate.
+
+_(CI note: GitHub's `actions/setup-go` download was intermittently rate-limited
+(429→503) during this window, so on any single run one of the two jobs may fail in
+"Set up job" before Go installs — an infra flake, not a job-logic failure. Both
+jobs passed green across runs 32042112358 (egress-probe) and 32042268453 (Q6); a
+re-run clears a setup-go flake.)_
