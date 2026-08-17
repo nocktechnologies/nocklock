@@ -82,6 +82,9 @@ jobs:
               unmapped=$(jq -r '(.checks[] | select(.id=="unprivileged-userns-netns-unmapped") | .status) // "n/a"' "$json")
               causeEvidence=$(jq -r '(.checks[] | select(.id=="unprivileged-userns-cause") | .status) // "n/a"' "$json")
               causeDetail=$(jq -r '(.checks[] | select(.id=="unprivileged-userns-cause") | .detail) // "n/a"' "$json")
+              # The cause detail is free-text prose from the probe; escape any literal
+              # '|' so a pipe in the string can't break the markdown table row.
+              causeDetail=${causeDetail//|/\\|}
               echo "| $f | \`$track\` | $nft | $userns | $mapped | $unmapped | $causeEvidence | $causeDetail |"
             done
             echo ""
