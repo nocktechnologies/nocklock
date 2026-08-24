@@ -412,3 +412,83 @@ _(CI note: GitHub's `actions/setup-go` download was intermittently rate-limited
 "Set up job" before Go installs — an infra flake, not a job-logic failure. Both
 jobs passed green across runs 32042112358 (egress-probe) and 32042268453 (Q6); a
 re-run clears a setup-go flake.)_
+
+### Amendment 2026-08-24 — Q6 capability model DECIDED (unblocks Phase 1)
+
+Open question 6 (capability model) was the last *design* gate on Phase 1 — the Q6
+acceptance *bar* is receipted (the capped-child-cannot-mutate test passes on CI),
+but the *minimum helper privilege and how it is acquired* was undecided. Phase 0's
+receipts now settle it. This amendment fixes the ownership split so Phase 1 builds
+to a decided design, not an open one.
+
+**Decision — privilege acquisition (v1): `sudo -n`.** The privileged parent helper
+is installed root-owned and non-writable by the service user at
+`/usr/libexec/nocklock-egress-helper`, and invoked via passwordless
+sudo with one of two fixed argument vectors: `check` (non-mutating preflight) or
+`setup` (reads the validated setup request from standard input; no command-line
+arguments are accepted). Availability MUST be tested with the complete command
+`sudo -n /usr/libexec/nocklock-egress-helper check`, not `sudo -n true`. The host
+installer owns this constrained sudoers policy (with `nocklock` replaced by the
+dedicated service user when applicable):
+
+```sudoers
+Cmnd_Alias NOCKLOCK_EGRESS = /usr/libexec/nocklock-egress-helper check, \
+                             /usr/libexec/nocklock-egress-helper setup
+nocklock ALL = (root) NOPASSWD: NOCKLOCK_EGRESS
+```
+
+Phase 0 receipted `sudo -n` (NOPASSWD) available
+on BOTH probed kernels (dev VPS Ubuntu 26.04 + `ubuntu-latest` 24.04), so this path
+is confirmed reachable and does not depend on the Q1 unprivileged answer (which is
+blocked by the AppArmor `uid_map`-write gate on 24.04+). v1 deliberately does NOT
+ship a setuid-root or file-capability (`setcap cap_net_admin,cap_sys_admin+ep`)
+binary — both are named future alternatives for hosts without NOPASSWD sudo, not v1
+scope. Rationale: sudo keeps the privileged surface an auditable, host-controlled
+policy decision rather than a persistently-privileged binary in the tree.
+
+**Decision — helper's minimum privilege set.** The helper holds `CAP_NET_ADMIN`
+(create/configure the netns veth/loopback, install the default-drop `nftables`
+ruleset, add the `fwmark` `ip rule`/route for tproxy) and `CAP_SYS_ADMIN`
+(`CLONE_NEWNET`/`setns`; and the mount for the in-namespace DNS stub's resolver
+config if bind-mounted). It also holds `CAP_SETPCAP` only long enough to perform
+the required `PR_CAPBSET_DROP` operations. `CAP_NET_RAW` is NOT required. These
+are held ONLY for the setup window; the helper does not persist.
+
+**Decision — child credential drop (receipted).** Before `execve` of the child, the
+helper removes `CAP_NET_ADMIN`, `CAP_SYS_ADMIN`, and the temporary `CAP_SETPCAP`
+from ALL FIVE capability sets — effective, permitted, inheritable, ambient, AND
+bounding. It drops the two fence capabilities from the bounding set while
+`CAP_SETPCAP` remains effective, drops `CAP_SETPCAP` from the bounding set last,
+then clears all three from the live sets. Clearing the bounding set alone only
+blocks *future* regains across `exec`; the live sets must already be clear. The Q6
+CI gate directly checks all five sets after the drop and before `execve`, then
+exercises the resulting credential:
+`TestQ6_CappedChildCannotMutate` proves the post-drop child is denied (EPERM) on
+`nft add table`, `nft flush ruleset`, `ip route add`, and `ip link set up`, while
+`TestQ6_PrivilegedParentCanMutate_Control` proves the parent can — so the denials
+are caused by the drop, not broken setup. Q6 IS the acceptance bar for this
+decision; any Phase 1 change to the credential model must keep that gate green.
+
+**Decision — fail-closed on privilege.** If the helper cannot acquire privilege
+(no NOPASSWD sudo) OR cannot fully clear the child's five sets, it MUST refuse to
+`exec` the child. There is no advisory/degraded network fallback — the enforcement
+boundary is not optional (same posture as the fs/syscall fences). The existing
+env-`HTTP_PROXY` layer stays a convenience on top of this floor, never the boundary.
+
+**Independence from Q1/Q7.** This capability model is the privileged-helper track
+and is orthogonal to Q1 (unprivileged userns, blocked — irrelevant here) and to Q7
+(QUIC→TCP fallback, the remaining Phase-0 exit criterion). The Phase 1 *foundation*
+increment below — netns + default-drop-all base + cap-dropped child — denies QUIC
+by default and therefore does not depend on Q7; Q7 gates only the later increment
+that adds the selective HTTP(S)/DNS *allowance* on top of the default-drop floor.
+
+**Phase 1 increment ordering (unblocked by this decision).**
+1. **Foundation (Q7-independent, ships first):** privileged helper creates the
+   netns, applies the default-drop `nftables` base over IPv4+IPv6 across all
+   transports, and `exec`s the child with net-admin/sys-admin dropped from all five
+   sets — reusing the receipted Q6 cap-drop harness. This is the kernel-enforced
+   *hardened (no-network)* floor. Root-gated acceptance tests run in CI beside Q6.
+2. **Transparent allowlist (gated on Q7):** tproxy intercept + SNI/Host allowlist +
+   in-namespace DNS stub, turning the floor into a selective HTTP(S)+DNS allowlist.
+3. **Compose + README (Phase 2):** collapse the env-proxy to a convenience layer;
+   update the threat model to the working+bypass-resistant allowlist.
