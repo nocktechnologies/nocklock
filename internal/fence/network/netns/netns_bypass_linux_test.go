@@ -81,11 +81,10 @@ const (
 	exitSetupFailed = 20 // setns / cap-drop failed; the result is inconclusive
 )
 
-// caps is the exact set the child drops from every capability set. Keeping it to
-// precisely these two (rather than clearing everything) makes the causal claim
-// sharp: only net-admin and sys-admin are removed, so an observed EPERM is caused
-// by that drop and nothing else.
-var caps = []uintptr{unix.CAP_NET_ADMIN, unix.CAP_SYS_ADMIN}
+// caps is the exact setup-only set the child drops from every capability set.
+// CAP_SETPCAP stays effective until last so the preceding bounding-set drops are
+// permitted, then is itself removed before exec.
+var caps = []uintptr{unix.CAP_NET_ADMIN, unix.CAP_SYS_ADMIN, unix.CAP_SETPCAP}
 
 // epermMarker is the C-locale strerror(EPERM) text emitted by both `nft` and `ip`
 // on a capability denial ("Operation not permitted"). Helpers force LC_ALL=C so
@@ -138,6 +137,10 @@ func runChild(scenario string) int {
 	// Drop CAP_NET_ADMIN + CAP_SYS_ADMIN from all five capability sets.
 	if err := dropCaps(); err != nil {
 		fmt.Fprintf(os.Stderr, "child: drop caps: %v\n", err)
+		return exitSetupFailed
+	}
+	if err := assertCapsDropped(); err != nil {
+		fmt.Fprintf(os.Stderr, "child: verify dropped caps: %v\n", err)
 		return exitSetupFailed
 	}
 
@@ -193,6 +196,37 @@ func dropCaps() error {
 	}
 	if err := unix.Capset(&hdr, &data[0]); err != nil {
 		return fmt.Errorf("capset: %w", err)
+	}
+	return nil
+}
+
+// assertCapsDropped verifies the post-drop credential directly before exec.
+func assertCapsDropped() error {
+	hdr := unix.CapUserHeader{Version: unix.LINUX_CAPABILITY_VERSION_3}
+	var data [2]unix.CapUserData
+	if err := unix.Capget(&hdr, &data[0]); err != nil {
+		return fmt.Errorf("capget: %w", err)
+	}
+	for _, c := range caps {
+		word := c >> 5
+		bit := uint32(1) << (c & 31)
+		if data[word].Effective&bit != 0 || data[word].Permitted&bit != 0 || data[word].Inheritable&bit != 0 {
+			return fmt.Errorf("capability %d remains in effective, permitted, or inheritable set", c)
+		}
+		ambient, err := unix.PrctlRetInt(unix.PR_CAP_AMBIENT, unix.PR_CAP_AMBIENT_IS_SET, c, 0, 0)
+		if err != nil {
+			return fmt.Errorf("PR_CAP_AMBIENT_IS_SET %d: %w", c, err)
+		}
+		if ambient != 0 {
+			return fmt.Errorf("capability %d remains in ambient set", c)
+		}
+		bounding, err := unix.PrctlRetInt(unix.PR_CAPBSET_READ, c, 0, 0, 0)
+		if err != nil {
+			return fmt.Errorf("PR_CAPBSET_READ %d: %w", c, err)
+		}
+		if bounding != 0 {
+			return fmt.Errorf("capability %d remains in bounding set", c)
+		}
 	}
 	return nil
 }
