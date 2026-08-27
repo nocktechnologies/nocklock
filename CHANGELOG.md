@@ -6,6 +6,23 @@ All notable changes to NockLock will be documented in this file.
 
 ### Added
 
+- `nocklock wrap --net-fence=netns` (Linux, opt-in): the Phase-1 FOUNDATION of
+  the network-egress fence (Candidate B). A privileged helper — acquired via
+  passwordless `sudo -n` under the DECIDED capability model (spec amendment
+  2026-08-24) — creates a fresh network namespace (`CLONE_NEWNET`), brings
+  loopback up, installs a default-drop `nftables` base across ALL transports and
+  both IPv4 and IPv6 (QUIC/UDP/SCTP/TCP all denied — no allowances yet), drops
+  `CAP_NET_ADMIN`+`CAP_SYS_ADMIN` from all five capability sets (reusing the
+  receipted Q6 cap-drop harness), drops to the invoking user, and execve's the
+  agent as a non-root child inside the namespace. Fail-closed: if privilege
+  cannot be acquired or the five-set drop cannot complete, NockLock refuses to
+  exec — no advisory/degraded fallback. Default `wrap` behavior is unchanged;
+  the flag is Linux-only and refuses on other platforms. This is the
+  kernel-enforced hardened (no-network) floor; the transparent HTTP(S)/DNS
+  allowlist on top of it is a later increment (gated on Q7). A new root-gated
+  acceptance test (`TestNetnsFoundation_DefaultDropDeniesEgress`) proves the
+  capped child is denied all egress and runs beside the Q6 bar in the
+  `network-egress` CI workflow.
 - `nocklock egress-probe`: a repeatable, structured feasibility probe for the
   Linux network-egress-enforcement track (Candidate B: netns + transparent
   redirect). It codifies the Phase 0 VPS probe runs so every fleet kernel — CI
