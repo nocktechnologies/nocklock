@@ -81,10 +81,11 @@ const (
 	exitSetupFailed = 20 // setns / cap-drop failed; the result is inconclusive
 )
 
-// caps is the exact setup-only set the child drops from every capability set.
-// CAP_SETPCAP stays effective until last so the preceding bounding-set drops are
-// permitted, then is itself removed before exec.
-var caps = []uintptr{unix.CAP_NET_ADMIN, unix.CAP_SYS_ADMIN, unix.CAP_SETPCAP}
+// The five-set fence capability drop (`caps`, dropCaps, assertCapsDropped) now
+// lives in caps_linux.go so the production helper reuses this exact receipted
+// code (2026-08-24 amendment: "reuse the receipted Q6 cap-drop harness"). This
+// test file calls dropCaps/assertCapsDropped from there — same package, same
+// behaviour.
 
 // epermMarker is the C-locale strerror(EPERM) text emitted by both `nft` and `ip`
 // on a capability denial ("Operation not permitted"). Helpers force LC_ALL=C so
@@ -144,6 +145,14 @@ func runChild(scenario string) int {
 		return exitSetupFailed
 	}
 
+	// Phase-1 FOUNDATION egress scenarios reuse this exact setns + five-set
+	// cap-drop child, then attempt real egress instead of a fence mutation. See
+	// foundation_linux_test.go. If this scenario is one of those, it is fully
+	// handled there.
+	if code, handled := runEgressChildIfRequested(scenario); handled {
+		return code
+	}
+
 	// Attempt the mutation via the standard tool, now capless-for-net-admin in
 	// every set (the tool is exec'd as a root subprocess but cannot regain the
 	// capability because it is gone from the bounding set).
@@ -159,76 +168,6 @@ func runChild(scenario string) int {
 		return exitDeniedEPERM
 	}
 	return exitOtherErr
-}
-
-// dropCaps removes each capability in `caps` from every capability set of the
-// calling thread: bounding, ambient, then effective/permitted/inheritable.
-// Bounding is dropped first, while CAP_SETPCAP is still held.
-func dropCaps() error {
-	// Bounding set — one PR_CAPBSET_DROP per capability. This is what prevents the
-	// exec'd root tool from regaining the capability across execve.
-	for _, c := range caps {
-		if err := unix.Prctl(unix.PR_CAPBSET_DROP, c, 0, 0, 0); err != nil {
-			return fmt.Errorf("PR_CAPBSET_DROP %d: %w", c, err)
-		}
-	}
-
-	// Ambient set — clear all. Ambient caps are a subset of the permitted+
-	// inheritable pair we clear below, so clearing the whole ambient set is a
-	// complete (and simplest) way to ensure neither target cap is ambient.
-	if err := unix.Prctl(unix.PR_CAP_AMBIENT, unix.PR_CAP_AMBIENT_CLEAR_ALL, 0, 0, 0); err != nil {
-		return fmt.Errorf("PR_CAP_AMBIENT_CLEAR_ALL: %w", err)
-	}
-
-	// Effective, permitted, inheritable — read the current sets, clear exactly the
-	// target bits, write them back. Clearing bits is always permitted.
-	hdr := unix.CapUserHeader{Version: unix.LINUX_CAPABILITY_VERSION_3}
-	var data [2]unix.CapUserData
-	if err := unix.Capget(&hdr, &data[0]); err != nil {
-		return fmt.Errorf("capget: %w", err)
-	}
-	for _, c := range caps {
-		word := c >> 5 // 32 capabilities per CapUserData word
-		bit := uint32(1) << (c & 31)
-		data[word].Effective &^= bit
-		data[word].Permitted &^= bit
-		data[word].Inheritable &^= bit
-	}
-	if err := unix.Capset(&hdr, &data[0]); err != nil {
-		return fmt.Errorf("capset: %w", err)
-	}
-	return nil
-}
-
-// assertCapsDropped verifies the post-drop credential directly before exec.
-func assertCapsDropped() error {
-	hdr := unix.CapUserHeader{Version: unix.LINUX_CAPABILITY_VERSION_3}
-	var data [2]unix.CapUserData
-	if err := unix.Capget(&hdr, &data[0]); err != nil {
-		return fmt.Errorf("capget: %w", err)
-	}
-	for _, c := range caps {
-		word := c >> 5
-		bit := uint32(1) << (c & 31)
-		if data[word].Effective&bit != 0 || data[word].Permitted&bit != 0 || data[word].Inheritable&bit != 0 {
-			return fmt.Errorf("capability %d remains in effective, permitted, or inheritable set", c)
-		}
-		ambient, err := unix.PrctlRetInt(unix.PR_CAP_AMBIENT, unix.PR_CAP_AMBIENT_IS_SET, c, 0, 0)
-		if err != nil {
-			return fmt.Errorf("PR_CAP_AMBIENT_IS_SET %d: %w", c, err)
-		}
-		if ambient != 0 {
-			return fmt.Errorf("capability %d remains in ambient set", c)
-		}
-		bounding, err := unix.PrctlRetInt(unix.PR_CAPBSET_READ, c, 0, 0, 0)
-		if err != nil {
-			return fmt.Errorf("PR_CAPBSET_READ %d: %w", c, err)
-		}
-		if bounding != 0 {
-			return fmt.Errorf("capability %d remains in bounding set", c)
-		}
-	}
-	return nil
 }
 
 // mutationArgv maps a scenario to the fence-mutating command the child attempts.
@@ -254,11 +193,16 @@ func mutationArgv(scenario string) []string {
 // --- Parent side: gates, namespace setup, and the two assertions. ---
 
 // strictlyRequired reports whether the caller demands the test actually run.
-// A privileged CI job sets NOCKLOCK_Q6_REQUIRE=1 so the normally-green skips
-// (non-root, or missing ip/nft) become HARD FAILURES — a misconfigured runner
-// must not report green by silently skipping. Mirrors the seccomp suite's "a
-// skip is not a pass" discipline.
-func strictlyRequired() bool { return os.Getenv("NOCKLOCK_Q6_REQUIRE") == "1" }
+// A privileged CI job sets NOCKLOCK_Q6_REQUIRE=1 (Q6 mutation bar) or
+// NOCKLOCK_NETNS_REQUIRE=1 (Phase-1 foundation egress bar) so the normally-green
+// skips (non-root, or missing ip/nft) become HARD FAILURES — a misconfigured
+// runner must not report green by silently skipping. Both vars feed the same
+// shared requireRoot/requireTool gates, so the foundation test skips-are-failures
+// under its own job without duplicating those helpers. Mirrors the seccomp
+// suite's "a skip is not a pass" discipline.
+func strictlyRequired() bool {
+	return os.Getenv("NOCKLOCK_Q6_REQUIRE") == "1" || os.Getenv("NOCKLOCK_NETNS_REQUIRE") == "1"
+}
 
 // requireRoot skips (or, under NOCKLOCK_Q6_REQUIRE=1, fails) unless running as
 // root. Setup creates a network namespace and applies an nftables base — both
@@ -268,7 +212,7 @@ func requireRoot(t *testing.T) {
 	if os.Geteuid() != 0 {
 		const msg = "Q6 netns mutation test needs root to create a netns + nftables base"
 		if strictlyRequired() {
-			t.Fatalf("%s; NOCKLOCK_Q6_REQUIRE=1 forbids skipping", msg)
+			t.Fatalf("%s; strict-required mode forbids skipping", msg)
 		}
 		t.Skipf("%s; skipping (runs under the privileged CI job)", msg)
 	}
@@ -281,7 +225,7 @@ func requireTool(t *testing.T, name string) string {
 	p, err := exec.LookPath(name)
 	if err != nil {
 		if strictlyRequired() {
-			t.Fatalf("Q6 netns mutation test needs %q in PATH (NOCKLOCK_Q6_REQUIRE=1 forbids skipping): %v", name, err)
+			t.Fatalf("Q6 netns mutation test needs %q in PATH (strict-required mode forbids skipping): %v", name, err)
 		}
 		t.Skipf("Q6 netns mutation test needs %q in PATH: %v", name, err)
 	}
@@ -297,12 +241,23 @@ type netnsHandle struct {
 	path string
 }
 
-// setupNetns creates a fresh network namespace and installs a default-drop
-// nftables base (IPv4+IPv6 via the `inet` family), mirroring the Phase-1 helper's
-// intended base policy. It registers cleanup and returns a handle. It skips if
-// nftables is unsupported on this kernel and fails hard on any other setup error
-// (root + tools are present, so a genuine failure must not be masked as a pass).
+// setupNetns creates a fresh network namespace, brings loopback up, and installs
+// the shared default-drop nftables base. It is the base-installed convenience
+// used by Q6 and the foundation denial test; setupNetnsBase(t, false) is the
+// no-base variant the foundation POSITIVE CONTROL uses.
 func setupNetns(t *testing.T) netnsHandle {
+	t.Helper()
+	return setupNetnsBase(t, true)
+}
+
+// setupNetnsBase creates a fresh network namespace and brings loopback up,
+// optionally installing the default-drop base. Bringing `lo` up matches the
+// production helper (SetupAndExec) and is what lets the foundation test attribute
+// a loopback denial to the drop policy rather than to a down interface / missing
+// route. It registers cleanup and returns a handle. It skips if nftables is
+// unsupported on this kernel and fails hard on any other setup error (root +
+// tools are present, so a genuine failure must not be masked as a pass).
+func setupNetnsBase(t *testing.T, installBase bool) netnsHandle {
 	t.Helper()
 	ipBin := requireTool(t, "ip")
 	nftBin := requireTool(t, "nft")
@@ -315,28 +270,32 @@ func setupNetns(t *testing.T) netnsHandle {
 	}
 	t.Cleanup(func() { _, _ = run(ipBin, "netns", "del", name) })
 
-	// Default-drop base over IPv4 and IPv6. The `inet` family covers both address
-	// families in a single table, and the drop policies mirror the fence's
-	// intended Phase-1 base. (These policies filter packets; they do NOT gate the
-	// netlink admin ops under test — capabilities do — so the parent control below
-	// still succeeds against this same base.)
-	base := "table inet filter {\n" +
-		"  chain input   { type filter hook input priority 0; policy drop; }\n" +
-		"  chain output  { type filter hook output priority 0; policy drop; }\n" +
-		"  chain forward { type filter hook forward priority 0; policy drop; }\n" +
-		"}\n"
-	out, err := runStdin(base, ipBin, "netns", "exec", name, nftBin, "-f", "-")
-	if err != nil {
-		low := strings.ToLower(out)
-		if strings.Contains(low, "not supported") ||
-			strings.Contains(low, "no such file") ||
-			strings.Contains(low, "protocol not supported") {
-			if strictlyRequired() {
-				t.Fatalf("nftables unsupported in required environment: %v\n%s", err, out)
+	// Bring loopback up (link state) — mirrors the production helper. Setting an
+	// already-up link up is idempotent, so this stays consistent with the Q6
+	// scenarioLink control's `ip link set dev lo up`.
+	if out, err := run(ipBin, "netns", "exec", name, ipBin, "link", "set", "lo", "up"); err != nil {
+		t.Fatalf("bring loopback up in %s: %v\n%s", name, err, out)
+	}
+
+	if installBase {
+		// Default-drop base over IPv4 and IPv6 — the SINGLE shared DefaultDropRuleset
+		// the production helper installs, so the tested base and the shipped base are
+		// literally the same string. (These policies filter packets; they do NOT gate
+		// the netlink admin ops under test — capabilities do — so the parent control
+		// below still succeeds against this same base.)
+		out, err := runStdin(DefaultDropRuleset, ipBin, "netns", "exec", name, nftBin, "-f", "-")
+		if err != nil {
+			low := strings.ToLower(out)
+			if strings.Contains(low, "not supported") ||
+				strings.Contains(low, "no such file") ||
+				strings.Contains(low, "protocol not supported") {
+				if strictlyRequired() {
+					t.Fatalf("nftables unsupported in required environment: %v\n%s", err, out)
+				}
+				t.Skipf("nftables unsupported in this environment: %v\n%s", err, out)
 			}
-			t.Skipf("nftables unsupported in this environment: %v\n%s", err, out)
+			t.Fatalf("apply default-drop nftables base: %v\n%s", err, out)
 		}
-		t.Fatalf("apply default-drop nftables base: %v\n%s", err, out)
 	}
 
 	// The netns pseudo-file lives under /run/netns (some layouts expose it only

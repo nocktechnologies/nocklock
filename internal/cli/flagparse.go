@@ -9,6 +9,10 @@ type WrapFlags struct {
 	AllowPrivateRanges bool // --allow-private-ranges: permit RFC1918/loopback connections
 	DryRun             bool // --dry-run: validate config without starting fences or child process
 	Profile            string
+	// NetFence opts into a kernel-enforced network egress fence. "" (default)
+	// keeps the existing userspace-proxy posture unchanged; "netns" selects the
+	// privileged-helper network-namespace default-drop floor (Linux only).
+	NetFence string
 }
 
 // parseWrapFlags splits wrap command args into NockLock flags and child args.
@@ -68,12 +72,26 @@ func parseWrapFlags(args []string) (WrapFlags, []string, error) {
 			}
 			i++
 			flags.Profile = nockArgs[i]
+		case "--net-fence":
+			if i+1 >= len(nockArgs) {
+				return WrapFlags{}, nil, fmt.Errorf("--net-fence requires a value (netns)")
+			}
+			i++
+			if err := setNetFence(&flags, nockArgs[i]); err != nil {
+				return WrapFlags{}, nil, err
+			}
 		default:
 			if value, ok := splitWrapFlagValue(a, "--profile="); ok {
 				if value == "" {
 					return WrapFlags{}, nil, fmt.Errorf("--profile requires a profile name")
 				}
 				flags.Profile = value
+				continue
+			}
+			if value, ok := splitWrapFlagValue(a, "--net-fence="); ok {
+				if err := setNetFence(&flags, value); err != nil {
+					return WrapFlags{}, nil, err
+				}
 				continue
 			}
 			return WrapFlags{}, nil, fmt.Errorf("unknown nocklock flag %q (place child flags after --)", a)
@@ -91,18 +109,35 @@ func allRecognizedWrapFlags(args []string) bool {
 		a := args[i]
 		switch a {
 		case "--allow-unfenced", "--allow-private-ranges", "--dry-run":
-		case "--profile":
+		case "--profile", "--net-fence":
 			if i+1 >= len(args) {
 				return false
 			}
 			i++
 		default:
-			if _, ok := splitWrapFlagValue(a, "--profile="); !ok {
+			_, isProfile := splitWrapFlagValue(a, "--profile=")
+			_, isNetFence := splitWrapFlagValue(a, "--net-fence=")
+			if !isProfile && !isNetFence {
 				return false
 			}
 		}
 	}
 	return true
+}
+
+// setNetFence validates and records the --net-fence value. Only "netns" is
+// recognized today; an unknown value is rejected rather than silently ignored, so
+// a typo never degrades to the default (no fence).
+func setNetFence(flags *WrapFlags, value string) error {
+	switch value {
+	case "netns":
+		flags.NetFence = value
+		return nil
+	case "":
+		return fmt.Errorf("--net-fence requires a value (netns)")
+	default:
+		return fmt.Errorf("unknown --net-fence value %q (supported: netns)", value)
+	}
 }
 
 func splitWrapFlagValue(arg, prefix string) (string, bool) {
