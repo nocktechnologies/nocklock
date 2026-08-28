@@ -371,7 +371,7 @@ var wrapCmd = &cobra.Command{
 		var child *exec.Cmd
 		if useNetns {
 			// Hand the fully-composed child (any fs/syscall shim prefix included) to
-			// the privileged netns helper via `sudo -n <self> __netns-helper setup`.
+			// the privileged netns helper via `sudo -n <helper> setup`.
 			// The helper creates the namespace + default-drop base, drops the
 			// child's capabilities from all five sets, drops to this (invoking)
 			// user, and execve's the child inside the namespace. The request —

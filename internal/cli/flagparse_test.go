@@ -56,6 +56,7 @@ func TestParseWrapFlagsProfile(t *testing.T) {
 	}
 }
 
+// TestParseWrapFlagsNetFence verifies both supported net-fence flag forms.
 func TestParseWrapFlagsNetFence(t *testing.T) {
 	// Both the space and =-joined forms select the netns floor.
 	for _, args := range [][]string{
@@ -75,6 +76,7 @@ func TestParseWrapFlagsNetFence(t *testing.T) {
 	}
 }
 
+// TestParseWrapFlagsNetFenceDefaultsEmpty verifies the default net-fence mode.
 func TestParseWrapFlagsNetFenceDefaultsEmpty(t *testing.T) {
 	// Negative control: without the flag, NetFence stays empty — default wrap
 	// behavior is unchanged.
@@ -87,6 +89,7 @@ func TestParseWrapFlagsNetFenceDefaultsEmpty(t *testing.T) {
 	}
 }
 
+// TestParseWrapFlagsNetFenceUnknownValueRejected verifies invalid net-fence values fail.
 func TestParseWrapFlagsNetFenceUnknownValueRejected(t *testing.T) {
 	// A typo must be rejected, never silently degraded to "no fence".
 	if _, _, err := parseWrapFlags([]string{"--net-fence=bogus", "--", "cmd"}); err == nil {

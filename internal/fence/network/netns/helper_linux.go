@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"os/user"
 	"path/filepath"
 	"runtime"
 	"strconv"
@@ -85,8 +86,8 @@ func Check() error {
 // validateChildCredential refuses any child credential that would escalate
 // privilege. This is the real security boundary for the stdin request: without
 // it, a caller holding the NOPASSWD grant could pipe {"uid":0,...} and have the
-// helper execve an arbitrary argv as root. It rejects root/uid<=0, a gid 0 in the
-// supplementary groups, and — critically — any credential that does not match the
+// helper execve an arbitrary argv as root. It rejects root/uid<=0 and —
+// critically — any credential or group set that does not belong to the
 // sudo-invoking user. sudo always sets SUDO_UID/SUDO_GID (even under env_reset),
 // so an absent or unparseable value means we are NOT under the expected sudo
 // invocation; that is a refusal, never a pass.
@@ -94,8 +95,8 @@ func validateChildCredential(req Request) error {
 	if req.UID <= 0 || req.GID <= 0 {
 		return fmt.Errorf("refusing to run the netns child as root/uid<=0 (uid=%d gid=%d); it must be unprivileged", req.UID, req.GID)
 	}
-	for _, g := range req.Groups {
-		if g == 0 {
+	for _, gid := range req.Groups {
+		if gid == 0 {
 			return errors.New("refusing to run the netns child with gid 0 among its supplementary groups")
 		}
 	}
@@ -112,6 +113,27 @@ func validateChildCredential(req Request) error {
 	}
 	if sudoGID != req.GID {
 		return fmt.Errorf("netns child gid %d does not match the sudo-invoking group %d; refusing", req.GID, sudoGID)
+	}
+	invokingUser, err := user.LookupId(strconv.Itoa(sudoUID))
+	if err != nil {
+		return fmt.Errorf("cannot resolve sudo-invoking uid %d: %w", sudoUID, err)
+	}
+	groupIDs, err := invokingUser.GroupIds()
+	if err != nil {
+		return fmt.Errorf("cannot resolve groups for sudo-invoking uid %d: %w", sudoUID, err)
+	}
+	allowedGroups := make(map[int]struct{}, len(groupIDs)+1)
+	for _, groupID := range append(groupIDs, invokingUser.Gid) {
+		gid, parseErr := strconv.Atoi(groupID)
+		if parseErr != nil {
+			return fmt.Errorf("group id %q for sudo-invoking uid %d is not an integer: %w", groupID, sudoUID, parseErr)
+		}
+		allowedGroups[gid] = struct{}{}
+	}
+	for _, gid := range append([]int{req.GID}, req.Groups...) {
+		if _, ok := allowedGroups[gid]; !ok {
+			return fmt.Errorf("netns child gid %d does not belong to the sudo-invoking user %d; refusing", gid, sudoUID)
+		}
 	}
 	return nil
 }

@@ -13,16 +13,18 @@ import (
 	"github.com/spf13/cobra"
 )
 
-// The hidden __netns-helper subcommand is NockLock's privileged network-egress
-// helper. It is the process invoked as root via passwordless sudo under the
-// DECIDED capability model (spec amendment 2026-08-24) with exactly one of two
-// fixed argument vectors:
+const netnsHelperPath = "/usr/libexec/nocklock-egress-helper"
+
+// The hidden __netns-helper subcommand contains NockLock's privileged
+// network-egress helper logic. The installed helper exposes that logic at the
+// fixed, root-owned netnsHelperPath and is invoked via passwordless sudo under
+// the DECIDED capability model (spec amendment 2026-08-24) with exactly one of
+// two fixed argument vectors:
 //
-//	__netns-helper check   — non-mutating preflight (is the privileged path reachable?)
-//	__netns-helper setup    — read a JSON netns.Request from STDIN, create the
-//	                          namespace + default-drop base, drop the child's
-//	                          capabilities from all five sets, drop to the
-//	                          unprivileged child credential, and execve the child.
+//	check — non-mutating preflight (is the privileged path reachable?)
+//	setup — read a JSON netns.Request from STDIN, create the namespace +
+//	        default-drop base, drop the child's capabilities from all five
+//	        sets, drop to the unprivileged child credential, and execve the child.
 //
 // The child argv/env/credential travel on stdin, never on argv, so the fixed
 // two-vector sudoers policy is a real boundary rather than an argument-injection
@@ -30,9 +32,8 @@ import (
 // is an error and the caller (wrap) fails closed.
 //
 // Install note (deferred to the host installer, out of this foundation's scope):
-// production installs this as a root-owned `/usr/libexec/nocklock-egress-helper`
-// with the constrained sudoers policy from the spec. Here the same binary is
-// invoked via its own resolved path; the privileged LOGIC is identical.
+// production installs the helper at netnsHelperPath with the constrained
+// sudoers policy from the spec.
 var netnsHelperCmd = &cobra.Command{
 	Use:                "__netns-helper <check|setup>",
 	Hidden:             true,
@@ -68,27 +69,19 @@ func init() {
 // `sudo -n <helper> check` command, never `sudo -n true`). A non-nil error means
 // the privileged path is not reachable and wrap must fail closed.
 func netnsHelperPreflight(ctx context.Context) error {
-	self, err := os.Executable()
-	if err != nil {
-		return fmt.Errorf("cannot resolve nocklock executable for the netns helper: %w", err)
-	}
-	cmd := exec.CommandContext(ctx, "sudo", "-n", self, "__netns-helper", "check")
+	cmd := exec.CommandContext(ctx, "sudo", "-n", netnsHelperPath, "check")
 	out, err := cmd.CombinedOutput()
 	if err != nil {
-		return fmt.Errorf("passwordless sudo to the netns helper is not available (need NOPASSWD sudo for `%s __netns-helper`): %w\n%s", self, err, strings.TrimSpace(string(out)))
+		return fmt.Errorf("passwordless sudo to the netns helper is not available (need NOPASSWD sudo for `%s check`): %w\n%s", netnsHelperPath, err, strings.TrimSpace(string(out)))
 	}
 	return nil
 }
 
-// buildNetnsChild constructs the `sudo -n <self> __netns-helper setup` command
+// buildNetnsChild constructs the `sudo -n <helper> setup` command
 // that hands the composed child to the privileged helper. The child argv, env,
 // and the unprivileged credential to drop to are JSON-encoded onto stdin so they
 // never ride the fixed sudoers argument vector.
 func buildNetnsChild(ctx context.Context, childArgv, childEnv []string) (*exec.Cmd, error) {
-	self, err := os.Executable()
-	if err != nil {
-		return nil, fmt.Errorf("cannot resolve nocklock executable for the netns helper: %w", err)
-	}
 	groups, err := os.Getgroups()
 	if err != nil {
 		return nil, fmt.Errorf("cannot read supplementary groups for the netns child: %w", err)
@@ -117,7 +110,7 @@ func buildNetnsChild(ctx context.Context, childArgv, childEnv []string) (*exec.C
 	if err != nil {
 		return nil, fmt.Errorf("cannot encode netns setup request: %w", err)
 	}
-	cmd := exec.CommandContext(ctx, "sudo", "-n", self, "__netns-helper", "setup")
+	cmd := exec.CommandContext(ctx, "sudo", "-n", netnsHelperPath, "setup")
 	cmd.Stdin = bytes.NewReader(reqBytes)
 	// sudo resets the environment; the CHILD env is carried in the request and
 	// applied by the helper at execve. This env is only sudo's own.

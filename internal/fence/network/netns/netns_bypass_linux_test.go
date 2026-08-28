@@ -212,7 +212,7 @@ func requireRoot(t *testing.T) {
 	if os.Geteuid() != 0 {
 		const msg = "Q6 netns mutation test needs root to create a netns + nftables base"
 		if strictlyRequired() {
-			t.Fatalf("%s; NOCKLOCK_Q6_REQUIRE=1 forbids skipping", msg)
+			t.Fatalf("%s; strict-required mode forbids skipping", msg)
 		}
 		t.Skipf("%s; skipping (runs under the privileged CI job)", msg)
 	}
@@ -225,7 +225,7 @@ func requireTool(t *testing.T, name string) string {
 	p, err := exec.LookPath(name)
 	if err != nil {
 		if strictlyRequired() {
-			t.Fatalf("Q6 netns mutation test needs %q in PATH (NOCKLOCK_Q6_REQUIRE=1 forbids skipping): %v", name, err)
+			t.Fatalf("Q6 netns mutation test needs %q in PATH (strict-required mode forbids skipping): %v", name, err)
 		}
 		t.Skipf("Q6 netns mutation test needs %q in PATH: %v", name, err)
 	}
