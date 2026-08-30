@@ -77,6 +77,14 @@ All notable changes to NockLock will be documented in this file.
 
 ### Testing
 
+- **SBPL generator acceptance coverage (N10058)** — closed the residual test
+  gaps named by the macOS-fence Phase-1a acceptance criteria against the already
+  shipped generator (`sbpl.go`, #27/#38): a table-driven test asserting a config
+  of N sensitive paths yields exactly N canonical `(subpath …)` deny rules; a
+  preamble-ordering assertion (`(version 1)` first, `(allow default)` before the
+  first `(deny …)`, never `(deny default)`); and a fail-CLOSED negative control
+  proving an unresolvable path makes `GenerateProfile` error and emit no profile
+  (never a silent unfenced drop). No production code changed.
 - **Fuzz coverage over the fence decision surface** — the project's first fuzz
   targets, seeded from the v0.4.0 known-bypass regressions, hunt the next bypass
   class continuously in CI (bounded `-fuzztime`, one target per package). The
