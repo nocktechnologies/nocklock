@@ -166,6 +166,97 @@ func TestCanonicalize_NonexistentPathResolvesPrefix(t *testing.T) {
 	}
 }
 
+// TestGenerateProfile_TableEmitsRulePerPath is the table-driven proof that a
+// config of N sensitive paths yields exactly N canonical (subpath "…") deny
+// rules — one per path, each carrying the RESOLVED path (acceptance: "given a
+// config with N sensitive paths, the generated profile contains a correct
+// (deny … (subpath "<canonical>")) for each").
+func TestGenerateProfile_TableEmitsRulePerPath(t *testing.T) {
+	const n = 4
+	inputs := make([]string, 0, n)
+	wantCanonical := make([]string, 0, n)
+	for i := 0; i < n; i++ {
+		d := t.TempDir() // each is a distinct real dir, so nothing dedups away
+		resolved, err := filepath.EvalSymlinks(d)
+		if err != nil {
+			t.Fatal(err)
+		}
+		inputs = append(inputs, d)
+		wantCanonical = append(wantCanonical, resolved)
+	}
+
+	prof, err := GenerateProfile(inputs)
+	if err != nil {
+		t.Fatalf("GenerateProfile: %v", err)
+	}
+	for _, c := range wantCanonical {
+		want := "(subpath " + sbplString(c) + ")"
+		if !strings.Contains(prof, want) {
+			t.Errorf("profile missing per-path rule %s:\n%s", want, prof)
+		}
+	}
+	if got := strings.Count(prof, "(subpath "); got != n {
+		t.Errorf("expected exactly %d (subpath …) rules, got %d:\n%s", n, got, prof)
+	}
+}
+
+// TestGenerateProfile_PreambleOrdering asserts the spec's validated preamble
+// ORDER (acceptance: profile "ALWAYS begins with the (version 1)(allow default)
+// preamble"). The spec's working shape puts these on separate lines with
+// comments between (see the design spec), so this checks order — (version 1)
+// first, (allow default) before the first (deny …) — not byte-contiguity, and
+// re-asserts (deny default) is absent.
+func TestGenerateProfile_PreambleOrdering(t *testing.T) {
+	prof, err := GenerateProfile([]string{t.TempDir()})
+	if err != nil {
+		t.Fatalf("GenerateProfile: %v", err)
+	}
+	if !strings.HasPrefix(prof, "(version 1)") {
+		t.Errorf("profile must start with (version 1):\n%s", prof)
+	}
+	allowIdx := strings.Index(prof, "(allow default)")
+	denyIdx := strings.Index(prof, "(deny ")
+	if allowIdx < 0 {
+		t.Fatalf("profile missing (allow default):\n%s", prof)
+	}
+	if denyIdx < 0 {
+		t.Fatalf("profile missing a (deny …) rule:\n%s", prof)
+	}
+	if allowIdx > denyIdx {
+		t.Errorf("(allow default) must precede the first (deny …) [allow@%d deny@%d]:\n%s", allowIdx, denyIdx, prof)
+	}
+	if strings.Contains(prof, "(deny default)") {
+		t.Errorf("profile must never contain (deny default) — it SIGABRTs:\n%s", prof)
+	}
+}
+
+// TestGenerateProfile_UnresolvablePathFailsClosed is the fail-CLOSED negative
+// control (acceptance: "non-canonicalizable path → error, no rule emitted"). A
+// path that cannot be resolved must make GenerateProfile ERROR and emit NO
+// profile, never silently drop the rule (which would leave the sensitive path
+// unfenced — fail open). We force the unresolvable case by removing the working
+// directory so filepath.Abs of a relative path fails.
+func TestGenerateProfile_UnresolvablePathFailsClosed(t *testing.T) {
+	tmp := t.TempDir()
+	t.Chdir(tmp) // restored on cleanup, before tmp's own removal cleanup runs
+	if err := os.Remove(tmp); err != nil {
+		t.Skipf("cannot remove cwd to simulate an unresolvable path: %v", err)
+	}
+	// With the cwd gone, os.Getwd fails, so filepath.Abs of a relative path
+	// fails and the path cannot be canonicalized.
+	if _, err := canonicalizeForProfile("relative/secret"); err == nil {
+		t.Skip("filepath.Abs unexpectedly succeeded with a removed cwd; cannot exercise the fail-closed path here")
+	}
+
+	prof, err := GenerateProfile([]string{"relative/secret"})
+	if err == nil {
+		t.Fatalf("expected a fail-closed error for an unresolvable path, got a profile:\n%s", prof)
+	}
+	if prof != "" {
+		t.Errorf("fail-closed must emit NO profile (no partial rule), got:\n%s", prof)
+	}
+}
+
 func TestSbplString_Escaping(t *testing.T) {
 	cases := map[string]string{
 		`/a/b`:    `"/a/b"`,
