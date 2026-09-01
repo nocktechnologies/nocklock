@@ -7,7 +7,7 @@ All notable changes to NockLock will be documented in this file.
 ### Added
 
 - CI: a `macos-enforce` job in `.github/workflows/test.yml` that runs the SBPL
-  filesystem fence's runtime ENFORCEMENT proof on a GitHub-hosted `macos-14`
+  filesystem fence's runtime ENFORCEMENT proof on a GitHub-hosted `macos-latest`
   runner. It exercises the existing
   darwin-tagged `TestSeatbeltEnforcement_RealSandboxExec` and
   `TestSeatbeltDeniesWriteToFencedAuditLog` under real `sandbox-exec` — a fenced

@@ -4,7 +4,7 @@ on:
   push:
     branches: [main]
   pull_request:
-    # ready_for_review is included so the self-hosted macos-enforce job's
+    # ready_for_review is included so the macos-enforce job's
     # `draft == false` gate fires on the draft→ready transition (mirrors
     # anvil.yml). This applies to the whole trigger, so the ubuntu test and
     # fuzz-smoke jobs also re-run when a draft PR is marked ready — a cheap,
@@ -79,12 +79,12 @@ jobs:
     # allow→success proof actually runs. Runs beside (never before) the ubuntu
     # `test` job — no `needs:`, so it can neither delay nor skip it.
     #
-    # Runs on a GitHub-hosted macos-14 runner (ephemeral + isolated), so PR
+    # Runs on a GitHub-hosted macos-latest runner (ephemeral + isolated), so PR
     # test code — even from forks — executes safely without a self-hosted
     # trust gate. sandbox-exec ships on the hosted image. Runs beside the
     # ubuntu `test` job (no `needs:`), so it can neither delay nor skip it.
     if: github.event.pull_request.draft == false
-    runs-on: macos-14
+    runs-on: macos-latest
     timeout-minutes: 15
     steps:
       - uses: actions/checkout@v4
