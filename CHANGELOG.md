@@ -15,9 +15,10 @@ All notable changes to NockLock will be documented in this file.
   acceptance gap: enforcement had never run in CI (the ubuntu job is
   generation-only, PR #80). The job runs beside — never before — the ubuntu
   `test` job, and runs on an ephemeral, isolated GitHub-hosted runner so fork PRs
-  can execute code safely without trust gates. A new `NOCKLOCK_SANDBOX_REQUIRE=1` gate on the
-  two tests (mirroring the netns suite's `NOCKLOCK_NETNS_REQUIRE`) turns their
-  normally-green "sandbox-exec unavailable" skip into a hard failure under CI, so
+  can execute code safely without trust gates. A new `NOCKLOCK_SANDBOX_REQUIRE=1`
+  gate on the two tests (mirroring the netns suite's `NOCKLOCK_NETNS_REQUIRE`)
+  turns their normally-green "sandbox-exec unavailable" skip into a hard failure
+  under CI, so
   a runner that has lost `sandbox-exec` cannot silently re-open the gap.
 - `nocklock wrap --net-fence=netns` (Linux, opt-in): the Phase-1 FOUNDATION of
   the network-egress fence (Candidate B). A privileged helper — acquired via
