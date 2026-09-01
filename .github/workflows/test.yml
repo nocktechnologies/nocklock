@@ -83,14 +83,8 @@ jobs:
     # test code on the shared Mac mini, so it must only ever run for non-fork
     # PRs from trusted collaborators on this private repo. A fork PR or an
     # outside contributor must never execute code on the self-hosted runner.
-    if: >-
-      github.event_name == 'pull_request' &&
-      github.event.repository.private == true &&
-      github.event.pull_request.draft == false &&
-      github.event.pull_request.user.login != 'dependabot[bot]' &&
-      github.event.pull_request.head.repo.full_name == github.repository &&
-      contains(fromJSON('["OWNER","MEMBER","COLLABORATOR"]'), github.event.pull_request.author_association)
-    runs-on: [self-hosted, macOS, ARM64]
+    if: github.event.pull_request.draft == false
+    runs-on: macos-14
     timeout-minutes: 15
     steps:
       - uses: actions/checkout@v4

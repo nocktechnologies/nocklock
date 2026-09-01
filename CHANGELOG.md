@@ -7,16 +7,15 @@ All notable changes to NockLock will be documented in this file.
 ### Added
 
 - CI: a `macos-enforce` job in `.github/workflows/test.yml` that runs the SBPL
-  filesystem fence's runtime ENFORCEMENT proof on the self-hosted Mac mini
-  (`runs-on: [self-hosted, macOS, ARM64]`). It exercises the existing
+  filesystem fence's runtime ENFORCEMENT proof on a GitHub-hosted `macos-14`
+  runner. It exercises the existing
   darwin-tagged `TestSeatbeltEnforcement_RealSandboxExec` and
   `TestSeatbeltDeniesWriteToFencedAuditLog` under real `sandbox-exec` — a fenced
   read/write is DENIED while an unfenced one SUCCEEDS — closing the final N9222
   acceptance gap: enforcement had never run in CI (the ubuntu job is
   generation-only, PR #80). The job runs beside — never before — the ubuntu
-  `test` job, and reuses anvil.yml's self-hosted trust gate shape (private repo,
-  non-fork, non-draft, non-dependabot, trusted `author_association`) so fork PRs
-  can't execute code on the mini. A new `NOCKLOCK_SANDBOX_REQUIRE=1` gate on the
+  `test` job, and runs on an ephemeral, isolated GitHub-hosted runner so fork PRs
+  can execute code safely without trust gates. A new `NOCKLOCK_SANDBOX_REQUIRE=1` gate on the
   two tests (mirroring the netns suite's `NOCKLOCK_NETNS_REQUIRE`) turns their
   normally-green "sandbox-exec unavailable" skip into a hard failure under CI, so
   a runner that has lost `sandbox-exec` cannot silently re-open the gap.
