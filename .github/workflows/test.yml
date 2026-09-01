@@ -79,10 +79,10 @@ jobs:
     # allow→success proof actually runs. Runs beside (never before) the ubuntu
     # `test` job — no `needs:`, so it can neither delay nor skip it.
     #
-    # Self-hosted trust gate (mirrors anvil.yml): this job compiles and runs PR
-    # test code on the shared Mac mini, so it must only ever run for non-fork
-    # PRs from trusted collaborators on this private repo. A fork PR or an
-    # outside contributor must never execute code on the self-hosted runner.
+    # Runs on a GitHub-hosted macos-14 runner (ephemeral + isolated), so PR
+    # test code — even from forks — executes safely without a self-hosted
+    # trust gate. sandbox-exec ships on the hosted image. Runs beside the
+    # ubuntu `test` job (no `needs:`), so it can neither delay nor skip it.
     if: github.event.pull_request.draft == false
     runs-on: macos-14
     timeout-minutes: 15
