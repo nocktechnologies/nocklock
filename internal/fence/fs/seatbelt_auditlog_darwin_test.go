@@ -15,9 +15,7 @@ import (
 // writing elsewhere still works. Read-denial is covered by the sibling test;
 // this one specifically exercises WRITE, which is the audit-tamper threat.
 func TestSeatbeltDeniesWriteToFencedAuditLog(t *testing.T) {
-	if err := EnsureSandboxExecAvailable(); err != nil {
-		t.Skipf("sandbox-exec unavailable: %v", err)
-	}
+	requireSandboxExec(t)
 
 	base := t.TempDir()
 	auditDir := filepath.Join(base, ".nock")

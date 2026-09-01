@@ -4,6 +4,12 @@ on:
   push:
     branches: [main]
   pull_request:
+    # ready_for_review is included so the self-hosted macos-enforce job's
+    # `draft == false` gate fires on the draft→ready transition (mirrors
+    # anvil.yml). This applies to the whole trigger, so the ubuntu test and
+    # fuzz-smoke jobs also re-run when a draft PR is marked ready — a cheap,
+    # desirable full-CI pass at the moment a PR opens for review.
+    types: [opened, synchronize, reopened, ready_for_review]
 
 permissions:
   contents: read
@@ -65,3 +71,48 @@ jobs:
 
       - name: fuzz landlock ruleset containment (grant/deny)
         run: go test ./internal/fence/fs/landlock/ -run='^$' -fuzz=FuzzRulesFromConfigContainment -fuzztime=25s
+
+  macos-enforce:
+    name: macOS SBPL fence enforcement proof (sandbox-exec)
+    # The SBPL fence's runtime ENFORCEMENT can only be exercised on real macOS
+    # via sandbox-exec, so this is the ONLY job where the deny→blocked /
+    # allow→success proof actually runs. Runs beside (never before) the ubuntu
+    # `test` job — no `needs:`, so it can neither delay nor skip it.
+    #
+    # Self-hosted trust gate (mirrors anvil.yml): this job compiles and runs PR
+    # test code on the shared Mac mini, so it must only ever run for non-fork
+    # PRs from trusted collaborators on this private repo. A fork PR or an
+    # outside contributor must never execute code on the self-hosted runner.
+    if: >-
+      github.event_name == 'pull_request' &&
+      github.event.repository.private == true &&
+      github.event.pull_request.draft == false &&
+      github.event.pull_request.user.login != 'dependabot[bot]' &&
+      github.event.pull_request.head.repo.full_name == github.repository &&
+      contains(fromJSON('["OWNER","MEMBER","COLLABORATOR"]'), github.event.pull_request.author_association)
+    runs-on: [self-hosted, macOS, ARM64]
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      # The enforcement tests are darwin build-tagged, so they compile and run
+      # natively on this macOS runner (no cross-build flag needed). Running the
+      # whole fs package auto-picks up any future sibling darwin-tagged proof.
+      #
+      # NOCKLOCK_SANDBOX_REQUIRE=1 turns the tests' normally-green "sandbox-exec
+      # unavailable" skip into a HARD FAILURE (via the requireSandboxExec gate),
+      # so a runner that has lost sandbox-exec can never report green by silently
+      # skipping the only proof of the SBPL fence's runtime enforcement — exactly
+      # the "enforcement has NEVER run in CI" gap (N9222) this job closes.
+      # Mirrors network-egress.yml's NOCKLOCK_NETNS_REQUIRE gate.
+      - name: run SBPL enforcement proof (deny→blocked / allow→success)
+        env:
+          NOCKLOCK_SANDBOX_REQUIRE: "1"
+        run: go test ./internal/fence/fs/ -count=1 -v
