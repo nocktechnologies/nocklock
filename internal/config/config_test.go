@@ -83,6 +83,9 @@ func TestDefaultConfig(t *testing.T) {
 	if cfg.Cloud.Enabled != false {
 		t.Error("expected cloud to be disabled by default")
 	}
+	if cfg.Filesystem.LinuxEnforcement != "required" {
+		t.Errorf("expected default linux_enforcement 'required', got %q", cfg.Filesystem.LinuxEnforcement)
+	}
 
 	// Verify sensitive dirs are denied by default
 	found := false
@@ -240,6 +243,9 @@ func TestDefaultConfigFilesystemRootAndMode(t *testing.T) {
 	if cfg.Filesystem.Mode != "read-write" {
 		t.Errorf("expected default filesystem mode 'read-write', got %q", cfg.Filesystem.Mode)
 	}
+	if cfg.Filesystem.LinuxEnforcement != "required" {
+		t.Errorf("expected default linux_enforcement 'required', got %q", cfg.Filesystem.LinuxEnforcement)
+	}
 }
 
 func TestDefaultTOMLMatchesDefaultConfig(t *testing.T) {
@@ -250,5 +256,75 @@ func TestDefaultTOMLMatchesDefaultConfig(t *testing.T) {
 	expected := DefaultConfig()
 	if !reflect.DeepEqual(parsed, expected) {
 		t.Error("DefaultTOML() does not produce the same config as DefaultConfig()")
+	}
+}
+
+func TestDefaultSyscallConfig(t *testing.T) {
+	cfg := DefaultConfig()
+	if cfg.Syscall.Enforcement != "preferred" {
+		t.Errorf("default syscall.enforcement = %q, want preferred", cfg.Syscall.Enforcement)
+	}
+	if cfg.Syscall.AllowNamespaces {
+		t.Error("default syscall.allow_namespaces should be false")
+	}
+	want := []string{"unix", "inet", "inet6"}
+	if !reflect.DeepEqual(cfg.Syscall.SocketFamilies, want) {
+		t.Errorf("default syscall.socket_families = %v, want %v", cfg.Syscall.SocketFamilies, want)
+	}
+}
+
+func TestSyscallConfigParsesAndIsOptIn(t *testing.T) {
+	// An explicit [syscall] block parses; an ABSENT one leaves the zero value
+	// (which the wiring treats as "preferred" only when present in defaults — a
+	// minimal config with no [syscall] block must not error).
+	const minimal = `
+[project]
+name = "x"
+[filesystem]
+root = "."
+`
+	var cfg Config
+	md, err := toml.Decode(minimal, &cfg)
+	if err != nil {
+		t.Fatalf("decode minimal config: %v", err)
+	}
+	if undec := md.Undecoded(); len(undec) > 0 {
+		t.Fatalf("unexpected undecoded keys: %v", undec)
+	}
+	if cfg.Syscall.Enforcement != "" {
+		t.Errorf("absent [syscall] should leave Enforcement empty, got %q", cfg.Syscall.Enforcement)
+	}
+	if len(Validate(&cfg)) != 0 {
+		t.Errorf("minimal config with no [syscall] should validate clean: %v", Validate(&cfg))
+	}
+}
+
+func TestSyscallEnforcementValidation(t *testing.T) {
+	cfg := DefaultConfig()
+	cfg.Syscall.Enforcement = "bogus"
+	errs := Validate(&cfg)
+	found := false
+	for _, e := range errs {
+		if e.Field == "syscall.enforcement" && e.Severity == "error" {
+			found = true
+		}
+	}
+	if !found {
+		t.Errorf("expected a syscall.enforcement validation error, got %v", errs)
+	}
+}
+
+func TestSyscallSocketFamilyValidation(t *testing.T) {
+	cfg := DefaultConfig()
+	cfg.Syscall.SocketFamilies = []string{"inet", "bogusfamily"}
+	errs := Validate(&cfg)
+	found := false
+	for _, e := range errs {
+		if e.Field == "syscall.socket_families" && e.Severity == "error" {
+			found = true
+		}
+	}
+	if !found {
+		t.Errorf("expected a syscall.socket_families validation error, got %v", errs)
 	}
 }

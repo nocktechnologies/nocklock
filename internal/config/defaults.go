@@ -8,8 +8,9 @@ func DefaultConfig() Config {
 			Root: ".",
 		},
 		Filesystem: FilesystemConfig{
-			Root: ".",
-			Mode: "read-write",
+			Root:             ".",
+			Mode:             "read-write",
+			LinuxEnforcement: "required",
 			Allow: []string{
 				"~/.claude/",
 				"/tmp/",
@@ -53,6 +54,11 @@ func DefaultConfig() Config {
 				"*_TOKEN*",
 			},
 		},
+		Syscall: SyscallConfig{
+			Enforcement:     "preferred",
+			AllowNamespaces: false,
+			SocketFamilies:  []string{"unix", "inet", "inet6"},
+		},
 		Logging: LoggingConfig{
 			DB:    ".nock/events.db",
 			Level: "info",
@@ -74,6 +80,7 @@ root = "."
 [filesystem]
 root = "."
 mode = "read-write"
+linux_enforcement = "required"
 allow = [
     "~/.claude/",
     "/tmp/",
@@ -115,6 +122,18 @@ block = [
     "*_SECRET*",
     "*_PASSWORD*",
     "*_TOKEN*",
+]
+
+[syscall]
+# Linux seccomp-BPF syscall fence (no-op on macOS).
+# enforcement: "required" (fail closed), "preferred" (install if supported),
+# or "off" (disabled).
+enforcement = "preferred"
+allow_namespaces = false
+socket_families = [
+    "unix",
+    "inet",
+    "inet6",
 ]
 
 [logging]
