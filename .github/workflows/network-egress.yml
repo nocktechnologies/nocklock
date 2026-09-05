@@ -127,3 +127,37 @@ jobs:
       # ip/nft in /usr/sbin. This is the first time this bar actually executes.
       - name: run Q6 acceptance test as root (skips forbidden)
         run: sudo env NOCKLOCK_Q6_REQUIRE=1 ./netns.test -test.run '^TestQ6' -test.v -test.count=1
+
+  netns-foundation:
+    name: netns Phase-1 foundation · default-drop denies all egress (root)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: provision iproute2 + nftables
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y iproute2 nftables
+
+      # Compile AS THE RUNNER USER so root never writes into the Go build/module
+      # cache (setup-go persists it; root-owned files there break the cache save).
+      # The compiled binary re-execs itself as the capped egress child, so a
+      # standalone binary is exactly what the test needs — same idiom as Q6.
+      - name: compile netns foundation acceptance test
+        run: go test -c -o netns.test ./internal/fence/network/netns/
+
+      # Run as root with NOCKLOCK_NETNS_REQUIRE=1 so a non-root or tool-missing
+      # runner HARD-FAILS instead of silently skipping (mirrors the Q6 gate). This
+      # is the receipted Phase-1 foundation bar: with the default-drop base
+      # installed, the capped child is denied ALL egress (external TCP + UDP/53).
+      # An exact ^TestNetnsFoundation anchor + -test.v means a pattern that matched
+      # nothing would be visible, not a silent green.
+      - name: run netns foundation acceptance test as root (skips forbidden)
+        run: sudo env NOCKLOCK_NETNS_REQUIRE=1 ./netns.test -test.run '^TestNetnsFoundation' -test.v -test.count=1

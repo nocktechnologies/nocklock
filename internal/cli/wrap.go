@@ -57,8 +57,23 @@ var wrapCmd = &cobra.Command{
 			return fmt.Errorf("invalid config at %s: %w", configPath, err)
 		}
 		effectiveCfg := effectiveWrapConfig(cfg, wrapFlags)
+
+		// --net-fence=netns opts into the kernel-enforced network-namespace
+		// default-drop floor (Nock #9916, Phase-1 foundation). It is Linux-only;
+		// on any other platform there is no equivalent, so we FAIL CLOSED (refuse)
+		// rather than silently fall back to the userspace proxy. Checked before the
+		// dry-run branch so `--dry-run` on a non-Linux host reports the refusal too.
+		useNetns := wrapFlags.NetFence == "netns"
+		if useNetns && runtime.GOOS != "linux" {
+			cmd.SilenceUsage = true
+			return fmt.Errorf("--net-fence=netns requires Linux kernel network namespaces; refusing to run without the kernel-enforced egress floor")
+		}
+
 		if wrapFlags.DryRun {
 			fmt.Fprintln(os.Stdout, effectiveCfg.EffectivePolicy())
+			if useNetns {
+				fmt.Fprintln(os.Stderr, "NockLock: --net-fence=netns selected — the kernel-enforced netns default-drop floor OVERRIDES the network posture above (all egress denied; no allowances yet), and requires passwordless sudo at run time")
+			}
 			if wrapFlags.Profile != "" {
 				fmt.Fprintf(os.Stderr, "NockLock: profile %q is the base; %s overlays may only tighten it\n", wrapFlags.Profile, filepath.Join(config.Dir, config.File))
 			}
@@ -282,7 +297,25 @@ var wrapCmd = &cobra.Command{
 		defer childCancel()
 		var proxyFailed atomic.Bool
 
-		if !cfg.Network.AllowAll {
+		if useNetns {
+			// Kernel-enforced network egress floor. Confirm the privileged helper
+			// is reachable via passwordless sudo (the DECIDED acquisition path)
+			// BEFORE launching the child. Fail closed if it is not — there is no
+			// advisory/degraded network fallback (spec 2026-08-24).
+			if err := netnsHelperPreflight(cmd.Context()); err != nil {
+				logEvent(logging.EventNetworkError, "network", fmt.Sprintf("netns preflight failed: %v", err), true)
+				cmd.SilenceUsage = true
+				cmd.SilenceErrors = true
+				fmt.Fprintf(os.Stderr, "NockLock: fatal: network egress fence (netns) unavailable: %v\n", err)
+				return &exitCodeError{code: 2}
+			}
+			// The userspace proxy is intentionally NOT started under the netns
+			// floor: the default-drop base drops loopback too, so a 127.0.0.1
+			// listener would be unreachable. The child is handed to the privileged
+			// helper below. env-proxy vars were already stripped above.
+			logEvent(logging.EventNetworkPassed, "network", "netns default-drop egress fence active", false)
+			fmt.Fprintln(os.Stderr, "NockLock: network egress fence active — netns default-drop floor (kernel-enforced, no allowances)")
+		} else if !cfg.Network.AllowAll {
 			proxyCfg := effectiveCfg.Network
 			proxy := network.NewProxyServer(proxyCfg, logger, sessionID)
 			addr, proxyErr := proxy.Start()
@@ -335,9 +368,30 @@ var wrapCmd = &cobra.Command{
 		// (kernel-enforced, inherited by all descendants). On Linux fsSandboxPrefix
 		// is empty and the child runs directly with the LD_PRELOAD env above.
 		childArgv := composeChildArgv(args, landlockPrefix, fsSandboxPrefix)
-		child := exec.CommandContext(childCtx, childArgv[0], childArgv[1:]...)
-		child.Env = childEnv
-		child.Stdin = os.Stdin
+		var child *exec.Cmd
+		if useNetns {
+			// Hand the fully-composed child (any fs/syscall shim prefix included) to
+			// the privileged netns helper via `sudo -n <helper> setup`.
+			// The helper creates the namespace + default-drop base, drops the
+			// child's capabilities from all five sets, drops to this (invoking)
+			// user, and execve's the child inside the namespace. The request —
+			// argv, env, and the unprivileged credential — travels on stdin so it
+			// never rides the fixed sudoers argument vector.
+			//
+			// FOUNDATION LIMITATION (documented): the request consumes the child's
+			// stdin, so an interactive agent that needs terminal stdin is not yet
+			// supported under --net-fence=netns. A dedicated request fd is the
+			// later-increment fix; the kernel-enforced floor itself is unaffected.
+			nc, err := buildNetnsChild(childCtx, childArgv, childEnv)
+			if err != nil {
+				return err
+			}
+			child = nc
+		} else {
+			child = exec.CommandContext(childCtx, childArgv[0], childArgv[1:]...)
+			child.Env = childEnv
+			child.Stdin = os.Stdin
+		}
 		child.Stdout = os.Stdout
 		child.Stderr = os.Stderr
 

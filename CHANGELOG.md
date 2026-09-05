@@ -6,6 +6,37 @@ All notable changes to NockLock will be documented in this file.
 
 ### Added
 
+- CI: a `macos-enforce` job in `.github/workflows/test.yml` that runs the SBPL
+  filesystem fence's runtime ENFORCEMENT proof on a GitHub-hosted `macos-latest`
+  runner. It exercises the existing
+  darwin-tagged `TestSeatbeltEnforcement_RealSandboxExec` and
+  `TestSeatbeltDeniesWriteToFencedAuditLog` under real `sandbox-exec` — a fenced
+  read/write is DENIED while an unfenced one SUCCEEDS — closing the final N9222
+  acceptance gap: enforcement had never run in CI (the ubuntu job is
+  generation-only, PR #80). The job runs beside — never before — the ubuntu
+  `test` job, and runs on an ephemeral, isolated GitHub-hosted runner so fork PRs
+  can execute code safely without trust gates. A new `NOCKLOCK_SANDBOX_REQUIRE=1`
+  gate on the two tests (mirroring the netns suite's `NOCKLOCK_NETNS_REQUIRE`)
+  turns their normally-green "sandbox-exec unavailable" skip into a hard failure
+  under CI, so
+  a runner that has lost `sandbox-exec` cannot silently re-open the gap.
+- `nocklock wrap --net-fence=netns` (Linux, opt-in): the Phase-1 FOUNDATION of
+  the network-egress fence (Candidate B). A privileged helper — acquired via
+  passwordless `sudo -n` under the DECIDED capability model (spec amendment
+  2026-08-24) — creates a fresh network namespace (`CLONE_NEWNET`), brings
+  loopback up, installs a default-drop `nftables` base across ALL transports and
+  both IPv4 and IPv6 (QUIC/UDP/SCTP/TCP all denied — no allowances yet), drops
+  `CAP_NET_ADMIN`+`CAP_SYS_ADMIN` from all five capability sets (reusing the
+  receipted Q6 cap-drop harness), drops to the invoking user, and execve's the
+  agent as a non-root child inside the namespace. Fail-closed: if privilege
+  cannot be acquired or the five-set drop cannot complete, NockLock refuses to
+  exec — no advisory/degraded fallback. Default `wrap` behavior is unchanged;
+  the flag is Linux-only and refuses on other platforms. This is the
+  kernel-enforced hardened (no-network) floor; the transparent HTTP(S)/DNS
+  allowlist on top of it is a later increment (gated on Q7). A new root-gated
+  acceptance test (`TestNetnsFoundation_DefaultDropDeniesEgress`) proves the
+  capped child is denied all egress and runs beside the Q6 bar in the
+  `network-egress` CI workflow.
 - `nocklock egress-probe`: a repeatable, structured feasibility probe for the
   Linux network-egress-enforcement track (Candidate B: netns + transparent
   redirect). It codifies the Phase 0 VPS probe runs so every fleet kernel — CI
@@ -60,6 +91,14 @@ All notable changes to NockLock will be documented in this file.
 
 ### Testing
 
+- **SBPL generator acceptance coverage (N10058)** — closed the residual test
+  gaps named by the macOS-fence Phase-1a acceptance criteria against the already
+  shipped generator (`sbpl.go`, #27/#38): a table-driven test asserting a config
+  of N sensitive paths yields exactly N canonical `(subpath …)` deny rules; a
+  preamble-ordering assertion (`(version 1)` first, `(allow default)` before the
+  first `(deny …)`, never `(deny default)`); and a fail-CLOSED negative control
+  proving an unresolvable path makes `GenerateProfile` error and emit no profile
+  (never a silent unfenced drop). No production code changed.
 - **Fuzz coverage over the fence decision surface** — the project's first fuzz
   targets, seeded from the v0.4.0 known-bypass regressions, hunt the next bypass
   class continuously in CI (bounded `-fuzztime`, one target per package). The

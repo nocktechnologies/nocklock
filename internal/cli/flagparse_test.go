@@ -56,6 +56,55 @@ func TestParseWrapFlagsProfile(t *testing.T) {
 	}
 }
 
+// TestParseWrapFlagsNetFence verifies both supported net-fence flag forms.
+func TestParseWrapFlagsNetFence(t *testing.T) {
+	// Both the space and =-joined forms select the netns floor.
+	for _, args := range [][]string{
+		{"--net-fence", "netns", "--", "cmd"},
+		{"--net-fence=netns", "--", "cmd"},
+	} {
+		flags, childArgs, err := parseWrapFlags(args)
+		if err != nil {
+			t.Fatalf("args %v: unexpected error: %v", args, err)
+		}
+		if flags.NetFence != "netns" {
+			t.Fatalf("args %v: NetFence = %q, want netns", args, flags.NetFence)
+		}
+		if len(childArgs) != 1 || childArgs[0] != "cmd" {
+			t.Fatalf("args %v: unexpected child args: %v", args, childArgs)
+		}
+	}
+}
+
+// TestParseWrapFlagsNetFenceDefaultsEmpty verifies the default net-fence mode.
+func TestParseWrapFlagsNetFenceDefaultsEmpty(t *testing.T) {
+	// Negative control: without the flag, NetFence stays empty — default wrap
+	// behavior is unchanged.
+	flags, _, err := parseWrapFlags([]string{"--", "cmd"})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if flags.NetFence != "" {
+		t.Fatalf("NetFence = %q, want empty by default", flags.NetFence)
+	}
+}
+
+// TestParseWrapFlagsNetFenceUnknownValueRejected verifies invalid net-fence values fail.
+func TestParseWrapFlagsNetFenceUnknownValueRejected(t *testing.T) {
+	// A typo must be rejected, never silently degraded to "no fence".
+	if _, _, err := parseWrapFlags([]string{"--net-fence=bogus", "--", "cmd"}); err == nil {
+		t.Fatal("expected an error for an unknown --net-fence value, got nil")
+	}
+	// An empty =-value must error, not select the default.
+	if _, _, err := parseWrapFlags([]string{"--net-fence=", "--", "cmd"}); err == nil {
+		t.Fatal("expected an error for an empty --net-fence value, got nil")
+	}
+	// --net-fence with no following value in the flag region must error.
+	if _, _, err := parseWrapFlags([]string{"--net-fence", "--"}); err == nil {
+		t.Fatal("expected an error for --net-fence with no value, got nil")
+	}
+}
+
 func TestParseWrapFlagsProfileEquals(t *testing.T) {
 	flags, childArgs, err := parseWrapFlags([]string{"--profile=claude-code", "--dry-run"})
 	if err != nil {
