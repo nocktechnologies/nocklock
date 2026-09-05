@@ -1,4 +1,4 @@
-# NockLock
+# NockLock™
 
 **Fence, not guardrails.** Sandbox your AI agents without restricting how they work.
 
@@ -231,4 +231,4 @@ See [CONTRIBUTING.md](CONTRIBUTING.md).
 
 ---
 
-Built by [Nock Technologies](https://nocktechnologies.io).
+Built by [Nock Technologies™](https://nocktechnologies.io).
