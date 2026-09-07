@@ -22,9 +22,9 @@ const netnsHelperPath = "/usr/libexec/nocklock-egress-helper"
 // two fixed argument vectors:
 //
 //	check — non-mutating preflight (is the privileged path reachable?)
-//	setup — read a JSON netns.Request from STDIN, create the namespace +
-//	        default-drop base, drop the child's capabilities from all five
-//	        sets, drop to the unprivileged child credential, and execve the child.
+//	setup — read a JSON netns.Request from STDIN, create the namespace + tproxy
+//	        HTTP(S)/DNS policy sidecar, drop the child's capabilities from all
+//	        five sets, drop to the unprivileged child credential, and execve it.
 //
 // The child argv/env/credential travel on stdin, never on argv, so the fixed
 // two-vector sudoers policy is a real boundary rather than an argument-injection
@@ -60,8 +60,18 @@ var netnsHelperCmd = &cobra.Command{
 	},
 }
 
+var netnsProxyCmd = &cobra.Command{
+	Use:    "__netns-proxy",
+	Hidden: true,
+	RunE: func(cmd *cobra.Command, _ []string) error {
+		cmd.SilenceUsage = true
+		return netns.StartPolicyProxyFromEnv()
+	},
+}
+
 func init() {
 	rootCmd.AddCommand(netnsHelperCmd)
+	rootCmd.AddCommand(netnsProxyCmd)
 }
 
 // netnsHelperPreflight runs the non-mutating `check` verb through passwordless
@@ -81,7 +91,7 @@ func netnsHelperPreflight(ctx context.Context) error {
 // that hands the composed child to the privileged helper. The child argv, env,
 // and the unprivileged credential to drop to are JSON-encoded onto stdin so they
 // never ride the fixed sudoers argument vector.
-func buildNetnsChild(ctx context.Context, childArgv, childEnv []string) (*exec.Cmd, error) {
+func buildNetnsChild(ctx context.Context, childArgv, childEnv []string, proxy netns.ProxyConfig) (*exec.Cmd, error) {
 	groups, err := os.Getgroups()
 	if err != nil {
 		return nil, fmt.Errorf("cannot read supplementary groups for the netns child: %w", err)
@@ -105,6 +115,7 @@ func buildNetnsChild(ctx context.Context, childArgv, childEnv []string) (*exec.C
 		UID:    os.Getuid(),
 		GID:    os.Getgid(),
 		Groups: groups,
+		Proxy:  proxy,
 	}
 	reqBytes, err := json.Marshal(req)
 	if err != nil {

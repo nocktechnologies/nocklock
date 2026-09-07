@@ -95,6 +95,13 @@ const epermMarker = "operation not permitted"
 // TestMain intercepts the re-exec'd child helper before the test framework runs,
 // so the child does exactly one fenced mutation and exits with a decodable code.
 func TestMain(m *testing.M) {
+	if os.Getenv("NOCKLOCK_NETNS_TEST_PROXY") == "1" {
+		if err := StartPolicyProxyFromEnv(); err != nil {
+			fmt.Fprintln(os.Stderr, "test transparent proxy:", err)
+			os.Exit(exitSetupFailed)
+		}
+		os.Exit(0)
+	}
 	if scenario := os.Getenv(scenarioEnv); scenario != "" {
 		os.Exit(runChild(scenario))
 	}

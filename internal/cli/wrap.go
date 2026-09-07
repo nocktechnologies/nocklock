@@ -20,6 +20,7 @@ import (
 	fsfence "github.com/nocktechnologies/nocklock/internal/fence/fs"
 	"github.com/nocktechnologies/nocklock/internal/fence/fs/landlock"
 	"github.com/nocktechnologies/nocklock/internal/fence/network"
+	"github.com/nocktechnologies/nocklock/internal/fence/network/netns"
 	"github.com/nocktechnologies/nocklock/internal/fence/secrets"
 	"github.com/nocktechnologies/nocklock/internal/logging"
 	"github.com/spf13/cobra"
@@ -59,7 +60,7 @@ var wrapCmd = &cobra.Command{
 		effectiveCfg := effectiveWrapConfig(cfg, wrapFlags)
 
 		// --net-fence=netns opts into the kernel-enforced network-namespace
-		// default-drop floor (Nock #9916, Phase-1 foundation). It is Linux-only;
+		// tproxy HTTP(S)+DNS allowlist (Nock #10399, Phase-1b). It is Linux-only;
 		// on any other platform there is no equivalent, so we FAIL CLOSED (refuse)
 		// rather than silently fall back to the userspace proxy. Checked before the
 		// dry-run branch so `--dry-run` on a non-Linux host reports the refusal too.
@@ -72,7 +73,7 @@ var wrapCmd = &cobra.Command{
 		if wrapFlags.DryRun {
 			fmt.Fprintln(os.Stdout, effectiveCfg.EffectivePolicy())
 			if useNetns {
-				fmt.Fprintln(os.Stderr, "NockLock: --net-fence=netns selected — the kernel-enforced netns default-drop floor OVERRIDES the network posture above (all egress denied; no allowances yet), and requires passwordless sudo at run time")
+				fmt.Fprintln(os.Stderr, "NockLock: --net-fence=netns selected — the kernel-enforced tproxy HTTP(S)+DNS allowlist overrides the userspace proxy posture and requires passwordless sudo at run time")
 			}
 			if wrapFlags.Profile != "" {
 				fmt.Fprintf(os.Stderr, "NockLock: profile %q is the base; %s overlays may only tighten it\n", wrapFlags.Profile, filepath.Join(config.Dir, config.File))
@@ -296,6 +297,7 @@ var wrapCmd = &cobra.Command{
 		childCtx, childCancel := context.WithCancel(cmd.Context())
 		defer childCancel()
 		var proxyFailed atomic.Bool
+		var netnsProxy netns.ProxyConfig
 
 		if useNetns {
 			// Kernel-enforced network egress floor. Confirm the privileged helper
@@ -309,12 +311,34 @@ var wrapCmd = &cobra.Command{
 				fmt.Fprintf(os.Stderr, "NockLock: fatal: network egress fence (netns) unavailable: %v\n", err)
 				return &exitCodeError{code: 2}
 			}
-			// The userspace proxy is intentionally NOT started under the netns
-			// floor: the default-drop base drops loopback too, so a 127.0.0.1
-			// listener would be unreachable. The child is handed to the privileged
-			// helper below. env-proxy vars were already stripped above.
-			logEvent(logging.EventNetworkPassed, "network", "netns default-drop egress fence active", false)
-			fmt.Fprintln(os.Stderr, "NockLock: network egress fence active — netns default-drop floor (kernel-enforced, no allowances)")
+			broker := network.NewTransparentBroker(effectiveCfg.Network, logger, sessionID)
+			brokerPath, brokerToken, brokerErr := broker.Start()
+			if brokerErr != nil {
+				logEvent(logging.EventNetworkError, "network", fmt.Sprintf("netns broker start failed: %v", brokerErr), true)
+				fmt.Fprintf(os.Stderr, "NockLock: fatal: transparent network broker failed to start: %v\n", brokerErr)
+				cmd.SilenceUsage = true
+				cmd.SilenceErrors = true
+				return &exitCodeError{code: 2}
+			}
+			defer broker.Stop()
+			netnsProxy = netns.ProxyConfig{
+				Allow:              effectiveCfg.Network.Allow,
+				AllowAll:           effectiveCfg.Network.AllowAll,
+				AllowPrivateRanges: effectiveCfg.Network.AllowPrivateRanges,
+				BrokerPath:         brokerPath,
+				BrokerToken:        brokerToken,
+			}
+
+			watchdogCtx, watchdogCancel := context.WithCancel(cmd.Context())
+			defer watchdogCancel()
+			broker.StartWatchdog(watchdogCtx.Done(), 5*time.Second, 2, func() {
+				proxyFailed.Store(true)
+				logEvent(logging.EventNetworkError, "network", "transparent proxy heartbeat lost, killing child", true)
+				fmt.Fprintln(os.Stderr, "NockLock: fatal: transparent network proxy died unexpectedly — terminating child process")
+				childCancel()
+			})
+			logEvent(logging.EventNetworkPassed, "network", "netns tproxy allowlist fence active", false)
+			fmt.Fprintf(os.Stderr, "NockLock: network egress fence active — netns tproxy allowlist (%d domain(s))\n", len(effectiveCfg.Network.Allow))
 		} else if !cfg.Network.AllowAll {
 			proxyCfg := effectiveCfg.Network
 			proxy := network.NewProxyServer(proxyCfg, logger, sessionID)
@@ -372,8 +396,8 @@ var wrapCmd = &cobra.Command{
 		if useNetns {
 			// Hand the fully-composed child (any fs/syscall shim prefix included) to
 			// the privileged netns helper via `sudo -n <helper> setup`.
-			// The helper creates the namespace + default-drop base, drops the
-			// child's capabilities from all five sets, drops to this (invoking)
+			// The helper creates the namespace + tproxy/DNS policy sidecar, drops
+			// the child's capabilities from all five sets, drops to this invoking
 			// user, and execve's the child inside the namespace. The request —
 			// argv, env, and the unprivileged credential — travels on stdin so it
 			// never rides the fixed sudoers argument vector.
@@ -382,7 +406,7 @@ var wrapCmd = &cobra.Command{
 			// stdin, so an interactive agent that needs terminal stdin is not yet
 			// supported under --net-fence=netns. A dedicated request fd is the
 			// later-increment fix; the kernel-enforced floor itself is unaffected.
-			nc, err := buildNetnsChild(childCtx, childArgv, childEnv)
+			nc, err := buildNetnsChild(childCtx, childArgv, childEnv, netnsProxy)
 			if err != nil {
 				return err
 			}

@@ -3,6 +3,8 @@
 package netns
 
 import (
+	"encoding/base64"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
@@ -12,6 +14,8 @@ import (
 	"runtime"
 	"strconv"
 	"strings"
+	"syscall"
+	"time"
 
 	"golang.org/x/sys/unix"
 )
@@ -45,6 +49,10 @@ type Request struct {
 	GID int `json:"gid"`
 	// Groups are the supplementary groups to set for the child. Empty clears them.
 	Groups []int `json:"groups"`
+	// Proxy wires the privileged namespace sidecar to the host-network broker.
+	// It is required for Phase 1b: there is no default-drop-only fallback once
+	// --net-fence=netns selects the working egress allowlist.
+	Proxy ProxyConfig `json:"proxy"`
 }
 
 // trustedToolDirs is the FIXED search path for the setup tools. A root helper
@@ -154,9 +162,10 @@ func envInt(name string) (int, error) {
 
 // SetupAndExec is the `setup` verb and the whole privileged floor: it validates
 // the requested child credential, creates a fresh network namespace, brings
-// loopback up, installs the DefaultDropRuleset base, drops the fence capabilities
-// from all five sets, drops to the requested unprivileged credential, latches
-// NO_NEW_PRIVS, and finally execve's the child INTO that namespace.
+// loopback up, installs the tproxy default-drop policy and authenticated
+// HTTP(S)/DNS sidecar, drops the fence capabilities from all five sets, drops to
+// the requested unprivileged credential, latches NO_NEW_PRIVS, and finally
+// execve's the child INTO that namespace.
 //
 // FAIL-CLOSED: it returns an error at the first failed step and NEVER execs a
 // child it could not fully fence. On success it does not return — execve
@@ -174,6 +183,16 @@ func SetupAndExec(req Request) error {
 	// without side effects.
 	if err := validateChildCredential(req); err != nil {
 		return err
+	}
+	if !req.Proxy.Valid() {
+		return errors.New("netns setup request has no authenticated transparent proxy broker; refusing default-drop-only fallback")
+	}
+	proxyUser, err := proxyCredential()
+	if err != nil {
+		return fmt.Errorf("resolve transparent proxy credential: %w", err)
+	}
+	if proxyUser.uid == req.UID {
+		return fmt.Errorf("transparent proxy uid %d matches child uid; refusing a bypassable policy", req.UID)
 	}
 
 	// Namespace membership and per-thread capability state are BOTH per-thread,
@@ -195,18 +214,33 @@ func SetupAndExec(req Request) error {
 		return fmt.Errorf("create network namespace (CLONE_NEWNET): %w", err)
 	}
 
-	// Bring the loopback interface up (link state). The base installs no loopback
-	// allowance yet — see DefaultDropRuleset — but later increments (proxy
-	// listener, in-namespace DNS stub) need a live `lo`.
+	// Bring the loopback interface up (link state). Phase 1b tproxy locally
+	// delivers HTTP(S) and DNS traffic to its sidecar over this interface.
 	if out, err := runInNS("ip", "link", "set", "lo", "up"); err != nil {
 		return fmt.Errorf("bring loopback up: %w\n%s", err, out)
 	}
 
-	// Install the default-drop base. nft reads the ruleset from stdin and, because
-	// it is forked from this locked (already-unshared) thread, configures THIS
-	// namespace's tables.
-	if out, err := runInNSStdin(DefaultDropRuleset, "nft", "-f", "-"); err != nil {
-		return fmt.Errorf("install default-drop nftables base: %w\n%s", err, out)
+	// Install tproxy's marked local-delivery route before applying the packet
+	// rules. Without both the ip-rule route and the nftables rule, a transparent
+	// listener is either unreachable or a packet-level drop — neither is the
+	// required intercepted, fail-closed direct-IP behaviour.
+	if err := installTransparentRoutes(); err != nil {
+		return fmt.Errorf("install tproxy local-delivery routes: %w", err)
+	}
+
+	// Install the Phase-1b default-drop policy. It only allows marked HTTP(S)
+	// and DNS packets into the sidecar; all other transports stay denied.
+	if out, err := runInNSStdin(TransparentRuleset(proxyUser.uid), "nft", "-f", "-"); err != nil {
+		return fmt.Errorf("install transparent nftables policy: %w\n%s", err, out)
+	}
+
+	// Start the separate transparent proxy while privileged so it can create
+	// IP_TRANSPARENT listeners, then wait for its authenticated broker heartbeat
+	// before the child is allowed to run. The sidecar drops to nobody before it
+	// accepts child bytes and receives Pdeathsig so it cannot outlive the fenced
+	// session.
+	if err := startPolicySidecar(req.Proxy); err != nil {
+		return fmt.Errorf("start transparent policy proxy: %w", err)
 	}
 
 	// Drop CAP_NET_ADMIN + CAP_SYS_ADMIN (+ the temporary CAP_SETPCAP) from all
@@ -242,6 +276,69 @@ func SetupAndExec(req Request) error {
 		return fmt.Errorf("exec child %q in namespace: %w", req.Argv[0], err)
 	}
 	return errors.New("unreachable: execve returned without error")
+}
+
+func installTransparentRoutes() error {
+	commands := [][]string{
+		{"rule", "add", "priority", "100", "fwmark", fmt.Sprintf("0x%x", transparentMark), "lookup", strconv.Itoa(transparentRouteTable)},
+		{"route", "replace", "local", "0.0.0.0/0", "dev", "lo", "table", strconv.Itoa(transparentRouteTable)},
+		{"route", "replace", "default", "dev", "lo"},
+		{"-6", "rule", "add", "priority", "100", "fwmark", fmt.Sprintf("0x%x", transparentMark), "lookup", strconv.Itoa(transparentRouteTable)},
+		{"-6", "route", "replace", "local", "::/0", "dev", "lo", "table", strconv.Itoa(transparentRouteTable)},
+		{"-6", "route", "replace", "default", "dev", "lo"},
+	}
+	for _, args := range commands {
+		if out, err := runInNS("ip", args...); err != nil {
+			return fmt.Errorf("ip %s: %w\n%s", strings.Join(args, " "), err, out)
+		}
+	}
+	return nil
+}
+
+func startPolicySidecar(cfg ProxyConfig) error {
+	raw, err := json.Marshal(cfg)
+	if err != nil {
+		return fmt.Errorf("encode sidecar configuration: %w", err)
+	}
+	readinessRead, readinessWrite, err := os.Pipe()
+	if err != nil {
+		return fmt.Errorf("create sidecar readiness pipe: %w", err)
+	}
+	defer readinessRead.Close()
+
+	cmd := exec.Command(os.Args[0], "__netns-proxy")
+	cmd.Env = []string{
+		proxyConfigEnv + "=" + base64.RawStdEncoding.EncodeToString(raw),
+		proxyReadyFDEnv + "=3",
+	}
+	cmd.ExtraFiles = []*os.File{readinessWrite}
+	cmd.Stdout = os.Stderr
+	cmd.Stderr = os.Stderr
+	cmd.SysProcAttr = &syscall.SysProcAttr{Pdeathsig: syscall.SIGKILL}
+	if err := cmd.Start(); err != nil {
+		_ = readinessWrite.Close()
+		return fmt.Errorf("exec sidecar: %w", err)
+	}
+	_ = readinessWrite.Close()
+
+	result := make(chan []byte, 1)
+	go func() {
+		buf := make([]byte, 1024)
+		n, _ := readinessRead.Read(buf)
+		result <- buf[:n]
+	}()
+	select {
+	case message := <-result:
+		if len(message) == 0 {
+			return errors.New("sidecar exited before reporting readiness")
+		}
+		if message[0] != 1 {
+			return fmt.Errorf("sidecar startup failed: %s", strings.TrimSpace(string(message[1:])))
+		}
+		return nil
+	case <-time.After(5 * time.Second):
+		return errors.New("sidecar did not report readiness within 5 seconds")
+	}
 }
 
 // dropPrivilege sets the supplementary groups, gid, and uid to the requested

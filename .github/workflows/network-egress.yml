@@ -1,10 +1,10 @@
 name: network-egress
 
 # CI for the Linux network-egress-enforcement track (Candidate B: netns +
-# transparent redirect). See
+# transparent tproxy intercept). See
 # docs/superpowers/specs/2026-07-30-linux-network-egress-enforcement.md.
 #
-# Two jobs, each closing a named open item in that spec's Phase 0:
+# The Phase-0 receipts and Phase-1 acceptance jobs close named spec items:
 #   - egress-probe   → Q1 "CI-runner kernel coverage": run the merged, repeatable
 #     `nocklock egress-probe` (#70) on ubuntu-latest so the CI kernel is measured
 #     identically to the dev VPS. Non-mutating and always exits 0 on completion;
@@ -161,3 +161,37 @@ jobs:
       # nothing would be visible, not a silent green.
       - name: run netns foundation acceptance test as root (skips forbidden)
         run: sudo env NOCKLOCK_NETNS_REQUIRE=1 ./netns.test -test.run '^TestNetnsFoundation' -test.v -test.count=1
+
+  netns-protocol-matrix:
+    name: netns Phase-1b · tproxy protocol matrix (root)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: provision netns protocol clients and nftables
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y iproute2 nftables nodejs python3-requests
+          # Some kernels build nft_tproxy in; the strict matrix test below is the
+          # authoritative capability check, so a no-module result is not itself
+          # a false infrastructure failure.
+          sudo modprobe nft_tproxy || true
+
+      # Compile as the runner user: the test re-execs itself both as the
+      # cap-dropped client and as the dedicated transparent sidecar. Running the
+      # binary under sudo keeps the Go cache writable by the runner user.
+      - name: compile Phase-1b protocol matrix
+        run: go test -c -o netns.test ./internal/fence/network/netns/
+
+      # NOCKLOCK_NETNS_REQUIRE turns every root/tool/tproxy unsupported skip into
+      # a hard failure. The matrix asserts a unique required result per protocol;
+      # it cannot pass with an all-deny policy or a userspace-only redirect.
+      - name: run tproxy protocol matrix as root (skips forbidden)
+        run: sudo env NOCKLOCK_NETNS_REQUIRE=1 ./netns.test -test.run '^Test(NetnsProtocolMatrix|TransparentRulesetLoadsInFreshNetns)$' -test.v -test.count=1

@@ -29,10 +29,6 @@ const ProxyHealthPath = "/healthz"
 //   - Matching is case-insensitive.
 //   - An empty allowlist blocks everything (correct fail-closed behaviour).
 func (p *ProxyServer) isAllowed(hostname string) bool {
-	if p.allowAll {
-		return true
-	}
-
 	// Strip port.
 	host := hostname
 	if h, _, err := net.SplitHostPort(hostname); err == nil {
@@ -43,6 +39,9 @@ func (p *ProxyServer) isAllowed(hostname string) bool {
 	// Block raw IP addresses — no reverse DNS, fail closed.
 	if net.ParseIP(host) != nil {
 		return false
+	}
+	if p.allowAll {
+		return true
 	}
 
 	for _, entry := range p.allowList {

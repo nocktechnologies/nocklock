@@ -492,3 +492,30 @@ that adds the selective HTTP(S)/DNS *allowance* on top of the default-drop floor
    in-namespace DNS stub, turning the floor into a selective HTTP(S)+DNS allowlist.
 3. **Compose + README (Phase 2):** collapse the env-proxy to a convenience layer;
    update the threat model to the working+bypass-resistant allowlist.
+
+### Amendment 2026-09-07 — Phase 1b transparent allowlist implementation
+
+Phase 1b implements increment 2 without reopening its locked decisions. The
+privileged helper installs `nftables tproxy` rules (not `REDIRECT`) with an
+`fwmark` local route for TCP/80, TCP/443, and DNS TCP/UDP port 53. A dedicated
+sidecar in the child namespace owns the transparent listeners but drops to a
+separate unprivileged proxy uid before accepting child bytes. It parses an HTTP
+`Host` header or TLS ClientHello SNI; missing SNI/raw-IP TCP is actively reset,
+and a denied HTTP Host returns 403. The sidecar sends an authenticated request to
+a parent-network broker, which repeats the allowlist decision, resolves only the
+observed name using the host resolver, and returns a connected upstream socket.
+
+The in-namespace DNS stub returns the fixed intercept address for every A/AAAA
+name query, including non-allowlisted names; policy still occurs once at the
+sidecar, rather than splitting DNS and HTTP(S) allowlists. Direct resolver
+queries are tproxied to that stub, so no DNS packet leaves the namespace.
+UDP/443, SCTP, raw IP, and all other child egress remain default-drop. The
+sidecar heartbeats the broker; lost heartbeats cancel the child process group,
+preserving the existing proxy-death fail-closed invariant.
+
+The root-required `netns-protocol-matrix` CI job runs beside the foundation and
+Q6 jobs. It asserts positive allowed HTTP and HTTPS, proxy-specific denial for
+blocked Host/SNI, fixed DNS over UDP and TCP, explicit UDP/443/SCTP denial, and
+curl/Node/Python TCP success while UDP/443 is unavailable. Phase 2 remains
+unchanged: environment-proxy collapse and the README threat-model rewrite are
+out of scope for this increment.

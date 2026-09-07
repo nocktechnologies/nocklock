@@ -92,7 +92,7 @@ func runEgressChildIfRequested(scenario string) (code int, handled bool) {
 	case scenarioUDPDNSEgress:
 		return udpDNSEgressResult(), true
 	default:
-		return 0, false
+		return runProtocolMatrixChildIfRequested(scenario)
 	}
 }
 

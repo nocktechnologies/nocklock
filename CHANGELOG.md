@@ -6,6 +6,22 @@ All notable changes to NockLock will be documented in this file.
 
 ### Added
 
+- `nocklock wrap --net-fence=netns` now turns its Phase-1 default-drop floor
+  into the Phase-1b working allowlist. nftables `tproxy` (never REDIRECT)
+  intercepts child TCP/80 and TCP/443 to a separate transparent sidecar; HTTP
+  Host headers and TLS SNI are checked against the configured allowlist, while
+  raw-IP/no-SNI connections are explicitly reset rather than silently dropped.
+  The sidecar can only ask an authenticated host-network broker to resolve and
+  dial an allowed hostname, and that broker repeats the allowlist decision,
+  records passed/blocked audit events, and supplies the connected upstream fd.
+  An in-namespace UDP+TCP DNS stub returns the fixed intercept address for every
+  queried name, so non-allowlisted destinations arrive at the single proxy deny
+  point; direct resolver traffic never leaves the namespace. UDP/443, SCTP, and
+  all other egress remain default-drop. The broker heartbeat extends the existing
+  fail-closed watchdog behaviour: sidecar death terminates the child process
+  group. A root-only `netns-protocol-matrix` CI job asserts each protocol outcome,
+  including curl, Node `fetch`, and Python `requests` succeeding via TCP while
+  UDP/443 is denied.
 - CI: a `macos-enforce` job in `.github/workflows/test.yml` that runs the SBPL
   filesystem fence's runtime ENFORCEMENT proof on a GitHub-hosted `macos-latest`
   runner. It exercises the existing

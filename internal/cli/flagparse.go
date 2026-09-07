@@ -11,7 +11,7 @@ type WrapFlags struct {
 	Profile            string
 	// NetFence opts into a kernel-enforced network egress fence. "" (default)
 	// keeps the existing userspace-proxy posture unchanged; "netns" selects the
-	// privileged-helper network-namespace default-drop floor (Linux only).
+	// privileged-helper network-namespace tproxy allowlist (Linux only).
 	NetFence string
 }
 
