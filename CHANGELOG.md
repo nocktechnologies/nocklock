@@ -6,6 +6,19 @@ All notable changes to NockLock will be documented in this file.
 
 ### Added
 
+- `nocklock wrap --net-fence=netns` now layers the Phase-1b working egress
+  allowlist onto its kernel default-drop floor. A per-run link-local veth grants
+  the namespace no default route and reaches only a host-side allowlist proxy;
+  nftables `tproxy` intercepts child TCP/80 and TCP/443 into a separate,
+  unprivileged transparent proxy that gates TLS SNI or HTTP Host before opening a
+  CONNECT tunnel to that host proxy. The namespace also bind-mounts a fixed-answer
+  DNS resolver that maps every A/AAAA name to the intercept address, keeping
+  denied-domain decisions at the proxy while UDP/TCP queries to other resolvers,
+  UDP/443 (QUIC), SCTP, and other raw egress remain default-dropped. Both policy
+  proxies are health-checked by the helper, which terminates the fenced child on
+  proxy death. A root-required CI protocol matrix now exercises the positive
+  HTTP(S) paths, proxy denial paths, DNS stub and bypass attempts, denied
+  transports, and curl/Node/Python TCP fallback clients.
 - CI: a `macos-enforce` job in `.github/workflows/test.yml` that runs the SBPL
   filesystem fence's runtime ENFORCEMENT proof on a GitHub-hosted `macos-latest`
   runner. It exercises the existing

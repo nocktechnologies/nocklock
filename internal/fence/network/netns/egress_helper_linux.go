@@ -1,0 +1,388 @@
+//go:build linux
+
+package netns
+
+import (
+	"bytes"
+	"context"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"io"
+	"os"
+	"os/exec"
+	"os/signal"
+	"path/filepath"
+	"runtime"
+	"strings"
+	"syscall"
+	"time"
+
+	"github.com/nocktechnologies/nocklock/internal/config"
+	"github.com/nocktechnologies/nocklock/internal/fence/network"
+	"golang.org/x/sys/unix"
+)
+
+// ChildExitError preserves the fenced command's exit status after the helper has
+// stopped its sidecars and removed the private bridge.
+type ChildExitError struct {
+	Code   int
+	Detail string
+}
+
+func (e *ChildExitError) Error() string {
+	if e.Detail != "" {
+		return e.Detail
+	}
+	return fmt.Sprintf("netns child exited %d", e.Code)
+}
+
+// SetupEgressAndSupervise builds the Phase-1b private bridge, starts both policy
+// proxies, installs the child namespace's tproxy/DNS policy, and supervises the
+// unprivileged child. It never leaves the child with a default route or a direct
+// path to a resolver or upstream host.
+func SetupEgressAndSupervise(req Request) (resultErr error) {
+	if err := validateEgressConfig(req.Egress, req.UID); err != nil {
+		return err
+	}
+	if os.Geteuid() != 0 {
+		return errors.New("netns helper must run as root (via sudo); euid is not 0")
+	}
+
+	// setns and all configuration subprocesses must stay on this thread. See the
+	// matching explanation in SetupAndExec for why a Go thread migration here is
+	// a fence fail-open.
+	runtime.LockOSThread()
+
+	bridge := req.Egress.Bridge
+	if err := createBridge(bridge); err != nil {
+		return err
+	}
+	if err := startDeferredBridgeCleanup(bridge); err != nil {
+		_ = removeBridge(bridge)
+		return err
+	}
+
+	hostProxy, err := startSidecar("__netns-host-proxy", *req.Egress)
+	if err != nil {
+		return fmt.Errorf("start host allowlist proxy: %w", err)
+	}
+	defer stopSidecar(hostProxy)
+	if err := network.WaitForProxyReady(context.Background(), bridge.hostProxyAddr(), 5*time.Second); err != nil {
+		return fmt.Errorf("host allowlist proxy readiness failed: %w", err)
+	}
+
+	nsPath := filepath.Join("/run/netns", bridge.Namespace)
+	nsFD, err := unix.Open(nsPath, unix.O_RDONLY|unix.O_CLOEXEC, 0)
+	if err != nil {
+		return fmt.Errorf("open private network namespace %q: %w", bridge.Namespace, err)
+	}
+	defer unix.Close(nsFD)
+	if err := unix.Setns(nsFD, unix.CLONE_NEWNET); err != nil {
+		return fmt.Errorf("enter private network namespace %q: %w", bridge.Namespace, err)
+	}
+
+	cleanupResolver, err := mountStubResolver()
+	if err != nil {
+		return err
+	}
+	defer cleanupResolver()
+	if err := configureEgressNamespace(*req.Egress); err != nil {
+		return err
+	}
+
+	transparentProxy, err := startSidecar("__netns-proxy", *req.Egress)
+	if err != nil {
+		return fmt.Errorf("start transparent policy proxy: %w", err)
+	}
+	defer stopSidecar(transparentProxy)
+	if err := network.WaitForProxyReady(context.Background(), "127.0.0.1:"+fmt.Sprint(ProxyHealthPort), 5*time.Second); err != nil {
+		return fmt.Errorf("transparent policy proxy readiness failed: %w", err)
+	}
+
+	child, err := startSidecar("__netns-child", req)
+	if err != nil {
+		return fmt.Errorf("start fenced netns child: %w", err)
+	}
+	resultErr = superviseChild(child, []string{
+		"127.0.0.1:" + fmt.Sprint(ProxyHealthPort),
+		bridge.hostProxyAddr(),
+	})
+
+	// A named network namespace can be held by Go runtime threads other than the
+	// locked setup thread. The host-side cleanup process waits for this helper to
+	// exit before removing the veth and namespace, preventing an early-error leak.
+	return resultErr
+}
+
+// DropAndExecChild applies the receipted five-set capability drop, changes to the
+// caller's credential, and execs the actual fenced command. It is a separate
+// process so the root supervisor can kill it when either proxy becomes unhealthy.
+func DropAndExecChild(req Request) error {
+	if len(req.Argv) == 0 {
+		return errors.New("netns setup request has no argv to exec")
+	}
+	if err := validateChildCredential(req); err != nil {
+		return err
+	}
+	if err := dropCaps(); err != nil {
+		return fmt.Errorf("drop fence capabilities: %w", err)
+	}
+	if err := assertCapsDropped(); err != nil {
+		return fmt.Errorf("verify fence capabilities dropped: %w", err)
+	}
+	if err := dropPrivilege(req); err != nil {
+		return fmt.Errorf("drop to unprivileged child credential: %w", err)
+	}
+	if err := unix.Prctl(unix.PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0); err != nil {
+		return fmt.Errorf("set NO_NEW_PRIVS: %w", err)
+	}
+	if err := unix.Exec(req.Argv[0], req.Argv, req.Env); err != nil {
+		return fmt.Errorf("exec child %q in namespace: %w", req.Argv[0], err)
+	}
+	return errors.New("unreachable: execve returned without error")
+}
+
+// RunHostProxy serves the host-side half of the private bridge. The transparent
+// proxy can only open CONNECT tunnels to this listener; this proxy repeats the
+// allowlist check and is the component that uses the host resolver to dial a real
+// destination.
+func RunHostProxy(cfg EgressConfig) error {
+	if err := validateEgressConfig(&cfg, 1); err != nil {
+		return err
+	}
+	if err := dropProxyIdentity(); err != nil {
+		return fmt.Errorf("drop host policy proxy identity: %w", err)
+	}
+	p := network.NewProxyServerAt(config.NetworkConfig{Allow: cfg.Allow, AllowPrivateRanges: cfg.AllowPrivateRanges}, nil, "", cfg.Bridge.hostProxyAddr())
+	if _, err := p.Start(); err != nil {
+		return err
+	}
+	defer p.Stop()
+	signals := make(chan os.Signal, 1)
+	signal.Notify(signals, syscall.SIGTERM, syscall.SIGINT)
+	defer signal.Stop(signals)
+	<-signals
+	return nil
+}
+
+func createBridge(bridge BridgeSpec) error {
+	if out, err := runInNS("ip", "netns", "add", bridge.Namespace); err != nil {
+		return fmt.Errorf("create private network namespace: %w\n%s", err, out)
+	}
+	if out, err := runInNS("ip", "link", "add", bridge.HostInterface, "type", "veth", "peer", "name", bridge.ChildInterface); err != nil {
+		_, _ = runInNS("ip", "netns", "del", bridge.Namespace)
+		return fmt.Errorf("create private bridge veth: %w\n%s", err, out)
+	}
+	if out, err := runInNS("ip", "addr", "add", bridge.hostCIDR(), "dev", bridge.HostInterface); err != nil {
+		return fmt.Errorf("assign host private bridge address: %w\n%s", err, out)
+	}
+	if out, err := runInNS("ip", "link", "set", "dev", bridge.HostInterface, "up"); err != nil {
+		return fmt.Errorf("bring host private bridge up: %w\n%s", err, out)
+	}
+	if out, err := runInNS("ip", "link", "set", "dev", bridge.ChildInterface, "netns", bridge.Namespace); err != nil {
+		return fmt.Errorf("move child private bridge into namespace: %w\n%s", err, out)
+	}
+	return nil
+}
+
+func removeBridge(bridge BridgeSpec) error {
+	var errs []error
+	if out, err := runInNS("ip", "link", "del", bridge.HostInterface); err != nil && !strings.Contains(strings.ToLower(out), "cannot find device") {
+		errs = append(errs, fmt.Errorf("delete host private bridge interface: %w\n%s", err, out))
+	}
+	if out, err := runInNS("ip", "netns", "del", bridge.Namespace); err != nil {
+		errs = append(errs, fmt.Errorf("delete private network namespace: %w\n%s", err, out))
+	}
+	return errors.Join(errs...)
+}
+
+// deferredCleanupWriters deliberately keep the write end of each cleaner pipe
+// open until this helper process exits. Cleanup must wait until every Go runtime
+// thread has released the named namespace, not merely until the locked setup
+// thread has returned.
+var deferredCleanupWriters []*os.File
+
+func startDeferredBridgeCleanup(bridge BridgeSpec) error {
+	reader, writer, err := os.Pipe()
+	if err != nil {
+		return fmt.Errorf("create private bridge cleanup pipe: %w", err)
+	}
+	encoded, err := json.Marshal(bridge)
+	if err != nil {
+		_ = reader.Close()
+		_ = writer.Close()
+		return fmt.Errorf("encode private bridge cleanup request: %w", err)
+	}
+	self, err := os.Executable()
+	if err != nil {
+		_ = reader.Close()
+		_ = writer.Close()
+		return fmt.Errorf("resolve helper executable for private bridge cleanup: %w", err)
+	}
+	cmd := exec.Command(self, "__netns-cleanup")
+	cmd.Stdin = bytes.NewReader(encoded)
+	cmd.Stdout = os.Stdout
+	cmd.Stderr = os.Stderr
+	cmd.ExtraFiles = []*os.File{reader} // fd 3 signals parent helper exit by EOF.
+	if err := cmd.Start(); err != nil {
+		_ = reader.Close()
+		_ = writer.Close()
+		return fmt.Errorf("start private bridge cleanup process: %w", err)
+	}
+	if err := reader.Close(); err != nil {
+		_ = writer.Close()
+		return fmt.Errorf("close private bridge cleanup pipe reader: %w", err)
+	}
+	deferredCleanupWriters = append(deferredCleanupWriters, writer)
+	return nil
+}
+
+// RunDeferredBridgeCleanup waits until the setup helper exits, then removes the
+// host veth and named namespace from a process that never entered that namespace.
+func RunDeferredBridgeCleanup(bridge BridgeSpec) error {
+	if err := validateEgressConfig(&EgressConfig{Bridge: bridge}, 1); err != nil {
+		return fmt.Errorf("validate private bridge cleanup request: %w", err)
+	}
+	parentExit := os.NewFile(uintptr(3), "nocklock-parent-exit")
+	if parentExit == nil {
+		return errors.New("private bridge cleanup did not receive its parent-exit pipe")
+	}
+	defer parentExit.Close()
+	if _, err := io.Copy(io.Discard, parentExit); err != nil {
+		return fmt.Errorf("wait for netns helper exit before cleanup: %w", err)
+	}
+	return removeBridge(bridge)
+}
+
+func mountStubResolver() (func(), error) {
+	if err := unix.Unshare(unix.CLONE_NEWNS); err != nil {
+		return nil, fmt.Errorf("create private resolver mount namespace: %w", err)
+	}
+	if err := unix.Mount("", "/", "", unix.MS_REC|unix.MS_PRIVATE, ""); err != nil {
+		return nil, fmt.Errorf("make resolver mount namespace private: %w", err)
+	}
+	file, err := os.CreateTemp("", "nocklock-resolv-")
+	if err != nil {
+		return nil, fmt.Errorf("create stub resolver file: %w", err)
+	}
+	path := file.Name()
+	if _, err := file.WriteString("nameserver 127.0.0.1\noptions timeout:1 attempts:1\n"); err != nil {
+		file.Close()
+		os.Remove(path)
+		return nil, fmt.Errorf("write stub resolver file: %w", err)
+	}
+	if err := file.Close(); err != nil {
+		os.Remove(path)
+		return nil, fmt.Errorf("close stub resolver file: %w", err)
+	}
+	if err := unix.Mount(path, "/etc/resolv.conf", "", unix.MS_BIND, ""); err != nil {
+		os.Remove(path)
+		return nil, fmt.Errorf("bind mount stub resolver: %w", err)
+	}
+	return func() {
+		_ = unix.Unmount("/etc/resolv.conf", unix.MNT_DETACH)
+		_ = os.Remove(path)
+	}, nil
+}
+
+func configureEgressNamespace(cfg EgressConfig) error {
+	b := cfg.Bridge
+	for _, argv := range [][]string{
+		{"ip", "link", "set", "lo", "up"},
+		{"ip", "link", "set", "dev", b.ChildInterface, "up"},
+		{"ip", "addr", "add", b.childCIDR(), "dev", b.ChildInterface},
+		{"ip", "route", "replace", b.HostAddress + "/32", "dev", b.ChildInterface},
+		{"ip", "rule", "add", "fwmark", "0x1", "lookup", "100"},
+		{"ip", "route", "replace", "local", "0.0.0.0/0", "dev", "lo", "table", "100"},
+		{"ip", "-6", "rule", "add", "fwmark", "0x1", "lookup", "100"},
+		{"ip", "-6", "route", "replace", "local", "::/0", "dev", "lo", "table", "100"},
+	} {
+		out, err := runInNS(argv[0], argv[1:]...)
+		if err != nil {
+			return fmt.Errorf("configure private namespace (%s): %w\n%s", strings.Join(argv, " "), err, out)
+		}
+	}
+	if out, err := runInNSStdin(EgressRuleset(cfg), "nft", "-f", "-"); err != nil {
+		return fmt.Errorf("install tproxy egress ruleset: %w\n%s", err, out)
+	}
+	return nil
+}
+
+func startSidecar(verb string, payload any) (*exec.Cmd, error) {
+	encoded, err := json.Marshal(payload)
+	if err != nil {
+		return nil, fmt.Errorf("encode %s request: %w", verb, err)
+	}
+	self, err := os.Executable()
+	if err != nil {
+		return nil, fmt.Errorf("resolve helper executable for %s: %w", verb, err)
+	}
+	cmd := exec.Command(self, verb)
+	cmd.Stdin = bytes.NewReader(encoded)
+	cmd.Stdout = os.Stdout
+	cmd.Stderr = os.Stderr
+	cmd.SysProcAttr = &syscall.SysProcAttr{Pdeathsig: syscall.SIGKILL}
+	if err := cmd.Start(); err != nil {
+		return nil, err
+	}
+	return cmd, nil
+}
+
+func stopSidecar(cmd *exec.Cmd) {
+	if cmd == nil || cmd.Process == nil {
+		return
+	}
+	_ = cmd.Process.Signal(syscall.SIGTERM)
+	done := make(chan struct{})
+	go func() {
+		_ = cmd.Wait()
+		close(done)
+	}()
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		_ = cmd.Process.Kill()
+		<-done
+	}
+}
+
+func superviseChild(child *exec.Cmd, healthAddrs []string) error {
+	done := make(chan error, 1)
+	go func() { done <- child.Wait() }()
+	ticker := time.NewTicker(2 * time.Second)
+	defer ticker.Stop()
+	failures := 0
+	for {
+		select {
+		case err := <-done:
+			if err == nil {
+				return nil
+			}
+			var exitErr *exec.ExitError
+			if errors.As(err, &exitErr) {
+				return &ChildExitError{Code: exitErr.ExitCode()}
+			}
+			return fmt.Errorf("wait for fenced child: %w", err)
+		case <-ticker.C:
+			healthy := true
+			for _, addr := range healthAddrs {
+				if err := network.WaitForProxyReady(context.Background(), addr, time.Second); err != nil {
+					healthy = false
+					break
+				}
+			}
+			if healthy {
+				failures = 0
+				continue
+			}
+			failures++
+			if failures < 2 {
+				continue
+			}
+			_ = child.Process.Kill()
+			<-done
+			return &ChildExitError{Code: 2, Detail: "transparent policy proxy died; terminated fenced child"}
+		}
+	}
+}

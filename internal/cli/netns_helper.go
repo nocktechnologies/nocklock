@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
@@ -52,16 +53,81 @@ var netnsHelperCmd = &cobra.Command{
 			if err := dec.Decode(&req); err != nil {
 				return fmt.Errorf("failed to read netns setup request from stdin: %w", err)
 			}
-			// SetupAndExec fails closed and does not return on success.
-			return netns.SetupAndExec(req)
+			// SetupAndExec fails closed and does not return on success for the
+			// foundation path. Phase 1b's supervisor returns a typed child exit
+			// after it has stopped both proxies and removed the private bridge.
+			if err := netns.SetupAndExec(req); err != nil {
+				var childExit *netns.ChildExitError
+				if errors.As(err, &childExit) {
+					return &exitCodeError{code: childExit.Code}
+				}
+				return err
+			}
+			return nil
 		default:
 			return fmt.Errorf("unknown __netns-helper verb %q (expected check or setup)", args[0])
 		}
 	},
 }
 
+var netnsProxyCmd = &cobra.Command{
+	Use:                "__netns-proxy",
+	Hidden:             true,
+	DisableFlagParsing: true,
+	RunE: func(cmd *cobra.Command, _ []string) error {
+		var cfg netns.EgressConfig
+		if err := json.NewDecoder(os.Stdin).Decode(&cfg); err != nil {
+			return fmt.Errorf("failed to read transparent proxy configuration from stdin: %w", err)
+		}
+		return netns.RunTransparentProxy(cfg)
+	},
+}
+
+var netnsHostProxyCmd = &cobra.Command{
+	Use:                "__netns-host-proxy",
+	Hidden:             true,
+	DisableFlagParsing: true,
+	RunE: func(cmd *cobra.Command, _ []string) error {
+		var cfg netns.EgressConfig
+		if err := json.NewDecoder(os.Stdin).Decode(&cfg); err != nil {
+			return fmt.Errorf("failed to read host proxy configuration from stdin: %w", err)
+		}
+		return netns.RunHostProxy(cfg)
+	},
+}
+
+var netnsChildCmd = &cobra.Command{
+	Use:                "__netns-child",
+	Hidden:             true,
+	DisableFlagParsing: true,
+	RunE: func(cmd *cobra.Command, _ []string) error {
+		var req netns.Request
+		if err := json.NewDecoder(os.Stdin).Decode(&req); err != nil {
+			return fmt.Errorf("failed to read netns child request from stdin: %w", err)
+		}
+		return netns.DropAndExecChild(req)
+	},
+}
+
+var netnsCleanupCmd = &cobra.Command{
+	Use:                "__netns-cleanup",
+	Hidden:             true,
+	DisableFlagParsing: true,
+	RunE: func(cmd *cobra.Command, _ []string) error {
+		var bridge netns.BridgeSpec
+		if err := json.NewDecoder(os.Stdin).Decode(&bridge); err != nil {
+			return fmt.Errorf("failed to read netns cleanup request from stdin: %w", err)
+		}
+		return netns.RunDeferredBridgeCleanup(bridge)
+	},
+}
+
 func init() {
 	rootCmd.AddCommand(netnsHelperCmd)
+	rootCmd.AddCommand(netnsProxyCmd)
+	rootCmd.AddCommand(netnsHostProxyCmd)
+	rootCmd.AddCommand(netnsChildCmd)
+	rootCmd.AddCommand(netnsCleanupCmd)
 }
 
 // netnsHelperPreflight runs the non-mutating `check` verb through passwordless
@@ -81,7 +147,7 @@ func netnsHelperPreflight(ctx context.Context) error {
 // that hands the composed child to the privileged helper. The child argv, env,
 // and the unprivileged credential to drop to are JSON-encoded onto stdin so they
 // never ride the fixed sudoers argument vector.
-func buildNetnsChild(ctx context.Context, childArgv, childEnv []string) (*exec.Cmd, error) {
+func buildNetnsChild(ctx context.Context, childArgv, childEnv []string, egress *netns.EgressConfig) (*exec.Cmd, error) {
 	groups, err := os.Getgroups()
 	if err != nil {
 		return nil, fmt.Errorf("cannot read supplementary groups for the netns child: %w", err)
@@ -105,6 +171,7 @@ func buildNetnsChild(ctx context.Context, childArgv, childEnv []string) (*exec.C
 		UID:    os.Getuid(),
 		GID:    os.Getgid(),
 		Groups: groups,
+		Egress: egress,
 	}
 	reqBytes, err := json.Marshal(req)
 	if err != nil {

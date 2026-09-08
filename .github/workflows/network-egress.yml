@@ -161,3 +161,31 @@ jobs:
       # nothing would be visible, not a silent green.
       - name: run netns foundation acceptance test as root (skips forbidden)
         run: sudo env NOCKLOCK_NETNS_REQUIRE=1 ./netns.test -test.run '^TestNetnsFoundation' -test.v -test.count=1
+
+  netns-protocol-matrix:
+    name: netns Phase-1b protocol matrix · tproxy allowlist and DNS stub (root)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: provision network and fallback clients
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y iproute2 nftables curl nodejs python3-requests
+
+      - name: compile Phase-1b protocol matrix
+        run: go test -c -o netns.test ./internal/fence/network/netns/
+
+      # This is deliberately an exact test anchor. Every protocol row asserts
+      # its own outcome: positive HTTP(S), proxy 403/close, fixed DNS answers,
+      # direct-resolver no-answer, UDP/SCTP denial, TCP fallback clients, and
+      # proxy-death watchdog child termination.
+      - name: run Phase-1b protocol matrix as root (skips forbidden)
+        run: sudo env NOCKLOCK_PROTOCOL_REQUIRE=1 ./netns.test -test.run '^TestNetnsProtocolMatrix$' -test.v -test.count=1

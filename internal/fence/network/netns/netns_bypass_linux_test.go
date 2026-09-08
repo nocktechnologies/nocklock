@@ -48,6 +48,7 @@ package netns
 // instead of silently green-skipping — a skip is not a pass.
 
 import (
+	"encoding/json"
 	"fmt"
 	"os"
 	"os/exec"
@@ -95,6 +96,57 @@ const epermMarker = "operation not permitted"
 // TestMain intercepts the re-exec'd child helper before the test framework runs,
 // so the child does exactly one fenced mutation and exits with a decodable code.
 func TestMain(m *testing.M) {
+	if len(os.Args) == 2 {
+		switch os.Args[1] {
+		case "__netns-proxy":
+			var cfg EgressConfig
+			if err := json.NewDecoder(os.Stdin).Decode(&cfg); err != nil {
+				fmt.Fprintln(os.Stderr, err)
+				os.Exit(2)
+			}
+			if err := RunTransparentProxy(cfg); err != nil {
+				fmt.Fprintln(os.Stderr, err)
+				os.Exit(2)
+			}
+			os.Exit(0)
+		case "__netns-host-proxy":
+			var cfg EgressConfig
+			if err := json.NewDecoder(os.Stdin).Decode(&cfg); err != nil {
+				fmt.Fprintln(os.Stderr, err)
+				os.Exit(2)
+			}
+			if err := RunHostProxy(cfg); err != nil {
+				fmt.Fprintln(os.Stderr, err)
+				os.Exit(2)
+			}
+			os.Exit(0)
+		case "__netns-child":
+			var req Request
+			if err := json.NewDecoder(os.Stdin).Decode(&req); err != nil {
+				fmt.Fprintln(os.Stderr, err)
+				os.Exit(2)
+			}
+			if err := DropAndExecChild(req); err != nil {
+				fmt.Fprintln(os.Stderr, err)
+				os.Exit(2)
+			}
+			os.Exit(0)
+		case "__netns-cleanup":
+			var bridge BridgeSpec
+			if err := json.NewDecoder(os.Stdin).Decode(&bridge); err != nil {
+				fmt.Fprintln(os.Stderr, err)
+				os.Exit(2)
+			}
+			if err := RunDeferredBridgeCleanup(bridge); err != nil {
+				fmt.Fprintln(os.Stderr, err)
+				os.Exit(2)
+			}
+			os.Exit(0)
+		}
+	}
+	if os.Getenv("NOCKLOCK_PROTOCOL_CLIENT") == "1" {
+		os.Exit(runProtocolMatrixClient())
+	}
 	if scenario := os.Getenv(scenarioEnv); scenario != "" {
 		os.Exit(runChild(scenario))
 	}
@@ -201,7 +253,7 @@ func mutationArgv(scenario string) []string {
 // under its own job without duplicating those helpers. Mirrors the seccomp
 // suite's "a skip is not a pass" discipline.
 func strictlyRequired() bool {
-	return os.Getenv("NOCKLOCK_Q6_REQUIRE") == "1" || os.Getenv("NOCKLOCK_NETNS_REQUIRE") == "1"
+	return os.Getenv("NOCKLOCK_Q6_REQUIRE") == "1" || os.Getenv("NOCKLOCK_NETNS_REQUIRE") == "1" || os.Getenv("NOCKLOCK_PROTOCOL_REQUIRE") == "1"
 }
 
 // requireRoot skips (or, under NOCKLOCK_Q6_REQUIRE=1, fails) unless running as
