@@ -11,6 +11,7 @@ package netns
 
 import (
 	"bufio"
+	"context"
 	"crypto/rand"
 	"crypto/rsa"
 	"crypto/tls"
@@ -28,6 +29,7 @@ import (
 	"strconv"
 	"strings"
 	"sync/atomic"
+	"syscall"
 	"testing"
 	"time"
 
@@ -300,9 +302,13 @@ func protocolTCPFallbackClients() bool {
 		{"python3", "-c", "import requests; requests.get('https://localhost/', verify=False, timeout=10).raise_for_status()"},
 	}
 	for _, argv := range commands {
-		cmd := exec.Command(argv[0], argv[1:]...)
+		ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+		cmd := exec.CommandContext(ctx, argv[0], argv[1:]...)
 		cmd.Env = append(os.Environ(), "NODE_TLS_REJECT_UNAUTHORIZED=0", "PYTHONWARNINGS=ignore")
-		if err := cmd.Run(); err != nil {
+		output, err := cmd.CombinedOutput()
+		cancel()
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "TCP fallback %s failed: %v: %s\n", argv[0], err, output)
 			return false
 		}
 	}
@@ -322,6 +328,7 @@ func assertProxyDeathTerminatesChild(t *testing.T) {
 	}
 	defer p.Stop()
 	child := exec.Command("/bin/sleep", "30")
+	child.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 	if err := child.Start(); err != nil {
 		t.Fatalf("start watchdog child: %v", err)
 	}
