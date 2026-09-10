@@ -289,12 +289,36 @@ func protocolUDPAndSCTPDenied(host string) bool {
 	return err != nil || soErr != 0
 }
 
+func curlSupportsHTTP3(version string) bool {
+	for _, line := range strings.Split(version, "\n") {
+		if strings.HasPrefix(line, "Features:") {
+			for _, feature := range strings.Fields(strings.TrimPrefix(line, "Features:")) {
+				if feature == "HTTP3" {
+					return true
+				}
+			}
+		}
+	}
+	return false
+}
+
+func TestCurlHTTP3FeatureDetection(t *testing.T) {
+	if curlSupportsHTTP3("curl help mentions --http3\nFeatures: HTTP2 SSL\n") {
+		t.Fatal("help text is not compiled HTTP3 capability")
+	}
+	if !curlSupportsHTTP3("curl 8.x\nFeatures: HTTP2 HTTP3 SSL\n") {
+		t.Fatal("compiled HTTP3 capability missed")
+	}
+}
+
 func protocolTCPFallbackClients() bool {
 	curlArgs := []string{"--fail", "--silent", "--show-error", "--insecure", "https://localhost/"}
-	if help, err := exec.Command("curl", "--help", "all").CombinedOutput(); err == nil && strings.Contains(string(help), "--http3") {
+	if version, err := exec.Command("curl", "--version").CombinedOutput(); err == nil && curlSupportsHTTP3(string(version)) {
 		// curl's --http3 mode first attempts QUIC and falls back to TCP when the
 		// UDP/443 path is denied; --http3-only would not test fallback.
 		curlArgs = append([]string{"--http3"}, curlArgs...)
+	} else {
+		fmt.Fprintln(os.Stderr, "curl lacks compiled HTTP3: validating TCP path only; QUIC-to-TCP fallback is not measured on this runner")
 	}
 	commands := [][]string{
 		append([]string{"curl"}, curlArgs...),
