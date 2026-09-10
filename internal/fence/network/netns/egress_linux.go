@@ -117,6 +117,8 @@ func validateEgressConfig(cfg *EgressConfig, childUID int) error {
 // EgressRuleset returns the complete Phase-1b nftables policy. The only child
 // egress path is transparent TCP interception on ports 80/443; the policy
 // proxy's dedicated uid can reach only the host-side allowlist proxy.
+// TPROXY is valid only in prerouting: output marks locally generated packets,
+// policy routing loops them back, and prerouting assigns the transparent socket.
 func EgressRuleset(cfg EgressConfig) string {
 	b := cfg.Bridge
 	return fmt.Sprintf(`table inet nocklock {
@@ -124,7 +126,11 @@ func EgressRuleset(cfg EgressConfig) string {
     type route hook output priority mangle; policy accept;
     meta skuid %d ip daddr %s tcp dport %d accept
     meta skuid 0 ip daddr %s tcp dport %d accept
-    tcp dport { 80, 443 } tproxy to :%d meta mark set 0x1 accept
+    tcp dport { 80, 443 } meta mark set 0x1 accept
+  }
+  chain prerouting {
+    type filter hook prerouting priority mangle; policy accept;
+    iifname "lo" meta mark 0x1 tcp dport { 80, 443 } tproxy to :%d accept
   }
   chain input {
     type filter hook input priority filter; policy drop;

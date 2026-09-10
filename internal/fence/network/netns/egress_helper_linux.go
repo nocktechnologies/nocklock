@@ -167,20 +167,38 @@ func RunHostProxy(cfg EgressConfig) error {
 }
 
 func createBridge(bridge BridgeSpec) error {
-	if out, err := runInNS("ip", "netns", "add", bridge.Namespace); err != nil {
+	return createBridgeWith(bridge, runInNS)
+}
+
+func createBridgeWith(bridge BridgeSpec, run func(string, ...string) (string, error)) (resultErr error) {
+	if out, err := run("ip", "netns", "add", bridge.Namespace); err != nil {
 		return fmt.Errorf("create private network namespace: %w\n%s", err, out)
 	}
-	if out, err := runInNS("ip", "link", "add", bridge.HostInterface, "type", "veth", "peer", "name", bridge.ChildInterface); err != nil {
-		_, _ = runInNS("ip", "netns", "del", bridge.Namespace)
+	createdLink := false
+	defer func() {
+		if resultErr == nil {
+			return
+		}
+		if createdLink {
+			if out, err := run("ip", "link", "del", bridge.HostInterface); err != nil {
+				resultErr = errors.Join(resultErr, fmt.Errorf("rollback veth: %w: %s", err, out))
+			}
+		}
+		if out, err := run("ip", "netns", "del", bridge.Namespace); err != nil {
+			resultErr = errors.Join(resultErr, fmt.Errorf("rollback namespace: %w: %s", err, out))
+		}
+	}()
+	if out, err := run("ip", "link", "add", bridge.HostInterface, "type", "veth", "peer", "name", bridge.ChildInterface); err != nil {
 		return fmt.Errorf("create private bridge veth: %w\n%s", err, out)
 	}
-	if out, err := runInNS("ip", "addr", "add", bridge.hostCIDR(), "dev", bridge.HostInterface); err != nil {
+	createdLink = true
+	if out, err := run("ip", "addr", "add", bridge.hostCIDR(), "dev", bridge.HostInterface); err != nil {
 		return fmt.Errorf("assign host private bridge address: %w\n%s", err, out)
 	}
-	if out, err := runInNS("ip", "link", "set", "dev", bridge.HostInterface, "up"); err != nil {
+	if out, err := run("ip", "link", "set", "dev", bridge.HostInterface, "up"); err != nil {
 		return fmt.Errorf("bring host private bridge up: %w\n%s", err, out)
 	}
-	if out, err := runInNS("ip", "link", "set", "dev", bridge.ChildInterface, "netns", bridge.Namespace); err != nil {
+	if out, err := run("ip", "link", "set", "dev", bridge.ChildInterface, "netns", bridge.Namespace); err != nil {
 		return fmt.Errorf("move child private bridge into namespace: %w\n%s", err, out)
 	}
 	return nil
@@ -322,7 +340,7 @@ func startSidecar(verb string, payload any) (*exec.Cmd, error) {
 	cmd.Stdin = bytes.NewReader(encoded)
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
-	cmd.SysProcAttr = &syscall.SysProcAttr{Pdeathsig: syscall.SIGKILL}
+	cmd.SysProcAttr = &syscall.SysProcAttr{Pdeathsig: syscall.SIGKILL, Setpgid: true}
 	if err := cmd.Start(); err != nil {
 		return nil, err
 	}
@@ -333,7 +351,7 @@ func stopSidecar(cmd *exec.Cmd) {
 	if cmd == nil || cmd.Process == nil {
 		return
 	}
-	_ = cmd.Process.Signal(syscall.SIGTERM)
+	_ = syscall.Kill(-cmd.Process.Pid, syscall.SIGTERM)
 	done := make(chan struct{})
 	go func() {
 		_ = cmd.Wait()
@@ -342,19 +360,31 @@ func stopSidecar(cmd *exec.Cmd) {
 	select {
 	case <-done:
 	case <-time.After(2 * time.Second):
-		_ = cmd.Process.Kill()
+		_ = syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
 		<-done
 	}
 }
 
 func superviseChild(child *exec.Cmd, healthAddrs []string) error {
+	ctx, cancel := signal.NotifyContext(context.Background(), syscall.SIGTERM, syscall.SIGINT)
+	defer cancel()
+	return superviseChildContext(ctx, child, healthAddrs, 2*time.Second)
+}
+
+func superviseChildContext(ctx context.Context, child *exec.Cmd, healthAddrs []string, interval time.Duration) error {
+	// Also retire descendants when the leader exits normally.
+	defer syscall.Kill(-child.Process.Pid, syscall.SIGKILL)
 	done := make(chan error, 1)
 	go func() { done <- child.Wait() }()
-	ticker := time.NewTicker(2 * time.Second)
+	ticker := time.NewTicker(interval)
 	defer ticker.Stop()
 	failures := 0
 	for {
 		select {
+		case <-ctx.Done():
+			_ = syscall.Kill(-child.Process.Pid, syscall.SIGKILL)
+			<-done
+			return &ChildExitError{Code: 2, Detail: "fenced child cancelled; terminated process group"}
 		case err := <-done:
 			if err == nil {
 				return nil
@@ -380,7 +410,7 @@ func superviseChild(child *exec.Cmd, healthAddrs []string) error {
 			if failures < 2 {
 				continue
 			}
-			_ = child.Process.Kill()
+			_ = syscall.Kill(-child.Process.Pid, syscall.SIGKILL)
 			<-done
 			return &ChildExitError{Code: 2, Detail: "transparent policy proxy died; terminated fenced child"}
 		}

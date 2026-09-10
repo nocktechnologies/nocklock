@@ -241,6 +241,9 @@ func (p *transparentProxy) handleTLS(client net.Conn) {
 		return
 	}
 	defer upstream.Close()
+	if err := client.SetDeadline(time.Time{}); err != nil {
+		return
+	}
 	if _, err := upstream.Write(hello); err != nil {
 		return
 	}
@@ -254,7 +257,8 @@ func (p *transparentProxy) handleHTTP(client net.Conn) {
 	}
 	if !network.IsAllowedHost(p.cfg.Allow, false, host) {
 		fmt.Fprintln(os.Stderr, "NockLock: transparent HTTP connection denied (disallowed Host)")
-		_, _ = io.WriteString(client, "HTTP/1.1 403 Forbidden\r\nContent-Length: 35\r\nConnection: close\r\n\r\nNockLock: domain not in allowlist\n")
+		body := "NockLock: domain not in allowlist\n"
+		_, _ = fmt.Fprintf(client, "HTTP/1.1 403 Forbidden\r\nContent-Length: %d\r\nConnection: close\r\n\r\n%s", len(body), body)
 		return
 	}
 	upstream, err := openHostTunnel(client, p.cfg.Bridge.hostProxyAddr(), host, "80")
@@ -263,6 +267,9 @@ func (p *transparentProxy) handleHTTP(client net.Conn) {
 		return
 	}
 	defer upstream.Close()
+	if err := client.SetDeadline(time.Time{}); err != nil {
+		return
+	}
 	if _, err := upstream.Write(header); err != nil {
 		return
 	}
@@ -288,7 +295,23 @@ func readHTTPHeader(r io.Reader) ([]byte, string, error) {
 	if err != nil || req.Host == "" {
 		return nil, "", fmt.Errorf("parse HTTP Host header")
 	}
-	return raw.Bytes(), req.Host, nil
+	// Transparent interception accepts origin-form only: ReadRequest otherwise
+	// substitutes an absolute target authority for the wire Host header.
+	if !strings.HasPrefix(req.RequestURI, "/") || req.URL.IsAbs() || req.URL.Host != "" {
+		return nil, "", fmt.Errorf("transparent HTTP requires an origin-form request target")
+	}
+	host := req.Host
+	if strings.Contains(host, ":") {
+		var port string
+		host, port, err = net.SplitHostPort(host)
+		if err != nil || port != "80" {
+			return nil, "", fmt.Errorf("HTTP Host must use intercepted port 80")
+		}
+	}
+	if host == "" || strings.ContainsAny(host, " /\\@?#\t\r\n") {
+		return nil, "", fmt.Errorf("invalid HTTP Host authority")
+	}
+	return raw.Bytes(), host, nil
 }
 
 func readTLSClientHello(r io.Reader) ([]byte, string, error) {
@@ -440,16 +463,31 @@ type bufferedConn struct {
 
 func (c *bufferedConn) Read(p []byte) (int, error) { return c.reader.Read(p) }
 
+func (c *bufferedConn) CloseWrite() error {
+	if conn, ok := c.Conn.(interface{ CloseWrite() error }); ok {
+		return conn.CloseWrite()
+	}
+	return c.Conn.Close()
+}
+
+func closeWrite(conn net.Conn) {
+	if half, ok := conn.(interface{ CloseWrite() error }); ok {
+		_ = half.CloseWrite()
+	} else {
+		_ = conn.Close()
+	}
+}
+
 func pipeConnections(a, b net.Conn) {
 	done := make(chan struct{}, 2)
 	go func() {
 		_, _ = io.Copy(b, a)
-		_ = b.Close()
+		closeWrite(b)
 		done <- struct{}{}
 	}()
 	go func() {
 		_, _ = io.Copy(a, b)
-		_ = a.Close()
+		closeWrite(a)
 		done <- struct{}{}
 	}()
 	<-done
