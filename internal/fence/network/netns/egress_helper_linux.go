@@ -96,7 +96,10 @@ func SetupEgressAndSupervise(req Request) (resultErr error) {
 		return fmt.Errorf("start transparent policy proxy: %w", err)
 	}
 	defer stopSidecar(transparentProxy)
-	if err := network.WaitForProxyReady(context.Background(), "127.0.0.1:"+fmt.Sprint(ProxyHealthPort), 5*time.Second); err != nil {
+	// net/http dials on runtime goroutines, not necessarily the locked setns
+	// thread. The veth address names this proxy from both host and child netns;
+	// loopback would accidentally probe the host's unrelated loopback listener.
+	if err := network.WaitForProxyReady(context.Background(), bridge.childHealthAddr(), 5*time.Second); err != nil {
 		return fmt.Errorf("transparent policy proxy readiness failed: %w", err)
 	}
 
@@ -105,7 +108,7 @@ func SetupEgressAndSupervise(req Request) (resultErr error) {
 		return fmt.Errorf("start fenced netns child: %w", err)
 	}
 	resultErr = superviseChild(child, []string{
-		"127.0.0.1:" + fmt.Sprint(ProxyHealthPort),
+		bridge.childHealthAddr(),
 		bridge.hostProxyAddr(),
 	})
 
