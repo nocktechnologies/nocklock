@@ -311,6 +311,25 @@ func TestCurlHTTP3FeatureDetection(t *testing.T) {
 	}
 }
 
+func TestCurlHTTP3BlockedFallbackTrace(t *testing.T) {
+	hostedTrace := `* QUIC connect to ::1 port 443 failed: Could not connect to server
+* QUIC connect to 127.0.0.1 port 443 failed: Could not connect to server
+* ALPN: curl offers h2,http/1.1
+* TLSv1.3 (OUT), TLS handshake, Client hello (1):
+* TLS connect error: error:0A000126:SSL routines::unexpected eof while reading`
+	if !curlHTTP3TraceAttemptedQUIC(hostedTrace) {
+		t.Fatal("hosted trace did not prove QUIC attempt")
+	}
+	if !curlHTTP3TraceReachedDeniedTCPFallback(hostedTrace) {
+		t.Fatal("hosted trace did not prove denied TCP fallback")
+	}
+
+	quicOnlyTrace := `* QUIC connect to 127.0.0.1 port 443 failed: Could not connect to server`
+	if curlHTTP3TraceReachedDeniedTCPFallback(quicOnlyTrace) {
+		t.Fatal("QUIC-only trace was accepted as denied TCP fallback")
+	}
+}
+
 func protocolTCPFallbackClients() bool {
 	version, err := exec.Command("curl", "--version").CombinedOutput()
 	if err != nil {
@@ -351,10 +370,7 @@ func protocolCurlHTTP3Fallback(host string, wantAllowed bool) bool {
 	cmd := exec.CommandContext(ctx, "curl", "--http3", "--verbose", "--fail", "--silent", "--show-error", "--insecure", "https://"+host+"/")
 	output, err := cmd.CombinedOutput()
 	trace := string(output)
-	quicAttempted := strings.Contains(trace, "QUIC connect") ||
-		strings.Contains(trace, "vquic_sendmsg") ||
-		strings.Contains(trace, "[HTTP/3]")
-	if !quicAttempted {
+	if !curlHTTP3TraceAttemptedQUIC(trace) {
 		fmt.Fprintf(os.Stderr, "curl HTTP3 fallback trace for %s did not prove a QUIC attempt: %s\n", host, trace)
 		return false
 	}
@@ -365,11 +381,28 @@ func protocolCurlHTTP3Fallback(host string, wantAllowed bool) bool {
 		}
 		return true
 	}
-	if err == nil || !strings.Contains(trace, "403") {
-		fmt.Fprintf(os.Stderr, "curl HTTP3 fallback to non-allowlisted host was not denied by the TCP proxy: err=%v trace=%s\n", err, trace)
+	if err == nil || !curlHTTP3TraceReachedDeniedTCPFallback(trace) {
+		fmt.Fprintf(os.Stderr, "curl HTTP3 fallback to non-allowlisted host did not prove denied TCP fallback: err=%v trace=%s\n", err, trace)
 		return false
 	}
 	return true
+}
+
+func curlHTTP3TraceAttemptedQUIC(trace string) bool {
+	return strings.Contains(trace, "QUIC connect") ||
+		strings.Contains(trace, "vquic_sendmsg") ||
+		strings.Contains(trace, "[HTTP/3]")
+}
+
+func curlHTTP3TraceReachedDeniedTCPFallback(trace string) bool {
+	tcpAttempted := strings.Contains(trace, "ALPN: curl offers") ||
+		strings.Contains(trace, "TLS handshake, Client hello") ||
+		strings.Contains(trace, "HTTP/1.1")
+	denied := strings.Contains(trace, "403") ||
+		strings.Contains(trace, "TLS connect error") ||
+		strings.Contains(trace, "unexpected eof") ||
+		strings.Contains(trace, "decode error")
+	return tcpAttempted && denied
 }
 
 func TestProxyDeathTerminatesChild(t *testing.T) {
