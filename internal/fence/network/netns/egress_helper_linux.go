@@ -61,15 +61,15 @@ func SetupEgressAndSupervise(req Request) (resultErr error) {
 	runtime.LockOSThread()
 
 	bridge := req.Egress.Bridge
+	bridgeCreated := false
 	cleanupTransferred := false
 	defer func() {
-		if resultErr != nil && !cleanupTransferred {
-			resultErr = errors.Join(resultErr, removeBridge(bridge))
-		}
+		cleanupFailedBridge(bridge, bridgeCreated, cleanupTransferred, &resultErr, removeBridge)
 	}()
 	if err := createBridge(bridge); err != nil {
 		return err
 	}
+	bridgeCreated = true
 	if err := startDeferredBridgeCleanup(bridge); err != nil {
 		return err
 	}
@@ -136,6 +136,12 @@ func SetupEgressAndSupervise(req Request) (resultErr error) {
 	// locked setup thread. The host-side cleanup process waits for this helper to
 	// exit before removing the veth and namespace, preventing an early-error leak.
 	return resultErr
+}
+
+func cleanupFailedBridge(bridge BridgeSpec, bridgeCreated, cleanupTransferred bool, resultErr *error, cleanup func(BridgeSpec) error) {
+	if bridgeCreated && *resultErr != nil && !cleanupTransferred {
+		*resultErr = errors.Join(*resultErr, cleanup(bridge))
+	}
 }
 
 // DropAndExecChild applies the receipted five-set capability drop, changes to the

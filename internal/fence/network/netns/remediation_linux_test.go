@@ -139,6 +139,67 @@ func TestBridgeRollbackEachFailure(t *testing.T) {
 	}
 }
 
+func TestBridgeRollbackEachFailurePreExistingNamespaceIsNotDeleted(t *testing.T) {
+	useTempSubnetReservationDir(t)
+	bridge, err := NewBridgeSpec()
+	if err != nil {
+		t.Fatal(err)
+	}
+	var calls []string
+	run := func(name string, args ...string) (string, error) {
+		call := name + " " + strings.Join(args, " ")
+		calls = append(calls, call)
+		if call == "ip netns add "+bridge.Namespace {
+			return "File exists", errors.New("failure")
+		}
+		return "", nil
+	}
+	if createBridgeWith(bridge, run) == nil {
+		t.Fatal("expected pre-existing namespace failure")
+	}
+	resultErr := errors.New("create bridge")
+	cleanupFailedBridge(bridge, false, false, &resultErr, func(bridge BridgeSpec) error {
+		calls = append(calls, "ip netns del "+bridge.Namespace)
+		return nil
+	})
+	for _, call := range calls {
+		if call == "ip netns del "+bridge.Namespace {
+			t.Fatalf("deleted pre-existing namespace: %q", call)
+		}
+	}
+}
+
+func TestSubnetReservationBridgeFailureDoesNotRemoveReplacement(t *testing.T) {
+	useTempSubnetReservationDir(t)
+	bridge, err := NewBridgeSpec()
+	if err != nil {
+		t.Fatal(err)
+	}
+	reservationFile := filepath.Join(subnetReservationDir, bridge.ReservationID)
+	const replacementOwner = "different-owner\n"
+	run := func(name string, args ...string) (string, error) {
+		return "File exists", errors.New("failure")
+	}
+	if createBridgeWith(bridge, run) == nil {
+		t.Fatal("expected create bridge failure")
+	}
+	if err := os.WriteFile(reservationFile, []byte(replacementOwner), 0600); err != nil {
+		t.Fatalf("simulate replacement reservation: %v", err)
+	}
+	resultErr := errors.New("create bridge")
+	cleanupFailedBridge(bridge, false, false, &resultErr, func(bridge BridgeSpec) error {
+		return ReleaseSubnetReservation(bridge.ReservationID)
+	})
+
+	got, err := os.ReadFile(reservationFile)
+	if err != nil {
+		t.Fatalf("replacement reservation removed: %v", err)
+	}
+	if string(got) != replacementOwner {
+		t.Fatalf("replacement reservation = %q, want %q", got, replacementOwner)
+	}
+}
+
 func TestSupervisionKillsDescendantOnCancel(t *testing.T) {
 	testSupervisionKillsDescendant(t, true)
 }
