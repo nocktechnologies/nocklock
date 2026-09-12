@@ -23,12 +23,11 @@ const (
 	// terminate the fenced child if either policy proxy dies.
 	ProxyHealthPort = 15081
 	proxyUID        = 65534 // the standard, dedicated nobody account
-
-	// subnetReservationDir is the host-wide directory that holds reservation files
-	// to prevent concurrent bridge subnet collisions.
-	subnetReservationDir  = "/run/nocklock-subnets"
-	subnetReservationLock = "/run/nocklock-subnets/.lock"
 )
+
+// subnetReservationDir is the host-wide directory that holds reservation files
+// to prevent concurrent bridge subnet collisions.
+var subnetReservationDir = "/run/nocklock-subnets"
 
 // BridgeSpec identifies one private point-to-point veth bridge. The bridge is
 // intentionally link-local and the child receives no default route: its only
@@ -51,8 +50,6 @@ type EgressConfig struct {
 	Bridge             BridgeSpec `json:"bridge"`
 }
 
-// subnetReservationLockFile is a global mutex to protect access to the reservation
-// directory and ensure only one process allocates/deallocates subnets at a time.
 var subnetReservationMutex sync.Mutex
 
 // NewBridgeSpec reserves a random link-local /30 identity for one netns run,
@@ -91,6 +88,16 @@ func NewBridgeSpec() (BridgeSpec, error) {
 
 		// Attempt to reserve this subnet.
 		if err := reserveSubnet(reservationID); err != nil {
+			if errors.Is(err, os.ErrPermission) {
+				bridge = BridgeSpec{
+					Namespace:      "nln" + nameID,
+					HostInterface:  "nlh" + nameID,
+					ChildInterface: "nlc" + nameID,
+					HostAddress:    fmt.Sprintf("169.254.%d.%d", octet3, octet4+1),
+					ChildAddress:   fmt.Sprintf("169.254.%d.%d", octet3, octet4+2),
+				}
+				return bridge, nil
+			}
 			// If reservation fails, assume collision and retry.
 			continue
 		}

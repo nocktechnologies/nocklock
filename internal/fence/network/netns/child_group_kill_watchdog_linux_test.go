@@ -5,12 +5,28 @@ package netns
 import (
 	"bytes"
 	"encoding/json"
+	"fmt"
 	"os"
 	"os/exec"
 	"syscall"
 	"testing"
 	"time"
 )
+
+func runWatchdogTestChild(descendants int) int {
+	for i := 0; i < descendants; i++ {
+		cmd := exec.Command("/bin/sleep", "30")
+		cmd.Stdout = os.Stdout
+		cmd.Stderr = os.Stderr
+		if err := cmd.Start(); err != nil {
+			fmt.Fprintln(os.Stderr, err)
+			return 2
+		}
+	}
+	for {
+		time.Sleep(time.Hour)
+	}
+}
 
 // TestChildGroupKillWatchdog_ProcessGroupKilledOnParentExit verifies that when
 // a parent process dies, the watchdog kills the entire child process group,
@@ -65,20 +81,7 @@ func TestChildGroupKillWatchdog_ProcessGroupKilledOnParentExit(t *testing.T) {
 	// Close the write end of the pipe to signal parent death to the watchdog.
 	pipeWrite.Close()
 
-	// Give the watchdog time to kill the process group.
-	time.Sleep(200 * time.Millisecond)
-
-	// Verify the child process is dead.
-	childProc, err := os.FindProcess(childPID)
-	if err != nil {
-		t.Fatalf("find child process: %v", err)
-	}
-
-	// Send signal 0 to check if process exists.
-	err = childProc.Signal(syscall.Signal(0))
-	if err == nil {
-		t.Errorf("child process %d still alive after watchdog should have killed it", childPID)
-	}
+	waitCommandExit(t, cmd, time.Second)
 
 	// Wait for watchdog to finish.
 	if err := watchdogCmd.Wait(); err != nil {
@@ -130,15 +133,40 @@ func TestChildGroupKillWatchdog_ConcurrentDescendantsAllKilled(t *testing.T) {
 	}
 
 	pipeWrite.Close()
-	time.Sleep(200 * time.Millisecond)
-
-	// Attempt to kill the process group should yield ESRCH (no such process).
-	err = syscall.Kill(-childPGID, 0)
-	if err == nil {
-		t.Errorf("process group %d still exists after watchdog kill", childPGID)
-	}
+	waitCommandExit(t, cmd, time.Second)
+	waitProcessGroupGone(t, childPGID, 2*time.Second)
 
 	if err := watchdogCmd.Wait(); err != nil {
 		t.Fatalf("watchdog exit: %v", err)
+	}
+}
+
+func waitCommandExit(t *testing.T, cmd *exec.Cmd, timeout time.Duration) {
+	t.Helper()
+	done := make(chan error, 1)
+	go func() { done <- cmd.Wait() }()
+	select {
+	case err := <-done:
+		if err == nil {
+			t.Fatal("child exited cleanly; want watchdog signal termination")
+		}
+	case <-time.After(timeout):
+		_ = cmd.Process.Kill()
+		t.Fatalf("child process %d still alive after watchdog should have killed it", cmd.Process.Pid)
+	}
+}
+
+func waitProcessGroupGone(t *testing.T, pgid int, timeout time.Duration) {
+	t.Helper()
+	deadline := time.Now().Add(timeout)
+	for {
+		err := syscall.Kill(-pgid, 0)
+		if err == syscall.ESRCH {
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("process group %d still exists after watchdog kill", pgid)
+		}
+		time.Sleep(10 * time.Millisecond)
 	}
 }

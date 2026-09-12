@@ -11,10 +11,18 @@ import (
 	"time"
 )
 
+func useTempSubnetReservationDir(t *testing.T) {
+	t.Helper()
+	old := subnetReservationDir
+	subnetReservationDir = t.TempDir()
+	t.Cleanup(func() { subnetReservationDir = old })
+}
+
 // TestSubnetReservation_NoCollisionsOnConcurrentAllocation verifies that
 // concurrent calls to NewBridgeSpec never allocate the same subnet address,
 // even with many simultaneous allocations.
 func TestSubnetReservation_NoCollisionsOnConcurrentAllocation(t *testing.T) {
+	useTempSubnetReservationDir(t)
 	const concurrentAllocations = 20
 	bridges := make([]BridgeSpec, concurrentAllocations)
 	errors := make([]error, concurrentAllocations)
@@ -60,6 +68,7 @@ func TestSubnetReservation_NoCollisionsOnConcurrentAllocation(t *testing.T) {
 // TestSubnetReservation_ReservationRelease verifies that a released subnet
 // can be reallocated by a subsequent call.
 func TestSubnetReservation_ReservationRelease(t *testing.T) {
+	useTempSubnetReservationDir(t)
 	// Allocate a subnet.
 	bridge1, err := NewBridgeSpec()
 	if err != nil {
@@ -109,6 +118,7 @@ func TestSubnetReservation_ReservationRelease(t *testing.T) {
 // TestSubnetReservation_DirectFileCreation verifies that the reservation
 // system correctly detects and handles reservations stored in the file system.
 func TestSubnetReservation_DirectFileCreation(t *testing.T) {
+	useTempSubnetReservationDir(t)
 	// Ensure reservation directory exists.
 	if err := os.MkdirAll(subnetReservationDir, 0700); err != nil {
 		t.Fatalf("create reservation directory: %v", err)
@@ -155,6 +165,7 @@ func TestSubnetReservation_DirectFileCreation(t *testing.T) {
 // TestSubnetReservation_AllocationRetryOnCollision verifies that NewBridgeSpec
 // retries and eventually succeeds even when encountering collisions.
 func TestSubnetReservation_AllocationRetryOnCollision(t *testing.T) {
+	useTempSubnetReservationDir(t)
 	// Pre-create a reservation for a subnet we'll force a collision on.
 	testSubnet := "169.254.5.1"
 	reservationFile := filepath.Join(subnetReservationDir, testSubnet)
@@ -185,6 +196,7 @@ func TestSubnetReservation_AllocationRetryOnCollision(t *testing.T) {
 // TestSubnetReservation_BridgeSpec_ValidateAfterReservation verifies that
 // a reserved bridge spec passes validation.
 func TestSubnetReservation_BridgeSpec_ValidateAfterReservation(t *testing.T) {
+	useTempSubnetReservationDir(t)
 	bridge, err := NewBridgeSpec()
 	if err != nil {
 		t.Fatalf("allocate bridge: %v", err)

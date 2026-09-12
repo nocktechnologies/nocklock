@@ -312,16 +312,22 @@ func TestCurlHTTP3FeatureDetection(t *testing.T) {
 }
 
 func protocolTCPFallbackClients() bool {
-	curlArgs := []string{"--fail", "--silent", "--show-error", "--insecure", "https://localhost/"}
-	if version, err := exec.Command("curl", "--version").CombinedOutput(); err == nil && curlSupportsHTTP3(string(version)) {
-		// curl's --http3 mode first attempts QUIC and falls back to TCP when the
-		// UDP/443 path is denied; --http3-only would not test fallback.
-		curlArgs = append([]string{"--http3"}, curlArgs...)
-	} else {
-		fmt.Fprintln(os.Stderr, "curl lacks compiled HTTP3: validating TCP path only; QUIC-to-TCP fallback is not measured on this runner")
+	version, err := exec.Command("curl", "--version").CombinedOutput()
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "curl --version failed: %v: %s\n", err, version)
+		return false
+	}
+	if !curlSupportsHTTP3(string(version)) {
+		fmt.Fprintf(os.Stderr, "curl lacks compiled HTTP3 support; install an HTTP3-capable curl for the QUIC-to-TCP fallback row: %s\n", version)
+		return false
+	}
+	if !protocolCurlHTTP3Fallback("localhost", true) {
+		return false
+	}
+	if !protocolCurlHTTP3Fallback("blocked.example", false) {
+		return false
 	}
 	commands := [][]string{
-		append([]string{"curl"}, curlArgs...),
 		{"node", "-e", "fetch(\"https://localhost/\").then(r=>{if(!r.ok)process.exit(1)}).catch(()=>process.exit(1))"},
 		{"python3", "-c", "import requests; requests.get('https://localhost/', verify=False, timeout=10).raise_for_status()"},
 	}
@@ -335,6 +341,34 @@ func protocolTCPFallbackClients() bool {
 			fmt.Fprintf(os.Stderr, "TCP fallback %s failed: %v: %s\n", argv[0], err, output)
 			return false
 		}
+	}
+	return true
+}
+
+func protocolCurlHTTP3Fallback(host string, wantAllowed bool) bool {
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, "curl", "--http3", "--verbose", "--fail", "--silent", "--show-error", "--insecure", "https://"+host+"/")
+	output, err := cmd.CombinedOutput()
+	trace := string(output)
+	quicAttempted := strings.Contains(trace, "[HTTP/3]") &&
+		(strings.Contains(trace, "vquic_sendmsg") || strings.Contains(trace, "QUIC connect"))
+	tcpFallback := strings.Contains(trace, "2nd attempt uses h2") ||
+		(strings.Contains(trace, "h3 ") && strings.Contains(trace, "starting h2"))
+	if !quicAttempted || !tcpFallback {
+		fmt.Fprintf(os.Stderr, "curl HTTP3 fallback trace for %s did not prove QUIC attempt plus TCP fallback (quic=%v fallback=%v): %s\n", host, quicAttempted, tcpFallback, trace)
+		return false
+	}
+	if wantAllowed {
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "curl HTTP3 fallback to allowlisted host failed: %v: %s\n", err, trace)
+			return false
+		}
+		return true
+	}
+	if err == nil || !strings.Contains(trace, "403") {
+		fmt.Fprintf(os.Stderr, "curl HTTP3 fallback to non-allowlisted host was not denied by the TCP proxy: err=%v trace=%s\n", err, trace)
+		return false
 	}
 	return true
 }

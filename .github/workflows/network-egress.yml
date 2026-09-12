@@ -179,6 +179,11 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y iproute2 nftables curl nodejs python3-requests
+          curl -sSfL https://github.com/stunnel/static-curl/releases/download/8.22.0/curl-linux-x86_64-glibc-8.22.0.tar.xz -o /tmp/curl-http3.tar.xz
+          echo 'd74460e43c0e6eaf40ec1fdda92c53dee94da8a6e6db066711541ada5aab0fa6  /tmp/curl-http3.tar.xz' | sha256sum -c -
+          tar -C /tmp -xf /tmp/curl-http3.tar.xz curl
+          sudo install -m 0755 /tmp/curl /usr/local/bin/curl
+          curl --version
 
       - name: compile Phase-1b protocol matrix
         run: go test -c -o netns.test ./internal/fence/network/netns/
@@ -188,4 +193,4 @@ jobs:
       # direct-resolver no-answer, UDP/SCTP denial, TCP fallback clients, and
       # proxy-death watchdog child termination.
       - name: run Phase-1b protocol matrix as root (skips forbidden)
-        run: sudo env NOCKLOCK_PROTOCOL_REQUIRE=1 ./netns.test -test.run '^TestNetnsProtocolMatrix$' -test.v -test.count=1
+        run: sudo env "PATH=$PATH" NOCKLOCK_PROTOCOL_REQUIRE=1 ./netns.test -test.run '^TestNetnsProtocolMatrix$' -test.v -test.count=1
