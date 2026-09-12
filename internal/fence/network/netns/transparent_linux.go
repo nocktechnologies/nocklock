@@ -232,6 +232,7 @@ func (p *transparentProxy) handleTCP(conn net.Conn) {
 func (p *transparentProxy) handleTLS(client net.Conn) {
 	hello, host, err := readTLSClientHello(client)
 	if err != nil || !network.IsAllowedHost(p.cfg.Allow, false, host) {
+		recordTransparentDeny("tls", host, "disallowed_sni")
 		fmt.Fprintln(os.Stderr, "NockLock: transparent TLS connection denied (missing or disallowed SNI)")
 		return
 	}
@@ -256,6 +257,7 @@ func (p *transparentProxy) handleHTTP(client net.Conn) {
 		return
 	}
 	if !network.IsAllowedHost(p.cfg.Allow, false, host) {
+		recordTransparentDeny("http", host, "disallowed_host")
 		fmt.Fprintln(os.Stderr, "NockLock: transparent HTTP connection denied (disallowed Host)")
 		body := "NockLock: domain not in allowlist\n"
 		_, _ = fmt.Fprintf(client, "HTTP/1.1 403 Forbidden\r\nContent-Length: %d\r\nConnection: close\r\n\r\n%s", len(body), body)
@@ -274,6 +276,22 @@ func (p *transparentProxy) handleHTTP(client net.Conn) {
 		return
 	}
 	pipeConnections(client, upstream)
+}
+
+func recordTransparentDeny(protocol, host, reason string) {
+	path := os.Getenv("NOCKLOCK_TRANSPARENT_DENY_LOG")
+	if path == "" {
+		return
+	}
+	if strings.ContainsAny(protocol+host+reason, "\t\r\n") {
+		return
+	}
+	f, err := os.OpenFile(path, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0600)
+	if err != nil {
+		return
+	}
+	defer f.Close()
+	_, _ = fmt.Fprintf(f, "%s\t%s\t%s\n", protocol, host, reason)
 }
 
 func readHTTPHeader(r io.Reader) ([]byte, string, error) {

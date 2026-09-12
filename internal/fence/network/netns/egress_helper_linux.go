@@ -61,13 +61,19 @@ func SetupEgressAndSupervise(req Request) (resultErr error) {
 	runtime.LockOSThread()
 
 	bridge := req.Egress.Bridge
+	cleanupTransferred := false
+	defer func() {
+		if resultErr != nil && !cleanupTransferred {
+			resultErr = errors.Join(resultErr, removeBridge(bridge))
+		}
+	}()
 	if err := createBridge(bridge); err != nil {
 		return err
 	}
 	if err := startDeferredBridgeCleanup(bridge); err != nil {
-		_ = removeBridge(bridge)
 		return err
 	}
+	cleanupTransferred = true
 
 	hostProxy, err := startSidecar("__netns-host-proxy", *req.Egress)
 	if err != nil {
@@ -188,10 +194,8 @@ func createBridge(bridge BridgeSpec) error {
 }
 
 func createBridgeWith(bridge BridgeSpec, run func(string, ...string) (string, error)) (resultErr error) {
-	if out, err := run("ip", "netns", "add", bridge.Namespace); err != nil {
-		return fmt.Errorf("create private network namespace: %w\n%s", err, out)
-	}
 	createdLink := false
+	createdNamespace := false
 	defer func() {
 		if resultErr == nil {
 			return
@@ -201,10 +205,19 @@ func createBridgeWith(bridge BridgeSpec, run func(string, ...string) (string, er
 				resultErr = errors.Join(resultErr, fmt.Errorf("rollback veth: %w: %s", err, out))
 			}
 		}
-		if out, err := run("ip", "netns", "del", bridge.Namespace); err != nil {
-			resultErr = errors.Join(resultErr, fmt.Errorf("rollback namespace: %w: %s", err, out))
+		if createdNamespace {
+			if out, err := run("ip", "netns", "del", bridge.Namespace); err != nil {
+				resultErr = errors.Join(resultErr, fmt.Errorf("rollback namespace: %w: %s", err, out))
+			}
+		}
+		if err := ReleaseSubnetReservation(bridge.ReservationID); err != nil {
+			resultErr = errors.Join(resultErr, fmt.Errorf("rollback subnet reservation: %w", err))
 		}
 	}()
+	if out, err := run("ip", "netns", "add", bridge.Namespace); err != nil {
+		return fmt.Errorf("create private network namespace: %w\n%s", err, out)
+	}
+	createdNamespace = true
 	if out, err := run("ip", "link", "add", bridge.HostInterface, "type", "veth", "peer", "name", bridge.ChildInterface); err != nil {
 		return fmt.Errorf("create private bridge veth: %w\n%s", err, out)
 	}

@@ -151,7 +151,12 @@ func waitCommandExit(t *testing.T, cmd *exec.Cmd, timeout time.Duration) {
 			t.Fatal("child exited cleanly; want watchdog signal termination")
 		}
 	case <-time.After(timeout):
+		_ = syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
 		_ = cmd.Process.Kill()
+		select {
+		case <-done:
+		case <-time.After(time.Second):
+		}
 		t.Fatalf("child process %d still alive after watchdog should have killed it", cmd.Process.Pid)
 	}
 }

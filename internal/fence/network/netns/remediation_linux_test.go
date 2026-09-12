@@ -12,6 +12,7 @@ import (
 	"net/http"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"syscall"
@@ -103,9 +104,13 @@ func TestForbiddenHTTPFraming(t *testing.T) {
 }
 
 func TestBridgeRollbackEachFailure(t *testing.T) {
-	bridge, _ := NewBridgeSpec()
 	for fail := 1; fail <= 5; fail++ {
 		t.Run(strconv.Itoa(fail), func(t *testing.T) {
+			useTempSubnetReservationDir(t)
+			bridge, err := NewBridgeSpec()
+			if err != nil {
+				t.Fatal(err)
+			}
 			var calls []string
 			run := func(name string, args ...string) (string, error) {
 				calls = append(calls, name+" "+strings.Join(args, " "))
@@ -126,6 +131,9 @@ func TestBridgeRollbackEachFailure(t *testing.T) {
 			}
 			if fail <= 2 && strings.Contains(joined, "link del") {
 				t.Fatal("deleted unowned veth")
+			}
+			if _, err := os.Stat(filepath.Join(subnetReservationDir, bridge.ReservationID)); !errors.Is(err, os.ErrNotExist) {
+				t.Fatalf("reservation file after createBridge failure: %v", err)
 			}
 		})
 	}
