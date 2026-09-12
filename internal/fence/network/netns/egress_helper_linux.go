@@ -353,6 +353,9 @@ func RunChildGroupKillWatchdog(req ChildGroupKillWatchdogRequest) error {
 	// any descendants that may have been spawned by the child leader.
 	// Negative PGID kills all processes in the group.
 	if err := syscall.Kill(-req.ChildPGID, syscall.SIGKILL); err != nil {
+		if errors.Is(err, syscall.ESRCH) {
+			return nil
+		}
 		return fmt.Errorf("kill child process group %d: %w", req.ChildPGID, err)
 	}
 	return nil

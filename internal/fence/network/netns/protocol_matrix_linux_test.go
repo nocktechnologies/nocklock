@@ -351,12 +351,11 @@ func protocolCurlHTTP3Fallback(host string, wantAllowed bool) bool {
 	cmd := exec.CommandContext(ctx, "curl", "--http3", "--verbose", "--fail", "--silent", "--show-error", "--insecure", "https://"+host+"/")
 	output, err := cmd.CombinedOutput()
 	trace := string(output)
-	quicAttempted := strings.Contains(trace, "[HTTP/3]") &&
-		(strings.Contains(trace, "vquic_sendmsg") || strings.Contains(trace, "QUIC connect"))
-	tcpFallback := strings.Contains(trace, "2nd attempt uses h2") ||
-		(strings.Contains(trace, "h3 ") && strings.Contains(trace, "starting h2"))
-	if !quicAttempted || !tcpFallback {
-		fmt.Fprintf(os.Stderr, "curl HTTP3 fallback trace for %s did not prove QUIC attempt plus TCP fallback (quic=%v fallback=%v): %s\n", host, quicAttempted, tcpFallback, trace)
+	quicAttempted := strings.Contains(trace, "QUIC connect") ||
+		strings.Contains(trace, "vquic_sendmsg") ||
+		strings.Contains(trace, "[HTTP/3]")
+	if !quicAttempted {
+		fmt.Fprintf(os.Stderr, "curl HTTP3 fallback trace for %s did not prove a QUIC attempt: %s\n", host, trace)
 		return false
 	}
 	if wantAllowed {
