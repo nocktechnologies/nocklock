@@ -149,7 +149,7 @@ func reserveSubnet(subnetAddr string) (string, error) {
 	}
 	// Write token on first line (the ownership marker), then PID for debugging.
 	if _, err := fmt.Fprintf(f, "%s\n%d\n", token, os.Getpid()); err != nil {
-		f.Close()
+		_ = f.Close()
 		_ = os.Remove(reservationFile)
 		return "", fmt.Errorf("write reservation file: %w", err)
 	}
