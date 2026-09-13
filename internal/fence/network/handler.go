@@ -29,7 +29,14 @@ const ProxyHealthPath = "/healthz"
 //   - Matching is case-insensitive.
 //   - An empty allowlist blocks everything (correct fail-closed behaviour).
 func (p *ProxyServer) isAllowed(hostname string) bool {
-	if p.allowAll {
+	return IsAllowedHost(p.allowList, p.allowAll, hostname)
+}
+
+// IsAllowedHost reports whether hostname matches the configured domain allowlist.
+// It is shared by the explicit and transparent proxy paths so both enforce
+// identical wildcard, port-stripping, and raw-IP fail-closed semantics.
+func IsAllowedHost(allowList []string, allowAll bool, hostname string) bool {
+	if allowAll {
 		return true
 	}
 
@@ -45,7 +52,7 @@ func (p *ProxyServer) isAllowed(hostname string) bool {
 		return false
 	}
 
-	for _, entry := range p.allowList {
+	for _, entry := range allowList {
 		entry = strings.ToLower(entry)
 
 		if strings.HasPrefix(entry, "*.") {

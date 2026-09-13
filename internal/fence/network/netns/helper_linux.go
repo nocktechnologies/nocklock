@@ -45,6 +45,10 @@ type Request struct {
 	GID int `json:"gid"`
 	// Groups are the supplementary groups to set for the child. Empty clears them.
 	Groups []int `json:"groups"`
+	// Egress carries the Phase-1b transparent-proxy setup. It is deliberately
+	// part of the helper request rather than child environment: the helper
+	// validates the private bridge values before it mutates any namespace state.
+	Egress *EgressConfig `json:"egress,omitempty"`
 }
 
 // trustedToolDirs is the FIXED search path for the setup tools. A root helper
@@ -174,6 +178,13 @@ func SetupAndExec(req Request) error {
 	// without side effects.
 	if err := validateChildCredential(req); err != nil {
 		return err
+	}
+	if req.Egress != nil {
+		// Phase-1b uses a root supervisor so the transparent and host-side
+		// policy proxies stay outside the child's credential and their death can
+		// terminate the child. The foundation path below remains available to
+		// exercise its deliberately deny-all baseline in isolation.
+		return SetupEgressAndSupervise(req)
 	}
 
 	// Namespace membership and per-thread capability state are BOTH per-thread,

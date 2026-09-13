@@ -18,7 +18,10 @@
 //   - Foundation (foundation_linux_test.go): with the default-drop base
 //     installed, that same capped child cannot EGRESS at all (Nock #9916).
 //
-// The transparent HTTP(S)/DNS allowlist that turns this default-drop floor into a
-// selective allowlist (tproxy + SNI/Host + in-namespace DNS stub) is a later
-// increment, gated on the Q7 QUIC→TCP fallback exit criterion.
+// Phase 1b layers the transparent HTTP(S)/DNS allowlist onto that floor. TCP/80
+// and TCP/443 are intercepted with nftables tproxy; a namespace-local proxy
+// checks HTTP Host or TLS SNI before it can open an allowlisted CONNECT tunnel to
+// the host-resolver proxy. A fixed-answer DNS stub maps every A/AAAA name to the
+// intercept address, so the child has no direct resolver or default route.
+// UDP/QUIC, SCTP, raw IP, and every other transport remain denied.
 package netns

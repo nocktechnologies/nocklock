@@ -173,6 +173,15 @@ func NewProxyServer(cfg config.NetworkConfig, logger *logging.Logger, sessionID 
 	return p
 }
 
+// NewProxyServerAt creates an allowlist proxy bound to listenAddr. It is used by
+// the netns egress helper for its private veth peer; ordinary callers should use
+// NewProxyServer, which binds only to localhost.
+func NewProxyServerAt(cfg config.NetworkConfig, logger *logging.Logger, sessionID, listenAddr string) *ProxyServer {
+	p := NewProxyServer(cfg, logger, sessionID)
+	p.listenAddr = listenAddr
+	return p
+}
+
 // cachedSafeDial is the ProxyServer's dial function that uses the session DNS cache
 // and respects the allowPrivateRanges setting.
 func (p *ProxyServer) cachedSafeDial(ctx context.Context, network, addr string) (net.Conn, error) {
