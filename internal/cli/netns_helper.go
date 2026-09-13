@@ -61,12 +61,6 @@ var netnsHelperCmd = &cobra.Command{
 				if errors.As(err, &childExit) {
 					return &exitCodeError{code: childExit.Code}
 				}
-				var collision *netns.SubnetCollisionError
-				if errors.As(err, &collision) {
-					// Collision: another run reserved this subnet. Return exit code 77.
-					// wrap.go detects this and retries with a fresh candidate.
-					return &exitCodeError{code: 77}
-				}
 				return err
 			}
 			return nil

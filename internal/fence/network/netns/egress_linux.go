@@ -62,12 +62,11 @@ func (e *SubnetCollisionError) Error() string {
 	return "subnet collision: candidate already reserved by another run"
 }
 
-// NewBridgeSpec generates a candidate link-local /30 identity for one netns run.
-// It generates candidate names and addresses only; actual reservation is performed
-// by the privileged helper (SetupAndExec) which has write access to /run/nocklock-subnets.
-// This ensures the fence is not silently disabled on normal hosts where unprivileged
-// processes cannot write the reservation directory.
-func NewBridgeSpec() (BridgeSpec, error) {
+// generateBridgeCandidate generates a candidate link-local /30 identity
+// with random names and addresses, but does NOT attempt reservation.
+// Used by both NewBridgeSpec (unprivileged candidate generator) and by
+// SetupAndExec (privileged retry loop).
+func generateBridgeCandidate() (BridgeSpec, error) {
 	var raw [4]byte
 	if _, err := rand.Read(raw[:]); err != nil {
 		return BridgeSpec{}, fmt.Errorf("generate private netns bridge id: %w", err)
@@ -79,9 +78,8 @@ func NewBridgeSpec() (BridgeSpec, error) {
 	nameID := fmt.Sprintf("%08x", id)
 	reservationID := fmt.Sprintf("169.254.%d.%d", octet3, octet4+1)
 
-	// Generate the candidate bridge specification. The privileged helper will attempt
-	// to reserve this subnet; if a collision occurs, it returns SubnetCollisionError
-	// and wrap.go retries with a fresh candidate.
+	// Generate the candidate bridge specification. Actual reservation is performed
+	// by the privileged helper (SetupAndExec) which has write access to /run/nocklock-subnets.
 	bridge := BridgeSpec{
 		Namespace:      "nln" + nameID,
 		HostInterface:  "nlh" + nameID,
@@ -91,6 +89,15 @@ func NewBridgeSpec() (BridgeSpec, error) {
 		ReservationID:  reservationID,
 	}
 	return bridge, nil
+}
+
+// NewBridgeSpec generates a candidate link-local /30 identity for one netns run.
+// It generates candidate names and addresses only; actual reservation is performed
+// by the privileged helper (SetupAndExec) which has write access to /run/nocklock-subnets.
+// This ensures the fence is not silently disabled on normal hosts where unprivileged
+// processes cannot write the reservation directory.
+func NewBridgeSpec() (BridgeSpec, error) {
+	return generateBridgeCandidate()
 }
 
 // isSubnetReserved checks if a subnet address is already reserved by another run.

@@ -60,14 +60,42 @@ func SetupEgressAndSupervise(req Request) (resultErr error) {
 	// a fence fail-open.
 	runtime.LockOSThread()
 
-	bridge := req.Egress.Bridge
-	// Attempt to reserve the subnet. If collision, return error and wrap.go retries.
-	token, err := reserveSubnet(bridge.ReservationID)
-	if err != nil {
-		return err // SubnetCollisionError or other error; wrap.go retries on collision
+	// Attempt to reserve a bridge subnet. If collision occurs, generate a fresh
+	// candidate and retry. This loop happens inside the privileged helper so
+	// collisions never appear as exit codes — they're transparent to wrap.go.
+	const maxCollisionRetries = 100
+	var bridge BridgeSpec
+	var token string
+	for collisionAttempt := 0; collisionAttempt < maxCollisionRetries; collisionAttempt++ {
+		// Generate a fresh candidate bridge identity.
+		candidate, err := generateBridgeCandidate()
+		if err != nil {
+			return fmt.Errorf("generate bridge candidate: %w", err)
+		}
+
+		// Attempt to reserve this candidate's subnet.
+		reservedToken, err := reserveSubnet(candidate.ReservationID)
+		if err != nil {
+			// Check if this is a collision.
+			var collision *SubnetCollisionError
+			if errors.As(err, &collision) {
+				// Collision: another run owns this subnet. Retry with a new candidate.
+				continue
+			}
+			// Other error: fail loudly.
+			return fmt.Errorf("reserve subnet %s: %w", candidate.ReservationID, err)
+		}
+
+		// Success: use this candidate.
+		bridge = candidate
+		token = reservedToken
+		bridge.ReservationToken = token
+		break
 	}
-	// Store the token for release during cleanup.
-	bridge.ReservationToken = token
+
+	if bridge.ReservationID == "" {
+		return fmt.Errorf("exhausted %d collision retry attempts for subnet reservation", maxCollisionRetries)
+	}
 
 	bridgeCreated := false
 	cleanupTransferred := false
