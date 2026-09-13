@@ -5,10 +5,14 @@ package netns
 import (
 	"crypto/rand"
 	"encoding/binary"
+	"errors"
 	"fmt"
 	"net/netip"
+	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
+	"sync"
 )
 
 const (
@@ -21,6 +25,10 @@ const (
 	proxyUID        = 65534 // the standard, dedicated nobody account
 )
 
+// subnetReservationDir is the host-wide directory that holds reservation files
+// to prevent concurrent bridge subnet collisions.
+var subnetReservationDir = "/run/nocklock-subnets"
+
 // BridgeSpec identifies one private point-to-point veth bridge. The bridge is
 // intentionally link-local and the child receives no default route: its only
 // non-loopback peer is the host-side allowlist proxy.
@@ -30,6 +38,7 @@ type BridgeSpec struct {
 	ChildInterface string `json:"child_interface"`
 	HostAddress    string `json:"host_address"`
 	ChildAddress   string `json:"child_address"`
+	ReservationID  string `json:"reservation_id"`
 }
 
 // EgressConfig is the fixed Phase-1b setup supplied to the privileged helper.
@@ -41,26 +50,134 @@ type EgressConfig struct {
 	Bridge             BridgeSpec `json:"bridge"`
 }
 
-// NewBridgeSpec reserves a random link-local /30 identity for one netns run.
-// Interface names are derived from the same random token and stay under Linux's
-// 15-character interface-name limit.
+var subnetReservationMutex sync.Mutex
+
+// NewBridgeSpec reserves a random link-local /30 identity for one netns run,
+// ensuring no collisions with concurrent runs. It allocates the subnet under a
+// host-wide lock with collision detection and retry.
 func NewBridgeSpec() (BridgeSpec, error) {
-	var raw [4]byte
-	if _, err := rand.Read(raw[:]); err != nil {
-		return BridgeSpec{}, fmt.Errorf("generate private netns bridge id: %w", err)
+	// Ensure reservation directory exists (best-effort; may fail if no permissions,
+	// which we'll handle by falling back to collision-avoidance retry).
+	_ = os.MkdirAll(subnetReservationDir, 0700)
+
+	var bridge BridgeSpec
+
+	// Retry up to 100 times to find a non-colliding subnet.
+	for attempt := 0; attempt < 100; attempt++ {
+		var raw [4]byte
+		if _, err := rand.Read(raw[:]); err != nil {
+			return BridgeSpec{}, fmt.Errorf("generate private netns bridge id: %w", err)
+		}
+		id := binary.BigEndian.Uint32(raw[:])
+		slot := id & 0x3fff // 16,384 non-overlapping /30s in 169.254.0.0/16.
+		octet3 := slot >> 6
+		octet4 := (slot & 0x3f) << 2
+		nameID := fmt.Sprintf("%08x", id)
+
+		// Check if this subnet is already reserved.
+		reservationID := fmt.Sprintf("169.254.%d.%d", octet3, octet4+1)
+		if reserved, err := isSubnetReserved(reservationID); err != nil {
+			// If we can't check due to permissions, proceed anyway (best-effort).
+			if !errors.Is(err, os.ErrPermission) && !errors.Is(err, os.ErrNotExist) {
+				return BridgeSpec{}, fmt.Errorf("check subnet reservation: %w", err)
+			}
+		} else if reserved {
+			// Collision detected; retry with a different random ID.
+			continue
+		}
+
+		// Attempt to reserve this subnet.
+		if err := reserveSubnet(reservationID); err != nil {
+			if errors.Is(err, os.ErrPermission) {
+				bridge = BridgeSpec{
+					Namespace:      "nln" + nameID,
+					HostInterface:  "nlh" + nameID,
+					ChildInterface: "nlc" + nameID,
+					HostAddress:    fmt.Sprintf("169.254.%d.%d", octet3, octet4+1),
+					ChildAddress:   fmt.Sprintf("169.254.%d.%d", octet3, octet4+2),
+				}
+				return bridge, nil
+			}
+			// If reservation fails, assume collision and retry.
+			continue
+		}
+
+		bridge = BridgeSpec{
+			Namespace:      "nln" + nameID,
+			HostInterface:  "nlh" + nameID,
+			ChildInterface: "nlc" + nameID,
+			HostAddress:    fmt.Sprintf("169.254.%d.%d", octet3, octet4+1),
+			ChildAddress:   fmt.Sprintf("169.254.%d.%d", octet3, octet4+2),
+			ReservationID:  reservationID,
+		}
+		return bridge, nil
 	}
-	id := binary.BigEndian.Uint32(raw[:])
-	slot := id & 0x3fff // 16,384 non-overlapping /30s in 169.254.0.0/16.
-	octet3 := slot >> 6
-	octet4 := (slot & 0x3f) << 2
-	nameID := fmt.Sprintf("%08x", id)
-	return BridgeSpec{
-		Namespace:      "nln" + nameID,
-		HostInterface:  "nlh" + nameID,
-		ChildInterface: "nlc" + nameID,
-		HostAddress:    fmt.Sprintf("169.254.%d.%d", octet3, octet4+1),
-		ChildAddress:   fmt.Sprintf("169.254.%d.%d", octet3, octet4+2),
-	}, nil
+
+	return BridgeSpec{}, fmt.Errorf("exhausted retry attempts to find a non-colliding /30 subnet")
+}
+
+// isSubnetReserved checks if a subnet address is already reserved by another run.
+// It acquires a lock and checks for the existence of a reservation file.
+func isSubnetReserved(subnetAddr string) (bool, error) {
+	subnetReservationMutex.Lock()
+	defer subnetReservationMutex.Unlock()
+
+	reservationFile := filepath.Join(subnetReservationDir, subnetAddr)
+	_, err := os.Stat(reservationFile)
+	if err == nil {
+		return true, nil // File exists, subnet is reserved.
+	}
+	if errors.Is(err, os.ErrNotExist) {
+		return false, nil // File doesn't exist, subnet is free.
+	}
+	return false, err // Other error.
+}
+
+// reserveSubnet creates a reservation file for a subnet address. It should only
+// be called after a successful isSubnetReserved check (which indicates the subnet
+// is free) and holds the global lock.
+func reserveSubnet(subnetAddr string) error {
+	subnetReservationMutex.Lock()
+	defer subnetReservationMutex.Unlock()
+
+	// Ensure the directory exists before creating the reservation file.
+	if err := os.MkdirAll(subnetReservationDir, 0700); err != nil {
+		return fmt.Errorf("create subnet reservation directory: %w", err)
+	}
+
+	reservationFile := filepath.Join(subnetReservationDir, subnetAddr)
+	f, err := os.OpenFile(reservationFile, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0600)
+	if err != nil {
+		if errors.Is(err, os.ErrExist) {
+			// Another process reserved this subnet while we were checking; retry.
+			return errors.New("collision detected: subnet already reserved")
+		}
+		return fmt.Errorf("create subnet reservation file: %w", err)
+	}
+	defer f.Close()
+	// Write process ID to help with debugging.
+	if _, err := fmt.Fprintf(f, "%d\n", os.Getpid()); err != nil {
+		_ = os.Remove(reservationFile)
+		return fmt.Errorf("write reservation file: %w", err)
+	}
+	return nil
+}
+
+// ReleaseSubnetReservation removes the reservation for a subnet. This should be
+// called during cleanup to allow the subnet to be reused by other runs.
+func ReleaseSubnetReservation(reservationID string) error {
+	if reservationID == "" {
+		return nil // No reservation to release.
+	}
+
+	subnetReservationMutex.Lock()
+	defer subnetReservationMutex.Unlock()
+
+	reservationFile := filepath.Join(subnetReservationDir, reservationID)
+	if err := os.Remove(reservationFile); err != nil && !errors.Is(err, os.ErrNotExist) {
+		return fmt.Errorf("release subnet reservation: %w", err)
+	}
+	return nil
 }
 
 func (b BridgeSpec) hostCIDR() string  { return b.HostAddress + "/30" }
@@ -77,7 +194,7 @@ func validateEgressConfig(cfg *EgressConfig, childUID int) error {
 		return fmt.Errorf("netns egress setup is missing transparent proxy configuration")
 	}
 	if childUID == proxyUID {
-		return fmt.Errorf("netns egress fence cannot use uid %d because it is reserved for the policy proxy", proxyUID)
+		return fmt.Errorf("netns egress fence cannot use uid %d because it is reserved for the policy proxy", childUID)
 	}
 	b := cfg.Bridge
 	for _, pair := range []struct {

@@ -142,6 +142,21 @@ func TestMain(m *testing.M) {
 				os.Exit(2)
 			}
 			os.Exit(0)
+		case "__netns-child-kill-watchdog":
+			var req ChildGroupKillWatchdogRequest
+			if err := json.NewDecoder(os.Stdin).Decode(&req); err != nil {
+				fmt.Fprintln(os.Stderr, err)
+				os.Exit(2)
+			}
+			if err := RunChildGroupKillWatchdog(req); err != nil {
+				fmt.Fprintln(os.Stderr, err)
+				os.Exit(2)
+			}
+			os.Exit(0)
+		case "__test-child-spawn-descendant":
+			os.Exit(runWatchdogTestChild(1))
+		case "__test-child-spawn-many-descendants":
+			os.Exit(runWatchdogTestChild(3))
 		}
 	}
 	if os.Getenv("NOCKLOCK_PROTOCOL_CLIENT") == "1" {

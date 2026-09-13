@@ -49,6 +49,8 @@ func TestNetnsProtocolMatrix(t *testing.T) {
 	}
 	httpHits := startProtocolHTTPServer(t)
 	httpsHits := startProtocolTLSServer(t)
+	denyLog := protocolDenyLog(t)
+	t.Setenv("NOCKLOCK_TRANSPARENT_DENY_LOG", denyLog)
 
 	uid, gid, groups := protocolChildCredential(t)
 	exe, err := os.Executable()
@@ -57,7 +59,7 @@ func TestNetnsProtocolMatrix(t *testing.T) {
 	}
 	req := Request{
 		Argv:   []string{exe, "-test.run=^$"},
-		Env:    append(os.Environ(), "NOCKLOCK_PROTOCOL_CLIENT=1", "NOCKLOCK_PROTOCOL_EXTERNAL="+bridge.HostAddress),
+		Env:    append(os.Environ(), "NOCKLOCK_PROTOCOL_CLIENT=1", "NOCKLOCK_PROTOCOL_EXTERNAL="+bridge.HostAddress, "NOCKLOCK_PROTOCOL_DENY_LOG="+denyLog),
 		UID:    uid,
 		GID:    gid,
 		Groups: groups,
@@ -311,17 +313,55 @@ func TestCurlHTTP3FeatureDetection(t *testing.T) {
 	}
 }
 
+func TestCurlHTTP3BlockedFallbackTrace(t *testing.T) {
+	hostedTrace := `* QUIC connect to ::1 port 443 failed: Could not connect to server
+* QUIC connect to 127.0.0.1 port 443 failed: Could not connect to server
+* ALPN: curl offers h2,http/1.1
+* TLSv1.3 (OUT), TLS handshake, Client hello (1):
+* TLS connect error: error:0A000126:SSL routines::unexpected eof while reading`
+	if !curlHTTP3TraceAttemptedQUIC(hostedTrace) {
+		t.Fatal("hosted trace did not prove QUIC attempt")
+	}
+	if !curlHTTP3TraceReachedTCPFallback(hostedTrace) {
+		t.Fatal("hosted trace did not prove TCP fallback")
+	}
+
+	quicOnlyTrace := `* QUIC connect to 127.0.0.1 port 443 failed: Could not connect to server`
+	if curlHTTP3TraceReachedTCPFallback(quicOnlyTrace) {
+		t.Fatal("QUIC-only trace was accepted as TCP fallback")
+	}
+	if curlDenyLogContains(t.TempDir()+"/missing", "blocked.example", "tls") {
+		t.Fatal("missing deny log accepted")
+	}
+	denyLog := protocolDenyLog(t)
+	if err := os.WriteFile(denyLog, []byte("http\tblocked.example\tdisallowed_host\ntls\tblocked.example\tdisallowed_sni\n"), 0666); err != nil {
+		t.Fatal(err)
+	}
+	if !curlDenyLogContains(denyLog, "blocked.example", "tls") {
+		t.Fatal("proxy TLS deny receipt was not accepted")
+	}
+	if curlDenyLogContains(denyLog, "localhost", "tls") {
+		t.Fatal("wrong host accepted as proxy TLS denial")
+	}
+}
+
 func protocolTCPFallbackClients() bool {
-	curlArgs := []string{"--fail", "--silent", "--show-error", "--insecure", "https://localhost/"}
-	if version, err := exec.Command("curl", "--version").CombinedOutput(); err == nil && curlSupportsHTTP3(string(version)) {
-		// curl's --http3 mode first attempts QUIC and falls back to TCP when the
-		// UDP/443 path is denied; --http3-only would not test fallback.
-		curlArgs = append([]string{"--http3"}, curlArgs...)
-	} else {
-		fmt.Fprintln(os.Stderr, "curl lacks compiled HTTP3: validating TCP path only; QUIC-to-TCP fallback is not measured on this runner")
+	version, err := exec.Command("curl", "--version").CombinedOutput()
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "curl --version failed: %v: %s\n", err, version)
+		return false
+	}
+	if !curlSupportsHTTP3(string(version)) {
+		fmt.Fprintf(os.Stderr, "curl lacks compiled HTTP3 support; install an HTTP3-capable curl for the QUIC-to-TCP fallback row: %s\n", version)
+		return false
+	}
+	if !protocolCurlHTTP3Fallback("localhost", true) {
+		return false
+	}
+	if !protocolCurlHTTP3Fallback("curl-blocked.example", false) {
+		return false
 	}
 	commands := [][]string{
-		append([]string{"curl"}, curlArgs...),
 		{"node", "-e", "fetch(\"https://localhost/\").then(r=>{if(!r.ok)process.exit(1)}).catch(()=>process.exit(1))"},
 		{"python3", "-c", "import requests; requests.get('https://localhost/', verify=False, timeout=10).raise_for_status()"},
 	}
@@ -337,6 +377,77 @@ func protocolTCPFallbackClients() bool {
 		}
 	}
 	return true
+}
+
+func protocolCurlHTTP3Fallback(host string, wantAllowed bool) bool {
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, "curl", "--http3", "--verbose", "--fail", "--silent", "--show-error", "--insecure", "https://"+host+"/")
+	output, err := cmd.CombinedOutput()
+	trace := string(output)
+	if !curlHTTP3TraceAttemptedQUIC(trace) {
+		fmt.Fprintf(os.Stderr, "curl HTTP3 fallback trace for %s did not prove a QUIC attempt: %s\n", host, trace)
+		return false
+	}
+	if wantAllowed {
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "curl HTTP3 fallback to allowlisted host failed: %v: %s\n", err, trace)
+			return false
+		}
+		if !curlHTTP3TraceReachedTCPFallback(trace) {
+			fmt.Fprintf(os.Stderr, "curl HTTP3 trace for allowlisted host did not prove TCP fallback: %s\n", trace)
+			return false
+		}
+		return true
+	}
+	if err == nil || !curlHTTP3TraceReachedTCPFallback(trace) || !curlDenyLogContains(os.Getenv("NOCKLOCK_PROTOCOL_DENY_LOG"), host, "tls") {
+		fmt.Fprintf(os.Stderr, "curl HTTP3 fallback to non-allowlisted host did not prove TCP proxy denial: err=%v trace=%s\n", err, trace)
+		return false
+	}
+	return true
+}
+
+func curlHTTP3TraceAttemptedQUIC(trace string) bool {
+	return strings.Contains(trace, "QUIC connect") ||
+		strings.Contains(trace, "vquic_sendmsg") ||
+		strings.Contains(trace, "[HTTP/3]")
+}
+
+func curlHTTP3TraceReachedTCPFallback(trace string) bool {
+	return strings.Contains(trace, "ALPN: curl offers") ||
+		strings.Contains(trace, "TLS handshake, Client hello") ||
+		strings.Contains(trace, "HTTP/1.1")
+}
+
+func curlDenyLogContains(path, host, protocol string) bool {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return false
+	}
+	want := protocol + "\t" + host + "\t"
+	for _, line := range strings.Split(string(data), "\n") {
+		if strings.HasPrefix(line, want) {
+			return true
+		}
+	}
+	return false
+}
+
+func protocolDenyLog(t *testing.T) string {
+	t.Helper()
+	f, err := os.CreateTemp("", "nocklock-transparent-deny-*.log")
+	if err != nil {
+		t.Fatalf("create transparent deny log: %v", err)
+	}
+	path := f.Name()
+	if err := f.Close(); err != nil {
+		t.Fatalf("close transparent deny log: %v", err)
+	}
+	if err := os.Chmod(path, 0666); err != nil {
+		t.Fatalf("make transparent deny log writable by proxy uid: %v", err)
+	}
+	t.Cleanup(func() { _ = os.Remove(path) })
+	return path
 }
 
 func TestProxyDeathTerminatesChild(t *testing.T) {

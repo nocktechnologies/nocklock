@@ -37,6 +37,12 @@ func (e *ChildExitError) Error() string {
 	return fmt.Sprintf("netns child exited %d", e.Code)
 }
 
+// ChildGroupKillWatchdogRequest instructs the watchdog subprocess to monitor
+// a parent process's exit and kill the child process group when the parent dies.
+type ChildGroupKillWatchdogRequest struct {
+	ChildPGID int `json:"child_pgid"`
+}
+
 // SetupEgressAndSupervise builds the Phase-1b private bridge, starts both policy
 // proxies, installs the child namespace's tproxy/DNS policy, and supervises the
 // unprivileged child. It never leaves the child with a default route or a direct
@@ -55,13 +61,19 @@ func SetupEgressAndSupervise(req Request) (resultErr error) {
 	runtime.LockOSThread()
 
 	bridge := req.Egress.Bridge
+	bridgeCreated := false
+	cleanupTransferred := false
+	defer func() {
+		cleanupFailedBridge(bridge, bridgeCreated, cleanupTransferred, &resultErr, removeBridge)
+	}()
 	if err := createBridge(bridge); err != nil {
 		return err
 	}
+	bridgeCreated = true
 	if err := startDeferredBridgeCleanup(bridge); err != nil {
-		_ = removeBridge(bridge)
 		return err
 	}
+	cleanupTransferred = true
 
 	hostProxy, err := startSidecar("__netns-host-proxy", *req.Egress)
 	if err != nil {
@@ -107,6 +119,14 @@ func SetupEgressAndSupervise(req Request) (resultErr error) {
 	if err != nil {
 		return fmt.Errorf("start fenced netns child: %w", err)
 	}
+
+	// Start watchdog to kill the child process group if this parent helper dies.
+	// This ensures descendants survive only while the parent is alive.
+	if err := startChildGroupKillWatchdog(child.Process.Pid); err != nil {
+		stopSidecar(child)
+		return fmt.Errorf("start child group kill watchdog: %w", err)
+	}
+
 	resultErr = superviseChild(child, []string{
 		bridge.childHealthAddr(),
 		bridge.hostProxyAddr(),
@@ -116,6 +136,12 @@ func SetupEgressAndSupervise(req Request) (resultErr error) {
 	// locked setup thread. The host-side cleanup process waits for this helper to
 	// exit before removing the veth and namespace, preventing an early-error leak.
 	return resultErr
+}
+
+func cleanupFailedBridge(bridge BridgeSpec, bridgeCreated, cleanupTransferred bool, resultErr *error, cleanup func(BridgeSpec) error) {
+	if bridgeCreated && *resultErr != nil && !cleanupTransferred {
+		*resultErr = errors.Join(*resultErr, cleanup(bridge))
+	}
 }
 
 // DropAndExecChild applies the receipted five-set capability drop, changes to the
@@ -174,10 +200,8 @@ func createBridge(bridge BridgeSpec) error {
 }
 
 func createBridgeWith(bridge BridgeSpec, run func(string, ...string) (string, error)) (resultErr error) {
-	if out, err := run("ip", "netns", "add", bridge.Namespace); err != nil {
-		return fmt.Errorf("create private network namespace: %w\n%s", err, out)
-	}
 	createdLink := false
+	createdNamespace := false
 	defer func() {
 		if resultErr == nil {
 			return
@@ -187,10 +211,19 @@ func createBridgeWith(bridge BridgeSpec, run func(string, ...string) (string, er
 				resultErr = errors.Join(resultErr, fmt.Errorf("rollback veth: %w: %s", err, out))
 			}
 		}
-		if out, err := run("ip", "netns", "del", bridge.Namespace); err != nil {
-			resultErr = errors.Join(resultErr, fmt.Errorf("rollback namespace: %w: %s", err, out))
+		if createdNamespace {
+			if out, err := run("ip", "netns", "del", bridge.Namespace); err != nil {
+				resultErr = errors.Join(resultErr, fmt.Errorf("rollback namespace: %w: %s", err, out))
+			}
+		}
+		if err := ReleaseSubnetReservation(bridge.ReservationID); err != nil {
+			resultErr = errors.Join(resultErr, fmt.Errorf("rollback subnet reservation: %w", err))
 		}
 	}()
+	if out, err := run("ip", "netns", "add", bridge.Namespace); err != nil {
+		return fmt.Errorf("create private network namespace: %w\n%s", err, out)
+	}
+	createdNamespace = true
 	if out, err := run("ip", "link", "add", bridge.HostInterface, "type", "veth", "peer", "name", bridge.ChildInterface); err != nil {
 		return fmt.Errorf("create private bridge veth: %w\n%s", err, out)
 	}
@@ -214,6 +247,10 @@ func removeBridge(bridge BridgeSpec) error {
 	}
 	if out, err := runInNS("ip", "netns", "del", bridge.Namespace); err != nil {
 		errs = append(errs, fmt.Errorf("delete private network namespace: %w\n%s", err, out))
+	}
+	// Release the subnet reservation to allow other runs to use this /30.
+	if err := ReleaseSubnetReservation(bridge.ReservationID); err != nil {
+		errs = append(errs, fmt.Errorf("release subnet reservation: %w", err))
 	}
 	return errors.Join(errs...)
 }
@@ -274,6 +311,73 @@ func RunDeferredBridgeCleanup(bridge BridgeSpec) error {
 		return fmt.Errorf("wait for netns helper exit before cleanup: %w", err)
 	}
 	return removeBridge(bridge)
+}
+
+// startChildGroupKillWatchdog spawns a watchdog process that monitors parent
+// death and kills the child process group when the parent exits. This ensures
+// that if the privileged helper is killed (SIGKILL or crash), the entire child
+// process tree is terminated, not just the immediate child leader.
+func startChildGroupKillWatchdog(childPID int) error {
+	// Get the child's process group ID. Since the child is started with Setpgid,
+	// its PGID should be its own PID.
+	childPGID := childPID
+
+	reader, writer, err := os.Pipe()
+	if err != nil {
+		return fmt.Errorf("create child kill watchdog pipe: %w", err)
+	}
+	encoded, err := json.Marshal(ChildGroupKillWatchdogRequest{ChildPGID: childPGID})
+	if err != nil {
+		_ = reader.Close()
+		_ = writer.Close()
+		return fmt.Errorf("encode child kill watchdog request: %w", err)
+	}
+	self, err := os.Executable()
+	if err != nil {
+		_ = reader.Close()
+		_ = writer.Close()
+		return fmt.Errorf("resolve helper executable for child kill watchdog: %w", err)
+	}
+	cmd := exec.Command(self, "__netns-child-kill-watchdog")
+	cmd.Stdin = bytes.NewReader(encoded)
+	cmd.Stdout = os.Stdout
+	cmd.Stderr = os.Stderr
+	cmd.ExtraFiles = []*os.File{reader} // fd 3 signals parent helper exit by EOF.
+	if err := cmd.Start(); err != nil {
+		_ = reader.Close()
+		_ = writer.Close()
+		return fmt.Errorf("start child kill watchdog process: %w", err)
+	}
+	if err := reader.Close(); err != nil {
+		_ = writer.Close()
+		return fmt.Errorf("close child kill watchdog pipe reader: %w", err)
+	}
+	deferredCleanupWriters = append(deferredCleanupWriters, writer)
+	return nil
+}
+
+// RunChildGroupKillWatchdog reads from the parent-exit pipe and kills the
+// child's process group when the parent dies. This is called in a subprocess
+// via the "__netns-child-kill-watchdog" verb.
+func RunChildGroupKillWatchdog(req ChildGroupKillWatchdogRequest) error {
+	parentExit := os.NewFile(uintptr(3), "nocklock-parent-exit")
+	if parentExit == nil {
+		return errors.New("child kill watchdog did not receive its parent-exit pipe")
+	}
+	defer parentExit.Close()
+	if _, err := io.Copy(io.Discard, parentExit); err != nil {
+		return fmt.Errorf("wait for parent exit: %w", err)
+	}
+	// Parent has exited. Kill the entire child process group to clean up
+	// any descendants that may have been spawned by the child leader.
+	// Negative PGID kills all processes in the group.
+	if err := syscall.Kill(-req.ChildPGID, syscall.SIGKILL); err != nil {
+		if errors.Is(err, syscall.ESRCH) {
+			return nil
+		}
+		return fmt.Errorf("kill child process group %d: %w", req.ChildPGID, err)
+	}
+	return nil
 }
 
 func mountStubResolver() (func(), error) {

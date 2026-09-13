@@ -12,6 +12,7 @@ import (
 	"net/http"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"syscall"
@@ -103,9 +104,13 @@ func TestForbiddenHTTPFraming(t *testing.T) {
 }
 
 func TestBridgeRollbackEachFailure(t *testing.T) {
-	bridge, _ := NewBridgeSpec()
 	for fail := 1; fail <= 5; fail++ {
 		t.Run(strconv.Itoa(fail), func(t *testing.T) {
+			useTempSubnetReservationDir(t)
+			bridge, err := NewBridgeSpec()
+			if err != nil {
+				t.Fatal(err)
+			}
 			var calls []string
 			run := func(name string, args ...string) (string, error) {
 				calls = append(calls, name+" "+strings.Join(args, " "))
@@ -126,6 +131,103 @@ func TestBridgeRollbackEachFailure(t *testing.T) {
 			}
 			if fail <= 2 && strings.Contains(joined, "link del") {
 				t.Fatal("deleted unowned veth")
+			}
+			if _, err := os.Stat(filepath.Join(subnetReservationDir, bridge.ReservationID)); !errors.Is(err, os.ErrNotExist) {
+				t.Fatalf("reservation file after createBridge failure: %v", err)
+			}
+		})
+	}
+}
+
+func TestBridgeRollbackEachFailurePreExistingNamespaceIsNotDeleted(t *testing.T) {
+	useTempSubnetReservationDir(t)
+	bridge, err := NewBridgeSpec()
+	if err != nil {
+		t.Fatal(err)
+	}
+	var calls []string
+	run := func(name string, args ...string) (string, error) {
+		call := name + " " + strings.Join(args, " ")
+		calls = append(calls, call)
+		if call == "ip netns add "+bridge.Namespace {
+			return "File exists", errors.New("failure")
+		}
+		return "", nil
+	}
+	if createBridgeWith(bridge, run) == nil {
+		t.Fatal("expected pre-existing namespace failure")
+	}
+	resultErr := errors.New("create bridge")
+	cleanupFailedBridge(bridge, false, false, &resultErr, func(bridge BridgeSpec) error {
+		calls = append(calls, "ip netns del "+bridge.Namespace)
+		return nil
+	})
+	for _, call := range calls {
+		if call == "ip netns del "+bridge.Namespace {
+			t.Fatalf("deleted pre-existing namespace: %q", call)
+		}
+	}
+}
+
+func TestSubnetReservationBridgeFailureDoesNotRemoveReplacement(t *testing.T) {
+	useTempSubnetReservationDir(t)
+	bridge, err := NewBridgeSpec()
+	if err != nil {
+		t.Fatal(err)
+	}
+	reservationFile := filepath.Join(subnetReservationDir, bridge.ReservationID)
+	const replacementOwner = "different-owner\n"
+	run := func(name string, args ...string) (string, error) {
+		return "File exists", errors.New("failure")
+	}
+	if createBridgeWith(bridge, run) == nil {
+		t.Fatal("expected create bridge failure")
+	}
+	if err := os.WriteFile(reservationFile, []byte(replacementOwner), 0600); err != nil {
+		t.Fatalf("simulate replacement reservation: %v", err)
+	}
+	resultErr := errors.New("create bridge")
+	cleanupFailedBridge(bridge, false, false, &resultErr, func(bridge BridgeSpec) error {
+		return ReleaseSubnetReservation(bridge.ReservationID)
+	})
+
+	got, err := os.ReadFile(reservationFile)
+	if err != nil {
+		t.Fatalf("replacement reservation removed: %v", err)
+	}
+	if string(got) != replacementOwner {
+		t.Fatalf("replacement reservation = %q, want %q", got, replacementOwner)
+	}
+}
+
+func TestCleanupFailedBridgeGuard(t *testing.T) {
+	sentinel := errors.New("cleanup failed")
+	for _, tc := range []struct {
+		name               string
+		bridgeCreated      bool
+		resultErr          error
+		cleanupTransferred bool
+		cleanupErr         error
+		wantCalls          int
+	}{
+		{"created failure not transferred calls cleanup", true, errors.New("create bridge"), false, nil, 1},
+		{"bridge never created skips cleanup", false, errors.New("create bridge"), false, nil, 0},
+		{"ownership transferred skips cleanup", true, errors.New("create bridge"), true, nil, 0},
+		{"no failure skips cleanup", true, nil, false, nil, 0},
+		{"cleanup error is joined into resultErr", true, errors.New("create bridge"), false, sentinel, 1},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			calls := 0
+			resultErr := tc.resultErr
+			cleanupFailedBridge(BridgeSpec{}, tc.bridgeCreated, tc.cleanupTransferred, &resultErr, func(BridgeSpec) error {
+				calls++
+				return tc.cleanupErr
+			})
+			if calls != tc.wantCalls {
+				t.Fatalf("cleanup called %d times, want %d", calls, tc.wantCalls)
+			}
+			if tc.cleanupErr != nil && !errors.Is(resultErr, tc.cleanupErr) {
+				t.Fatalf("resultErr = %v, want it to wrap sentinel %v", resultErr, tc.cleanupErr)
 			}
 		})
 	}
