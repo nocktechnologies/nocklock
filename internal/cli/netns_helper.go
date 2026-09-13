@@ -61,6 +61,12 @@ var netnsHelperCmd = &cobra.Command{
 				if errors.As(err, &childExit) {
 					return &exitCodeError{code: childExit.Code}
 				}
+				var collision *netns.SubnetCollisionError
+				if errors.As(err, &collision) {
+					// Collision: another run reserved this subnet. Return exit code 77.
+					// wrap.go detects this and retries with a fresh candidate.
+					return &exitCodeError{code: 77}
+				}
 				return err
 			}
 			return nil
@@ -122,12 +128,26 @@ var netnsCleanupCmd = &cobra.Command{
 	},
 }
 
+var netnsChildKillWatchdogCmd = &cobra.Command{
+	Use:                "__netns-child-kill-watchdog",
+	Hidden:             true,
+	DisableFlagParsing: true,
+	RunE: func(cmd *cobra.Command, _ []string) error {
+		var req netns.ChildGroupKillWatchdogRequest
+		if err := json.NewDecoder(os.Stdin).Decode(&req); err != nil {
+			return fmt.Errorf("failed to read child kill watchdog request from stdin: %w", err)
+		}
+		return netns.RunChildGroupKillWatchdog(req)
+	},
+}
+
 func init() {
 	rootCmd.AddCommand(netnsHelperCmd)
 	rootCmd.AddCommand(netnsProxyCmd)
 	rootCmd.AddCommand(netnsHostProxyCmd)
 	rootCmd.AddCommand(netnsChildCmd)
 	rootCmd.AddCommand(netnsCleanupCmd)
+	rootCmd.AddCommand(netnsChildKillWatchdogCmd)
 }
 
 // netnsHelperPreflight runs the non-mutating `check` verb through passwordless

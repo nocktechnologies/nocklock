@@ -61,6 +61,14 @@ func SetupEgressAndSupervise(req Request) (resultErr error) {
 	runtime.LockOSThread()
 
 	bridge := req.Egress.Bridge
+	// Attempt to reserve the subnet. If collision, return error and wrap.go retries.
+	token, err := reserveSubnet(bridge.ReservationID)
+	if err != nil {
+		return err // SubnetCollisionError or other error; wrap.go retries on collision
+	}
+	// Store the token for release during cleanup.
+	bridge.ReservationToken = token
+
 	bridgeCreated := false
 	cleanupTransferred := false
 	defer func() {
@@ -131,6 +139,18 @@ func SetupEgressAndSupervise(req Request) (resultErr error) {
 		bridge.childHealthAddr(),
 		bridge.hostProxyAddr(),
 	})
+
+	// Signal the watchdog process(es) to stand down (do not kill on clean exit).
+	// Write a 0x00 byte to each deferred cleanup writer. The watchdog will see this
+	// sentinel and exit without killing. A crash/SIGKILL of this process will cause
+	// bare EOF at the watchdog, which triggers the kill.
+	standDownByte := byte(0)
+	for _, w := range deferredCleanupWriters {
+		if _, err := w.Write([]byte{standDownByte}); err != nil {
+			// Best-effort; error writing to pipe is not fatal (pipe may be closed).
+			_ = err
+		}
+	}
 
 	// A named network namespace can be held by Go runtime threads other than the
 	// locked setup thread. The host-side cleanup process waits for this helper to
@@ -216,7 +236,7 @@ func createBridgeWith(bridge BridgeSpec, run func(string, ...string) (string, er
 				resultErr = errors.Join(resultErr, fmt.Errorf("rollback namespace: %w: %s", err, out))
 			}
 		}
-		if err := ReleaseSubnetReservation(bridge.ReservationID); err != nil {
+		if err := ReleaseSubnetReservation(bridge.ReservationID, bridge.ReservationToken); err != nil {
 			resultErr = errors.Join(resultErr, fmt.Errorf("rollback subnet reservation: %w", err))
 		}
 	}()
@@ -249,7 +269,7 @@ func removeBridge(bridge BridgeSpec) error {
 		errs = append(errs, fmt.Errorf("delete private network namespace: %w\n%s", err, out))
 	}
 	// Release the subnet reservation to allow other runs to use this /30.
-	if err := ReleaseSubnetReservation(bridge.ReservationID); err != nil {
+	if err := ReleaseSubnetReservation(bridge.ReservationID, bridge.ReservationToken); err != nil {
 		errs = append(errs, fmt.Errorf("release subnet reservation: %w", err))
 	}
 	return errors.Join(errs...)
@@ -357,23 +377,38 @@ func startChildGroupKillWatchdog(childPID int) error {
 }
 
 // RunChildGroupKillWatchdog reads from the parent-exit pipe and kills the
-// child's process group when the parent dies. This is called in a subprocess
-// via the "__netns-child-kill-watchdog" verb.
+// child's process group ONLY on abnormal parent death. It implements a stand-down
+// protocol: if the parent exits cleanly, it writes a stand-down sentinel byte before
+// closing the pipe. If the watchdog receives this sentinel, it exits without killing.
+// If the watchdog gets bare EOF (parent crashed), it kills the child process group.
+// This called in a subprocess via the "__netns-child-kill-watchdog" verb.
 func RunChildGroupKillWatchdog(req ChildGroupKillWatchdogRequest) error {
 	parentExit := os.NewFile(uintptr(3), "nocklock-parent-exit")
 	if parentExit == nil {
 		return errors.New("child kill watchdog did not receive its parent-exit pipe")
 	}
 	defer parentExit.Close()
-	if _, err := io.Copy(io.Discard, parentExit); err != nil {
-		return fmt.Errorf("wait for parent exit: %w", err)
+
+	// Read up to 1 byte from the pipe. If we get the stand-down sentinel (0x00),
+	// the parent is exiting cleanly and we should NOT kill. If we get EOF with
+	// no data (bare EOF), the parent crashed and we should kill the child group.
+	var buf [1]byte
+	n, err := parentExit.Read(buf[:])
+	if err != nil && !errors.Is(err, io.EOF) {
+		return fmt.Errorf("read parent-exit pipe: %w", err)
 	}
-	// Parent has exited. Kill the entire child process group to clean up
-	// any descendants that may have been spawned by the child leader.
+
+	// If we read the stand-down byte (0x00), exit cleanly without killing.
+	if n == 1 && buf[0] == 0 {
+		return nil // Clean exit signaled by parent; do not kill.
+	}
+
+	// If we got bare EOF (n == 0 and err == EOF) or read something other than the
+	// sentinel, the parent crashed abnormally. Kill the child process group.
 	// Negative PGID kills all processes in the group.
 	if err := syscall.Kill(-req.ChildPGID, syscall.SIGKILL); err != nil {
 		if errors.Is(err, syscall.ESRCH) {
-			return nil
+			return nil // Process group already gone; idempotent.
 		}
 		return fmt.Errorf("kill child process group %d: %w", req.ChildPGID, err)
 	}

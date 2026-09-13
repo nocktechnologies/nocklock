@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -61,7 +62,7 @@ func TestSubnetReservation_NoCollisionsOnConcurrentAllocation(t *testing.T) {
 
 	// Clean up reservations.
 	for _, bridge := range bridges {
-		_ = ReleaseSubnetReservation(bridge.ReservationID)
+		_ = ReleaseSubnetReservation(bridge.ReservationID, bridge.ReservationToken)
 	}
 }
 
@@ -78,7 +79,7 @@ func TestSubnetReservation_ReservationRelease(t *testing.T) {
 	resID1 := bridge1.ReservationID
 
 	// Release it.
-	if err := ReleaseSubnetReservation(resID1); err != nil {
+	if err := ReleaseSubnetReservation(resID1, bridge1.ReservationToken); err != nil {
 		t.Fatalf("release reservation: %v", err)
 	}
 
@@ -86,6 +87,7 @@ func TestSubnetReservation_ReservationRelease(t *testing.T) {
 	// We'll try up to 10 times to see if we can reuse the address.
 	var addr2 string
 	var resID2 string
+	var bridge2 BridgeSpec
 	reused := false
 	for attempt := 0; attempt < 10; attempt++ {
 		bridge2, err := NewBridgeSpec()
@@ -101,7 +103,7 @@ func TestSubnetReservation_ReservationRelease(t *testing.T) {
 		}
 
 		// Release this one and try again.
-		_ = ReleaseSubnetReservation(resID2)
+		_ = ReleaseSubnetReservation(resID2, bridge2.ReservationToken)
 		time.Sleep(10 * time.Millisecond)
 	}
 
@@ -112,7 +114,7 @@ func TestSubnetReservation_ReservationRelease(t *testing.T) {
 		t.Logf("could not reuse %s in 10 attempts (acceptable due to randomness)", addr1)
 	}
 
-	_ = ReleaseSubnetReservation(resID2)
+	_ = ReleaseSubnetReservation(resID2, bridge2.ReservationToken)
 }
 
 // TestSubnetReservation_DirectFileCreation verifies that the reservation
@@ -142,7 +144,7 @@ func TestSubnetReservation_DirectFileCreation(t *testing.T) {
 	}
 
 	// Verify reserveSubnet fails on this subnet (collision).
-	err = reserveSubnet(testSubnet)
+	_, err = reserveSubnet(testSubnet)
 	if err == nil {
 		t.Errorf("reserveSubnet should fail with collision on %s", testSubnet)
 	}
@@ -190,7 +192,7 @@ func TestSubnetReservation_AllocationRetryOnCollision(t *testing.T) {
 		t.Errorf("NewBridgeSpec should have retried and avoided collision with %s", testSubnet)
 	}
 
-	_ = ReleaseSubnetReservation(bridge.ReservationID)
+	_ = ReleaseSubnetReservation(bridge.ReservationID, bridge.ReservationToken)
 }
 
 // TestSubnetReservation_BridgeSpec_ValidateAfterReservation verifies that
@@ -201,7 +203,7 @@ func TestSubnetReservation_BridgeSpec_ValidateAfterReservation(t *testing.T) {
 	if err != nil {
 		t.Fatalf("allocate bridge: %v", err)
 	}
-	defer ReleaseSubnetReservation(bridge.ReservationID)
+	defer ReleaseSubnetReservation(bridge.ReservationID, bridge.ReservationToken)
 
 	cfg := &EgressConfig{
 		Allow:              []string{"example.com"},
@@ -212,4 +214,47 @@ func TestSubnetReservation_BridgeSpec_ValidateAfterReservation(t *testing.T) {
 	if err := validateEgressConfig(cfg, 1000); err != nil {
 		t.Errorf("validate allocated bridge config: %v", err)
 	}
+}
+
+// TestSubnetReservation_StaleTOCTOURelease verifies that releasing a reservation
+// with a mismatched token does NOT delete the current owner's reservation,
+// preventing TOCTOU deletion of another run's subnet.
+func TestSubnetReservation_StaleTOCTOURelease(t *testing.T) {
+	useTempSubnetReservationDir(t)
+	// Allocate a subnet (run A).
+	bridge1, err := NewBridgeSpec()
+	if err != nil {
+		t.Fatalf("first allocation (run A): %v", err)
+	}
+	token1 := bridge1.ReservationToken
+	resID1 := bridge1.ReservationID
+
+	// Release run A's reservation (clean exit).
+	if err := ReleaseSubnetReservation(resID1, token1); err != nil {
+		t.Fatalf("release run A's reservation: %v", err)
+	}
+
+	// Run B allocates the same subnet (simulate by pre-writing a reservation file).
+	reservationFile := filepath.Join(subnetReservationDir, resID1)
+	runBToken := "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+	if err := os.WriteFile(reservationFile, []byte(runBToken+"\n"+fmt.Sprintf("%d\n", os.Getpid())), 0600); err != nil {
+		t.Fatalf("simulate run B allocation: %v", err)
+	}
+
+	// Run A's cleanup (stale release with mismatched token) should NOT delete run B's reservation.
+	if err := ReleaseSubnetReservation(resID1, token1); err != nil {
+		t.Fatalf("stale release with mismatched token: %v", err)
+	}
+
+	// Verify run B's reservation still exists with the correct token.
+	content, err := os.ReadFile(reservationFile)
+	if err != nil {
+		t.Fatalf("run B's reservation was deleted (should still exist): %v", err)
+	}
+	if !strings.HasPrefix(string(content), runBToken) {
+		t.Fatalf("run B's token was corrupted: got %q, want %q", string(content), runBToken)
+	}
+
+	// Clean up run B's reservation.
+	_ = ReleaseSubnetReservation(resID1, runBToken)
 }

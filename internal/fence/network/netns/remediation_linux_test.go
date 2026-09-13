@@ -188,7 +188,7 @@ func TestSubnetReservationBridgeFailureDoesNotRemoveReplacement(t *testing.T) {
 	}
 	resultErr := errors.New("create bridge")
 	cleanupFailedBridge(bridge, false, false, &resultErr, func(bridge BridgeSpec) error {
-		return ReleaseSubnetReservation(bridge.ReservationID)
+		return ReleaseSubnetReservation(bridge.ReservationID, bridge.ReservationToken)
 	})
 
 	got, err := os.ReadFile(reservationFile)
