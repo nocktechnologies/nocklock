@@ -200,6 +200,39 @@ func TestSubnetReservationBridgeFailureDoesNotRemoveReplacement(t *testing.T) {
 	}
 }
 
+func TestCleanupFailedBridgeGuard(t *testing.T) {
+	sentinel := errors.New("cleanup failed")
+	for _, tc := range []struct {
+		name               string
+		bridgeCreated      bool
+		resultErr          error
+		cleanupTransferred bool
+		cleanupErr         error
+		wantCalls          int
+	}{
+		{"created failure not transferred calls cleanup", true, errors.New("create bridge"), false, nil, 1},
+		{"bridge never created skips cleanup", false, errors.New("create bridge"), false, nil, 0},
+		{"ownership transferred skips cleanup", true, errors.New("create bridge"), true, nil, 0},
+		{"no failure skips cleanup", true, nil, false, nil, 0},
+		{"cleanup error is joined into resultErr", true, errors.New("create bridge"), false, sentinel, 1},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			calls := 0
+			resultErr := tc.resultErr
+			cleanupFailedBridge(BridgeSpec{}, tc.bridgeCreated, tc.cleanupTransferred, &resultErr, func(BridgeSpec) error {
+				calls++
+				return tc.cleanupErr
+			})
+			if calls != tc.wantCalls {
+				t.Fatalf("cleanup called %d times, want %d", calls, tc.wantCalls)
+			}
+			if tc.cleanupErr != nil && !errors.Is(resultErr, tc.cleanupErr) {
+				t.Fatalf("resultErr = %v, want it to wrap sentinel %v", resultErr, tc.cleanupErr)
+			}
+		})
+	}
+}
+
 func TestSupervisionKillsDescendantOnCancel(t *testing.T) {
 	testSupervisionKillsDescendant(t, true)
 }
