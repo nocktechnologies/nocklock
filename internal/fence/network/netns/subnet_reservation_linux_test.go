@@ -258,3 +258,80 @@ func TestSubnetReservation_StaleTOCTOURelease(t *testing.T) {
 	// Clean up run B's reservation.
 	_ = ReleaseSubnetReservation(resID1, runBToken)
 }
+
+// TestReservationID_RejectsTraversalPaths verifies that directory traversal
+// attacks in the reservation ID are rejected and no files are created.
+func TestReservationID_RejectsTraversalPaths(t *testing.T) {
+	useTempSubnetReservationDir(t)
+
+	traversalIDs := []string{
+		"../evil",
+		"../../etc/passwd",
+		"/etc/evil",
+		"169.254.1.1/../../../evil",
+		"169.254.1.1/./evil",
+	}
+
+	for _, traversalID := range traversalIDs {
+		t.Run(traversalID, func(t *testing.T) {
+			// Attempt to reserve with a malicious ID.
+			_, err := reserveSubnet(traversalID)
+			if err == nil {
+				t.Errorf("reserveSubnet should reject traversal ID %q, got nil error", traversalID)
+			}
+
+			// Verify no files were created outside the reservation directory.
+			err = filepath.Walk("/", func(path string, info os.FileInfo, err error) error {
+				if err != nil {
+					return err
+				}
+				// If we find any file with the traversal component in its name outside
+				// the reservation dir, that's a failure. This is a quick sanity check.
+				if strings.Contains(path, "evil") && !strings.HasPrefix(path, subnetReservationDir) {
+					t.Errorf("traversal ID %q created file outside reservation dir: %s", traversalID, path)
+				}
+				return nil
+			})
+			if err != nil {
+				// Walk errors are okay (permission denied on some dirs), just log it.
+				t.Logf("walk error (acceptable): %v", err)
+			}
+		})
+	}
+}
+
+// TestReservationID_ValidatesShape verifies that validateReservationID
+// accepts valid 169.254.x.y addresses and rejects invalid ones.
+func TestReservationID_ValidatesShape(t *testing.T) {
+	useTempSubnetReservationDir(t)
+
+	validIDs := []string{
+		"169.254.1.1",
+		"169.254.255.254",
+		"169.254.0.0",
+		"169.254.100.50",
+	}
+
+	invalidIDs := []string{
+		"169.254.256.1", // octet out of range
+		"169.253.1.1",   // wrong network
+		"192.168.1.1",   // different network
+		"169.254",       // incomplete
+		"169.254.1.1.1", // too many octets
+		"not.a.valid.address",
+	}
+
+	for _, validID := range validIDs {
+		err := validateReservationID(validID)
+		if err != nil {
+			t.Errorf("validateReservationID should accept %q, got error: %v", validID, err)
+		}
+	}
+
+	for _, invalidID := range invalidIDs {
+		err := validateReservationID(invalidID)
+		if err == nil {
+			t.Errorf("validateReservationID should reject %q, got nil error", invalidID)
+		}
+	}
+}

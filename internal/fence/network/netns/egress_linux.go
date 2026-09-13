@@ -100,9 +100,46 @@ func NewBridgeSpec() (BridgeSpec, error) {
 	return GenerateBridgeCandidate()
 }
 
+// validateReservationID ensures the subnet address is a valid reservation ID
+// and cannot traverse filesystem paths (defense in depth against caller-supplied
+// untrusted input used as a filesystem path in the privileged helper).
+func validateReservationID(subnetAddr string) error {
+	// Must be a valid link-local /30 address: 169.254.X.Y
+	// Parse and validate octets to ensure they're in range 0-255.
+	parts := strings.Split(subnetAddr, ".")
+	if len(parts) != 4 {
+		return fmt.Errorf("invalid reservation ID format: %q (must be 169.254.x.y)", subnetAddr)
+	}
+
+	// Validate each octet is a number 0-255.
+	expectedPrefix := []string{"169", "254"}
+	for i := 0; i < 2; i++ {
+		if parts[i] != expectedPrefix[i] {
+			return fmt.Errorf("invalid reservation ID format: %q (must be 169.254.x.y)", subnetAddr)
+		}
+	}
+
+	for i := 2; i < 4; i++ {
+		octet, err := strconv.Atoi(parts[i])
+		if err != nil || octet < 0 || octet > 255 {
+			return fmt.Errorf("invalid reservation ID format: %q (octet out of range: %q)", subnetAddr, parts[i])
+		}
+	}
+
+	// Must not contain path separators (defense in depth).
+	if subnetAddr != filepath.Base(subnetAddr) {
+		return fmt.Errorf("invalid reservation ID: %q contains path separators", subnetAddr)
+	}
+	return nil
+}
+
 // isSubnetReserved checks if a subnet address is already reserved by another run.
 // It acquires a lock and checks for the existence of a reservation file.
 func isSubnetReserved(subnetAddr string) (bool, error) {
+	if err := validateReservationID(subnetAddr); err != nil {
+		return false, err
+	}
+
 	subnetReservationMutex.Lock()
 	defer subnetReservationMutex.Unlock()
 
@@ -123,6 +160,10 @@ func isSubnetReserved(subnetAddr string) (bool, error) {
 // has write access to /run/nocklock-subnets. Returns SubnetCollisionError if another
 // run already owns this subnet (O_EXCL failed).
 func reserveSubnet(subnetAddr string) (string, error) {
+	if err := validateReservationID(subnetAddr); err != nil {
+		return "", err
+	}
+
 	subnetReservationMutex.Lock()
 	defer subnetReservationMutex.Unlock()
 
@@ -167,6 +208,10 @@ func reserveSubnet(subnetAddr string) (string, error) {
 func ReleaseSubnetReservation(reservationID, token string) error {
 	if reservationID == "" {
 		return nil // No reservation to release.
+	}
+
+	if err := validateReservationID(reservationID); err != nil {
+		return err
 	}
 
 	subnetReservationMutex.Lock()
