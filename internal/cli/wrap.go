@@ -314,13 +314,16 @@ var wrapCmd = &cobra.Command{
 			if effectiveCfg.Network.AllowAll {
 				return fmt.Errorf("--net-fence=netns requires network.allow entries; allow_all bypasses the transparent allowlist")
 			}
-			// The privileged helper (SetupAndExec) will generate and reserve the bridge
-			// internally after handling collisions. The unprivileged side sends an empty
-			// bridge; the helper fills it in.
+			// Send a valid candidate bridge to the privileged helper. The helper will
+			// attempt to reserve it; on collision it regenerates candidates and retries.
+			candidate, err := netns.GenerateBridgeCandidate()
+			if err != nil {
+				return fmt.Errorf("generate bridge candidate: %w", err)
+			}
 			netnsEgress = &netns.EgressConfig{
 				Allow:              append([]string(nil), effectiveCfg.Network.Allow...),
 				AllowPrivateRanges: effectiveCfg.Network.AllowPrivateRanges,
-				Bridge:             netns.BridgeSpec{}, // Empty; helper reserves it
+				Bridge:             candidate,
 			}
 			logEvent(logging.EventNetworkPassed, "network", fmt.Sprintf("netns tproxy egress fence active domains=%d", len(netnsEgress.Allow)), false)
 			fmt.Fprintf(os.Stderr, "NockLock: network egress fence active — netns tproxy allowlist (%d domain(s))\n", len(netnsEgress.Allow))

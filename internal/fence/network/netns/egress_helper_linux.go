@@ -60,40 +60,38 @@ func SetupEgressAndSupervise(req Request) (resultErr error) {
 	// a fence fail-open.
 	runtime.LockOSThread()
 
-	// Attempt to reserve a bridge subnet. If collision occurs, generate a fresh
-	// candidate and retry. This loop happens inside the privileged helper so
+	// Attempt to reserve the incoming bridge candidate. If collision occurs, generate
+	// fresh candidates and retry. This loop happens inside the privileged helper so
 	// collisions never appear as exit codes — they're transparent to wrap.go.
 	const maxCollisionRetries = 100
-	var bridge BridgeSpec
+	var bridge BridgeSpec = req.Egress.Bridge
 	var token string
 	for collisionAttempt := 0; collisionAttempt < maxCollisionRetries; collisionAttempt++ {
-		// Generate a fresh candidate bridge identity.
-		candidate, err := generateBridgeCandidate()
-		if err != nil {
-			return fmt.Errorf("generate bridge candidate: %w", err)
-		}
-
-		// Attempt to reserve this candidate's subnet.
-		reservedToken, err := reserveSubnet(candidate.ReservationID)
+		// Attempt to reserve this bridge's subnet.
+		reservedToken, err := reserveSubnet(bridge.ReservationID)
 		if err != nil {
 			// Check if this is a collision.
 			var collision *SubnetCollisionError
 			if errors.As(err, &collision) {
-				// Collision: another run owns this subnet. Retry with a new candidate.
+				// Collision: another run owns this subnet. Generate a fresh candidate and retry.
+				candidate, err := GenerateBridgeCandidate()
+				if err != nil {
+					return fmt.Errorf("generate bridge candidate: %w", err)
+				}
+				bridge = candidate
 				continue
 			}
 			// Other error: fail loudly.
-			return fmt.Errorf("reserve subnet %s: %w", candidate.ReservationID, err)
+			return fmt.Errorf("reserve subnet %s: %w", bridge.ReservationID, err)
 		}
 
-		// Success: use this candidate.
-		bridge = candidate
+		// Success: reservation acquired.
 		token = reservedToken
 		bridge.ReservationToken = token
 		break
 	}
 
-	if bridge.ReservationID == "" {
+	if bridge.ReservationID == "" || token == "" {
 		return fmt.Errorf("exhausted %d collision retry attempts for subnet reservation", maxCollisionRetries)
 	}
 

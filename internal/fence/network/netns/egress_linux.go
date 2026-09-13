@@ -66,7 +66,7 @@ func (e *SubnetCollisionError) Error() string {
 // with random names and addresses, but does NOT attempt reservation.
 // Used by both NewBridgeSpec (unprivileged candidate generator) and by
 // SetupAndExec (privileged retry loop).
-func generateBridgeCandidate() (BridgeSpec, error) {
+func GenerateBridgeCandidate() (BridgeSpec, error) {
 	var raw [4]byte
 	if _, err := rand.Read(raw[:]); err != nil {
 		return BridgeSpec{}, fmt.Errorf("generate private netns bridge id: %w", err)
@@ -97,7 +97,7 @@ func generateBridgeCandidate() (BridgeSpec, error) {
 // This ensures the fence is not silently disabled on normal hosts where unprivileged
 // processes cannot write the reservation directory.
 func NewBridgeSpec() (BridgeSpec, error) {
-	return generateBridgeCandidate()
+	return GenerateBridgeCandidate()
 }
 
 // isSubnetReserved checks if a subnet address is already reserved by another run.

@@ -27,11 +27,13 @@ type Request struct {
 // BridgeSpec mirrors the Linux-only private bridge description so callers keep
 // compiling on platforms where the netns fence refuses to run.
 type BridgeSpec struct {
-	Namespace      string `json:"namespace"`
-	HostInterface  string `json:"host_interface"`
-	ChildInterface string `json:"child_interface"`
-	HostAddress    string `json:"host_address"`
-	ChildAddress   string `json:"child_address"`
+	Namespace        string `json:"namespace"`
+	HostInterface    string `json:"host_interface"`
+	ChildInterface   string `json:"child_interface"`
+	HostAddress      string `json:"host_address"`
+	ChildAddress     string `json:"child_address"`
+	ReservationID    string `json:"reservation_id"`
+	ReservationToken string `json:"reservation_token"`
 }
 
 // EgressConfig mirrors the Linux-only transparent-proxy setup request.
@@ -54,6 +56,11 @@ func (e *ChildExitError) Error() string {
 	return fmt.Sprintf("netns child exited %d", e.Code)
 }
 
+// ChildGroupKillWatchdogRequest mirrors the Linux watchdog request.
+type ChildGroupKillWatchdogRequest struct {
+	ChildPGID int
+}
+
 // Check refuses on non-Linux platforms.
 func Check() error { return ErrUnsupported }
 
@@ -74,3 +81,9 @@ func RunHostProxy(EgressConfig) error { return ErrUnsupported }
 
 // RunDeferredBridgeCleanup refuses on non-Linux platforms.
 func RunDeferredBridgeCleanup(BridgeSpec) error { return ErrUnsupported }
+
+// GenerateBridgeCandidate refuses on non-Linux platforms.
+func GenerateBridgeCandidate() (BridgeSpec, error) { return BridgeSpec{}, ErrUnsupported }
+
+// RunChildGroupKillWatchdog refuses on non-Linux platforms.
+func RunChildGroupKillWatchdog(ChildGroupKillWatchdogRequest) error { return ErrUnsupported }
