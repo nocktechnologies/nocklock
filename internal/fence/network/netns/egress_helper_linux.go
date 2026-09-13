@@ -97,6 +97,9 @@ func SetupEgressAndSupervise(req Request) (resultErr error) {
 		return fmt.Errorf("exhausted %d collision retry attempts for subnet reservation", maxCollisionRetries)
 	}
 
+	// Propagate the reserved bridge to all consumers (sidecars and configuration).
+	req.Egress.Bridge = bridge
+
 	bridgeCreated := false
 	cleanupTransferred := false
 	defer func() {
