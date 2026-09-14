@@ -21,6 +21,7 @@ import (
 	"github.com/BurntSushi/toml"
 	"github.com/nocktechnologies/nocklock/internal/config"
 	"github.com/nocktechnologies/nocklock/internal/fence/syscallfence"
+	"github.com/nocktechnologies/nocklock/internal/logging"
 	"github.com/spf13/cobra"
 )
 
@@ -64,6 +65,10 @@ var verifyCmd = &cobra.Command{
 		"environment variable is absent, and attempt one side-effect-free denied syscall.",
 	RunE: func(cmd *cobra.Command, args []string) error {
 		asJSON, _ := cmd.Flags().GetBool("json")
+		asAudit, _ := cmd.Flags().GetBool("audit")
+		if asAudit {
+			return runAuditVerify(cmd.Context(), cmd.OutOrStdout())
+		}
 		report, err := runVerify(cmd.Context(), currentDoctorCapabilities, currentProbeRunner)
 		if err != nil {
 			cmd.SilenceUsage = true
@@ -87,7 +92,78 @@ var verifyCmd = &cobra.Command{
 
 func init() {
 	verifyCmd.Flags().Bool("json", false, "emit structured JSON output")
+	verifyCmd.Flags().Bool("audit", false, "verify the audit chain instead of running fence probes")
 	rootCmd.AddCommand(verifyCmd)
+}
+
+func runAuditVerify(ctx context.Context, w io.Writer) error {
+	configPath, err := config.FindConfig()
+	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return fmt.Errorf("no NockLock config found. Run 'nocklock init' first")
+		}
+		return fmt.Errorf("config lookup failed: %w", err)
+	}
+
+	cfg, err := config.Load(configPath)
+	if err != nil {
+		return err
+	}
+
+	// Get the logging DB path from config
+	if cfg.Logging.DB == "" {
+		return fmt.Errorf("no logging DB configured")
+	}
+
+	dbPath := cfg.Logging.DB
+	projectRoot := filepath.Dir(filepath.Dir(configPath))
+
+	// Make path absolute if relative
+	if !filepath.IsAbs(dbPath) {
+		dbPath = filepath.Join(projectRoot, dbPath)
+	}
+
+	// Open the logger (will error if DB doesn't exist)
+	if _, err := os.Stat(dbPath); err != nil {
+		return fmt.Errorf("event log not found at %s: %w", dbPath, err)
+	}
+
+	logger, err := logging.NewLogger(dbPath, projectRoot)
+	if err != nil {
+		return fmt.Errorf("failed to open event log: %w", err)
+	}
+	defer logger.Close()
+
+	// Verify the chain
+	result, err := logger.VerifyChain()
+	if err != nil {
+		return fmt.Errorf("verification failed: %w", err)
+	}
+
+	// Format and print output
+	return writeAuditVerifyResult(w, result)
+}
+
+// writeAuditVerifyResult renders a chain verification result. An intact chain
+// prints the CONSISTENT verdict, followed by a NOTE for any migration boundary
+// and any prune boundary — so a compaction of the log can never read back as
+// untouched history. A broken chain prints the TAMPERED verdict and returns a
+// non-zero exit.
+func writeAuditVerifyResult(w io.Writer, result *logging.ChainVerifyResult) error {
+	if !result.Intact {
+		fmt.Fprintf(w, "AUDIT: TAMPERED — chain breaks at entry %d (%s)\n", result.FirstBrokenID, result.BrokenReason)
+		return &exitCodeError{code: 1}
+	}
+
+	fmt.Fprintf(w, "AUDIT: CONSISTENT — %d entries verified, hash chain intact (not externally anchored)\n", result.EntriesVerified)
+	if result.MigratedAt != nil {
+		fmt.Fprintf(w, "NOTE: entries 1..%d predate the chain (migrated %s); structurally chained, not authenticated.\n", result.LegacyThroughID, result.MigratedAt.Format(time.RFC3339))
+	}
+	if result.PrunedAt != nil {
+		fmt.Fprintf(w, "NOTE: chain was re-anchored by a prune at %s; %d event(s) were removed in that prune and history before it is not retained.\n", result.PrunedAt.Format(time.RFC3339), result.PrunedCount)
+	}
+	fmt.Fprintf(w, "Head hash: %s\n", result.HeadHash)
+	return nil
 }
 
 func runVerify(ctx context.Context, caps doctorCapabilities, runner probeRunner) (verifyReport, error) {

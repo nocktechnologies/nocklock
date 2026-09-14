@@ -43,6 +43,20 @@ nocklock init --runtime goose
 
 Every blocked access is logged to `.nock/events.db`. Blocked file opens and access-style checks return EACCES (permission denied); denied stat-family probes return ENOENT to avoid existence enumeration. Blocked domains return 403.
 
+## Tamper-Evident Audit Log (v1)
+
+`nocklock verify --audit` walks the SHA-256 hash chain in `.nock/events.db` and reports its integrity. Each row carries a SHA-256 hash of its contents linked to the previous row's hash. A chain verification run looks like:
+
+```
+$ nocklock verify --audit
+AUDIT: CONSISTENT — 247 events verified, hash chain intact (not externally anchored)
+Head hash: fe48c7a11e02b9ebe9ba07eb7df01e1e3c5b18f3fcb31af8f0eb5d8b4f1e7a4c
+```
+
+This means the logged events have not been altered, deleted (except possibly the most recent), or reordered since they were recorded. An intentional compaction (`--prune`) re-anchors the chain and still verifies as consistent, but it is never silent: verify prints a `NOTE:` line reporting when the prune happened and how many events it removed. The chain is **not externally anchored** — a write-access attacker with access to the SQLite file can defeat this check by rewriting the chain and `chain_head` in the same transaction. A successful audit verification means the stored rows and their integrity metadata are internally consistent; it does not prove the history is authentic or that NockLock itself recorded the entries.
+
+v1 is a tamper-*evident* log, not an unforgeable receipt. Follow-ons will add Ed25519 signing (authenticity) and external head anchoring (resistance to tail truncation).
+
 ## Configuration
 
 `nocklock init` creates `.nock/config.toml` with sensible defaults:

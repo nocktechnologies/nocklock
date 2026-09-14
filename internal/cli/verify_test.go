@@ -8,7 +8,46 @@ import (
 	"time"
 
 	"github.com/nocktechnologies/nocklock/internal/config"
+	"github.com/nocktechnologies/nocklock/internal/logging"
 )
+
+func TestWriteAuditVerifyResultSurfacesPrune(t *testing.T) {
+	prunedAt := time.Date(2026, 9, 14, 16, 0, 0, 0, time.UTC)
+	var buf strings.Builder
+	err := writeAuditVerifyResult(&buf, &logging.ChainVerifyResult{
+		Intact:          true,
+		EntriesVerified: 3,
+		PrunedAt:        &prunedAt,
+		PrunedCount:     2,
+		HeadHash:        "deadbeef",
+	})
+	if err != nil {
+		t.Fatalf("writeAuditVerifyResult returned error: %v", err)
+	}
+	out := buf.String()
+	if !strings.Contains(out, "AUDIT: CONSISTENT") {
+		t.Errorf("missing CONSISTENT verdict:\n%s", out)
+	}
+	// The whole point of the product: a prune that removed records must never
+	// read back as untouched history. The count and the boundary must surface.
+	if !strings.Contains(out, "prune") || !strings.Contains(out, "2 event") {
+		t.Errorf("prune boundary not surfaced on an intact-but-pruned chain:\n%s", out)
+	}
+}
+
+func TestWriteAuditVerifyResultCleanChainHasNoPruneNote(t *testing.T) {
+	var buf strings.Builder
+	if err := writeAuditVerifyResult(&buf, &logging.ChainVerifyResult{
+		Intact:          true,
+		EntriesVerified: 5,
+		HeadHash:        "cafef00d",
+	}); err != nil {
+		t.Fatalf("writeAuditVerifyResult returned error: %v", err)
+	}
+	if strings.Contains(buf.String(), "prune") {
+		t.Errorf("clean chain must not mention a prune:\n%s", buf.String())
+	}
+}
 
 func TestRunVerifyAggregatesPassFailSkip(t *testing.T) {
 	dir := t.TempDir()
