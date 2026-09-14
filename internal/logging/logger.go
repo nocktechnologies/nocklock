@@ -2,7 +2,10 @@
 package logging
 
 import (
+	"crypto/sha256"
 	"database/sql"
+	"encoding/binary"
+	"encoding/hex"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -29,6 +32,15 @@ const (
 	EventSessionEnd     EventType = "session_end"
 	EventConfigLoaded   EventType = "config_loaded"
 )
+
+
+// formatTimestampForChain formats a time.Time as UTC RFC3339 with exactly 9 fractional second digits and trailing Z.
+// This is the critical canonical format for the audit chain hash.
+func formatTimestampForChain(t time.Time) string {
+	utc := t.UTC()
+	// Format as: 2026-09-14T15:30:45.123456789Z
+	return utc.Format("2006-01-02T15:04:05.000000000") + "Z"
+}
 
 // Event represents a single fence event.
 type Event struct {
@@ -71,6 +83,20 @@ type Logger struct {
 	db *sql.DB
 }
 
+// ChainVerifyResult holds the outcome of a chain verification.
+type ChainVerifyResult struct {
+	Intact            bool       // true if chain is unbroken from genesis to current head
+	EntriesVerified   int        // number of entries checked
+	FirstBrokenID     int64      // id of first broken entry (0 if intact)
+	BrokenReason      string     // explanation of what broke (if not intact)
+	HeadHash          string     // current chain head hash (hex)
+	MigratedAt        *time.Time // when chain was created on existing DB (if applicable)
+	LegacyThroughID   int64      // highest id of pre-migration rows (if applicable)
+}
+
+// chainGenesisHashHex is the entry_hash for genesis (SHA256 of all zeros).
+const chainGenesisHashHex = "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+
 const schema = `
 CREATE TABLE IF NOT EXISTS events (
 	id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -79,12 +105,21 @@ CREATE TABLE IF NOT EXISTS events (
 	category TEXT NOT NULL,
 	detail TEXT NOT NULL,
 	blocked INTEGER NOT NULL DEFAULT 0,
-	session_id TEXT NOT NULL
+	session_id TEXT NOT NULL,
+	prev_hash TEXT NOT NULL DEFAULT '',
+	entry_hash TEXT NOT NULL DEFAULT ''
 );
 CREATE INDEX IF NOT EXISTS idx_events_session ON events(session_id);
 CREATE INDEX IF NOT EXISTS idx_events_type ON events(event_type);
 CREATE INDEX IF NOT EXISTS idx_events_timestamp ON events(timestamp);
 CREATE INDEX IF NOT EXISTS idx_events_blocked ON events(blocked);
+CREATE TABLE IF NOT EXISTS chain_head (
+	id INTEGER PRIMARY KEY CHECK (id = 1),
+	entry_hash TEXT NOT NULL,
+	row_count INTEGER NOT NULL,
+	migrated_at TEXT,
+	legacy_through_id INTEGER
+);
 `
 
 // validatePath rejects paths containing traversal sequences and paths outside the project root.
@@ -215,61 +250,174 @@ func NewLogger(dbPath string, projectRoot string) (*Logger, error) {
 		return nil, fmt.Errorf("failed to set DB file permissions: %w", err)
 	}
 
+	// Migrate existing DBs to add hash columns and initialize chain
+	if err := migrateToChain(db); err != nil {
+		db.Close()
+		return nil, fmt.Errorf("failed to migrate audit chain: %w", err)
+	}
+
 	return &Logger{db: db}, nil
 }
 
-// Log records a single event. Thread-safe (SQLite WAL handles locking).
+// Log records a single event with hash chain. Thread-safe (SQLite WAL handles locking).
 func (l *Logger) Log(event Event) error {
-	ts := event.Timestamp.UTC().Format(time.RFC3339)
+	ts := formatTimestampForChain(event.Timestamp)
 	blocked := 0
 	if event.Blocked {
 		blocked = 1
 	}
-	_, err := l.db.Exec(
-		`INSERT INTO events (timestamp, event_type, category, detail, blocked, session_id)
-		 VALUES (?, ?, ?, ?, ?, ?)`,
+
+	tx, err := l.db.Begin()
+	if err != nil {
+		return fmt.Errorf("failed to begin log transaction: %w", err)
+	}
+	defer tx.Rollback()
+
+	// Insert without hash values first
+	result, err := tx.Exec(
+		`INSERT INTO events (timestamp, event_type, category, detail, blocked, session_id, prev_hash, entry_hash)
+		 VALUES (?, ?, ?, ?, ?, ?, '', '')`,
 		ts, string(event.EventType), event.Category, event.Detail, blocked, event.SessionID,
 	)
 	if err != nil {
-		return fmt.Errorf("failed to log event: %w", err)
+		return fmt.Errorf("failed to insert event: %w", err)
+	}
+
+	eventID, err := result.LastInsertId()
+	if err != nil {
+		return fmt.Errorf("failed to get event ID: %w", err)
+	}
+
+	// Get previous hash
+	var prevHashHex string
+	err = tx.QueryRow("SELECT COALESCE((SELECT entry_hash FROM events WHERE id = ? ORDER BY id DESC LIMIT 1), ?) FROM events WHERE id = ? LIMIT 1",
+		eventID-1, chainGenesisHashHex, eventID).Scan(&prevHashHex)
+	if err != nil && err != sql.ErrNoRows {
+		// Simple fallback: if this is first event or query fails, use genesis
+		prevHashHex = chainGenesisHashHex
+	}
+	if prevHashHex == "" {
+		prevHashHex = chainGenesisHashHex
+	}
+
+	// Compute hash chain
+	entryHash, err := chainEntry(eventID, ts, event.EventType, event.Category, event.Detail, event.Blocked, event.SessionID, prevHashHex)
+	if err != nil {
+		return fmt.Errorf("failed to compute chain: %w", err)
+	}
+
+	// Update with computed hashes
+	_, err = tx.Exec(
+		"UPDATE events SET prev_hash = ?, entry_hash = ? WHERE id = ?",
+		prevHashHex, entryHash, eventID,
+	)
+	if err != nil {
+		return fmt.Errorf("failed to update event hashes: %w", err)
+	}
+
+	// Update chain_head
+	err = initChainHeadIfNeeded(tx)
+	if err != nil {
+		return fmt.Errorf("failed to initialize chain_head: %w", err)
+	}
+
+	_, err = tx.Exec(
+		"UPDATE chain_head SET entry_hash = ?, row_count = (SELECT COUNT(*) FROM events) WHERE id = 1",
+		entryHash,
+	)
+	if err != nil {
+		return fmt.Errorf("failed to update chain_head: %w", err)
+	}
+
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("failed to commit log transaction: %w", err)
 	}
 	return nil
 }
 
-// LogBatch records multiple events in a single transaction for efficiency.
+// LogBatch records multiple events in a single transaction for efficiency, with chain.
 // Thread-safe. Use this when logging multiple events at once (e.g., blocked vars).
 func (l *Logger) LogBatch(events []Event) error {
 	if len(events) == 0 {
 		return nil
 	}
+
 	tx, err := l.db.Begin()
 	if err != nil {
-		return fmt.Errorf("failed to begin transaction: %w", err)
+		return fmt.Errorf("failed to begin batch transaction: %w", err)
 	}
 	defer tx.Rollback()
 
-	stmt, err := tx.Prepare(
-		`INSERT INTO events (timestamp, event_type, category, detail, blocked, session_id)
-		 VALUES (?, ?, ?, ?, ?, ?)`,
-	)
-	if err != nil {
-		return fmt.Errorf("failed to prepare batch insert: %w", err)
+	// Initialize chain_head if needed
+	if err := initChainHeadIfNeeded(tx); err != nil {
+		return fmt.Errorf("failed to initialize chain_head: %w", err)
 	}
-	defer stmt.Close()
 
+	// Get current head
+	var currentHeadHash string
+	err = tx.QueryRow("SELECT entry_hash FROM chain_head WHERE id = 1").Scan(&currentHeadHash)
+	if err != nil {
+		currentHeadHash = chainGenesisHashHex
+	}
+
+	prevHashHex := currentHeadHash
+
+	// Insert all events with chaining
 	for _, event := range events {
-		ts := event.Timestamp.UTC().Format(time.RFC3339)
+		ts := formatTimestampForChain(event.Timestamp)
 		blocked := 0
 		if event.Blocked {
 			blocked = 1
 		}
-		if _, err := stmt.Exec(ts, string(event.EventType), event.Category, event.Detail, blocked, event.SessionID); err != nil {
+
+		result, err := tx.Exec(
+			`INSERT INTO events (timestamp, event_type, category, detail, blocked, session_id, prev_hash, entry_hash)
+			 VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+			ts, string(event.EventType), event.Category, event.Detail, blocked, event.SessionID, prevHashHex, "",
+		)
+		if err != nil {
 			return fmt.Errorf("failed to insert event in batch: %w", err)
 		}
+
+		eventID, err := result.LastInsertId()
+		if err != nil {
+			return fmt.Errorf("failed to get event ID: %w", err)
+		}
+
+		// Compute hash
+		entryHash, err := chainEntry(eventID, ts, event.EventType, event.Category, event.Detail, event.Blocked, event.SessionID, prevHashHex)
+		if err != nil {
+			return fmt.Errorf("failed to compute chain for event %d: %w", eventID, err)
+		}
+
+		// Update with computed hash
+		_, err = tx.Exec(
+			"UPDATE events SET entry_hash = ? WHERE id = ?",
+			entryHash, eventID,
+		)
+		if err != nil {
+			return fmt.Errorf("failed to update event hash: %w", err)
+		}
+
+		prevHashHex = entryHash
+	}
+
+	// Update chain_head with final state
+	count, err := countEvents(tx)
+	if err != nil {
+		return fmt.Errorf("failed to count events: %w", err)
+	}
+
+	_, err = tx.Exec(
+		"UPDATE chain_head SET entry_hash = ?, row_count = ? WHERE id = 1",
+		prevHashHex, count,
+	)
+	if err != nil {
+		return fmt.Errorf("failed to update chain_head: %w", err)
 	}
 
 	if err := tx.Commit(); err != nil {
-		return fmt.Errorf("failed to commit batch: %w", err)
+		return fmt.Errorf("failed to commit batch transaction: %w", err)
 	}
 	return nil
 }
@@ -436,4 +584,329 @@ func (l *Logger) Prune(olderThan time.Duration) (int, error) {
 // Close closes the database connection.
 func (l *Logger) Close() error {
 	return l.db.Close()
+}
+
+// ============ AUDIT CHAIN HELPERS ============
+
+// canonicalBytes returns the deterministic byte encoding of an Event for hashing.
+// Format: version || u64be(id) || lp(timestamp) || lp(event_type) || lp(category) || lp(detail) || blocked || lp(session_id)
+// where lp = uint32be length + UTF-8 bytes, blocked = 0x00/0x01, version = 0x01
+func canonicalBytes(id int64, ts string, et EventType, cat, detail string, blocked bool, sid string) []byte {
+	var buf []byte
+
+	// Version byte
+	buf = append(buf, 0x01)
+
+	// id as uint64 big-endian
+	idBuf := make([]byte, 8)
+	binary.BigEndian.PutUint64(idBuf, uint64(id))
+	buf = append(buf, idBuf...)
+
+	// Helper to length-prefix a string
+	appendLP := func(s string) {
+		lenBuf := make([]byte, 4)
+		binary.BigEndian.PutUint32(lenBuf, uint32(len(s)))
+		buf = append(buf, lenBuf...)
+		buf = append(buf, []byte(s)...)
+	}
+
+	// timestamp, event_type, category, detail (all length-prefixed strings)
+	appendLP(ts)
+	appendLP(string(et))
+	appendLP(cat)
+	appendLP(detail)
+
+	// blocked as single byte
+	if blocked {
+		buf = append(buf, 0x01)
+	} else {
+		buf = append(buf, 0x00)
+	}
+
+	// session_id (length-prefixed)
+	appendLP(sid)
+
+	return buf
+}
+
+// chainEntry computes the entry_hash for a row given the previous hash.
+// prevHashHex is the hex-encoded previous entry_hash (or 64 zeros for genesis).
+// Returns (entry_hash hex string, error).
+func chainEntry(id int64, ts string, et EventType, cat, detail string, blocked bool, sid, prevHashHex string) (string, error) {
+	// Decode previous hash from hex to bytes
+	prevHashBytes, err := hex.DecodeString(prevHashHex)
+	if err != nil {
+		return "", fmt.Errorf("invalid prev_hash hex: %w", err)
+	}
+	if len(prevHashBytes) != 32 {
+		return "", fmt.Errorf("prev_hash must be 32 bytes, got %d", len(prevHashBytes))
+	}
+
+	// Compute canonical bytes for this row
+	cb := canonicalBytes(id, ts, et, cat, detail, blocked, sid)
+
+	// Concatenate canonical bytes with previous hash bytes
+	toHash := append(cb, prevHashBytes...)
+
+	// SHA256
+	h := sha256.Sum256(toHash)
+
+	return hex.EncodeToString(h[:]), nil
+}
+
+// detectMissingHashColumns checks if prev_hash and entry_hash columns exist.
+func detectMissingHashColumns(db *sql.DB) (bool, error) {
+	rows, err := db.Query("PRAGMA table_info(events)")
+	if err != nil {
+		return false, err
+	}
+	defer rows.Close()
+
+	hasColumns := map[string]bool{}
+	for rows.Next() {
+		var cid int
+		var name string
+		var typ string
+		var notnull int
+		var dfltValue *string
+		var pk int
+		if err := rows.Scan(&cid, &name, &typ, &notnull, &dfltValue, &pk); err != nil {
+			return false, err
+		}
+		hasColumns[name] = true
+	}
+	if err := rows.Err(); err != nil {
+		return false, err
+	}
+
+	missing := !hasColumns["prev_hash"] || !hasColumns["entry_hash"]
+	return missing, nil
+}
+
+// initChainHeadIfNeeded creates the chain_head table if it doesn't exist.
+// Called within a transaction.
+func initChainHeadIfNeeded(tx *sql.Tx) error {
+	// Table already created in schema, just ensure it has a seed row
+	var count int
+	err := tx.QueryRow("SELECT COUNT(*) FROM chain_head").Scan(&count)
+	if err != nil {
+		return fmt.Errorf("failed to count chain_head: %w", err)
+	}
+
+	if count == 0 {
+		// Seed with genesis state
+		_, err := tx.Exec(
+			"INSERT INTO chain_head (id, entry_hash, row_count) VALUES (1, ?, 0)",
+			chainGenesisHashHex,
+		)
+		if err != nil {
+			return fmt.Errorf("failed to seed chain_head: %w", err)
+		}
+	}
+
+	return nil
+}
+
+// countEvents returns the total number of events in the database (within a transaction).
+func countEvents(tx *sql.Tx) (int, error) {
+	var count int
+	err := tx.QueryRow("SELECT COUNT(*) FROM events").Scan(&count)
+	return count, err
+}
+
+// migrateToChain adds hash columns to existing DBs and chains existing rows.
+// Called within NewLogger before the first Log.
+func migrateToChain(db *sql.DB) error {
+	missing, err := detectMissingHashColumns(db)
+	if err != nil {
+		return err
+	}
+	if !missing {
+		// Already migrated, just ensure chain_head is initialized
+		tx, err := db.Begin()
+		if err != nil {
+			return err
+		}
+		defer tx.Rollback()
+		if err := initChainHeadIfNeeded(tx); err != nil {
+			return err
+		}
+		return tx.Commit()
+	}
+
+	tx, err := db.Begin()
+	if err != nil {
+		return fmt.Errorf("failed to begin migration transaction: %w", err)
+	}
+	defer tx.Rollback()
+
+	// Add columns
+	if _, err := tx.Exec("ALTER TABLE events ADD COLUMN prev_hash TEXT NOT NULL DEFAULT ''"); err != nil {
+		return fmt.Errorf("failed to add prev_hash column: %w", err)
+	}
+	if _, err := tx.Exec("ALTER TABLE events ADD COLUMN entry_hash TEXT NOT NULL DEFAULT ''"); err != nil {
+		return fmt.Errorf("failed to add entry_hash column: %w", err)
+	}
+
+	// Initialize chain_head
+	if err := initChainHeadIfNeeded(tx); err != nil {
+		return err
+	}
+
+	// Walk existing rows in id order and chain them
+	rows, err := tx.Query("SELECT id, timestamp, event_type, category, detail, blocked, session_id FROM events ORDER BY id ASC")
+	if err != nil {
+		return fmt.Errorf("failed to query existing events: %w", err)
+	}
+	defer rows.Close()
+
+	prevHashHex := chainGenesisHashHex
+	highestID := int64(0)
+	for rows.Next() {
+		var id int64
+		var ts, et, cat, detail, sid string
+		var blocked int
+		if err := rows.Scan(&id, &ts, &et, &cat, &detail, &blocked, &sid); err != nil {
+			return fmt.Errorf("failed to scan event row: %w", err)
+		}
+
+		entryHash, err := chainEntry(id, ts, EventType(et), cat, detail, blocked != 0, sid, prevHashHex)
+		if err != nil {
+			return fmt.Errorf("failed to chain event %d: %w", id, err)
+		}
+
+		_, err = tx.Exec(
+			"UPDATE events SET prev_hash = ?, entry_hash = ? WHERE id = ?",
+			prevHashHex, entryHash, id,
+		)
+		if err != nil {
+			return fmt.Errorf("failed to update event %d with chain: %w", id, err)
+		}
+
+		prevHashHex = entryHash
+		highestID = id
+	}
+	if err := rows.Err(); err != nil {
+		return fmt.Errorf("error iterating events during migration: %w", err)
+	}
+
+	// Update chain_head with migration info
+	_, err = tx.Exec(
+		"UPDATE chain_head SET entry_hash = ?, row_count = ?, migrated_at = ?, legacy_through_id = ? WHERE id = 1",
+		prevHashHex, highestID, time.Now().UTC().Format(time.RFC3339), highestID,
+	)
+	if err != nil {
+		return fmt.Errorf("failed to update chain_head after migration: %w", err)
+	}
+
+	return tx.Commit()
+}
+
+// VerifyChain walks the hash chain from genesis and returns the verification result.
+func (l *Logger) VerifyChain() (*ChainVerifyResult, error) {
+	result := &ChainVerifyResult{}
+
+	// Get chain_head state
+	var headHash string
+	var rowCount int
+	var migratedAtStr *string
+	var legacyID *int64
+	err := l.db.QueryRow(
+		"SELECT entry_hash, row_count, migrated_at, legacy_through_id FROM chain_head WHERE id = 1",
+	).Scan(&headHash, &rowCount, &migratedAtStr, &legacyID)
+	if err == sql.ErrNoRows {
+		// Empty log
+		result.HeadHash = chainGenesisHashHex
+		result.Intact = true
+		return result, nil
+	}
+	if err != nil {
+		return nil, fmt.Errorf("failed to read chain_head: %w", err)
+	}
+
+	result.HeadHash = headHash
+
+	if migratedAtStr != nil {
+		t, err := time.Parse(time.RFC3339, *migratedAtStr)
+		if err == nil {
+			result.MigratedAt = &t
+		}
+	}
+	if legacyID != nil {
+		result.LegacyThroughID = *legacyID
+	}
+
+	// Get all events in order
+	rows, err := l.db.Query(
+		"SELECT id, timestamp, event_type, category, detail, blocked, session_id, prev_hash, entry_hash FROM events ORDER BY id ASC",
+	)
+	if err != nil {
+		return nil, fmt.Errorf("failed to query events for verification: %w", err)
+	}
+	defer rows.Close()
+
+	prevHashHex := chainGenesisHashHex
+	for rows.Next() {
+		var id int64
+		var ts, et, cat, detail, sid, storedPrevHash, storedEntryHash string
+		var blocked int
+		if err := rows.Scan(&id, &ts, &et, &cat, &detail, &blocked, &sid, &storedPrevHash, &storedEntryHash); err != nil {
+			return nil, fmt.Errorf("failed to scan event row: %w", err)
+		}
+
+		// Check for non-genesis prev_hash on first row (indicates pruning)
+		if result.EntriesVerified == 0 && storedPrevHash != chainGenesisHashHex {
+			result.Intact = false
+			result.FirstBrokenID = id
+			result.BrokenReason = fmt.Sprintf("first row id=%d has non-genesis prev_hash; earlier rows removed", id)
+			return result, nil
+		}
+
+		// Check prev_hash link
+		if storedPrevHash != prevHashHex {
+			result.Intact = false
+			result.FirstBrokenID = id
+			result.BrokenReason = fmt.Sprintf("entry %d: prev_hash mismatch (expected %s, got %s)", id, prevHashHex, storedPrevHash)
+			return result, nil
+		}
+
+		// Recompute entry_hash
+		expectedHash, err := chainEntry(id, ts, EventType(et), cat, detail, blocked != 0, sid, prevHashHex)
+		if err != nil {
+			result.Intact = false
+			result.FirstBrokenID = id
+			result.BrokenReason = fmt.Sprintf("entry %d: failed to compute hash: %v", id, err)
+			return result, nil
+		}
+
+		if storedEntryHash != expectedHash {
+			result.Intact = false
+			result.FirstBrokenID = id
+			result.BrokenReason = fmt.Sprintf("entry %d: entry_hash mismatch (expected %s, got %s)", id, expectedHash, storedEntryHash)
+			return result, nil
+		}
+
+		prevHashHex = storedEntryHash
+		result.EntriesVerified++
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("error iterating events during verification: %w", err)
+	}
+
+	// Check chain_head consistency
+	actualRowCount := result.EntriesVerified
+	if rowCount != actualRowCount {
+		result.Intact = false
+		result.BrokenReason = fmt.Sprintf("chain_head row_count (%d) does not match actual events (%d)", rowCount, actualRowCount)
+		return result, nil
+	}
+
+	if headHash != prevHashHex {
+		result.Intact = false
+		result.BrokenReason = fmt.Sprintf("chain_head entry_hash mismatch (expected %s, got %s)", prevHashHex, headHash)
+		return result, nil
+	}
+
+	result.Intact = true
+	return result, nil
 }
