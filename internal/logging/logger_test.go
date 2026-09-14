@@ -434,6 +434,49 @@ func TestQuery_SinceUntilTimeRange(t *testing.T) {
 	}
 }
 
+func TestQuery_SinceUntilBoundarySubSecondPrecision(t *testing.T) {
+	// Stored timestamps carry 9 fractional digits. A Since/Until bound must be
+	// encoded the same way, or a second-precision bound sorts lexicographically
+	// against the stored value and silently drops (Since) or over-includes
+	// (Until) events inside the boundary second. Regression guard for the
+	// format change that made storage 9-digit while bounds stayed RFC3339.
+	l, _ := mustNewLogger(t)
+	defer l.Close()
+
+	// An event half a second into the boundary second.
+	evtTime := time.Date(2025, 6, 1, 12, 0, 0, 500_000_000, time.UTC)
+	if err := l.Log(Event{
+		Timestamp: evtTime,
+		EventType: EventSecretBlocked,
+		Category:  "secret",
+		Detail:    "BOUNDARY",
+		Blocked:   true,
+		SessionID: "sess-boundary",
+	}); err != nil {
+		t.Fatalf("Log failed: %v", err)
+	}
+
+	secondStart := time.Date(2025, 6, 1, 12, 0, 0, 0, time.UTC) // 12:00:00.000
+
+	// Since the top of the second must INCLUDE the .5s event (it is after it).
+	got, err := l.Query(QueryOptions{Since: timePtr(secondStart)})
+	if err != nil {
+		t.Fatalf("Query(Since) failed: %v", err)
+	}
+	if len(got) != 1 {
+		t.Errorf("Since=%s must include the 12:00:00.5 event, got %d", secondStart.Format(time.RFC3339), len(got))
+	}
+
+	// Until the top of the second must EXCLUDE the .5s event (it is after it).
+	got, err = l.Query(QueryOptions{Until: timePtr(secondStart)})
+	if err != nil {
+		t.Fatalf("Query(Until) failed: %v", err)
+	}
+	if len(got) != 0 {
+		t.Errorf("Until=%s must exclude the 12:00:00.5 event, got %d", secondStart.Format(time.RFC3339), len(got))
+	}
+}
+
 func TestQuery_LimitAndOffset(t *testing.T) {
 	l, _ := mustNewLogger(t)
 	defer l.Close()

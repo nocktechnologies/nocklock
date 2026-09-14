@@ -443,12 +443,16 @@ func (l *Logger) Query(opts QueryOptions) ([]Event, error) {
 		args = append(args, *opts.SessionID)
 	}
 	if opts.Since != nil {
+		// Bounds must use the same 9-fractional-digit encoding as stored
+		// timestamps (formatTimestampForChain); a second-precision RFC3339
+		// bound sorts lexicographically before an in-second stored value
+		// (".500...Z" < "Z"), silently dropping boundary-second events.
 		query += " AND timestamp >= ?"
-		args = append(args, opts.Since.UTC().Format(time.RFC3339))
+		args = append(args, formatTimestampForChain(*opts.Since))
 	}
 	if opts.Until != nil {
 		query += " AND timestamp <= ?"
-		args = append(args, opts.Until.UTC().Format(time.RFC3339))
+		args = append(args, formatTimestampForChain(*opts.Until))
 	}
 
 	if opts.Descending {
