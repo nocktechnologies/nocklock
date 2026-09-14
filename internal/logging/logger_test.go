@@ -1310,6 +1310,14 @@ func TestPruneReAnchorsChain(t *testing.T) {
 	if result.EntriesVerified != 3 {
 		t.Errorf("entries verified after prune: got %d, want 3", result.EntriesVerified)
 	}
+	// The prune boundary must be recorded so verify can surface it; an intact
+	// verdict with no prune marker would let a compaction read as pristine.
+	if result.PrunedAt == nil {
+		t.Error("PrunedAt not set after a prune; the re-anchor left no boundary marker")
+	}
+	if result.PrunedCount != 1 {
+		t.Errorf("PrunedCount after prune: got %d, want 1", result.PrunedCount)
+	}
 }
 
 func TestTamperingAfterPruneDetected(t *testing.T) {

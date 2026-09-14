@@ -141,17 +141,28 @@ func runAuditVerify(ctx context.Context, w io.Writer) error {
 	}
 
 	// Format and print output
-	if result.Intact {
-		fmt.Fprintf(w, "AUDIT: CONSISTENT — %d entries verified, hash chain intact (not externally anchored)\n", result.EntriesVerified)
-		if result.MigratedAt != nil {
-			fmt.Fprintf(w, "NOTE: entries 1..%d predate the chain (migrated %s); structurally chained, not authenticated.\n", result.LegacyThroughID, result.MigratedAt.Format(time.RFC3339))
-		}
-		fmt.Fprintf(w, "Head hash: %s\n", result.HeadHash)
-	} else {
+	return writeAuditVerifyResult(w, result)
+}
+
+// writeAuditVerifyResult renders a chain verification result. An intact chain
+// prints the CONSISTENT verdict, followed by a NOTE for any migration boundary
+// and any prune boundary — so a compaction of the log can never read back as
+// untouched history. A broken chain prints the TAMPERED verdict and returns a
+// non-zero exit.
+func writeAuditVerifyResult(w io.Writer, result *logging.ChainVerifyResult) error {
+	if !result.Intact {
 		fmt.Fprintf(w, "AUDIT: TAMPERED — chain breaks at entry %d (%s)\n", result.FirstBrokenID, result.BrokenReason)
 		return &exitCodeError{code: 1}
 	}
 
+	fmt.Fprintf(w, "AUDIT: CONSISTENT — %d entries verified, hash chain intact (not externally anchored)\n", result.EntriesVerified)
+	if result.MigratedAt != nil {
+		fmt.Fprintf(w, "NOTE: entries 1..%d predate the chain (migrated %s); structurally chained, not authenticated.\n", result.LegacyThroughID, result.MigratedAt.Format(time.RFC3339))
+	}
+	if result.PrunedAt != nil {
+		fmt.Fprintf(w, "NOTE: chain was re-anchored by a prune at %s; %d event(s) were removed in that prune and history before it is not retained.\n", result.PrunedAt.Format(time.RFC3339), result.PrunedCount)
+	}
+	fmt.Fprintf(w, "Head hash: %s\n", result.HeadHash)
 	return nil
 }
 
