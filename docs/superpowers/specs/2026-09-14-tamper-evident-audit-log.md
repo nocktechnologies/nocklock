@@ -12,34 +12,51 @@ wrapped agent that can reach the `.db` — can edit a `blocked` row to `passed`,
 delete the record of an exfiltration attempt, or truncate the tail, and nothing
 detects it. `nocklock verify` today tests the *fences*, not the *record*.
 
-That is the exact gap between "logging" and the product's own thesis: an
-**unforgeable receipt** of what the agent did. NockGuard, the sibling product,
+That is the exact gap between "logging" and the product's goal of producing a
+verifiable receipt of what the agent did. NockGuard, the sibling product,
 already signs its audit chain (Ed25519 over canonical per-row bytes). NockLock's
-own audit trail must at minimum be **tamper-evident**. This spec is v1 of that:
-a SHA-256 hash chain. Ed25519 signing (authenticity, not just integrity) is a
-scoped follow-on (§ Follow-on), and this chain is its prerequisite.
+own audit trail should first detect accidental corruption and edits that do not
+recompute its integrity metadata. This spec is v1 of that: a SHA-256 hash chain.
+It is not an unforgeable receipt against an attacker who can rewrite the
+database. Ed25519 signing and external anchoring are scoped follow-ons
+(§ Follow-on), and this chain is their prerequisite.
 
 ## Design decisions (answered, not listed)
 
-**1. Hash chain first, signing later.**
-A per-row hash chain gives tamper-*evidence* — detect any altered, deleted, or
-reordered row — with zero key management. Ed25519 adds *authenticity* (proves
-NockLock wrote it) but needs a key, a key-storage story, and a compromise story.
-The chain is 80% of the moat value at 20% of the complexity, and signing is
-strictly built on top of it. Build the chain now; do not block it on the key
-decision.
+**1. Hash chain first, signing and external anchoring later.**
+A per-row hash chain detects accidental corruption and altered, deleted, or
+reordered rows when the editor does not recompute the chain. It does not resist
+an active file-write adversary: the algorithm is public and unkeyed, so that
+adversary can recompute every affected hash and the in-database head. Ed25519
+adds *authenticity* (proves NockLock wrote it), while an external head anchor
+makes rollback or truncation observable; both need lifecycle and storage
+decisions. The chain is useful integrity metadata and the substrate for those
+controls. Build it now, but do not describe v1 alone as an unforgeable receipt.
 
 **2. Canonical bytes are explicit and pinned by a byte-literal test.**
 The hash covers a deterministic serialization of the row. Fix it precisely to
 avoid the exact class of bug fixed in NCC #1902 today (field-order / type drift
-silently breaking verification): fields in a FIXED order, each length-prefixed
-(`uint32` big-endian byte length + UTF-8 bytes) so no delimiter can be forged by
-crafted content, integers as fixed-width big-endian, `blocked` as a single
-`0x00`/`0x01` byte. Include a test that asserts the exact canonical byte string
-for a known row **independent of the hashing function** (a test that signs
-against `_canonical_bytes()` itself cannot catch drift — that was the #1902
-lesson). Version the encoding with a leading `v1` byte so a future change is
-detectable, not silent.
+silently breaking verification). The byte layout is, in order:
+
+1. encoding version: the single byte `0x01`;
+2. `id`: unsigned 64-bit integer, big-endian;
+3. `timestamp`: UTC RFC 3339 with exactly nine fractional-second digits and a
+   trailing `Z`, encoded as a length-prefixed string;
+4. `event_type`: length-prefixed string;
+5. `category`: length-prefixed string;
+6. `detail`: length-prefixed string;
+7. `blocked`: the single byte `0x00` for false or `0x01` for true; and
+8. `session_id`: length-prefixed string.
+
+A length-prefixed string is a `uint32` big-endian byte length followed by the
+field's unmodified UTF-8 bytes. No Unicode normalization is applied. The
+database-assigned `id` is included so reordering changes the encoded row.
+`prev_hash` and `entry_hash` are excluded from `canonical_bytes(row)`;
+`prev_hash` is decoded from its 64 lowercase hexadecimal characters to 32 bytes
+and appended separately by the chain formula below. Include a test that asserts
+the exact canonical byte string for a known row **independent of the hashing
+function** (a test that hashes `_canonical_bytes()` itself cannot catch drift —
+that was the #1902 lesson).
 
 **3. Chain construction.**
 Add two columns: `prev_hash TEXT NOT NULL` and `entry_hash TEXT NOT NULL`.
@@ -49,19 +66,20 @@ maintained inside the same transaction as the INSERT so a crash can't leave a
 row without its link. Reads (`Query`, `log` command) are unchanged; the chain is
 verification metadata.
 
-**4. Truncation detection — honest about the limit.**
-A pure per-row prev-hash chain detects mutation and reordering but NOT deletion
-of the *tail* (drop the last N rows and the remaining chain still verifies).
-Close it as far as v1 honestly can: maintain a single-row `chain_head` table
-holding the highest `entry_hash` and the row count, updated in the same
-transaction. `nocklock verify --audit` walks the chain AND checks the head
-matches the last row + count. This detects tail-truncation UNLESS the attacker
-also rewrites `chain_head` — which they can, since it's in the same file. So v1's
-honest guarantee is: **detects any in-place mutation, reordering, or
-non-tail deletion; detects tail-truncation unless `chain_head` is also rewritten
-in lockstep.** Full tail-truncation resistance needs an external anchor (§
-Follow-on). Document this limit in the verify output and the README — no silent
-success about our own guarantee.
+**4. Detection guarantee — honest about the limit.**
+A pure per-row prev-hash chain detects mutation, deletion, and reordering only
+when the editor does not recompute the affected hashes. Maintain a single-row
+`chain_head` table holding the highest `entry_hash` and row count, updated in
+the same transaction. `nocklock verify --audit` walks the chain and checks that
+the head matches the last row and count. This also detects naive tail truncation.
+
+An active adversary with write access to the SQLite file can defeat every v1
+check by recomputing the public, unkeyed chain and rewriting `chain_head` in the
+same file. This caveat applies to mutation, deletion, reordering, and truncation,
+not only to the tail. Resistance to that adversary requires a trusted signature
+or external head anchor (§ Follow-on). Document this limit in the verify output
+and README; a successful verification means the stored rows and integrity
+metadata are internally consistent, not that the history is authentic.
 
 **5. Migration of existing logs.**
 Existing DBs have rows with no hash columns. On first open after upgrade:
@@ -74,11 +92,11 @@ proves they haven't changed *since migration*. Mark the migration point with a
 output. Never claim pre-migration history is proven.
 
 **6. `nocklock verify --audit` verdict mirrors NockGuard.**
-Walk the chain from genesis; on success print `AUDIT: PROTECTED — N entries
-verified, hash chain intact` (matching NockGuard's `verify` verdict shape so the
-two products read consistently); on the first broken link print `AUDIT:
-TAMPERED — chain breaks at entry <id> (<what mismatched>)` and exit non-zero.
-Expose the current head hash so an external watcher (NockCC) can pin it.
+Walk the chain from genesis; on success print `AUDIT: CONSISTENT — N entries
+verified, hash chain intact (not externally anchored)`; on the first broken link
+print `AUDIT: TAMPERED — chain breaks at entry <id> (<what mismatched>)` and exit
+non-zero. Expose the current head hash so an external watcher (NockCC) can pin
+it.
 
 ## Scope for the build (v1)
 
