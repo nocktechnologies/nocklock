@@ -1,5 +1,11 @@
 # SQLite Event Logging Implementation Plan
 
+> **STATUS: SHIPPED (as of 2026-09.** `internal/logging/logger.go` + tests are
+> built and integrated into `wrap`, `log`, and `status`. The unchecked `- [ ]`
+> boxes below are the original TDD steps and are historical — do NOT read them
+> as "not built." Next work on the audit log is tamper-evidence:
+> `docs/superpowers/specs/2026-09-14-tamper-evident-audit-log.md`.)
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** Add SQLite-backed event logging so every fence action (blocked/passed env vars, future file/network events) is recorded for audit, debugging, and the `nocklock log` command.
