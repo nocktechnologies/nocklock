@@ -61,7 +61,7 @@ that was the #1902 lesson).
 **3. Chain construction.**
 Add two columns: `prev_hash TEXT NOT NULL` and `entry_hash TEXT NOT NULL`.
 `entry_hash = hex(sha256(canonical_bytes(row) || prev_hash_bytes))`, where the
-genesis row's `prev_hash` is a fixed 32-zero-byte constant. The chain is
+genesis row's `prev_hash` is the SHA-256 of the empty input (e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855). The chain is
 maintained inside the same transaction as the INSERT so a crash can't leave a
 row without its link. Reads (`Query`, `log` command) are unchanged; the chain is
 verification metadata.
