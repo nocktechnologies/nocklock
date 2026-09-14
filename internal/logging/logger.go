@@ -864,6 +864,7 @@ func migrateToChain(db *sql.DB) error {
 
 	prevHashHex := chainGenesisHashHex
 	highestID := int64(0)
+	rowCount := 0
 	for rows.Next() {
 		var id int64
 		var ts, et, cat, detail, sid string
@@ -887,6 +888,7 @@ func migrateToChain(db *sql.DB) error {
 
 		prevHashHex = entryHash
 		highestID = id
+		rowCount++
 	}
 	if err := rows.Err(); err != nil {
 		return fmt.Errorf("error iterating events during migration: %w", err)
@@ -895,7 +897,7 @@ func migrateToChain(db *sql.DB) error {
 	// Update chain_head with migration info
 	_, err = tx.Exec(
 		"UPDATE chain_head SET entry_hash = ?, row_count = ?, migrated_at = ?, legacy_through_id = ? WHERE id = 1",
-		prevHashHex, highestID, time.Now().UTC().Format(time.RFC3339), highestID,
+		prevHashHex, rowCount, time.Now().UTC().Format(time.RFC3339), highestID,
 	)
 	if err != nil {
 		return fmt.Errorf("failed to update chain_head after migration: %w", err)
@@ -907,6 +909,11 @@ func migrateToChain(db *sql.DB) error {
 // VerifyChain walks the hash chain from genesis and returns the verification result.
 func (l *Logger) VerifyChain() (*ChainVerifyResult, error) {
 	result := &ChainVerifyResult{}
+	tx, err := l.db.Begin()
+	if err != nil {
+		return nil, fmt.Errorf("failed to begin chain verification transaction: %w", err)
+	}
+	defer tx.Rollback()
 
 	// Get chain_head state
 	var headHash string
@@ -915,7 +922,7 @@ func (l *Logger) VerifyChain() (*ChainVerifyResult, error) {
 	var legacyID *int64
 	var prunedAtStr *string
 	var prunedCountVal *int
-	err := l.db.QueryRow(
+	err = tx.QueryRow(
 		"SELECT entry_hash, row_count, migrated_at, legacy_through_id, pruned_at, pruned_count FROM chain_head WHERE id = 1",
 	).Scan(&headHash, &rowCount, &migratedAtStr, &legacyID, &prunedAtStr, &prunedCountVal)
 	if err == sql.ErrNoRows {
@@ -950,7 +957,7 @@ func (l *Logger) VerifyChain() (*ChainVerifyResult, error) {
 	}
 
 	// Get all events in order
-	rows, err := l.db.Query(
+	rows, err := tx.Query(
 		"SELECT id, timestamp, event_type, category, detail, blocked, session_id, prev_hash, entry_hash FROM events ORDER BY id ASC",
 	)
 	if err != nil {

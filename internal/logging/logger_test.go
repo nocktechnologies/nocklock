@@ -1049,6 +1049,96 @@ func TestChainIntact_MultipleEvents(t *testing.T) {
 	}
 }
 
+func TestMigrationUsesEventCountWhenLegacyIDsHaveGaps(t *testing.T) {
+	dbPath := tempDBPath(t)
+	db, err := sql.Open("sqlite", dbPath)
+	if err != nil {
+		t.Fatalf("sql.Open failed: %v", err)
+	}
+	_, err = db.Exec(`
+		CREATE TABLE events (
+			id INTEGER PRIMARY KEY AUTOINCREMENT,
+			timestamp TEXT NOT NULL,
+			event_type TEXT NOT NULL,
+			category TEXT NOT NULL,
+			detail TEXT NOT NULL,
+			blocked INTEGER NOT NULL DEFAULT 0,
+			session_id TEXT NOT NULL
+		);
+		INSERT INTO events (id, timestamp, event_type, category, detail, blocked, session_id)
+		VALUES (1, '2026-09-14T10:00:00Z', 'session_start', 'session', 'first', 0, 'legacy'),
+		       (3, '2026-09-14T10:02:00Z', 'session_end', 'session', 'third', 0, 'legacy');
+	`)
+	if err != nil {
+		db.Close()
+		t.Fatalf("create legacy database with ID gap: %v", err)
+	}
+	db.Close()
+
+	l, err := NewLogger(dbPath, "")
+	if err != nil {
+		t.Fatalf("NewLogger migration failed: %v", err)
+	}
+	defer l.Close()
+
+	var rowCount int
+	var legacyThroughID int64
+	if err := l.db.QueryRow("SELECT row_count, legacy_through_id FROM chain_head WHERE id = 1").Scan(&rowCount, &legacyThroughID); err != nil {
+		t.Fatalf("read migrated chain head: %v", err)
+	}
+	if rowCount == int(legacyThroughID) {
+		t.Fatalf("negative control failed: gapped legacy IDs should make row count differ from highest ID; both were %d", rowCount)
+	}
+	if rowCount != 2 || legacyThroughID != 3 {
+		t.Fatalf("migrated chain head = (row_count %d, legacy_through_id %d), want (2, 3)", rowCount, legacyThroughID)
+	}
+
+	result, err := l.VerifyChain()
+	if err != nil {
+		t.Fatalf("VerifyChain failed: %v", err)
+	}
+	if !result.Intact {
+		t.Fatalf("migrated chain with legacy ID gap should be intact: %s", result.BrokenReason)
+	}
+}
+
+func TestVerifyChainUsesConsistentSnapshot(t *testing.T) {
+	l, dbPath := mustNewLogger(t)
+	defer l.Close()
+	if err := l.Log(sampleEvent(EventSessionStart, "session", "first", false, "snapshot")); err != nil {
+		t.Fatalf("initial Log failed: %v", err)
+	}
+
+	// Negative control: separate reads can observe an old head and a newer event set.
+	var oldCount int
+	if err := l.db.QueryRow("SELECT row_count FROM chain_head WHERE id = 1").Scan(&oldCount); err != nil {
+		t.Fatalf("read old chain head: %v", err)
+	}
+	writer, err := NewLogger(dbPath, "")
+	if err != nil {
+		t.Fatalf("open concurrent writer: %v", err)
+	}
+	defer writer.Close()
+	if err := writer.Log(sampleEvent(EventSessionEnd, "session", "second", false, "snapshot")); err != nil {
+		t.Fatalf("concurrent Log failed: %v", err)
+	}
+	var newCount int
+	if err := l.db.QueryRow("SELECT COUNT(*) FROM events").Scan(&newCount); err != nil {
+		t.Fatalf("read new event count: %v", err)
+	}
+	if oldCount == newCount {
+		t.Fatalf("negative control failed: separate snapshots both reported %d rows", oldCount)
+	}
+
+	result, err := l.VerifyChain()
+	if err != nil {
+		t.Fatalf("VerifyChain failed: %v", err)
+	}
+	if !result.Intact || result.EntriesVerified != newCount {
+		t.Fatalf("transactional verification = intact %v, entries %d, reason %q; want intact snapshot with %d entries", result.Intact, result.EntriesVerified, result.BrokenReason, newCount)
+	}
+}
+
 func TestTamperDetection_BlockedBitFlip(t *testing.T) {
 	l, dbPath := mustNewLogger(t)
 	l.Close()
