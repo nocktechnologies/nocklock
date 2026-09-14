@@ -867,14 +867,29 @@ func migrateToChain(db *sql.DB) error {
 			return fmt.Errorf("failed to scan event row: %w", err)
 		}
 
+		// Normalize legacy timestamps to the canonical 9-fractional-digit form
+		// (spec §2). A pre-chain DB was written with second-precision RFC3339,
+		// and a mixed-width timestamp column breaks every lexicographic compare
+		// against it — Query's Since/Until bounds, Prune's cutoff, and Stats'
+		// MIN/MAX. The instant is unchanged; only the stored string encoding is.
+		// The hash below covers the normalized value, so the chain stays
+		// self-consistent, and this is idempotent (the column-presence guard
+		// runs the walk once, and re-encoding an already-9-digit value is a
+		// no-op).
+		parsed, err := time.Parse(time.RFC3339, ts)
+		if err != nil {
+			return fmt.Errorf("failed to parse legacy timestamp %q for event %d: %w", ts, id, err)
+		}
+		ts = formatTimestampForChain(parsed)
+
 		entryHash, err := chainEntry(id, ts, EventType(et), cat, detail, blocked != 0, sid, prevHashHex)
 		if err != nil {
 			return fmt.Errorf("failed to chain event %d: %w", id, err)
 		}
 
 		_, err = tx.Exec(
-			"UPDATE events SET prev_hash = ?, entry_hash = ? WHERE id = ?",
-			prevHashHex, entryHash, id,
+			"UPDATE events SET timestamp = ?, prev_hash = ?, entry_hash = ? WHERE id = ?",
+			ts, prevHashHex, entryHash, id,
 		)
 		if err != nil {
 			return fmt.Errorf("failed to update event %d with chain: %w", id, err)

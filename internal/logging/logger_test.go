@@ -1169,6 +1169,71 @@ func TestMigrationUsesEventCountWhenLegacyIDsHaveGaps(t *testing.T) {
 	}
 }
 
+func TestMigrationNormalizesLegacyTimestampsForBoundaryQueries(t *testing.T) {
+	// A pre-chain DB stored timestamps at second precision. After migration the
+	// column must be uniform 9-digit, or a boundary-second Until query silently
+	// drops a legacy row: the legacy "...00Z" sorts lexicographically after a
+	// 9-digit bound "...00.000000000Z". Regression guard for the mixed-width
+	// timestamp column (also fixes Prune cutoff and Stats MIN/MAX on legacy DBs).
+	dbPath := tempDBPath(t)
+	db, err := sql.Open("sqlite", dbPath)
+	if err != nil {
+		t.Fatalf("sql.Open failed: %v", err)
+	}
+	_, err = db.Exec(`
+		CREATE TABLE events (
+			id INTEGER PRIMARY KEY AUTOINCREMENT,
+			timestamp TEXT NOT NULL,
+			event_type TEXT NOT NULL,
+			category TEXT NOT NULL,
+			detail TEXT NOT NULL,
+			blocked INTEGER NOT NULL DEFAULT 0,
+			session_id TEXT NOT NULL
+		);
+		INSERT INTO events (id, timestamp, event_type, category, detail, blocked, session_id)
+		VALUES (1, '2026-09-14T10:00:00Z', 'session_start', 'session', 'legacy-boundary', 0, 'legacy');
+	`)
+	if err != nil {
+		db.Close()
+		t.Fatalf("create legacy database: %v", err)
+	}
+	db.Close()
+
+	l, err := NewLogger(dbPath, "")
+	if err != nil {
+		t.Fatalf("NewLogger migration failed: %v", err)
+	}
+	defer l.Close()
+
+	// (a) The stored timestamp is normalized to 9 fractional digits.
+	var stored string
+	if err := l.db.QueryRow("SELECT timestamp FROM events WHERE id = 1").Scan(&stored); err != nil {
+		t.Fatalf("read migrated timestamp: %v", err)
+	}
+	if want := "2026-09-14T10:00:00.000000000Z"; stored != want {
+		t.Errorf("legacy timestamp not normalized: got %q, want %q", stored, want)
+	}
+
+	// (b) An Until query at exactly the legacy row's second must INCLUDE it.
+	boundary := time.Date(2026, 9, 14, 10, 0, 0, 0, time.UTC)
+	got, err := l.Query(QueryOptions{Until: timePtr(boundary)})
+	if err != nil {
+		t.Fatalf("Query(Until) failed: %v", err)
+	}
+	if len(got) != 1 {
+		t.Errorf("Until=%s must include the legacy 10:00:00 row, got %d", boundary.Format(time.RFC3339), len(got))
+	}
+
+	// (c) The migrated chain verifies intact over the normalized value.
+	result, err := l.VerifyChain()
+	if err != nil {
+		t.Fatalf("VerifyChain failed: %v", err)
+	}
+	if !result.Intact {
+		t.Fatalf("migrated chain should be intact: %s", result.BrokenReason)
+	}
+}
+
 func TestVerifyChainUsesConsistentSnapshot(t *testing.T) {
 	l, dbPath := mustNewLogger(t)
 	defer l.Close()
