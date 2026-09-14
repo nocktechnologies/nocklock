@@ -21,8 +21,8 @@ import (
 	"github.com/BurntSushi/toml"
 	"github.com/nocktechnologies/nocklock/internal/config"
 	"github.com/nocktechnologies/nocklock/internal/fence/syscallfence"
-	"github.com/spf13/cobra"
 	"github.com/nocktechnologies/nocklock/internal/logging"
+	"github.com/spf13/cobra"
 )
 
 type verifyResult string

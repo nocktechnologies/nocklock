@@ -33,7 +33,6 @@ const (
 	EventConfigLoaded   EventType = "config_loaded"
 )
 
-
 // formatTimestampForChain formats a time.Time as UTC RFC3339 with exactly 9 fractional second digits and trailing Z.
 // This is the critical canonical format for the audit chain hash.
 func formatTimestampForChain(t time.Time) string {
@@ -85,15 +84,15 @@ type Logger struct {
 
 // ChainVerifyResult holds the outcome of a chain verification.
 type ChainVerifyResult struct {
-	Intact            bool       // true if chain is unbroken from genesis to current head
-	EntriesVerified   int        // number of entries checked
-	FirstBrokenID     int64      // id of first broken entry (0 if intact)
-	BrokenReason      string     // explanation of what broke (if not intact)
-	HeadHash          string     // current chain head hash (hex)
-	MigratedAt        *time.Time // when chain was created on existing DB (if applicable)
-	LegacyThroughID   int64      // highest id of pre-migration rows (if applicable)
-	PrunedAt          *time.Time // when chain was re-anchored due to prune (if applicable)
-	PrunedCount       int        // number of events removed in the last prune (if applicable)
+	Intact          bool       // true if chain is unbroken from genesis to current head
+	EntriesVerified int        // number of entries checked
+	FirstBrokenID   int64      // id of first broken entry (0 if intact)
+	BrokenReason    string     // explanation of what broke (if not intact)
+	HeadHash        string     // current chain head hash (hex)
+	MigratedAt      *time.Time // when chain was created on existing DB (if applicable)
+	LegacyThroughID int64      // highest id of pre-migration rows (if applicable)
+	PrunedAt        *time.Time // when chain was re-anchored due to prune (if applicable)
+	PrunedCount     int        // number of events removed in the last prune (if applicable)
 }
 
 // chainGenesisHashHex is the entry_hash for genesis (SHA-256 of the empty input).
