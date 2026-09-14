@@ -4,6 +4,11 @@ All notable changes to NockLock will be documented in this file.
 
 ## [Unreleased]
 
+### Changed
+
+- Corrected the tamper-evident audit-log v1 specification to state the limits of
+  an unkeyed, in-database hash chain and fully define its canonical byte layout.
+
 ### Added
 
 - `nocklock wrap --net-fence=netns` now layers the Phase-1b working egress
