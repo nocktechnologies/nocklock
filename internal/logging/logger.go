@@ -275,6 +275,14 @@ func (l *Logger) Log(event Event) error {
 		return fmt.Errorf("failed to begin log transaction: %w", err)
 	}
 	defer tx.Rollback()
+	if err := initChainHeadIfNeeded(tx); err != nil {
+		return fmt.Errorf("failed to initialize chain_head: %w", err)
+	}
+
+	var prevHashHex string
+	if err := tx.QueryRow("SELECT entry_hash FROM chain_head WHERE id = 1").Scan(&prevHashHex); err != nil {
+		return fmt.Errorf("failed to read chain head: %w", err)
+	}
 
 	// Insert without hash values first
 	result, err := tx.Exec(
@@ -291,18 +299,6 @@ func (l *Logger) Log(event Event) error {
 		return fmt.Errorf("failed to get event ID: %w", err)
 	}
 
-	// Get previous hash
-	var prevHashHex string
-	err = tx.QueryRow("SELECT COALESCE((SELECT entry_hash FROM events WHERE id = ? ORDER BY id DESC LIMIT 1), ?) FROM events WHERE id = ? LIMIT 1",
-		eventID-1, chainGenesisHashHex, eventID).Scan(&prevHashHex)
-	if err != nil && err != sql.ErrNoRows {
-		// Simple fallback: if this is first event or query fails, use genesis
-		prevHashHex = chainGenesisHashHex
-	}
-	if prevHashHex == "" {
-		prevHashHex = chainGenesisHashHex
-	}
-
 	// Compute hash chain
 	entryHash, err := chainEntry(eventID, ts, event.EventType, event.Category, event.Detail, event.Blocked, event.SessionID, prevHashHex)
 	if err != nil {
@@ -316,12 +312,6 @@ func (l *Logger) Log(event Event) error {
 	)
 	if err != nil {
 		return fmt.Errorf("failed to update event hashes: %w", err)
-	}
-
-	// Update chain_head
-	err = initChainHeadIfNeeded(tx)
-	if err != nil {
-		return fmt.Errorf("failed to initialize chain_head: %w", err)
 	}
 
 	_, err = tx.Exec(
@@ -574,7 +564,7 @@ func (l *Logger) Stats(sessionID string) (*Stats, error) {
 // the forward chain, recording a prune-boundary marker in chain_head.
 // Returns the number of events removed.
 func (l *Logger) Prune(olderThan time.Duration) (int, error) {
-	cutoff := time.Now().Add(-olderThan).UTC().Format(time.RFC3339)
+	cutoff := formatTimestampForChain(time.Now().Add(-olderThan))
 
 	tx, err := l.db.Begin()
 	if err != nil {

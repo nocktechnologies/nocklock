@@ -742,6 +742,30 @@ func TestPrune_NoOldEventsRemovesNothing(t *testing.T) {
 	}
 }
 
+func TestPruneRetainsEventAfterFractionalCutoff(t *testing.T) {
+	l, _ := mustNewLogger(t)
+	defer l.Close()
+
+	pruneAge := 24 * time.Hour
+	eventTime := time.Now().Add(-pruneAge).Add(500 * time.Millisecond)
+	oldCutoffFormat := eventTime.Truncate(time.Second).Format(time.RFC3339)
+	storedTimestamp := formatTimestampForChain(eventTime)
+	if !(storedTimestamp < oldCutoffFormat) {
+		t.Fatalf("negative control failed: fractional timestamp %q should sort before second-precision cutoff %q", storedTimestamp, oldCutoffFormat)
+	}
+	if err := l.Log(Event{Timestamp: eventTime, EventType: EventSessionStart, Category: "session", Detail: "boundary", SessionID: "fractional-cutoff"}); err != nil {
+		t.Fatalf("Log failed: %v", err)
+	}
+
+	pruned, err := l.Prune(pruneAge)
+	if err != nil {
+		t.Fatalf("Prune failed: %v", err)
+	}
+	if pruned != 0 {
+		t.Fatalf("Prune removed %d events, want 0 for event after cutoff", pruned)
+	}
+}
+
 // ---------- Security ----------
 
 func TestSecurity_DetailStoresNamesNotValues(t *testing.T) {
@@ -1407,6 +1431,35 @@ func TestPruneReAnchorsChain(t *testing.T) {
 	}
 	if result.PrunedCount != 1 {
 		t.Errorf("PrunedCount after prune: got %d, want 1", result.PrunedCount)
+	}
+}
+
+func TestLogAfterTailPruneContinuesFromChainHead(t *testing.T) {
+	l, _ := mustNewLogger(t)
+	defer l.Close()
+
+	now := time.Now()
+	for i := 0; i < 3; i++ {
+		if err := l.Log(Event{Timestamp: now, EventType: EventSessionStart, Category: "session", Detail: "survivor", SessionID: "tail-prune"}); err != nil {
+			t.Fatalf("Log survivor %d failed: %v", i, err)
+		}
+	}
+	if err := l.Log(Event{Timestamp: now.Add(-48 * time.Hour), EventType: EventSessionEnd, Category: "session", Detail: "old-tail", SessionID: "tail-prune"}); err != nil {
+		t.Fatalf("Log old tail failed: %v", err)
+	}
+	if pruned, err := l.Prune(24 * time.Hour); err != nil || pruned != 1 {
+		t.Fatalf("Prune = (%d, %v), want (1, nil)", pruned, err)
+	}
+	if err := l.Log(Event{Timestamp: now, EventType: EventSessionEnd, Category: "session", Detail: "after-prune", SessionID: "tail-prune"}); err != nil {
+		t.Fatalf("Log after tail prune failed: %v", err)
+	}
+
+	result, err := l.VerifyChain()
+	if err != nil {
+		t.Fatalf("VerifyChain failed: %v", err)
+	}
+	if !result.Intact {
+		t.Fatalf("chain should remain intact after logging across an ID gap: %s", result.BrokenReason)
 	}
 }
 
