@@ -144,6 +144,17 @@ func LoadPublicKeyFile(path string) (ed25519.PublicKey, error) {
 	return loadPublicKey(path)
 }
 
+// EnsurePublicKeyFile returns the public key from the managed signing key file,
+// generating the key on first use if absent (for `verify --export-pubkey`). The
+// private key is never returned or printed.
+func EnsurePublicKeyFile(path string) (ed25519.PublicKey, error) {
+	s, err := loadOrCreateSigner(path)
+	if err != nil {
+		return nil, err
+	}
+	return s.pub, nil
+}
+
 // signRow returns the base64 signature over a row's canonical bytes — the exact
 // bytes the hash chain already covers (canonicalBytes), reused, not re-encoded.
 func (s *signer) signRow(canonical []byte) string {
