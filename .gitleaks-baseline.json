@@ -40,5 +40,23 @@
   "Message": "fix: address security review findings\n\n- Switch filepath.Match to path.Match for platform-independent glob\n  matching (env var names are not filesystem paths)\n- Rename blocked → blockedNames in wrap.go to make the names-only\n  contract self-documenting and prevent accidental value leaks\n- Add TestBlockedNamesNeverContainValues regression test asserting\n  no secret values ever appear in the blocked names list\n\nCo-Authored-By: Claude Opus 4.6 (1M context) \u003cnoreply@anthropic.com\u003e",
   "Tags": [],
   "Fingerprint": "049ea39b16640f1565a3c6b60f3fd6bba8c6c281:internal/fence/secrets/secrets_test.go:generic-api-key:388"
+ },
+ {
+  "Fingerprint": "0176a70f4dfd6c035589e6cb8e778376beb3ddd8:internal/logging/signing_test.go:generic-api-key:21"
+ },
+ {
+  "Fingerprint": "0176a70f4dfd6c035589e6cb8e778376beb3ddd8:internal/logging/signing_test.go:generic-api-key:75"
+ },
+ {
+  "Fingerprint": "0176a70f4dfd6c035589e6cb8e778376beb3ddd8:internal/logging/signing_test.go:generic-api-key:96"
+ },
+ {
+  "Fingerprint": "0176a70f4dfd6c035589e6cb8e778376beb3ddd8:internal/logging/signing_test.go:generic-api-key:123"
+ },
+ {
+  "Fingerprint": "0176a70f4dfd6c035589e6cb8e778376beb3ddd8:internal/logging/signing_test.go:generic-api-key:559"
+ },
+ {
+  "Fingerprint": "0176a70f4dfd6c035589e6cb8e778376beb3ddd8:internal/logging/signing_test.go:generic-api-key:618"
  }
 ]
