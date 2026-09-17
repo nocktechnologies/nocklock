@@ -92,7 +92,13 @@ var wrapCmd = &cobra.Command{
 		// running unrecorded would silently break the "every decision is recorded"
 		// promise, which is worse than not running at all.
 		dbPath, projectRoot := config.ResolveDBPath(cfg, configPath)
-		logger, logErr := logging.NewLogger(dbPath, projectRoot)
+		// Sign the audit trail with the NockLock-managed Ed25519 key so each
+		// recorded decision is authentic, not merely internally consistent. The
+		// key is generated 0600 on first use. If its path cannot be resolved we
+		// fall back to an unsigned (still hash-chained) open rather than refusing
+		// to run; the logger itself fails closed on any write to a log that has
+		// already adopted signing.
+		logger, logErr := logging.NewLogger(dbPath, projectRoot, signingLoggerOpts()...)
 		if logErr != nil {
 			return fmt.Errorf("could not open the event log at %s: %w\nThe audit trail is required — refusing to run unrecorded. Fix the .nock directory's permissions or free disk space", dbPath, logErr)
 		}

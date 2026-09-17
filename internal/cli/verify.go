@@ -3,6 +3,7 @@ package cli
 import (
 	"bytes"
 	"context"
+	"crypto/ed25519"
 	"crypto/rand"
 	"encoding/hex"
 	"encoding/json"
@@ -66,8 +67,13 @@ var verifyCmd = &cobra.Command{
 	RunE: func(cmd *cobra.Command, args []string) error {
 		asJSON, _ := cmd.Flags().GetBool("json")
 		asAudit, _ := cmd.Flags().GetBool("audit")
+		exportPub, _ := cmd.Flags().GetBool("export-pubkey")
+		pubFlag, _ := cmd.Flags().GetString("ed25519-pub")
+		if exportPub {
+			return runExportPubkey(cmd.OutOrStdout())
+		}
 		if asAudit {
-			return runAuditVerify(cmd.Context(), cmd.OutOrStdout())
+			return runAuditVerify(cmd.Context(), cmd.OutOrStdout(), pubFlag)
 		}
 		report, err := runVerify(cmd.Context(), currentDoctorCapabilities, currentProbeRunner)
 		if err != nil {
@@ -93,10 +99,12 @@ var verifyCmd = &cobra.Command{
 func init() {
 	verifyCmd.Flags().Bool("json", false, "emit structured JSON output")
 	verifyCmd.Flags().Bool("audit", false, "verify the audit chain instead of running fence probes")
+	verifyCmd.Flags().Bool("export-pubkey", false, "print the Ed25519 audit-log public key (base64) for out-of-band verification")
+	verifyCmd.Flags().String("ed25519-pub", "", "trusted Ed25519 public key (base64 or hex); requires the audit log to be signed")
 	rootCmd.AddCommand(verifyCmd)
 }
 
-func runAuditVerify(ctx context.Context, w io.Writer) error {
+func runAuditVerify(ctx context.Context, w io.Writer, pubFlag string) error {
 	configPath, err := config.FindConfig()
 	if err != nil {
 		if errors.Is(err, os.ErrNotExist) {
@@ -128,14 +136,23 @@ func runAuditVerify(ctx context.Context, w io.Writer) error {
 		return fmt.Errorf("event log not found at %s: %w", dbPath, err)
 	}
 
+	// Resolve a public key for authenticity checking. An explicit --ed25519-pub
+	// both wins and establishes the external expectation that this log is signed;
+	// otherwise derive it from the local signing key file if one exists. No key
+	// at all means a hash-only (CONSISTENCY) verification.
+	pub, err := resolveVerifyPublicKey(pubFlag)
+	if err != nil {
+		return err
+	}
+
 	logger, err := logging.NewLogger(dbPath, projectRoot)
 	if err != nil {
 		return fmt.Errorf("failed to open event log: %w", err)
 	}
 	defer logger.Close()
 
-	// Verify the chain
-	result, err := logger.VerifyChain()
+	// Verify the chain (signature-aware when a key is available).
+	result, err := logger.VerifyChainSigned(pub, pubFlag != "")
 	if err != nil {
 		return fmt.Errorf("verification failed: %w", err)
 	}
@@ -144,26 +161,122 @@ func runAuditVerify(ctx context.Context, w io.Writer) error {
 	return writeAuditVerifyResult(w, result)
 }
 
+// resolveVerifyPublicKey returns the Ed25519 public key to verify against, or
+// nil for a hash-only check. A supplied key (base64 or hex) overrides the local
+// key file; a missing key file is not an error (falls back to nil).
+func resolveVerifyPublicKey(pubFlag string) (ed25519.PublicKey, error) {
+	if pubFlag != "" {
+		pub, err := logging.ParsePublicKey(pubFlag)
+		if err != nil {
+			return nil, fmt.Errorf("invalid --ed25519-pub: %w", err)
+		}
+		return pub, nil
+	}
+	keyPath, err := logging.DefaultSigningKeyPath()
+	if err != nil {
+		return nil, nil
+	}
+	pub, err := logging.LoadPublicKeyFile(keyPath)
+	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return nil, nil
+		}
+		return nil, fmt.Errorf("failed to load signing public key from %s: %w", keyPath, err)
+	}
+	return pub, nil
+}
+
+// signingLoggerOpts returns the Logger options that enable Ed25519 signing with
+// the NockLock-managed key. If the key path cannot be resolved it returns no
+// options, degrading to an unsigned (hash-only) open rather than failing.
+func signingLoggerOpts() []logging.Option {
+	keyPath, err := logging.DefaultSigningKeyPath()
+	if err != nil {
+		return nil
+	}
+	return []logging.Option{logging.WithSigning(keyPath)}
+}
+
+// runExportPubkey prints the base64 Ed25519 audit-log public key. The key is
+// generated on first use if absent; the private key is never printed.
+func runExportPubkey(w io.Writer) error {
+	keyPath, err := logging.DefaultSigningKeyPath()
+	if err != nil {
+		return fmt.Errorf("cannot resolve signing key path: %w", err)
+	}
+	pub, err := logging.EnsurePublicKeyFile(keyPath)
+	if err != nil {
+		return fmt.Errorf("failed to load signing public key: %w", err)
+	}
+	fmt.Fprintf(w, "ed25519 %s\n", logging.EncodePublicKey(pub))
+	return nil
+}
+
 // writeAuditVerifyResult renders a chain verification result. An intact chain
 // prints the CONSISTENT verdict, followed by a NOTE for any migration boundary
 // and any prune boundary — so a compaction of the log can never read back as
 // untouched history. A broken chain prints the TAMPERED verdict and returns a
 // non-zero exit.
 func writeAuditVerifyResult(w io.Writer, result *logging.ChainVerifyResult) error {
+	// A broken hash chain is TAMPERED regardless of signatures.
 	if !result.Intact {
 		fmt.Fprintf(w, "AUDIT: TAMPERED — chain breaks at entry %d (%s)\n", result.FirstBrokenID, result.BrokenReason)
 		return &exitCodeError{code: 1}
 	}
 
+	// A signature that does not verify is FORGED. Never conflated with a clean
+	// unsigned pass: the hash chain here is intact, but authenticity failed.
+	if result.SigState == "forged" {
+		where := "chain_head"
+		if result.SigBrokenID != 0 {
+			where = fmt.Sprintf("entry %d", result.SigBrokenID)
+		}
+		fmt.Fprintf(w, "AUDIT: FORGED — hash chain intact but signature check failed at %s (%s)\n", where, result.SigBrokenReason)
+		return &exitCodeError{code: 1}
+	}
+
+	// Signing was explicitly required (--ed25519-pub) but the log has events and
+	// no signatures or adoption markers: possibly fully stripped. Never a clean
+	// pass (No-Silent-Success).
+	if result.SigState == "suspect" {
+		fmt.Fprintf(w, "AUDIT: SUSPECT — hash chain intact but no signatures present though signed verification was required (%s)\n", result.SigBrokenReason)
+		writeAuditBoundaryNotes(w, result)
+		fmt.Fprintf(w, "Head hash: %s\n", result.HeadHash)
+		return &exitCodeError{code: 1}
+	}
+
+	if result.SigState == "authentic" {
+		fmt.Fprintf(w, "AUDIT: AUTHENTIC — %d entries verified, %d Ed25519-signed and valid, chain_head signature valid\n", result.EntriesVerified, result.SigVerified)
+		if result.SignedGenesisAt != nil && result.UnsignedEntries > 0 {
+			fmt.Fprintf(w, "NOTE: entries 1..%d predate signing adoption (%s); consistent but unsigned, not authenticated.\n", result.UnsignedThroughID, result.SignedGenesisAt.Format(time.RFC3339))
+		}
+		writeAuditBoundaryNotes(w, result)
+		fmt.Fprintf(w, "Head hash: %s\n", result.HeadHash)
+		return nil
+	}
+
+	// SigState is "" (hash-only requested), "unsigned", or "unverified": the
+	// hash chain is internally consistent but authenticity is NOT established.
 	fmt.Fprintf(w, "AUDIT: CONSISTENT — %d entries verified, hash chain intact (not externally anchored)\n", result.EntriesVerified)
+	if result.SigState == "unverified" {
+		fmt.Fprintf(w, "NOTE: %d entries carry Ed25519 signatures but no public key was supplied; authenticity NOT checked (pass --ed25519-pub or run on the signing host).\n", result.SignedEntries)
+	} else if result.PubKeyProvided && result.SignedEntries == 0 {
+		fmt.Fprintln(w, "NOTE: no entries are signed; this proves internal consistency only, not that NockLock recorded them.")
+	}
+	writeAuditBoundaryNotes(w, result)
+	fmt.Fprintf(w, "Head hash: %s\n", result.HeadHash)
+	return nil
+}
+
+// writeAuditBoundaryNotes prints the migration and prune boundary notes shared
+// by every non-tampered verdict.
+func writeAuditBoundaryNotes(w io.Writer, result *logging.ChainVerifyResult) {
 	if result.MigratedAt != nil {
 		fmt.Fprintf(w, "NOTE: entries 1..%d predate the chain (migrated %s); structurally chained, not authenticated.\n", result.LegacyThroughID, result.MigratedAt.Format(time.RFC3339))
 	}
 	if result.PrunedAt != nil {
 		fmt.Fprintf(w, "NOTE: chain was re-anchored by a prune at %s; %d event(s) were removed in that prune and history before it is not retained.\n", result.PrunedAt.Format(time.RFC3339), result.PrunedCount)
 	}
-	fmt.Fprintf(w, "Head hash: %s\n", result.HeadHash)
-	return nil
 }
 
 func runVerify(ctx context.Context, caps doctorCapabilities, runner probeRunner) (verifyReport, error) {
