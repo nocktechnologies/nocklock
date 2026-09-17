@@ -10,6 +10,7 @@ package logging
 import (
 	"crypto/ed25519"
 	"crypto/rand"
+	"crypto/sha256"
 	"encoding/base64"
 	"encoding/binary"
 	"encoding/hex"
@@ -31,13 +32,25 @@ var signingRand io.Reader = rand.Reader
 
 // headSigVersion is the leading domain-separation tag for chain_head canonical
 // bytes. Row canonical bytes lead with 0x01 (see canonicalBytes); the head
-// leads with 0x02 so a row signature can never be replayed as a head signature.
-const headSigVersion byte = 0x02
+// leads with 0x03 so a row signature can never be replayed as a head signature.
+// Version 0x03 also binds the signing, pruning, and public-key metadata.
+const headSigVersion byte = 0x03
 
 // signer holds a loaded Ed25519 keypair. A nil *signer means signing is off.
 type signer struct {
 	priv ed25519.PrivateKey
 	pub  ed25519.PublicKey
+}
+
+// headSignatureMetadata is the security-relevant chain_head metadata covered
+// by its signature. The database stores optional values as NULL; the canonical
+// encoding preserves that distinction from an empty or zero value.
+type headSignatureMetadata struct {
+	prunedAt                *string
+	prunedCount             *int
+	signedGenesisAt         *string
+	unsignedThroughID       *int64
+	publicKeyFingerprintHex string
 }
 
 // DefaultSigningKeyPath returns the NockLock-managed signing key path,
@@ -58,10 +71,11 @@ func DefaultSigningKeyPath() (string, error) {
 // 32-byte seed. A world/group-readable, non-regular, or symlinked key file is
 // rejected (fail closed). The private key is never printed.
 func loadOrCreateSigner(path string) (*signer, error) {
-	dir := filepath.Dir(path)
-	if err := os.MkdirAll(dir, 0o700); err != nil {
-		return nil, fmt.Errorf("failed to create signing key directory %s: %w", dir, err)
+	dir, err := validateSigningKeyDirectory(filepath.Dir(path), true)
+	if err != nil {
+		return nil, err
 	}
+	path = filepath.Join(dir, filepath.Base(path))
 
 	// O_EXCL closes the create race: exactly one process creates the key, the
 	// rest fall through to load. O_NOFOLLOW refuses to create through a symlink.
@@ -72,7 +86,6 @@ func loadOrCreateSigner(path string) (*signer, error) {
 		}
 		return nil, fmt.Errorf("failed to create signing key at %s: %w", path, err)
 	}
-
 	// The file now exists on disk. A silent Close error persisting a truncated
 	// key — or any failed Write/Chmod leaving a partial key — is exactly the
 	// No-Silent-Success failure NockLock exists to prevent, here on our own
@@ -104,11 +117,57 @@ func loadOrCreateSigner(path string) (*signer, error) {
 	return &signer{priv: priv, pub: pub}, nil
 }
 
+// validateSigningKeyDirectory creates and validates the managed key directory.
+// Every existing path component must be real (not symlinked), and the final
+// directory must be private to the current owner before a key is created or
+// loaded from it.
+func validateSigningKeyDirectory(dir string, create bool) (string, error) {
+	absDir, err := filepath.Abs(dir)
+	if err != nil {
+		return "", fmt.Errorf("failed to resolve signing key directory %s: %w", dir, err)
+	}
+	absDir = filepath.Clean(absDir)
+	if create {
+		if err := os.MkdirAll(absDir, 0o700); err != nil {
+			return "", fmt.Errorf("failed to create signing key directory %s: %w", absDir, err)
+		}
+	} else if _, err := os.Lstat(absDir); err != nil {
+		return "", err
+	}
+	resolvedDir, err := filepath.EvalSymlinks(absDir)
+	if err != nil {
+		return "", fmt.Errorf("failed to resolve signing key directory %s: %w", absDir, err)
+	}
+	if filepath.Clean(resolvedDir) != absDir {
+		return "", fmt.Errorf("refusing to use signing key directory %s: path contains a symlink", absDir)
+	}
+	info, err := os.Lstat(absDir)
+	if err != nil {
+		return "", fmt.Errorf("failed to stat signing key directory %s: %w", absDir, err)
+	}
+	if info.Mode()&os.ModeSymlink != 0 || !info.IsDir() {
+		return "", fmt.Errorf("refusing to use signing key directory %s: not a real directory", absDir)
+	}
+	if info.Mode().Perm() != 0o700 {
+		return "", fmt.Errorf("refusing to use signing key directory %s: permissions %o, want 0700", absDir, info.Mode().Perm())
+	}
+	if err := validateSigningKeyDirectoryOwner(info); err != nil {
+		return "", fmt.Errorf("refusing to use signing key directory %s: %w", absDir, err)
+	}
+	return absDir, nil
+}
+
 // loadSigner reads and validates an existing signing key file. It rejects a
 // symlink, a non-regular file, or one that is group/world accessible, then
 // reconstructs the private key from its 32-byte seed. Errors from a missing
 // file are returned unwrapped enough for errors.Is(err, os.ErrNotExist).
 func loadSigner(path string) (*signer, error) {
+	dir, err := validateSigningKeyDirectory(filepath.Dir(path), false)
+	if err != nil {
+		return nil, err
+	}
+	path = filepath.Join(dir, filepath.Base(path))
+
 	// Reject a symlink before opening; O_NOFOLLOW below is the authoritative
 	// guard that also closes the lstat->open TOCTOU window.
 	if fi, err := os.Lstat(path); err != nil {
@@ -183,10 +242,10 @@ func (s *signer) signRow(canonical []byte) string {
 }
 
 // headCanonicalBytes returns the domain-separated canonical bytes for the
-// chain_head record: 0x02 || headHash(32 raw bytes) || uint64be(row_count).
-// Signing the head means an attacker rewriting the head in lockstep with the
-// rows still needs the key, upgrading tail-truncation resistance.
-func headCanonicalBytes(headHashHex string, rowCount int) ([]byte, error) {
+// chain_head record. In addition to the hash and row count, it authenticates
+// pruning, signing-adoption, and public-key metadata so database-only changes
+// to those fields cannot still verify as authentic.
+func headCanonicalBytes(headHashHex string, rowCount int, meta headSignatureMetadata) ([]byte, error) {
 	hb, err := hex.DecodeString(headHashHex)
 	if err != nil {
 		return nil, fmt.Errorf("invalid head hash hex: %w", err)
@@ -194,21 +253,61 @@ func headCanonicalBytes(headHashHex string, rowCount int) ([]byte, error) {
 	if len(hb) != 32 {
 		return nil, fmt.Errorf("head hash must be 32 bytes, got %d", len(hb))
 	}
-	buf := make([]byte, 0, 1+32+8)
+	fingerprint, err := hex.DecodeString(meta.publicKeyFingerprintHex)
+	if err != nil || len(fingerprint) != sha256.Size {
+		return nil, fmt.Errorf("signing public key fingerprint must be %d bytes of hex", sha256.Size)
+	}
+	buf := make([]byte, 0, 1+32+8+2*(1+4)+2*(1+8)+sha256.Size)
 	buf = append(buf, headSigVersion)
 	buf = append(buf, hb...)
 	var cnt [8]byte
 	binary.BigEndian.PutUint64(cnt[:], uint64(rowCount))
 	buf = append(buf, cnt[:]...)
+	buf = appendHeadOptionalString(buf, meta.prunedAt)
+	buf = appendHeadOptionalInt(buf, meta.prunedCount)
+	buf = appendHeadOptionalString(buf, meta.signedGenesisAt)
+	buf = appendHeadOptionalInt64(buf, meta.unsignedThroughID)
+	buf = append(buf, fingerprint...)
 	return buf, nil
 }
 
+func appendHeadOptionalString(buf []byte, value *string) []byte {
+	if value == nil {
+		return append(buf, 0)
+	}
+	buf = append(buf, 1)
+	var length [4]byte
+	binary.BigEndian.PutUint32(length[:], uint32(len(*value)))
+	buf = append(buf, length[:]...)
+	return append(buf, (*value)...)
+}
+
+func appendHeadOptionalInt(buf []byte, value *int) []byte {
+	if value == nil {
+		return append(buf, 0)
+	}
+	buf = append(buf, 1)
+	var encoded [8]byte
+	binary.BigEndian.PutUint64(encoded[:], uint64(*value))
+	return append(buf, encoded[:]...)
+}
+
+func appendHeadOptionalInt64(buf []byte, value *int64) []byte {
+	if value == nil {
+		return append(buf, 0)
+	}
+	buf = append(buf, 1)
+	var encoded [8]byte
+	binary.BigEndian.PutUint64(encoded[:], uint64(*value))
+	return append(buf, encoded[:]...)
+}
+
 // signHead returns the base64 head signature, or "" when signing is off.
-func signHead(s *signer, headHashHex string, rowCount int) (string, error) {
+func signHead(s *signer, headHashHex string, rowCount int, meta headSignatureMetadata) (string, error) {
 	if s == nil {
 		return "", nil
 	}
-	hb, err := headCanonicalBytes(headHashHex, rowCount)
+	hb, err := headCanonicalBytes(headHashHex, rowCount, meta)
 	if err != nil {
 		return "", err
 	}
@@ -225,8 +324,8 @@ func verifyRowSig(pub ed25519.PublicKey, canonical []byte, sigB64 string) bool {
 }
 
 // verifyHeadSig checks a base64 head signature against the head canonical bytes.
-func verifyHeadSig(pub ed25519.PublicKey, headHashHex string, rowCount int, sigB64 string) bool {
-	hb, err := headCanonicalBytes(headHashHex, rowCount)
+func verifyHeadSig(pub ed25519.PublicKey, headHashHex string, rowCount int, meta headSignatureMetadata, sigB64 string) bool {
+	hb, err := headCanonicalBytes(headHashHex, rowCount, meta)
 	if err != nil {
 		return false
 	}
@@ -235,6 +334,11 @@ func verifyHeadSig(pub ed25519.PublicKey, headHashHex string, rowCount int, sigB
 		return false
 	}
 	return ed25519.Verify(pub, hb, sig)
+}
+
+func publicKeyFingerprint(pub ed25519.PublicKey) string {
+	sum := sha256.Sum256(pub)
+	return hex.EncodeToString(sum[:])
 }
 
 // ParsePublicKey decodes a public key supplied out-of-band (--ed25519-pub / env)

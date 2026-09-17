@@ -165,7 +165,8 @@ CREATE TABLE IF NOT EXISTS chain_head (
 	pruned_count INTEGER,
 	head_sig TEXT NOT NULL DEFAULT '',
 	signed_genesis_at TEXT,
-	unsigned_through_id INTEGER
+	unsigned_through_id INTEGER,
+	signing_pubkey_fingerprint TEXT NOT NULL DEFAULT ''
 );
 `
 
@@ -319,7 +320,19 @@ func NewLogger(dbPath string, projectRoot string, opts ...Option) (*Logger, erro
 	l := &Logger{db: db}
 
 	if lc.signingEnabled {
-		s, err := loadOrCreateSigner(lc.signingKeyPath)
+		adopted, err := signingAlreadyAdopted(db)
+		if err != nil {
+			db.Close()
+			return nil, fmt.Errorf("failed to check signing adoption state: %w", err)
+		}
+		var s *signer
+		if adopted {
+			// An adopted log must already have its original key. Do not create a
+			// replacement key that could silently sever the signature history.
+			s, err = loadSigner(lc.signingKeyPath)
+		} else {
+			s, err = loadOrCreateSigner(lc.signingKeyPath)
+		}
 		if err != nil {
 			db.Close()
 			return nil, fmt.Errorf("failed to load signing key: %w", err)
@@ -404,7 +417,11 @@ func (l *Logger) Log(event Event) error {
 	if err != nil {
 		return fmt.Errorf("failed to count events: %w", err)
 	}
-	headSig, err := signHead(l.signer, entryHash, count)
+	headMeta, err := readHeadSignatureMetadata(tx)
+	if err != nil {
+		return fmt.Errorf("failed to read chain head signing metadata: %w", err)
+	}
+	headSig, err := signHead(l.signer, entryHash, count, headMeta)
 	if err != nil {
 		return fmt.Errorf("failed to sign chain head: %w", err)
 	}
@@ -503,7 +520,11 @@ func (l *Logger) LogBatch(events []Event) error {
 		return fmt.Errorf("failed to count events: %w", err)
 	}
 
-	headSig, err := signHead(l.signer, prevHashHex, count)
+	headMeta, err := readHeadSignatureMetadata(tx)
+	if err != nil {
+		return fmt.Errorf("failed to read chain head signing metadata: %w", err)
+	}
+	headSig, err := signHead(l.signer, prevHashHex, count, headMeta)
 	if err != nil {
 		return fmt.Errorf("failed to sign chain head: %w", err)
 	}
@@ -714,12 +735,19 @@ func (l *Logger) Prune(olderThan time.Duration) (int, error) {
 	if err == sql.ErrNoRows {
 		// All events were pruned. The head returns to genesis; re-sign it so an
 		// adopted log keeps an authentic head.
-		headSig, signErr := signHead(l.signer, chainGenesisHashHex, 0)
+		prunedAt := time.Now().UTC().Format(time.RFC3339)
+		headMeta, metaErr := readHeadSignatureMetadata(tx)
+		if metaErr != nil {
+			return 0, fmt.Errorf("failed to read chain head signing metadata after full prune: %w", metaErr)
+		}
+		headMeta.prunedAt = &prunedAt
+		headMeta.prunedCount = &pruneCount
+		headSig, signErr := signHead(l.signer, chainGenesisHashHex, 0, headMeta)
 		if signErr != nil {
 			return 0, fmt.Errorf("failed to sign chain head after full prune: %w", signErr)
 		}
 		_, err = tx.Exec("UPDATE chain_head SET entry_hash = ?, row_count = 0, pruned_at = ?, pruned_count = ?, head_sig = ? WHERE id = 1",
-			chainGenesisHashHex, time.Now().UTC().Format(time.RFC3339), pruneCount, headSig)
+			chainGenesisHashHex, prunedAt, pruneCount, headSig)
 		if err != nil {
 			return 0, fmt.Errorf("failed to update chain_head after full prune: %w", err)
 		}
@@ -783,12 +811,19 @@ func (l *Logger) Prune(olderThan time.Duration) (int, error) {
 		return 0, fmt.Errorf("failed to count events after prune: %w", err)
 	}
 
-	headSig, err := signHead(l.signer, prevHashHex, count)
+	prunedAt := time.Now().UTC().Format(time.RFC3339)
+	headMeta, err := readHeadSignatureMetadata(tx)
+	if err != nil {
+		return 0, fmt.Errorf("failed to read chain head signing metadata after re-anchor: %w", err)
+	}
+	headMeta.prunedAt = &prunedAt
+	headMeta.prunedCount = &pruneCount
+	headSig, err := signHead(l.signer, prevHashHex, count, headMeta)
 	if err != nil {
 		return 0, fmt.Errorf("failed to sign chain head after re-anchor: %w", err)
 	}
 	_, err = tx.Exec("UPDATE chain_head SET entry_hash = ?, row_count = ?, pruned_at = ?, pruned_count = ?, head_sig = ? WHERE id = 1",
-		prevHashHex, count, time.Now().UTC().Format(time.RFC3339), pruneCount, headSig)
+		prevHashHex, count, prunedAt, pruneCount, headSig)
 	if err != nil {
 		return 0, fmt.Errorf("failed to update chain_head after re-anchor: %w", err)
 	}
@@ -985,6 +1020,9 @@ func migrateSigColumns(db *sql.DB) error {
 	if !headCols["unsigned_through_id"] {
 		alters = append(alters, "ALTER TABLE chain_head ADD COLUMN unsigned_through_id INTEGER")
 	}
+	if !headCols["signing_pubkey_fingerprint"] {
+		alters = append(alters, "ALTER TABLE chain_head ADD COLUMN signing_pubkey_fingerprint TEXT NOT NULL DEFAULT ''")
+	}
 	if len(alters) == 0 {
 		return nil
 	}
@@ -1000,6 +1038,35 @@ func migrateSigColumns(db *sql.DB) error {
 		}
 	}
 	return tx.Commit()
+}
+
+// signingAlreadyAdopted reports whether this log has a signing-adoption marker.
+// It is checked before loading a key so an adopted log never creates a silent
+// replacement key when its original managed key is missing.
+func signingAlreadyAdopted(db *sql.DB) (bool, error) {
+	var genesis *string
+	err := db.QueryRow("SELECT signed_genesis_at FROM chain_head WHERE id = 1").Scan(&genesis)
+	if err == sql.ErrNoRows {
+		return false, nil
+	}
+	if err != nil {
+		return false, err
+	}
+	return genesis != nil, nil
+}
+
+// readHeadSignatureMetadata loads all chain_head fields authenticated by the
+// versioned head signature.
+func readHeadSignatureMetadata(tx *sql.Tx) (headSignatureMetadata, error) {
+	var meta headSignatureMetadata
+	var fingerprint string
+	if err := tx.QueryRow(
+		"SELECT pruned_at, pruned_count, signed_genesis_at, unsigned_through_id, signing_pubkey_fingerprint FROM chain_head WHERE id = 1",
+	).Scan(&meta.prunedAt, &meta.prunedCount, &meta.signedGenesisAt, &meta.unsignedThroughID, &fingerprint); err != nil {
+		return headSignatureMetadata{}, err
+	}
+	meta.publicKeyFingerprintHex = fingerprint
+	return meta, nil
 }
 
 // adoptSigningIfNeeded records the signing genesis marker on the first signed
@@ -1018,11 +1085,30 @@ func adoptSigningIfNeeded(db *sql.DB, s *signer) error {
 	}
 
 	var genesis *string
-	if err := tx.QueryRow("SELECT signed_genesis_at FROM chain_head WHERE id = 1").Scan(&genesis); err != nil {
+	var fingerprint string
+	if err := tx.QueryRow("SELECT signed_genesis_at, signing_pubkey_fingerprint FROM chain_head WHERE id = 1").Scan(&genesis, &fingerprint); err != nil {
 		return fmt.Errorf("failed to read signing genesis: %w", err)
 	}
 	if genesis != nil {
-		// Already adopted.
+		if fingerprint == "" {
+			return fmt.Errorf("audit log signing metadata has no public key fingerprint; refusing to write")
+		}
+		if fingerprint != publicKeyFingerprint(s.pub) {
+			return fmt.Errorf("audit log signing key does not match the adopted public key fingerprint; refusing to write")
+		}
+		var headHash, headSig string
+		var rowCount int
+		if err := tx.QueryRow("SELECT entry_hash, row_count, head_sig FROM chain_head WHERE id = 1").Scan(&headHash, &rowCount, &headSig); err != nil {
+			return fmt.Errorf("failed to read chain head for signing key validation: %w", err)
+		}
+		headMeta, err := readHeadSignatureMetadata(tx)
+		if err != nil {
+			return fmt.Errorf("failed to read chain head signing metadata for key validation: %w", err)
+		}
+		if headSig == "" || !verifyHeadSig(s.pub, headHash, rowCount, headMeta, headSig) {
+			return fmt.Errorf("audit log signing key does not verify the adopted chain head; refusing to write")
+		}
+		// Already adopted with the same key.
 		return tx.Commit()
 	}
 
@@ -1036,17 +1122,24 @@ func adoptSigningIfNeeded(db *sql.DB, s *signer) error {
 	if err := tx.QueryRow("SELECT entry_hash, row_count FROM chain_head WHERE id = 1").Scan(&headHash, &rowCount); err != nil {
 		return fmt.Errorf("failed to read chain head for adoption: %w", err)
 	}
-	headSig, err := signHead(s, headHash, rowCount)
-	if err != nil {
-		return fmt.Errorf("failed to sign chain head at adoption: %w", err)
-	}
-
+	signedGenesisAt := time.Now().UTC().Format(time.RFC3339)
 	_, err = tx.Exec(
-		"UPDATE chain_head SET signed_genesis_at = ?, unsigned_through_id = ?, head_sig = ? WHERE id = 1",
-		time.Now().UTC().Format(time.RFC3339), maxID, headSig,
+		"UPDATE chain_head SET signed_genesis_at = ?, unsigned_through_id = ?, signing_pubkey_fingerprint = ? WHERE id = 1",
+		signedGenesisAt, maxID, publicKeyFingerprint(s.pub),
 	)
 	if err != nil {
 		return fmt.Errorf("failed to write signing genesis marker: %w", err)
+	}
+	headMeta, err := readHeadSignatureMetadata(tx)
+	if err != nil {
+		return fmt.Errorf("failed to read chain head signing metadata at adoption: %w", err)
+	}
+	headSig, err := signHead(s, headHash, rowCount, headMeta)
+	if err != nil {
+		return fmt.Errorf("failed to sign chain head at adoption: %w", err)
+	}
+	if _, err = tx.Exec("UPDATE chain_head SET head_sig = ? WHERE id = 1", headSig); err != nil {
+		return fmt.Errorf("failed to sign chain head at adoption: %w", err)
 	}
 	return tx.Commit()
 }
@@ -1212,9 +1305,10 @@ func (l *Logger) verifyChain(pub ed25519.PublicKey) (*ChainVerifyResult, error) 
 	var headSig string
 	var signedGenesisStr *string
 	var unsignedThroughID *int64
+	var publicKeyFingerprintHex string
 	err = tx.QueryRow(
-		"SELECT entry_hash, row_count, migrated_at, legacy_through_id, pruned_at, pruned_count, head_sig, signed_genesis_at, unsigned_through_id FROM chain_head WHERE id = 1",
-	).Scan(&headHash, &rowCount, &migratedAtStr, &legacyID, &prunedAtStr, &prunedCountVal, &headSig, &signedGenesisStr, &unsignedThroughID)
+		"SELECT entry_hash, row_count, migrated_at, legacy_through_id, pruned_at, pruned_count, head_sig, signed_genesis_at, unsigned_through_id, signing_pubkey_fingerprint FROM chain_head WHERE id = 1",
+	).Scan(&headHash, &rowCount, &migratedAtStr, &legacyID, &prunedAtStr, &prunedCountVal, &headSig, &signedGenesisStr, &unsignedThroughID, &publicKeyFingerprintHex)
 	if err == sql.ErrNoRows {
 		// Empty log
 		result.HeadHash = chainGenesisHashHex
@@ -1254,6 +1348,13 @@ func (l *Logger) verifyChain(pub ed25519.PublicKey) (*ChainVerifyResult, error) 
 	if unsignedThroughID != nil {
 		result.UnsignedThroughID = *unsignedThroughID
 	}
+	headMeta := headSignatureMetadata{
+		prunedAt:                prunedAtStr,
+		prunedCount:             prunedCountVal,
+		signedGenesisAt:         signedGenesisStr,
+		unsignedThroughID:       unsignedThroughID,
+		publicKeyFingerprintHex: publicKeyFingerprintHex,
+	}
 
 	// Get all events in order
 	rows, err := tx.Query(
@@ -1265,6 +1366,16 @@ func (l *Logger) verifyChain(pub ed25519.PublicKey) (*ChainVerifyResult, error) 
 	defer rows.Close()
 
 	sigForged := false
+	if pub != nil && adopted {
+		switch {
+		case publicKeyFingerprintHex == "":
+			sigForged = true
+			result.SigBrokenReason = "chain_head signing public key fingerprint missing after signing adoption"
+		case publicKeyFingerprintHex != publicKeyFingerprint(pub):
+			sigForged = true
+			result.SigBrokenReason = "chain_head signing public key fingerprint does not match the supplied key"
+		}
+	}
 	prevHashHex := chainGenesisHashHex
 	for rows.Next() {
 		var id int64
@@ -1360,7 +1471,7 @@ func (l *Logger) verifyChain(pub ed25519.PublicKey) (*ChainVerifyResult, error) 
 		if headSig == "" {
 			sigForged = true
 			result.SigBrokenReason = "chain_head signature missing after signing adoption (stripped)"
-		} else if !verifyHeadSig(pub, headHash, rowCount, headSig) {
+		} else if !verifyHeadSig(pub, headHash, rowCount, headMeta, headSig) {
 			sigForged = true
 			result.SigBrokenReason = "chain_head signature does not verify against the key"
 		}

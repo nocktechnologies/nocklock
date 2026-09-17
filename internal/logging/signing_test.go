@@ -18,7 +18,7 @@ import (
 func newSigningLogger(t *testing.T) (*Logger, string, ed25519.PublicKey) {
 	t.Helper()
 	dbPath := filepath.Join(t.TempDir(), "events.db")
-	keyPath := filepath.Join(t.TempDir(), "signing-ed25519.key")
+	keyPath := filepath.Join(t.TempDir(), "keys", "signing-ed25519.key")
 	l, err := NewLogger(dbPath, "", WithSigning(keyPath))
 	if err != nil {
 		t.Fatalf("NewLogger(WithSigning) failed: %v", err)
@@ -72,7 +72,7 @@ func TestSigningKey_GeneratedOnFirstUse0600(t *testing.T) {
 }
 
 func TestSigningKey_RejectsWorldReadable(t *testing.T) {
-	keyPath := filepath.Join(t.TempDir(), "signing-ed25519.key")
+	keyPath := filepath.Join(t.TempDir(), "keys", "signing-ed25519.key")
 	if _, err := loadOrCreateSigner(keyPath); err != nil {
 		t.Fatalf("initial create failed: %v", err)
 	}
@@ -89,11 +89,11 @@ func TestSigningKey_RejectsWorldReadable(t *testing.T) {
 
 func TestSigningKey_RejectsSymlink(t *testing.T) {
 	dir := t.TempDir()
-	realKey := filepath.Join(dir, "real.key")
+	realKey := filepath.Join(dir, "keys", "real.key")
 	if _, err := loadOrCreateSigner(realKey); err != nil {
 		t.Fatalf("create real key: %v", err)
 	}
-	linkPath := filepath.Join(dir, "signing-ed25519.key")
+	linkPath := filepath.Join(dir, "keys", "signing-ed25519.key")
 	if err := os.Symlink(realKey, linkPath); err != nil {
 		t.Fatalf("symlink: %v", err)
 	}
@@ -120,7 +120,7 @@ func TestSigningKey_CreateFailureLeavesNoPartialKey(t *testing.T) {
 	signingRand = errReader{}
 	t.Cleanup(func() { signingRand = orig })
 
-	keyPath := filepath.Join(t.TempDir(), "signing-ed25519.key")
+	keyPath := filepath.Join(t.TempDir(), "keys", "signing-ed25519.key")
 	if _, err := loadOrCreateSigner(keyPath); err == nil {
 		t.Fatal("expected loadOrCreateSigner to fail when entropy is unavailable")
 	}
@@ -140,6 +140,61 @@ func TestSigningKey_CreateFailureLeavesNoPartialKey(t *testing.T) {
 		t.Fatalf("expected a key file after recovery: %v", err)
 	} else if fi.Mode().Perm() != 0o600 {
 		t.Errorf("recovered key perms: got %o, want 600", fi.Mode().Perm())
+	}
+}
+
+func TestSigningKey_RejectsSymlinkedDirectory(t *testing.T) {
+	root := t.TempDir()
+	targetDir := filepath.Join(root, "attacker-controlled")
+	if err := os.Mkdir(targetDir, 0o700); err != nil {
+		t.Fatalf("mkdir target: %v", err)
+	}
+	linkDir := filepath.Join(root, "nocklock")
+	if err := os.Symlink(targetDir, linkDir); err != nil {
+		t.Fatalf("symlink key directory: %v", err)
+	}
+	keyPath := filepath.Join(linkDir, "signing-ed25519.key")
+
+	if _, err := loadOrCreateSigner(keyPath); err == nil {
+		t.Fatal("expected symlinked signing directory to be rejected")
+	} else if !containsAny(err.Error(), "symlink") {
+		t.Errorf("expected symlink error, got: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(targetDir, "signing-ed25519.key")); !os.IsNotExist(err) {
+		t.Errorf("key was created through rejected symlinked directory: %v", err)
+	}
+}
+
+func TestSigningKey_LoadRejectsSymlinkedDirectory(t *testing.T) {
+	root := t.TempDir()
+	targetDir := filepath.Join(root, "real")
+	keyPath := filepath.Join(targetDir, "signing-ed25519.key")
+	if _, err := loadOrCreateSigner(keyPath); err != nil {
+		t.Fatalf("create real signing key: %v", err)
+	}
+	linkDir := filepath.Join(root, "nocklock")
+	if err := os.Symlink(targetDir, linkDir); err != nil {
+		t.Fatalf("symlink key directory: %v", err)
+	}
+	if _, err := loadSigner(filepath.Join(linkDir, "signing-ed25519.key")); err == nil {
+		t.Fatal("expected load through a symlinked signing directory to be rejected")
+	} else if !containsAny(err.Error(), "symlink") {
+		t.Errorf("expected symlink error, got: %v", err)
+	}
+}
+
+func TestSigningKey_RejectsNonPrivateDirectory(t *testing.T) {
+	dir := filepath.Join(t.TempDir(), "nocklock")
+	if err := os.Mkdir(dir, 0o700); err != nil {
+		t.Fatalf("mkdir key directory: %v", err)
+	}
+	if err := os.Chmod(dir, 0o755); err != nil {
+		t.Fatalf("chmod key directory: %v", err)
+	}
+	if _, err := loadOrCreateSigner(filepath.Join(dir, "signing-ed25519.key")); err == nil {
+		t.Fatal("expected non-private signing directory to be rejected")
+	} else if !containsAny(err.Error(), "0700") {
+		t.Errorf("expected 0700 permission error, got: %v", err)
 	}
 }
 
@@ -191,24 +246,43 @@ func TestSigning_SignsSameCanonicalBytesAsHash(t *testing.T) {
 	}
 }
 
-// TestHeadCanonicalBytes_ByteLiteralPin pins the domain-separated head layout so
-// a row signature can never be replayed as a head signature.
+// TestHeadCanonicalBytes_ByteLiteralPin pins the versioned head layout so a row
+// signature can never be replayed as a head signature and metadata cannot be
+// silently omitted from its authentication scope.
 func TestHeadCanonicalBytes_ByteLiteralPin(t *testing.T) {
 	headHash := "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
-	cb, err := headCanonicalBytes(headHash, 5)
+	prunedAt := "2026-09-17T15:00:00Z"
+	prunedCount := 4
+	signedGenesisAt := "2026-09-17T14:00:00Z"
+	unsignedThroughID := int64(3)
+	fingerprint := "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+	cb, err := headCanonicalBytes(headHash, 5, headSignatureMetadata{
+		prunedAt:                &prunedAt,
+		prunedCount:             &prunedCount,
+		signedGenesisAt:         &signedGenesisAt,
+		unsignedThroughID:       &unsignedThroughID,
+		publicKeyFingerprintHex: fingerprint,
+	})
 	if err != nil {
 		t.Fatalf("headCanonicalBytes: %v", err)
 	}
-	want := []byte{0x02} // domain tag distinct from the 0x01 row version
+	want := []byte{0x03} // domain tag distinct from the 0x01 row version
 	want = append(want, mustHex(t, headHash)...)
 	var cnt [8]byte
 	binary.BigEndian.PutUint64(cnt[:], 5)
 	want = append(want, cnt[:]...)
+	want = append(want, 1, 0, 0, 0, byte(len(prunedAt)))
+	want = append(want, prunedAt...)
+	want = append(want, 1, 0, 0, 0, 0, 0, 0, 0, 4)
+	want = append(want, 1, 0, 0, 0, byte(len(signedGenesisAt)))
+	want = append(want, signedGenesisAt...)
+	want = append(want, 1, 0, 0, 0, 0, 0, 0, 0, 3)
+	want = append(want, mustHex(t, fingerprint)...)
 	if !bytesEqual(cb, want) {
 		t.Errorf("head canonical bytes mismatch:\ngot:  %x\nwant: %x", cb, want)
 	}
-	if len(cb) != 1+32+8 {
-		t.Errorf("head canonical length %d, want %d", len(cb), 1+32+8)
+	if len(cb) != len(want) {
+		t.Errorf("head canonical length %d, want %d", len(cb), len(want))
 	}
 }
 
@@ -406,6 +480,52 @@ func TestSigning_StrippedRowSignatureIsForged(t *testing.T) {
 	}
 }
 
+func TestSigning_StrippedSignatureCannotBeHiddenByRewritingAdoptionBoundary(t *testing.T) {
+	l, _, pub := newSigningLogger(t)
+	var dbPath string
+	if err := l.db.QueryRow("SELECT file FROM pragma_database_list WHERE name='main'").Scan(&dbPath); err != nil {
+		t.Fatalf("read db path: %v", err)
+	}
+	for i := 0; i < 2; i++ {
+		if err := l.Log(sampleEvent(EventFilePassed, "filesystem", "/x", false, "s")); err != nil {
+			t.Fatalf("Log: %v", err)
+		}
+	}
+	if err := l.Close(); err != nil {
+		t.Fatalf("close logger: %v", err)
+	}
+
+	// An attacker strips a row signature, then raises the unsigned prefix
+	// boundary to recast it as pre-adoption. The authenticated head metadata
+	// must make this report FORGED rather than AUTHENTIC.
+	db, err := sql.Open("sqlite", dbPath)
+	if err != nil {
+		t.Fatalf("open raw: %v", err)
+	}
+	if _, err := db.Exec("UPDATE events SET entry_sig = '' WHERE id = 2"); err != nil {
+		t.Fatalf("strip signature: %v", err)
+	}
+	if _, err := db.Exec("UPDATE chain_head SET unsigned_through_id = 2 WHERE id = 1"); err != nil {
+		t.Fatalf("rewrite adoption boundary: %v", err)
+	}
+	if err := db.Close(); err != nil {
+		t.Fatalf("close raw db: %v", err)
+	}
+
+	l2, err := NewLogger(dbPath, "")
+	if err != nil {
+		t.Fatalf("reopen: %v", err)
+	}
+	defer l2.Close()
+	res, err := l2.VerifyChainSigned(pub)
+	if err != nil {
+		t.Fatalf("VerifyChainSigned: %v", err)
+	}
+	if res.SigState != "forged" || !containsAny(res.SigBrokenReason, "chain_head") {
+		t.Errorf("rewritten adoption boundary: state=%q reason=%q, want forged chain_head failure", res.SigState, res.SigBrokenReason)
+	}
+}
+
 // ---------- no key, but signatures present -> unverified (No-Silent-Success) ----------
 
 func TestSigning_NoKeyWithSignaturesIsUnverifiedNotAuthentic(t *testing.T) {
@@ -436,7 +556,7 @@ func TestSigning_NoKeyWithSignaturesIsUnverifiedNotAuthentic(t *testing.T) {
 
 func TestSigning_MigrationBoundary(t *testing.T) {
 	dbPath := filepath.Join(t.TempDir(), "events.db")
-	keyPath := filepath.Join(t.TempDir(), "signing-ed25519.key")
+	keyPath := filepath.Join(t.TempDir(), "keys", "signing-ed25519.key")
 
 	// Phase 1: a pre-adoption (v1 hash-chain) log with 3 unsigned rows.
 	l1, err := NewLogger(dbPath, "")
@@ -495,7 +615,7 @@ func TestSigning_MigrationBoundary(t *testing.T) {
 
 func TestSigning_AdoptedLogWithoutKeyFailsClosed(t *testing.T) {
 	dbPath := filepath.Join(t.TempDir(), "events.db")
-	keyPath := filepath.Join(t.TempDir(), "signing-ed25519.key")
+	keyPath := filepath.Join(t.TempDir(), "keys", "signing-ed25519.key")
 
 	l1, err := NewLogger(dbPath, "", WithSigning(keyPath))
 	if err != nil {
@@ -559,6 +679,113 @@ func TestSigning_PrunePreservesRowSignaturesAndResignsHead(t *testing.T) {
 	}
 	if res.SigVerified != 3 {
 		t.Errorf("SigVerified = %d, want 3", res.SigVerified)
+	}
+}
+
+func TestSigning_RewrittenPruneMetadataIsForged(t *testing.T) {
+	l, _, pub := newSigningLogger(t)
+	var dbPath string
+	if err := l.db.QueryRow("SELECT file FROM pragma_database_list WHERE name='main'").Scan(&dbPath); err != nil {
+		t.Fatalf("read db path: %v", err)
+	}
+	old := sampleEvent(EventFilePassed, "filesystem", "/old", false, "s")
+	old.Timestamp = time.Now().Add(-48 * time.Hour)
+	if err := l.Log(old); err != nil {
+		t.Fatalf("Log old: %v", err)
+	}
+	if err := l.Log(sampleEvent(EventFilePassed, "filesystem", "/new", false, "s")); err != nil {
+		t.Fatalf("Log new: %v", err)
+	}
+	if _, err := l.Prune(24 * time.Hour); err != nil {
+		t.Fatalf("Prune: %v", err)
+	}
+	if err := l.Close(); err != nil {
+		t.Fatalf("close logger: %v", err)
+	}
+
+	db, err := sql.Open("sqlite", dbPath)
+	if err != nil {
+		t.Fatalf("open raw: %v", err)
+	}
+	if _, err := db.Exec("UPDATE chain_head SET pruned_count = pruned_count + 1 WHERE id = 1"); err != nil {
+		t.Fatalf("rewrite prune count: %v", err)
+	}
+	if err := db.Close(); err != nil {
+		t.Fatalf("close raw db: %v", err)
+	}
+
+	l2, err := NewLogger(dbPath, "")
+	if err != nil {
+		t.Fatalf("reopen: %v", err)
+	}
+	defer l2.Close()
+	res, err := l2.VerifyChainSigned(pub)
+	if err != nil {
+		t.Fatalf("VerifyChainSigned: %v", err)
+	}
+	if res.SigState != "forged" || !containsAny(res.SigBrokenReason, "chain_head") {
+		t.Errorf("rewritten prune metadata: state=%q reason=%q, want forged chain_head failure", res.SigState, res.SigBrokenReason)
+	}
+}
+
+func TestSigning_AdoptedLogRejectsMissingOrReplacementKey(t *testing.T) {
+	l, keyPath, _ := newSigningLogger(t)
+	var dbPath string
+	if err := l.db.QueryRow("SELECT file FROM pragma_database_list WHERE name='main'").Scan(&dbPath); err != nil {
+		t.Fatalf("read db path: %v", err)
+	}
+	if err := l.Log(sampleEvent(EventFilePassed, "filesystem", "/x", false, "s")); err != nil {
+		t.Fatalf("Log: %v", err)
+	}
+	if err := l.Close(); err != nil {
+		t.Fatalf("close logger: %v", err)
+	}
+
+	if err := os.Remove(keyPath); err != nil {
+		t.Fatalf("remove original key: %v", err)
+	}
+	if _, err := NewLogger(dbPath, "", WithSigning(keyPath)); err == nil {
+		t.Fatal("expected adopted log to reject a missing signing key")
+	}
+	if _, err := os.Lstat(keyPath); !os.IsNotExist(err) {
+		t.Errorf("adopted log created a replacement key: %v", err)
+	}
+
+	replacementPath := filepath.Join(t.TempDir(), "keys", "replacement.key")
+	replacement, err := loadOrCreateSigner(replacementPath)
+	if err != nil {
+		t.Fatalf("create replacement key: %v", err)
+	}
+	replacementSeed, err := os.ReadFile(replacementPath)
+	if err != nil {
+		t.Fatalf("read replacement key: %v", err)
+	}
+	if err := os.WriteFile(keyPath, replacementSeed, 0o600); err != nil {
+		t.Fatalf("replace managed key: %v", err)
+	}
+	if _, err := NewLogger(dbPath, "", WithSigning(keyPath)); err == nil {
+		t.Fatal("expected adopted log to reject a replacement signing key")
+	} else if !containsAny(err.Error(), "does not match", "fingerprint") {
+		t.Errorf("expected key fingerprint mismatch, got: %v", err)
+	}
+
+	// Rewriting the database fingerprint to match the replacement key is still
+	// not enough: the existing authenticated head must verify before a signer
+	// can append and replace it.
+	db, err := sql.Open("sqlite", dbPath)
+	if err != nil {
+		t.Fatalf("open raw: %v", err)
+	}
+	if _, err := db.Exec("UPDATE chain_head SET signing_pubkey_fingerprint = ? WHERE id = 1", publicKeyFingerprint(replacement.pub)); err != nil {
+		t.Fatalf("rewrite signing fingerprint: %v", err)
+	}
+	if err := db.Close(); err != nil {
+		t.Fatalf("close raw db: %v", err)
+	}
+	if _, err := NewLogger(dbPath, "", WithSigning(keyPath)); err == nil {
+		t.Fatal("expected adopted log to reject a replacement key with a rewritten fingerprint")
+	} else if !containsAny(err.Error(), "does not verify", "chain head") {
+		t.Errorf("expected chain-head key validation error, got: %v", err)
 	}
 }
 
