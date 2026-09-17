@@ -24,6 +24,11 @@ import (
 // the raw 32-byte Ed25519 seed (crypto/ed25519 derives the private key from it).
 const signingSeedLen = ed25519.SeedSize // 32
 
+// signingRand is the entropy source for key generation. It is a package
+// variable so a test can substitute a failing reader and exercise the
+// create-path cleanup contract; production always uses crypto/rand.
+var signingRand io.Reader = rand.Reader
+
 // headSigVersion is the leading domain-separation tag for chain_head canonical
 // bytes. Row canonical bytes lead with 0x01 (see canonicalBytes); the head
 // leads with 0x02 so a row signature can never be replayed as a head signature.
@@ -67,18 +72,34 @@ func loadOrCreateSigner(path string) (*signer, error) {
 		}
 		return nil, fmt.Errorf("failed to create signing key at %s: %w", path, err)
 	}
-	defer f.Close()
 
-	pub, priv, err := ed25519.GenerateKey(rand.Reader)
+	// The file now exists on disk. A silent Close error persisting a truncated
+	// key — or any failed Write/Chmod leaving a partial key — is exactly the
+	// No-Silent-Success failure NockLock exists to prevent, here on our own
+	// signing key. So the Close error is checked, not discarded, and on ANY
+	// failure the partial key is removed before returning.
+	fail := func(werr error) (*signer, error) {
+		f.Close()       // best effort; the file is being removed regardless
+		os.Remove(path) // never leave a corrupt/partial key behind
+		return nil, werr
+	}
+
+	pub, priv, err := ed25519.GenerateKey(signingRand)
 	if err != nil {
-		return nil, fmt.Errorf("failed to generate Ed25519 signing key: %w", err)
+		return fail(fmt.Errorf("failed to generate Ed25519 signing key: %w", err))
 	}
 	seed := priv.Seed()
 	if _, err := f.Write(seed); err != nil {
-		return nil, fmt.Errorf("failed to write signing key seed: %w", err)
+		return fail(fmt.Errorf("failed to write signing key seed: %w", err))
 	}
 	if err := f.Chmod(0o600); err != nil {
-		return nil, fmt.Errorf("failed to set signing key permissions: %w", err)
+		return fail(fmt.Errorf("failed to set signing key permissions: %w", err))
+	}
+	// Close explicitly and surface its error (a discarded deferred Close could
+	// hide a flush failure that truncated the key).
+	if err := f.Close(); err != nil {
+		os.Remove(path)
+		return nil, fmt.Errorf("failed to close signing key file at %s: %w", path, err)
 	}
 	return &signer{priv: priv, pub: pub}, nil
 }

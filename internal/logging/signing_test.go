@@ -104,6 +104,45 @@ func TestSigningKey_RejectsSymlink(t *testing.T) {
 	}
 }
 
+// errReader always fails, to drive the key-generation path into its error branch.
+type errReader struct{}
+
+func (errReader) Read(p []byte) (int, error) { return 0, errFakeEntropy }
+
+var errFakeEntropy = os.ErrClosed // any non-nil error works as a stand-in
+
+// TestSigningKey_CreateFailureLeavesNoPartialKey proves the cleanup contract:
+// when the create/write path fails, no key file is left on disk. A discarded
+// Close (or a failed Write) must never persist a corrupt/truncated signing key.
+func TestSigningKey_CreateFailureLeavesNoPartialKey(t *testing.T) {
+	// Force key generation to fail after the file has already been created.
+	orig := signingRand
+	signingRand = errReader{}
+	t.Cleanup(func() { signingRand = orig })
+
+	keyPath := filepath.Join(t.TempDir(), "signing-ed25519.key")
+	if _, err := loadOrCreateSigner(keyPath); err == nil {
+		t.Fatal("expected loadOrCreateSigner to fail when entropy is unavailable")
+	}
+
+	// The partial key file must have been removed — nothing left behind.
+	if _, err := os.Lstat(keyPath); !os.IsNotExist(err) {
+		t.Fatalf("expected no key file after a failed create, but Lstat gave: %v", err)
+	}
+
+	// Recovery: with entropy restored, a fresh create still succeeds (the failed
+	// attempt did not poison the path).
+	signingRand = orig
+	if _, err := loadOrCreateSigner(keyPath); err != nil {
+		t.Fatalf("create after recovery failed: %v", err)
+	}
+	if fi, err := os.Lstat(keyPath); err != nil {
+		t.Fatalf("expected a key file after recovery: %v", err)
+	} else if fi.Mode().Perm() != 0o600 {
+		t.Errorf("recovered key perms: got %o, want 600", fi.Mode().Perm())
+	}
+}
+
 // ---------- canonical-bytes reuse (sign over the SAME bytes v1 hashes) ----------
 
 func TestSigning_SignsSameCanonicalBytesAsHash(t *testing.T) {
