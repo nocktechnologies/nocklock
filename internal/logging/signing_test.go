@@ -526,6 +526,44 @@ func TestSigning_StrippedSignatureCannotBeHiddenByRewritingAdoptionBoundary(t *t
 	}
 }
 
+func TestSigning_RemovedAdoptionMarkerWithSigningArtifactsIsForged(t *testing.T) {
+	l, _, pub := newSigningLogger(t)
+	var dbPath string
+	if err := l.db.QueryRow("SELECT file FROM pragma_database_list WHERE name='main'").Scan(&dbPath); err != nil {
+		t.Fatalf("read db path: %v", err)
+	}
+	if err := l.Log(sampleEvent(EventFilePassed, "filesystem", "/x", false, "s")); err != nil {
+		t.Fatalf("Log: %v", err)
+	}
+	if err := l.Close(); err != nil {
+		t.Fatalf("close logger: %v", err)
+	}
+
+	db, err := sql.Open("sqlite", dbPath)
+	if err != nil {
+		t.Fatalf("open raw: %v", err)
+	}
+	if _, err := db.Exec("UPDATE chain_head SET signed_genesis_at = NULL, unsigned_through_id = NULL, signing_pubkey_fingerprint = '' WHERE id = 1"); err != nil {
+		t.Fatalf("remove adoption marker: %v", err)
+	}
+	if err := db.Close(); err != nil {
+		t.Fatalf("close raw db: %v", err)
+	}
+
+	l2, err := NewLogger(dbPath, "")
+	if err != nil {
+		t.Fatalf("reopen: %v", err)
+	}
+	defer l2.Close()
+	res, err := l2.VerifyChainSigned(pub)
+	if err != nil {
+		t.Fatalf("VerifyChainSigned: %v", err)
+	}
+	if res.SigState != "forged" || !containsAny(res.SigBrokenReason, "adoption marker") {
+		t.Errorf("removed adoption marker: state=%q reason=%q, want forged missing-marker failure", res.SigState, res.SigBrokenReason)
+	}
+}
+
 // ---------- no key, but signatures present -> unverified (No-Silent-Success) ----------
 
 func TestSigning_NoKeyWithSignaturesIsUnverifiedNotAuthentic(t *testing.T) {

@@ -92,9 +92,9 @@ func loadOrCreateSigner(path string) (*signer, error) {
 	// signing key. So the Close error is checked, not discarded, and on ANY
 	// failure the partial key is removed before returning.
 	fail := func(werr error) (*signer, error) {
-		f.Close()       // best effort; the file is being removed regardless
-		os.Remove(path) // never leave a corrupt/partial key behind
-		return nil, werr
+		closeErr := f.Close()
+		removeErr := os.Remove(path) // never leave a corrupt/partial key behind
+		return nil, errors.Join(werr, closeErr, removeErr)
 	}
 
 	pub, priv, err := ed25519.GenerateKey(signingRand)
@@ -111,7 +111,9 @@ func loadOrCreateSigner(path string) (*signer, error) {
 	// Close explicitly and surface its error (a discarded deferred Close could
 	// hide a flush failure that truncated the key).
 	if err := f.Close(); err != nil {
-		os.Remove(path)
+		if removeErr := os.Remove(path); removeErr != nil {
+			return nil, fmt.Errorf("failed to close signing key file at %s: %w", path, errors.Join(err, removeErr))
+		}
 		return nil, fmt.Errorf("failed to close signing key file at %s: %w", path, err)
 	}
 	return &signer{priv: priv, pub: pub}, nil

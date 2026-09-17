@@ -1447,6 +1447,14 @@ func (l *Logger) verifyChain(pub ed25519.PublicKey) (*ChainVerifyResult, error) 
 	if err := rows.Err(); err != nil {
 		return nil, fmt.Errorf("error iterating events during verification: %w", err)
 	}
+	if pub != nil && !adopted && (headSig != "" || publicKeyFingerprintHex != "" || result.SignedEntries > 0) {
+		// A genuine unsigned log has no signing artifacts at all. If a caller
+		// supplied a key and any artifact remains after its adoption marker was
+		// removed, report the inconsistent state as forged rather than silently
+		// downgrading it to an unsigned consistency check.
+		sigForged = true
+		result.SigBrokenReason = "signing artifacts are present but the signing adoption marker is missing"
+	}
 
 	// Check chain_head consistency (hash layer)
 	actualRowCount := result.EntriesVerified
