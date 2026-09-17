@@ -120,9 +120,9 @@ func loadOrCreateSigner(path string) (*signer, error) {
 }
 
 // validateSigningKeyDirectory creates and validates the managed key directory.
-// Every existing path component must be real (not symlinked), and the final
-// directory must be private to the current owner before a key is created or
-// loaded from it.
+// Every existing path component must be real (not symlinked), aside from a
+// trusted platform alias, and the final directory must be private to the
+// current owner before a key is created or loaded from it.
 func validateSigningKeyDirectory(dir string, create bool) (string, error) {
 	absDir, err := filepath.Abs(dir)
 	if err != nil {
@@ -140,23 +140,24 @@ func validateSigningKeyDirectory(dir string, create bool) (string, error) {
 	if err != nil {
 		return "", fmt.Errorf("failed to resolve signing key directory %s: %w", absDir, err)
 	}
-	if filepath.Clean(resolvedDir) != absDir {
+	resolvedDir = filepath.Clean(resolvedDir)
+	if resolvedDir != absDir && !isTrustedSigningKeyDirectoryAlias(absDir, resolvedDir) {
 		return "", fmt.Errorf("refusing to use signing key directory %s: path contains a symlink", absDir)
 	}
-	info, err := os.Lstat(absDir)
+	info, err := os.Lstat(resolvedDir)
 	if err != nil {
-		return "", fmt.Errorf("failed to stat signing key directory %s: %w", absDir, err)
+		return "", fmt.Errorf("failed to stat signing key directory %s: %w", resolvedDir, err)
 	}
 	if info.Mode()&os.ModeSymlink != 0 || !info.IsDir() {
-		return "", fmt.Errorf("refusing to use signing key directory %s: not a real directory", absDir)
+		return "", fmt.Errorf("refusing to use signing key directory %s: not a real directory", resolvedDir)
 	}
 	if info.Mode().Perm() != 0o700 {
-		return "", fmt.Errorf("refusing to use signing key directory %s: permissions %o, want 0700", absDir, info.Mode().Perm())
+		return "", fmt.Errorf("refusing to use signing key directory %s: permissions %o, want 0700", resolvedDir, info.Mode().Perm())
 	}
 	if err := validateSigningKeyDirectoryOwner(info); err != nil {
-		return "", fmt.Errorf("refusing to use signing key directory %s: %w", absDir, err)
+		return "", fmt.Errorf("refusing to use signing key directory %s: %w", resolvedDir, err)
 	}
-	return absDir, nil
+	return resolvedDir, nil
 }
 
 // loadSigner reads and validates an existing signing key file. It rejects a

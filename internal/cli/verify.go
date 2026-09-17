@@ -100,7 +100,7 @@ func init() {
 	verifyCmd.Flags().Bool("json", false, "emit structured JSON output")
 	verifyCmd.Flags().Bool("audit", false, "verify the audit chain instead of running fence probes")
 	verifyCmd.Flags().Bool("export-pubkey", false, "print the Ed25519 audit-log public key (base64) for out-of-band verification")
-	verifyCmd.Flags().String("ed25519-pub", "", "Ed25519 public key (base64 or hex) to verify signatures against; overrides the local key file")
+	verifyCmd.Flags().String("ed25519-pub", "", "trusted Ed25519 public key (base64 or hex); requires the audit log to be signed")
 	rootCmd.AddCommand(verifyCmd)
 }
 
@@ -137,8 +137,9 @@ func runAuditVerify(ctx context.Context, w io.Writer, pubFlag string) error {
 	}
 
 	// Resolve a public key for authenticity checking. An explicit --ed25519-pub
-	// wins; otherwise derive it from the local signing key file if one exists.
-	// No key at all means a hash-only (CONSISTENCY) verification.
+	// both wins and establishes the external expectation that this log is signed;
+	// otherwise derive it from the local signing key file if one exists. No key
+	// at all means a hash-only (CONSISTENCY) verification.
 	pub, err := resolveVerifyPublicKey(pubFlag)
 	if err != nil {
 		return err
@@ -151,7 +152,7 @@ func runAuditVerify(ctx context.Context, w io.Writer, pubFlag string) error {
 	defer logger.Close()
 
 	// Verify the chain (signature-aware when a key is available).
-	result, err := logger.VerifyChainSigned(pub)
+	result, err := logger.VerifyChainSigned(pub, pubFlag != "")
 	if err != nil {
 		return fmt.Errorf("verification failed: %w", err)
 	}

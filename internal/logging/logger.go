@@ -1275,19 +1275,22 @@ func migrateToChain(db *sql.DB) error {
 // signatures present but does not check them. Use VerifyChainSigned to verify
 // authenticity against a public key.
 func (l *Logger) VerifyChain() (*ChainVerifyResult, error) {
-	return l.verifyChain(nil)
+	return l.verifyChain(nil, false)
 }
 
 // VerifyChainSigned walks the hash chain and, using the supplied Ed25519 public
 // key, verifies every post-adoption row signature and the chain_head signature.
 // A nil key falls back to hash-only verification (equivalent to VerifyChain).
+// When requireSigned is true, a missing signing-adoption record is FORGED rather
+// than an unsigned fallback. Use it only when the caller has an external
+// expectation that this log was signed, such as an explicitly supplied key.
 // The three states — AUTHENTIC, CONSISTENT/UNSIGNED, FORGED/TAMPERED — are kept
 // distinct in the result and never conflated.
-func (l *Logger) VerifyChainSigned(pub ed25519.PublicKey) (*ChainVerifyResult, error) {
-	return l.verifyChain(pub)
+func (l *Logger) VerifyChainSigned(pub ed25519.PublicKey, requireSigned bool) (*ChainVerifyResult, error) {
+	return l.verifyChain(pub, requireSigned)
 }
 
-func (l *Logger) verifyChain(pub ed25519.PublicKey) (*ChainVerifyResult, error) {
+func (l *Logger) verifyChain(pub ed25519.PublicKey, requireSigned bool) (*ChainVerifyResult, error) {
 	result := &ChainVerifyResult{PubKeyProvided: pub != nil}
 	tx, err := l.db.Begin()
 	if err != nil {
@@ -1447,13 +1450,18 @@ func (l *Logger) verifyChain(pub ed25519.PublicKey) (*ChainVerifyResult, error) 
 	if err := rows.Err(); err != nil {
 		return nil, fmt.Errorf("error iterating events during verification: %w", err)
 	}
-	if pub != nil && !adopted && (headSig != "" || publicKeyFingerprintHex != "" || result.SignedEntries > 0) {
+	if pub != nil && !adopted && (requireSigned || headSig != "" || publicKeyFingerprintHex != "" || result.SignedEntries > 0) {
 		// A genuine unsigned log has no signing artifacts at all. If a caller
 		// supplied a key and any artifact remains after its adoption marker was
 		// removed, report the inconsistent state as forged rather than silently
-		// downgrading it to an unsigned consistency check.
+		// downgrading it to an unsigned consistency check. An external caller
+		// that requires signing also detects complete artifact stripping.
 		sigForged = true
-		result.SigBrokenReason = "signing artifacts are present but the signing adoption marker is missing"
+		if requireSigned {
+			result.SigBrokenReason = "signing adoption marker is missing although signed verification was required"
+		} else {
+			result.SigBrokenReason = "signing artifacts are present but the signing adoption marker is missing"
+		}
 	}
 
 	// Check chain_head consistency (hash layer)

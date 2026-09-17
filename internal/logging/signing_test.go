@@ -297,7 +297,7 @@ func TestSigning_VerifyAuthentic(t *testing.T) {
 			t.Fatalf("Log %d: %v", i, err)
 		}
 	}
-	res, err := l.VerifyChainSigned(pub)
+	res, err := l.VerifyChainSigned(pub, true)
 	if err != nil {
 		t.Fatalf("VerifyChainSigned: %v", err)
 	}
@@ -327,7 +327,7 @@ func TestSigning_LogBatchAuthentic(t *testing.T) {
 	if err := l.LogBatch(batch); err != nil {
 		t.Fatalf("LogBatch: %v", err)
 	}
-	res, err := l.VerifyChainSigned(pub)
+	res, err := l.VerifyChainSigned(pub, false)
 	if err != nil {
 		t.Fatalf("VerifyChainSigned: %v", err)
 	}
@@ -364,7 +364,7 @@ func TestSigning_TamperedRowIsForged(t *testing.T) {
 	}
 	defer l2.Close()
 
-	res, err := l2.VerifyChainSigned(pub)
+	res, err := l2.VerifyChainSigned(pub, false)
 	if err != nil {
 		t.Fatalf("VerifyChainSigned: %v", err)
 	}
@@ -431,7 +431,7 @@ func TestSigning_HeadSignatureCatchesLockstepTruncation(t *testing.T) {
 	}
 
 	// Signed verify catches it via the head signature.
-	signed, err := l2.VerifyChainSigned(pub)
+	signed, err := l2.VerifyChainSigned(pub, false)
 	if err != nil {
 		t.Fatalf("VerifyChainSigned: %v", err)
 	}
@@ -468,7 +468,7 @@ func TestSigning_StrippedRowSignatureIsForged(t *testing.T) {
 		t.Fatalf("reopen: %v", err)
 	}
 	defer l2.Close()
-	res, err := l2.VerifyChainSigned(pub)
+	res, err := l2.VerifyChainSigned(pub, false)
 	if err != nil {
 		t.Fatalf("VerifyChainSigned: %v", err)
 	}
@@ -517,7 +517,7 @@ func TestSigning_StrippedSignatureCannotBeHiddenByRewritingAdoptionBoundary(t *t
 		t.Fatalf("reopen: %v", err)
 	}
 	defer l2.Close()
-	res, err := l2.VerifyChainSigned(pub)
+	res, err := l2.VerifyChainSigned(pub, false)
 	if err != nil {
 		t.Fatalf("VerifyChainSigned: %v", err)
 	}
@@ -555,12 +555,64 @@ func TestSigning_RemovedAdoptionMarkerWithSigningArtifactsIsForged(t *testing.T)
 		t.Fatalf("reopen: %v", err)
 	}
 	defer l2.Close()
-	res, err := l2.VerifyChainSigned(pub)
+	res, err := l2.VerifyChainSigned(pub, false)
 	if err != nil {
 		t.Fatalf("VerifyChainSigned: %v", err)
 	}
 	if res.SigState != "forged" || !containsAny(res.SigBrokenReason, "adoption marker") {
 		t.Errorf("removed adoption marker: state=%q reason=%q, want forged missing-marker failure", res.SigState, res.SigBrokenReason)
+	}
+}
+
+func TestSigning_ExplicitKeyRejectsCompleteSignatureStripping(t *testing.T) {
+	l, _, pub := newSigningLogger(t)
+	var dbPath string
+	if err := l.db.QueryRow("SELECT file FROM pragma_database_list WHERE name='main'").Scan(&dbPath); err != nil {
+		t.Fatalf("read db path: %v", err)
+	}
+	if err := l.Log(sampleEvent(EventFilePassed, "filesystem", "/x", false, "s")); err != nil {
+		t.Fatalf("Log: %v", err)
+	}
+	if err := l.Close(); err != nil {
+		t.Fatalf("close logger: %v", err)
+	}
+
+	db, err := sql.Open("sqlite", dbPath)
+	if err != nil {
+		t.Fatalf("open raw: %v", err)
+	}
+	if _, err := db.Exec("UPDATE events SET entry_sig = ''"); err != nil {
+		t.Fatalf("remove row signatures: %v", err)
+	}
+	if _, err := db.Exec("UPDATE chain_head SET head_sig = '', signed_genesis_at = NULL, unsigned_through_id = NULL, signing_pubkey_fingerprint = '' WHERE id = 1"); err != nil {
+		t.Fatalf("remove signing metadata: %v", err)
+	}
+	if err := db.Close(); err != nil {
+		t.Fatalf("close raw db: %v", err)
+	}
+
+	l2, err := NewLogger(dbPath, "")
+	if err != nil {
+		t.Fatalf("reopen: %v", err)
+	}
+	defer l2.Close()
+
+	// Without an external signing expectation, a completely erased record is
+	// indistinguishable from a valid legacy unsigned log.
+	fallback, err := l2.VerifyChainSigned(pub, false)
+	if err != nil {
+		t.Fatalf("fallback VerifyChainSigned: %v", err)
+	}
+	if fallback.SigState != "unsigned" {
+		t.Fatalf("fallback state = %q, want unsigned", fallback.SigState)
+	}
+
+	required, err := l2.VerifyChainSigned(pub, true)
+	if err != nil {
+		t.Fatalf("required VerifyChainSigned: %v", err)
+	}
+	if required.SigState != "forged" || !containsAny(required.SigBrokenReason, "required") {
+		t.Errorf("complete signature stripping: state=%q reason=%q, want forged missing-required-signing failure", required.SigState, required.SigBrokenReason)
 	}
 }
 
@@ -622,7 +674,7 @@ func TestSigning_MigrationBoundary(t *testing.T) {
 	if err != nil {
 		t.Fatalf("load pub: %v", err)
 	}
-	res, err := l2.VerifyChainSigned(pub)
+	res, err := l2.VerifyChainSigned(pub, false)
 	l2.Close()
 	if err != nil {
 		t.Fatalf("VerifyChainSigned: %v", err)
@@ -705,7 +757,7 @@ func TestSigning_PrunePreservesRowSignaturesAndResignsHead(t *testing.T) {
 	if n != 1 {
 		t.Fatalf("pruned %d, want 1", n)
 	}
-	res, err := l.VerifyChainSigned(pub)
+	res, err := l.VerifyChainSigned(pub, false)
 	if err != nil {
 		t.Fatalf("VerifyChainSigned: %v", err)
 	}
@@ -757,7 +809,7 @@ func TestSigning_RewrittenPruneMetadataIsForged(t *testing.T) {
 		t.Fatalf("reopen: %v", err)
 	}
 	defer l2.Close()
-	res, err := l2.VerifyChainSigned(pub)
+	res, err := l2.VerifyChainSigned(pub, false)
 	if err != nil {
 		t.Fatalf("VerifyChainSigned: %v", err)
 	}
@@ -854,7 +906,7 @@ func TestSigning_ConcurrentSignedAppend(t *testing.T) {
 		t.Errorf("concurrent signed Log error: %v", err)
 	}
 
-	res, err := l.VerifyChainSigned(pub)
+	res, err := l.VerifyChainSigned(pub, false)
 	if err != nil {
 		t.Fatalf("VerifyChainSigned: %v", err)
 	}
