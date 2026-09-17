@@ -143,9 +143,15 @@ func TestSigningKey_CreateFailureLeavesNoPartialKey(t *testing.T) {
 	}
 }
 
-func TestSigningKey_RejectsSymlinkedDirectory(t *testing.T) {
+// TestSigningKey_AcceptsUserOwnedSymlinkedDirectory pins the [MAJOR] fix: a key
+// directory reached through a benign, user-owned symlink must be ACCEPTED on
+// every platform. macOS temp dirs resolve /var -> /private/var and many users
+// keep a symlinked ~/.config; rejecting those broke key creation outright. The
+// security property is the resolved target's ownership and permissions, not the
+// mere presence of a symlink in the path. Create AND load must both succeed.
+func TestSigningKey_AcceptsUserOwnedSymlinkedDirectory(t *testing.T) {
 	root := t.TempDir()
-	targetDir := filepath.Join(root, "attacker-controlled")
+	targetDir := filepath.Join(root, "real")
 	if err := os.Mkdir(targetDir, 0o700); err != nil {
 		t.Fatalf("mkdir target: %v", err)
 	}
@@ -155,31 +161,40 @@ func TestSigningKey_RejectsSymlinkedDirectory(t *testing.T) {
 	}
 	keyPath := filepath.Join(linkDir, "audit.key")
 
-	if _, err := loadOrCreateSigner(keyPath); err == nil {
-		t.Fatal("expected symlinked signing directory to be rejected")
-	} else if !containsAny(err.Error(), "symlink") {
-		t.Errorf("expected symlink error, got: %v", err)
+	if _, err := loadOrCreateSigner(keyPath); err != nil {
+		t.Fatalf("user-owned symlinked key directory must be accepted for create, got: %v", err)
 	}
-	if _, err := os.Stat(filepath.Join(targetDir, "audit.key")); !os.IsNotExist(err) {
-		t.Errorf("key was created through rejected symlinked directory: %v", err)
+	if _, err := os.Stat(filepath.Join(targetDir, "audit.key")); err != nil {
+		t.Errorf("key was not created in the resolved target directory: %v", err)
+	}
+	if _, err := loadSigner(keyPath); err != nil {
+		t.Fatalf("user-owned symlinked key directory must be accepted for load, got: %v", err)
 	}
 }
 
-func TestSigningKey_LoadRejectsSymlinkedDirectory(t *testing.T) {
+// TestSigningKey_RejectsSymlinkToNonPrivateDirectory keeps the malicious-target
+// guard: a symlink whose RESOLVED target is group/world accessible must still be
+// rejected, so a benign-looking symlink cannot smuggle in a non-private key
+// directory. (A target owned by another uid is likewise rejected by the
+// euid-ownership check, but that cannot be constructed unprivileged on this
+// host.)
+func TestSigningKey_RejectsSymlinkToNonPrivateDirectory(t *testing.T) {
 	root := t.TempDir()
-	targetDir := filepath.Join(root, "real")
-	keyPath := filepath.Join(targetDir, "audit.key")
-	if _, err := loadOrCreateSigner(keyPath); err != nil {
-		t.Fatalf("create real signing key: %v", err)
+	targetDir := filepath.Join(root, "world")
+	if err := os.Mkdir(targetDir, 0o700); err != nil {
+		t.Fatalf("mkdir target: %v", err)
+	}
+	if err := os.Chmod(targetDir, 0o755); err != nil {
+		t.Fatalf("chmod target group/world accessible: %v", err)
 	}
 	linkDir := filepath.Join(root, "nocklock")
 	if err := os.Symlink(targetDir, linkDir); err != nil {
 		t.Fatalf("symlink key directory: %v", err)
 	}
-	if _, err := loadSigner(filepath.Join(linkDir, "audit.key")); err == nil {
-		t.Fatal("expected load through a symlinked signing directory to be rejected")
-	} else if !containsAny(err.Error(), "symlink") {
-		t.Errorf("expected symlink error, got: %v", err)
+	if _, err := loadOrCreateSigner(filepath.Join(linkDir, "audit.key")); err == nil {
+		t.Fatal("expected a symlink to a group/world-accessible directory to be rejected")
+	} else if !containsAny(err.Error(), "0700", "group/world") {
+		t.Errorf("expected a permission error on the resolved target, got: %v", err)
 	}
 }
 
@@ -607,12 +622,19 @@ func TestSigning_ExplicitKeyRejectsCompleteSignatureStripping(t *testing.T) {
 		t.Fatalf("fallback state = %q, want unsigned", fallback.SigState)
 	}
 
+	// With an explicit external signing expectation, a completely erased record
+	// must never read as a clean pass: it surfaces as the distinct SUSPECT state
+	// (a full strip is indistinguishable from never-signed on disk, so it is not
+	// FORGED — that requires a detectable inconsistency or a real mismatch).
 	required, err := l2.VerifyChainSigned(pub, true)
 	if err != nil {
 		t.Fatalf("required VerifyChainSigned: %v", err)
 	}
-	if required.SigState != "forged" || !containsAny(required.SigBrokenReason, "required") {
-		t.Errorf("complete signature stripping: state=%q reason=%q, want forged missing-required-signing failure", required.SigState, required.SigBrokenReason)
+	if required.SigState != "suspect" {
+		t.Errorf("complete signature stripping with required signing: state=%q reason=%q, want suspect", required.SigState, required.SigBrokenReason)
+	}
+	if !containsAny(required.SigBrokenReason, "required", "stripped") {
+		t.Errorf("suspect reason should explain the required-but-missing signatures, got: %q", required.SigBrokenReason)
 	}
 }
 

@@ -121,6 +121,9 @@ type ChainVerifyResult struct {
 	//   "unverified" signatures are present but no public key was supplied
 	//   "authentic" every post-adoption row and the chain_head verified against the key
 	//   "forged"    a signature is missing where required or does not verify
+	//   "suspect"   signing was explicitly required but the log has events with no
+	//               signatures and no adoption markers — possibly fully stripped;
+	//               never a clean pass (see classifySigState)
 	// These states are never conflated: a pass on an unsigned chain is CONSISTENT,
 	// not AUTHENTIC.
 	SigState          string
@@ -1450,18 +1453,15 @@ func (l *Logger) verifyChain(pub ed25519.PublicKey, requireSigned bool) (*ChainV
 	if err := rows.Err(); err != nil {
 		return nil, fmt.Errorf("error iterating events during verification: %w", err)
 	}
-	if pub != nil && !adopted && (requireSigned || headSig != "" || publicKeyFingerprintHex != "" || result.SignedEntries > 0) {
-		// A genuine unsigned log has no signing artifacts at all. If a caller
-		// supplied a key and any artifact remains after its adoption marker was
-		// removed, report the inconsistent state as forged rather than silently
-		// downgrading it to an unsigned consistency check. An external caller
-		// that requires signing also detects complete artifact stripping.
+	if pub != nil && !adopted && (headSig != "" || publicKeyFingerprintHex != "" || result.SignedEntries > 0) {
+		// Signing artifacts remain but the adoption marker is gone — a genuine
+		// inconsistency (a partial strip), so report it forged rather than a
+		// downgraded unsigned pass. A COMPLETE strip leaves no artifacts here;
+		// when the caller explicitly required signing that surfaces as the
+		// distinct "suspect" state below (classifySigState), so a fully stripped
+		// log is never a clean pass either.
 		sigForged = true
-		if requireSigned {
-			result.SigBrokenReason = "signing adoption marker is missing although signed verification was required"
-		} else {
-			result.SigBrokenReason = "signing artifacts are present but the signing adoption marker is missing"
-		}
+		result.SigBrokenReason = "signing artifacts are present but the signing adoption marker is missing"
 	}
 
 	// Check chain_head consistency (hash layer)
@@ -1493,12 +1493,28 @@ func (l *Logger) verifyChain(pub ed25519.PublicKey, requireSigned bool) (*ChainV
 		}
 	}
 
-	result.SigState = classifySigState(pub, adopted, sigForged, result.SignedEntries)
+	result.SigState = classifySigState(pub, adopted, sigForged, result.SignedEntries, result.EntriesVerified, requireSigned)
+	if result.SigState == "suspect" {
+		result.SigBrokenReason = "signed verification was required (an Ed25519 public key was explicitly supplied) but the log carries no signatures and no adoption markers; if this log was expected to be signed, its signatures may have been fully stripped. Distinguishing a never-signed log from a fully stripped one requires an external head anchor (scoped follow-on)."
+	}
 	return result, nil
 }
 
-// classifySigState maps the walk outcome to one of the distinct signature states.
-func classifySigState(pub ed25519.PublicKey, adopted, sigForged bool, signedEntries int) string {
+// classifySigState maps the walk outcome to one of the distinct signature
+// states, never conflating them.
+//
+// The "suspect" state closes a No-Silent-Success gap: a writer who clears EVERY
+// signing artifact (all entry_sig, head_sig, signed_genesis_at,
+// unsigned_through_id, signing_pubkey_fingerprint) makes an adopted, tampered
+// log look never-adopted — on disk it is indistinguishable from a log that was
+// legitimately never signed. When the caller EXPLICITLY required signing
+// (requireSigned, i.e. an --ed25519-pub was supplied) and the log has events yet
+// carries no signatures and no adoption markers, that is reported "suspect",
+// never a clean pass; a merely derived key (from the local key file) is not an
+// assertion about this particular log, so a genuinely unsigned log stays
+// "unsigned". Telling a never-signed log apart from a fully stripped one
+// cryptographically needs an external head anchor (scoped follow-on).
+func classifySigState(pub ed25519.PublicKey, adopted, sigForged bool, signedEntries, entriesVerified int, requireSigned bool) string {
 	if sigForged {
 		return "forged"
 	}
@@ -1511,6 +1527,14 @@ func classifySigState(pub ed25519.PublicKey, adopted, sigForged bool, signedEntr
 		return "unsigned"
 	}
 	if !adopted {
+		// A key is available but the log has no adoption marker (partial
+		// artifacts are already "forged" above). If the caller explicitly
+		// required signing and the log has events, a full strip is
+		// indistinguishable from never-signed on disk, so report the honest,
+		// non-clean "suspect" rather than passing.
+		if requireSigned && entriesVerified > 0 {
+			return "suspect"
+		}
 		return "unsigned"
 	}
 	return "authentic"

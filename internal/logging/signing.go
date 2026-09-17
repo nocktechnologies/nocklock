@@ -120,9 +120,17 @@ func loadOrCreateSigner(path string) (*signer, error) {
 }
 
 // validateSigningKeyDirectory creates and validates the managed key directory.
-// Every existing path component must be real (not symlinked), aside from a
-// trusted platform alias, and the final directory must be private to the
-// current owner before a key is created or loaded from it.
+// It resolves the directory canonically and enforces the real security property
+// on the RESOLVED target: it must be a directory owned by the current user and
+// not group/world accessible.
+//
+// It deliberately does NOT reject a directory merely because a symlink appears
+// in its path. A benign user-owned symlink is normal — macOS temp dirs resolve
+// through /var -> /private/var, and many users keep a symlinked ~/.config — and
+// rejecting those broke key creation outright, on every platform. A symlink
+// whose target is owned by another uid, or is group/world accessible, still
+// fails the ownership and permission checks below. One code path, no per-OS
+// special cases.
 func validateSigningKeyDirectory(dir string, create bool) (string, error) {
 	absDir, err := filepath.Abs(dir)
 	if err != nil {
@@ -136,23 +144,21 @@ func validateSigningKeyDirectory(dir string, create bool) (string, error) {
 	} else if _, err := os.Lstat(absDir); err != nil {
 		return "", err
 	}
+	// Resolve symlinks to the canonical target, then run every check on it.
 	resolvedDir, err := filepath.EvalSymlinks(absDir)
 	if err != nil {
 		return "", fmt.Errorf("failed to resolve signing key directory %s: %w", absDir, err)
 	}
 	resolvedDir = filepath.Clean(resolvedDir)
-	if resolvedDir != absDir && !isTrustedSigningKeyDirectoryAlias(absDir, resolvedDir) {
-		return "", fmt.Errorf("refusing to use signing key directory %s: path contains a symlink", absDir)
-	}
-	info, err := os.Lstat(resolvedDir)
+	info, err := os.Stat(resolvedDir)
 	if err != nil {
 		return "", fmt.Errorf("failed to stat signing key directory %s: %w", resolvedDir, err)
 	}
-	if info.Mode()&os.ModeSymlink != 0 || !info.IsDir() {
-		return "", fmt.Errorf("refusing to use signing key directory %s: not a real directory", resolvedDir)
+	if !info.IsDir() {
+		return "", fmt.Errorf("refusing to use signing key directory %s: not a directory", resolvedDir)
 	}
-	if info.Mode().Perm() != 0o700 {
-		return "", fmt.Errorf("refusing to use signing key directory %s: permissions %o, want 0700", resolvedDir, info.Mode().Perm())
+	if info.Mode().Perm()&0o077 != 0 {
+		return "", fmt.Errorf("refusing to use signing key directory %s: permissions %o are group/world accessible, want 0700", resolvedDir, info.Mode().Perm())
 	}
 	if err := validateSigningKeyDirectoryOwner(info); err != nil {
 		return "", fmt.Errorf("refusing to use signing key directory %s: %w", resolvedDir, err)

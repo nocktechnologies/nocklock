@@ -96,6 +96,30 @@ func TestWriteAuditVerifyResult_ForgedHeadNamesChainHead(t *testing.T) {
 	}
 }
 
+func TestWriteAuditVerifyResult_SuspectIsDistinctAndExitsNonZero(t *testing.T) {
+	var buf bytes.Buffer
+	err := writeAuditVerifyResult(&buf, &logging.ChainVerifyResult{
+		Intact:          true,
+		EntriesVerified: 3,
+		SigState:        "suspect",
+		SigBrokenReason: "signed verification was required but the log carries no signatures and no adoption markers",
+	})
+	if err == nil {
+		t.Fatal("suspect result must return a non-zero exit error (never a clean pass)")
+	}
+	var ece *exitCodeError
+	if !asExitCodeError(err, &ece) || ece.code != 1 {
+		t.Errorf("suspect result must exit 1, got %v", err)
+	}
+	out := buf.String()
+	if !strings.Contains(out, "AUDIT: SUSPECT") {
+		t.Errorf("missing SUSPECT verdict:\n%s", out)
+	}
+	if strings.Contains(out, "CONSISTENT") || strings.Contains(out, "AUTHENTIC") {
+		t.Errorf("suspect must not read CONSISTENT or AUTHENTIC:\n%s", out)
+	}
+}
+
 func TestWriteAuditVerifyResult_UnverifiedIsConsistentNotAuthentic(t *testing.T) {
 	var buf bytes.Buffer
 	err := writeAuditVerifyResult(&buf, &logging.ChainVerifyResult{
