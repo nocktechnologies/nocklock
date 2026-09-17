@@ -18,7 +18,7 @@ import (
 func newSigningLogger(t *testing.T) (*Logger, string, ed25519.PublicKey) {
 	t.Helper()
 	dbPath := filepath.Join(t.TempDir(), "events.db")
-	keyPath := filepath.Join(t.TempDir(), "keys", "signing-ed25519.key")
+	keyPath := filepath.Join(t.TempDir(), "keys", "audit.key")
 	l, err := NewLogger(dbPath, "", WithSigning(keyPath))
 	if err != nil {
 		t.Fatalf("NewLogger(WithSigning) failed: %v", err)
@@ -33,7 +33,7 @@ func newSigningLogger(t *testing.T) (*Logger, string, ed25519.PublicKey) {
 // ---------- key custody ----------
 
 func TestSigningKey_GeneratedOnFirstUse0600(t *testing.T) {
-	keyPath := filepath.Join(t.TempDir(), "sub", "signing-ed25519.key")
+	keyPath := filepath.Join(t.TempDir(), "sub", "audit.key")
 	s, err := loadOrCreateSigner(keyPath)
 	if err != nil {
 		t.Fatalf("loadOrCreateSigner failed: %v", err)
@@ -72,7 +72,7 @@ func TestSigningKey_GeneratedOnFirstUse0600(t *testing.T) {
 }
 
 func TestSigningKey_RejectsWorldReadable(t *testing.T) {
-	keyPath := filepath.Join(t.TempDir(), "keys", "signing-ed25519.key")
+	keyPath := filepath.Join(t.TempDir(), "keys", "audit.key")
 	if _, err := loadOrCreateSigner(keyPath); err != nil {
 		t.Fatalf("initial create failed: %v", err)
 	}
@@ -93,7 +93,7 @@ func TestSigningKey_RejectsSymlink(t *testing.T) {
 	if _, err := loadOrCreateSigner(realKey); err != nil {
 		t.Fatalf("create real key: %v", err)
 	}
-	linkPath := filepath.Join(dir, "keys", "signing-ed25519.key")
+	linkPath := filepath.Join(dir, "keys", "audit.key")
 	if err := os.Symlink(realKey, linkPath); err != nil {
 		t.Fatalf("symlink: %v", err)
 	}
@@ -120,7 +120,7 @@ func TestSigningKey_CreateFailureLeavesNoPartialKey(t *testing.T) {
 	signingRand = errReader{}
 	t.Cleanup(func() { signingRand = orig })
 
-	keyPath := filepath.Join(t.TempDir(), "keys", "signing-ed25519.key")
+	keyPath := filepath.Join(t.TempDir(), "keys", "audit.key")
 	if _, err := loadOrCreateSigner(keyPath); err == nil {
 		t.Fatal("expected loadOrCreateSigner to fail when entropy is unavailable")
 	}
@@ -153,14 +153,14 @@ func TestSigningKey_RejectsSymlinkedDirectory(t *testing.T) {
 	if err := os.Symlink(targetDir, linkDir); err != nil {
 		t.Fatalf("symlink key directory: %v", err)
 	}
-	keyPath := filepath.Join(linkDir, "signing-ed25519.key")
+	keyPath := filepath.Join(linkDir, "audit.key")
 
 	if _, err := loadOrCreateSigner(keyPath); err == nil {
 		t.Fatal("expected symlinked signing directory to be rejected")
 	} else if !containsAny(err.Error(), "symlink") {
 		t.Errorf("expected symlink error, got: %v", err)
 	}
-	if _, err := os.Stat(filepath.Join(targetDir, "signing-ed25519.key")); !os.IsNotExist(err) {
+	if _, err := os.Stat(filepath.Join(targetDir, "audit.key")); !os.IsNotExist(err) {
 		t.Errorf("key was created through rejected symlinked directory: %v", err)
 	}
 }
@@ -168,7 +168,7 @@ func TestSigningKey_RejectsSymlinkedDirectory(t *testing.T) {
 func TestSigningKey_LoadRejectsSymlinkedDirectory(t *testing.T) {
 	root := t.TempDir()
 	targetDir := filepath.Join(root, "real")
-	keyPath := filepath.Join(targetDir, "signing-ed25519.key")
+	keyPath := filepath.Join(targetDir, "audit.key")
 	if _, err := loadOrCreateSigner(keyPath); err != nil {
 		t.Fatalf("create real signing key: %v", err)
 	}
@@ -176,7 +176,7 @@ func TestSigningKey_LoadRejectsSymlinkedDirectory(t *testing.T) {
 	if err := os.Symlink(targetDir, linkDir); err != nil {
 		t.Fatalf("symlink key directory: %v", err)
 	}
-	if _, err := loadSigner(filepath.Join(linkDir, "signing-ed25519.key")); err == nil {
+	if _, err := loadSigner(filepath.Join(linkDir, "audit.key")); err == nil {
 		t.Fatal("expected load through a symlinked signing directory to be rejected")
 	} else if !containsAny(err.Error(), "symlink") {
 		t.Errorf("expected symlink error, got: %v", err)
@@ -191,7 +191,7 @@ func TestSigningKey_RejectsNonPrivateDirectory(t *testing.T) {
 	if err := os.Chmod(dir, 0o755); err != nil {
 		t.Fatalf("chmod key directory: %v", err)
 	}
-	if _, err := loadOrCreateSigner(filepath.Join(dir, "signing-ed25519.key")); err == nil {
+	if _, err := loadOrCreateSigner(filepath.Join(dir, "audit.key")); err == nil {
 		t.Fatal("expected non-private signing directory to be rejected")
 	} else if !containsAny(err.Error(), "0700") {
 		t.Errorf("expected 0700 permission error, got: %v", err)
@@ -594,7 +594,7 @@ func TestSigning_NoKeyWithSignaturesIsUnverifiedNotAuthentic(t *testing.T) {
 
 func TestSigning_MigrationBoundary(t *testing.T) {
 	dbPath := filepath.Join(t.TempDir(), "events.db")
-	keyPath := filepath.Join(t.TempDir(), "keys", "signing-ed25519.key")
+	keyPath := filepath.Join(t.TempDir(), "keys", "audit.key")
 
 	// Phase 1: a pre-adoption (v1 hash-chain) log with 3 unsigned rows.
 	l1, err := NewLogger(dbPath, "")
@@ -653,7 +653,7 @@ func TestSigning_MigrationBoundary(t *testing.T) {
 
 func TestSigning_AdoptedLogWithoutKeyFailsClosed(t *testing.T) {
 	dbPath := filepath.Join(t.TempDir(), "events.db")
-	keyPath := filepath.Join(t.TempDir(), "keys", "signing-ed25519.key")
+	keyPath := filepath.Join(t.TempDir(), "keys", "audit.key")
 
 	l1, err := NewLogger(dbPath, "", WithSigning(keyPath))
 	if err != nil {
