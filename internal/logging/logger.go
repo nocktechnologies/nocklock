@@ -121,8 +121,9 @@ type ChainVerifyResult struct {
 	//   "unverified" signatures are present but no public key was supplied
 	//   "authentic" every post-adoption row and the chain_head verified against the key
 	//   "forged"    a signature is missing where required or does not verify
-	//   "suspect"   signing was explicitly required but the log has events with no
-	//               signatures and no adoption markers — possibly fully stripped;
+	//   "suspect"   signing was explicitly required but the log carries no
+	//               signatures and no adoption markers (whether or not any
+	//               events remain) — possibly fully stripped or wholly deleted;
 	//               never a clean pass (see classifySigState)
 	// These states are never conflated: a pass on an unsigned chain is CONSISTENT,
 	// not AUTHENTIC.
@@ -1316,10 +1317,18 @@ func (l *Logger) verifyChain(pub ed25519.PublicKey, requireSigned bool) (*ChainV
 		"SELECT entry_hash, row_count, migrated_at, legacy_through_id, pruned_at, pruned_count, head_sig, signed_genesis_at, unsigned_through_id, signing_pubkey_fingerprint FROM chain_head WHERE id = 1",
 	).Scan(&headHash, &rowCount, &migratedAtStr, &legacyID, &prunedAtStr, &prunedCountVal, &headSig, &signedGenesisStr, &unsignedThroughID, &publicKeyFingerprintHex)
 	if err == sql.ErrNoRows {
-		// Empty log
+		// No chain_head row at all: there is nothing to walk, so the (empty)
+		// chain is intact. It is NOT automatically a clean signed pass: a signed
+		// check that was explicitly required still has no adoption marker here,
+		// which is "suspect" exactly as for a populated log. Otherwise a writer
+		// could delete every row and reset the head to downgrade a required
+		// check to an unsigned pass.
 		result.HeadHash = chainGenesisHashHex
 		result.Intact = true
-		result.SigState = "unsigned" // an empty log carries no signatures
+		result.SigState = classifySigState(pub, false, false, 0, requireSigned)
+		if result.SigState == "suspect" {
+			result.SigBrokenReason = suspectSigReason
+		}
 		return result, nil
 	}
 	if err != nil {
@@ -1493,12 +1502,17 @@ func (l *Logger) verifyChain(pub ed25519.PublicKey, requireSigned bool) (*ChainV
 		}
 	}
 
-	result.SigState = classifySigState(pub, adopted, sigForged, result.SignedEntries, result.EntriesVerified, requireSigned)
+	result.SigState = classifySigState(pub, adopted, sigForged, result.SignedEntries, requireSigned)
 	if result.SigState == "suspect" {
-		result.SigBrokenReason = "signed verification was required (an Ed25519 public key was explicitly supplied) but the log carries no signatures and no adoption markers; if this log was expected to be signed, its signatures may have been fully stripped. Distinguishing a never-signed log from a fully stripped one requires an external head anchor (scoped follow-on)."
+		result.SigBrokenReason = suspectSigReason
 	}
 	return result, nil
 }
+
+// suspectSigReason explains the "suspect" state. It applies whether or not the
+// log still has events: a log with zero rows and no adoption marker is exactly
+// what a complete deletion leaves behind.
+const suspectSigReason = "signed verification was required (an Ed25519 public key was explicitly supplied) but the log carries no signatures and no adoption markers; if this log was expected to be signed, its signatures may have been fully stripped or every row deleted. Distinguishing a never-signed log from a fully stripped one requires an external head anchor (scoped follow-on)."
 
 // classifySigState maps the walk outcome to one of the distinct signature
 // states, never conflating them.
@@ -1508,13 +1522,16 @@ func (l *Logger) verifyChain(pub ed25519.PublicKey, requireSigned bool) (*ChainV
 // unsigned_through_id, signing_pubkey_fingerprint) makes an adopted, tampered
 // log look never-adopted — on disk it is indistinguishable from a log that was
 // legitimately never signed. When the caller EXPLICITLY required signing
-// (requireSigned, i.e. an --ed25519-pub was supplied) and the log has events yet
-// carries no signatures and no adoption markers, that is reported "suspect",
-// never a clean pass; a merely derived key (from the local key file) is not an
-// assertion about this particular log, so a genuinely unsigned log stays
-// "unsigned". Telling a never-signed log apart from a fully stripped one
-// cryptographically needs an external head anchor (scoped follow-on).
-func classifySigState(pub ed25519.PublicKey, adopted, sigForged bool, signedEntries, entriesVerified int, requireSigned bool) string {
+// (requireSigned, i.e. an --ed25519-pub was supplied) and the log carries no
+// signatures and no adoption markers, that is reported "suspect", never a
+// clean pass. This holds regardless of how many events remain: deleting every
+// row and resetting chain_head to genesis is a truncation to zero, and the
+// signed head exists precisely so truncation cannot pass a required check. A
+// merely derived key (from the local key file) is not an assertion about this
+// particular log, so a genuinely unsigned log stays "unsigned". Telling a
+// never-signed log apart from a fully stripped one cryptographically needs an
+// external head anchor (scoped follow-on).
+func classifySigState(pub ed25519.PublicKey, adopted, sigForged bool, signedEntries int, requireSigned bool) string {
 	if sigForged {
 		return "forged"
 	}
@@ -1529,10 +1546,10 @@ func classifySigState(pub ed25519.PublicKey, adopted, sigForged bool, signedEntr
 	if !adopted {
 		// A key is available but the log has no adoption marker (partial
 		// artifacts are already "forged" above). If the caller explicitly
-		// required signing and the log has events, a full strip is
+		// required signing, a full strip — or a complete deletion — is
 		// indistinguishable from never-signed on disk, so report the honest,
 		// non-clean "suspect" rather than passing.
-		if requireSigned && entriesVerified > 0 {
+		if requireSigned {
 			return "suspect"
 		}
 		return "unsigned"

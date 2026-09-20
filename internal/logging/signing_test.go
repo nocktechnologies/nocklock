@@ -2,6 +2,7 @@ package logging
 
 import (
 	"crypto/ed25519"
+	"crypto/rand"
 	"database/sql"
 	"encoding/base64"
 	"encoding/binary"
@@ -258,6 +259,93 @@ func TestSigning_SignsSameCanonicalBytesAsHash(t *testing.T) {
 	cbTampered := canonicalBytes(id, ts, EventType(et), cat, "API_KE!", blocked != 0, sid)
 	if ed25519.Verify(pub, cbTampered, sig) {
 		t.Error("signature verified over tampered canonical bytes — signing scope is wrong")
+	}
+}
+
+// TestSigning_RowSignatureVerifiesOverByteLiteral pins the SIGNING contract
+// independently of the encoder — the NCC #1902 lesson applied to signing. The
+// test above proves the signature covers whatever canonicalBytes returns; this
+// one proves what those bytes ARE, by verifying the stored entry_sig of a known
+// row against a hardcoded byte string that never passes through canonicalBytes.
+// It also pins the scope negatively: the row signature is over the canonical
+// bytes ONLY, not over the hash-chain input (canonical || prev_hash). That
+// exclusion is deliberate — it is what lets a prune re-anchor the chain while
+// every surviving row signature stays valid (see Prune and the prune tests).
+func TestSigning_RowSignatureVerifiesOverByteLiteral(t *testing.T) {
+	l, _, pub := newSigningLogger(t)
+	defer l.Close()
+
+	// The same known row TestCanonicalBytes_ByteLiteralPin (logger_test.go)
+	// pins for the hash; a fresh DB assigns it id=1.
+	evt := Event{
+		Timestamp: time.Date(2025, 3, 15, 10, 30, 45, 123456789, time.UTC),
+		EventType: EventSecretBlocked,
+		Category:  "secret",
+		Detail:    "API_KEY",
+		Blocked:   true,
+		SessionID: "sess-1",
+	}
+	if err := l.Log(evt); err != nil {
+		t.Fatalf("Log: %v", err)
+	}
+
+	var id int64
+	var entrySig string
+	if err := l.db.QueryRow("SELECT id, entry_sig FROM events ORDER BY id ASC LIMIT 1").Scan(&id, &entrySig); err != nil {
+		t.Fatalf("read row: %v", err)
+	}
+	if id != 1 {
+		t.Fatalf("known row should be id=1 in a fresh log, got %d", id)
+	}
+	sig, err := base64.StdEncoding.DecodeString(entrySig)
+	if err != nil {
+		t.Fatalf("decode entry_sig: %v", err)
+	}
+	if len(sig) != ed25519.SignatureSize {
+		t.Fatalf("entry_sig is %d bytes, want %d", len(sig), ed25519.SignatureSize)
+	}
+
+	// Hardcoded oracle (spec §2 layout), deliberately duplicated rather than
+	// shared with the hash test so the two pins are independent:
+	// version || u64be(id) || lp(timestamp) || lp(event_type) || lp(category)
+	// || lp(detail) || blocked || lp(session_id), lp = u32be length + bytes.
+	literal := []byte{
+		0x01,                                           // version
+		0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x01, // id=1 u64be
+		0x00, 0x00, 0x00, 0x1e, // len("2025-03-15T10:30:45.123456789Z") = 30
+		0x32, 0x30, 0x32, 0x35, 0x2d, 0x30, 0x33, 0x2d, 0x31, 0x35, 0x54, 0x31, 0x30, 0x3a, 0x33, 0x30, 0x3a, 0x34, 0x35, 0x2e, 0x31, 0x32, 0x33, 0x34, 0x35, 0x36, 0x37, 0x38, 0x39, 0x5a, // "2025-03-15T10:30:45.123456789Z"
+		0x00, 0x00, 0x00, 0x0e, // len("secret_blocked") = 14
+		0x73, 0x65, 0x63, 0x72, 0x65, 0x74, 0x5f, 0x62, 0x6c, 0x6f, 0x63, 0x6b, 0x65, 0x64, // "secret_blocked"
+		0x00, 0x00, 0x00, 0x06, // len("secret") = 6
+		0x73, 0x65, 0x63, 0x72, 0x65, 0x74, // "secret"
+		0x00, 0x00, 0x00, 0x07, // len("API_KEY") = 7
+		0x41, 0x50, 0x49, 0x5f, 0x4b, 0x45, 0x59, // "API_KEY"
+		0x01,                   // blocked=true
+		0x00, 0x00, 0x00, 0x06, // len("sess-1") = 6
+		0x73, 0x65, 0x73, 0x73, 0x2d, 0x31, // "sess-1"
+	}
+
+	if !ed25519.Verify(pub, literal, sig) {
+		t.Fatalf("stored entry_sig does not verify over the hardcoded canonical byte literal: the bytes signed drifted from the pinned layout")
+	}
+
+	// Negative pin (a): NOT over the hash-chain input canonical || prev_hash.
+	// prev_hash for id=1 is the genesis hash.
+	chainInput := append(append([]byte{}, literal...), mustHex(t, chainGenesisHashHex)...)
+	if ed25519.Verify(pub, chainInput, sig) {
+		t.Error("signature verified over canonical||prev_hash: the row signature must cover canonical bytes only")
+	}
+
+	// Negative pin (b): NOT over the same row with the blocked byte flipped.
+	// The blocked byte sits immediately before lp(session_id).
+	flipped := append([]byte{}, literal...)
+	blockedOff := len(literal) - (4 + len("sess-1")) - 1
+	if flipped[blockedOff] != 0x01 {
+		t.Fatalf("pinned blocked-byte offset %d holds %#x, want 0x01", blockedOff, flipped[blockedOff])
+	}
+	flipped[blockedOff] = 0x00
+	if ed25519.Verify(pub, flipped, sig) {
+		t.Error("signature verified with the blocked bit flipped: the blocked byte is not covered")
 	}
 }
 
@@ -635,6 +723,295 @@ func TestSigning_ExplicitKeyRejectsCompleteSignatureStripping(t *testing.T) {
 	}
 	if !containsAny(required.SigBrokenReason, "required", "stripped") {
 		t.Errorf("suspect reason should explain the required-but-missing signatures, got: %q", required.SigBrokenReason)
+	}
+}
+
+// TestSigning_CompleteDeletionWithRequiredSigningIsSuspect covers the
+// truncation-to-zero case: a writer deletes EVERY event, strips every signing
+// artifact, and resets chain_head to the unsigned genesis state. Without an
+// external expectation that reads as a legitimately empty unsigned log; with an
+// explicitly supplied key it must be SUSPECT (non-zero), never a clean pass —
+// otherwise the signed head's truncation protection would have a hole at zero
+// rows. Both the "chain_head reset" and the "chain_head row removed" shapes are
+// exercised.
+func TestSigning_CompleteDeletionWithRequiredSigningIsSuspect(t *testing.T) {
+	l, _, pub := newSigningLogger(t)
+	var dbPath string
+	if err := l.db.QueryRow("SELECT file FROM pragma_database_list WHERE name='main'").Scan(&dbPath); err != nil {
+		t.Fatalf("read db path: %v", err)
+	}
+	for i := 0; i < 2; i++ {
+		if err := l.Log(sampleEvent(EventSecretBlocked, "secret", "TOKEN", true, "s")); err != nil {
+			t.Fatalf("Log: %v", err)
+		}
+	}
+	if err := l.Close(); err != nil {
+		t.Fatalf("close logger: %v", err)
+	}
+
+	db, err := sql.Open("sqlite", dbPath)
+	if err != nil {
+		t.Fatalf("open raw: %v", err)
+	}
+	if _, err := db.Exec("DELETE FROM events"); err != nil {
+		t.Fatalf("delete every event: %v", err)
+	}
+	if _, err := db.Exec(
+		"UPDATE chain_head SET entry_hash = ?, row_count = 0, head_sig = '', signed_genesis_at = NULL, unsigned_through_id = NULL, signing_pubkey_fingerprint = '' WHERE id = 1",
+		chainGenesisHashHex,
+	); err != nil {
+		t.Fatalf("reset chain_head to unsigned genesis: %v", err)
+	}
+	if err := db.Close(); err != nil {
+		t.Fatalf("close raw db: %v", err)
+	}
+
+	l2, err := NewLogger(dbPath, "")
+	if err != nil {
+		t.Fatalf("reopen: %v", err)
+	}
+	defer l2.Close()
+
+	required, err := l2.VerifyChainSigned(pub, true)
+	if err != nil {
+		t.Fatalf("required VerifyChainSigned: %v", err)
+	}
+	if !required.Intact || required.EntriesVerified != 0 {
+		t.Fatalf("hash layer of an emptied log: intact=%v entries=%d, want intact/0", required.Intact, required.EntriesVerified)
+	}
+	if required.SigState != "suspect" {
+		t.Errorf("complete deletion with required signing: state=%q reason=%q, want suspect", required.SigState, required.SigBrokenReason)
+	}
+	if !containsAny(required.SigBrokenReason, "required") {
+		t.Errorf("suspect reason should say signing was required, got: %q", required.SigBrokenReason)
+	}
+
+	// No external expectation: an empty unsigned log is just that.
+	fallback, err := l2.VerifyChainSigned(pub, false)
+	if err != nil {
+		t.Fatalf("fallback VerifyChainSigned: %v", err)
+	}
+	if fallback.SigState != "unsigned" {
+		t.Errorf("complete deletion without required signing: state=%q, want unsigned", fallback.SigState)
+	}
+
+	// The other shape: no chain_head row at all (removed underneath an open
+	// logger, since opening re-initialises it). Still suspect when required.
+	raw, err := sql.Open("sqlite", dbPath)
+	if err != nil {
+		t.Fatalf("open raw again: %v", err)
+	}
+	if _, err := raw.Exec("DELETE FROM chain_head"); err != nil {
+		t.Fatalf("delete chain_head: %v", err)
+	}
+	if err := raw.Close(); err != nil {
+		t.Fatalf("close raw db: %v", err)
+	}
+	noHead, err := l2.VerifyChainSigned(pub, true)
+	if err != nil {
+		t.Fatalf("no-chain_head VerifyChainSigned: %v", err)
+	}
+	if !noHead.Intact || noHead.SigState != "suspect" {
+		t.Errorf("missing chain_head with required signing: intact=%v state=%q reason=%q, want intact/suspect", noHead.Intact, noHead.SigState, noHead.SigBrokenReason)
+	}
+	noHeadFallback, err := l2.VerifyChainSigned(pub, false)
+	if err != nil {
+		t.Fatalf("no-chain_head fallback VerifyChainSigned: %v", err)
+	}
+	if noHeadFallback.SigState != "unsigned" {
+		t.Errorf("missing chain_head without required signing: state=%q, want unsigned", noHeadFallback.SigState)
+	}
+}
+
+// ---------- wrong public key -> FORGED ----------
+
+// TestSigning_WrongPublicKeyIsForged: a signed, untouched log checked against a
+// key that is not the signer's must FAIL, in both the derived-key and the
+// required-key modes. The first line of defence is the authenticated fingerprint;
+// if the attacker rewrites that to match the wrong key, the row and head
+// signatures themselves still do not verify.
+func TestSigning_WrongPublicKeyIsForged(t *testing.T) {
+	l, _, pub := newSigningLogger(t)
+	var dbPath string
+	if err := l.db.QueryRow("SELECT file FROM pragma_database_list WHERE name='main'").Scan(&dbPath); err != nil {
+		t.Fatalf("read db path: %v", err)
+	}
+	for i := 0; i < 3; i++ {
+		if err := l.Log(sampleEvent(EventFileBlocked, "filesystem", "/etc/shadow", true, "s")); err != nil {
+			t.Fatalf("Log: %v", err)
+		}
+	}
+
+	wrongPub, _, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatalf("generate unrelated key: %v", err)
+	}
+	if wrongPub.Equal(pub) {
+		t.Fatal("unrelated key collided with the signing key")
+	}
+
+	for _, require := range []bool{false, true} {
+		res, err := l.VerifyChainSigned(wrongPub, require)
+		if err != nil {
+			t.Fatalf("VerifyChainSigned(wrong key, require=%v): %v", require, err)
+		}
+		if !res.Intact {
+			t.Fatalf("hash layer must be intact (the log is untouched): %s", res.BrokenReason)
+		}
+		if res.SigState != "forged" || !containsAny(res.SigBrokenReason, "fingerprint") {
+			t.Errorf("wrong key (require=%v): state=%q reason=%q, want forged with a fingerprint mismatch", require, res.SigState, res.SigBrokenReason)
+		}
+	}
+
+	// The right key still reads authentic: the failure above is the key, not the log.
+	right, err := l.VerifyChainSigned(pub, true)
+	if err != nil {
+		t.Fatalf("VerifyChainSigned(right key): %v", err)
+	}
+	if right.SigState != "authentic" {
+		t.Errorf("right key: state=%q reason=%q, want authentic", right.SigState, right.SigBrokenReason)
+	}
+	if err := l.Close(); err != nil {
+		t.Fatalf("close logger: %v", err)
+	}
+
+	// Attacker rewrites the stored fingerprint to the wrong key's. The rows were
+	// signed by the real key, so the very first row signature fails against it.
+	db, err := sql.Open("sqlite", dbPath)
+	if err != nil {
+		t.Fatalf("open raw: %v", err)
+	}
+	if _, err := db.Exec("UPDATE chain_head SET signing_pubkey_fingerprint = ? WHERE id = 1", publicKeyFingerprint(wrongPub)); err != nil {
+		t.Fatalf("rewrite fingerprint: %v", err)
+	}
+	if err := db.Close(); err != nil {
+		t.Fatalf("close raw db: %v", err)
+	}
+	l2, err := NewLogger(dbPath, "")
+	if err != nil {
+		t.Fatalf("reopen: %v", err)
+	}
+	defer l2.Close()
+	res, err := l2.VerifyChainSigned(wrongPub, true)
+	if err != nil {
+		t.Fatalf("VerifyChainSigned(wrong key, rewritten fingerprint): %v", err)
+	}
+	if res.SigState != "forged" || res.SigBrokenID != 1 {
+		t.Errorf("wrong key with rewritten fingerprint: state=%q brokenID=%d reason=%q, want forged at entry 1", res.SigState, res.SigBrokenID, res.SigBrokenReason)
+	}
+}
+
+// ---------- tamper classes with a lockstep re-chain: hash-only is fooled, signing is not ----------
+
+// TestSigning_BlockedBitFlipWithRechainIsForged: an active writer flips a row's
+// blocked bit (the "make an exfiltration attempt read as passed" edit) and
+// recomputes the hash chain forward, which defeats every v1 check. The row's
+// signature covers the blocked byte and the attacker cannot re-sign, so signed
+// verification reports FORGED at that row.
+func TestSigning_BlockedBitFlipWithRechainIsForged(t *testing.T) {
+	l, _, pub := newSigningLogger(t)
+	var dbPath string
+	if err := l.db.QueryRow("SELECT file FROM pragma_database_list WHERE name='main'").Scan(&dbPath); err != nil {
+		t.Fatalf("read db path: %v", err)
+	}
+	for i := 0; i < 3; i++ {
+		if err := l.Log(sampleEvent(EventSecretBlocked, "secret", "API_KEY", true, "s")); err != nil {
+			t.Fatalf("Log: %v", err)
+		}
+	}
+	if err := l.Close(); err != nil {
+		t.Fatalf("close logger: %v", err)
+	}
+
+	db, err := sql.Open("sqlite", dbPath)
+	if err != nil {
+		t.Fatalf("open raw: %v", err)
+	}
+	if _, err := db.Exec("UPDATE events SET blocked = 0 WHERE id = 2"); err != nil {
+		t.Fatalf("flip blocked bit: %v", err)
+	}
+	rechainAll(t, db)
+	if err := db.Close(); err != nil {
+		t.Fatalf("close raw db: %v", err)
+	}
+
+	l2, err := NewLogger(dbPath, "")
+	if err != nil {
+		t.Fatalf("reopen: %v", err)
+	}
+	defer l2.Close()
+
+	hashOnly, err := l2.VerifyChain()
+	if err != nil {
+		t.Fatalf("VerifyChain: %v", err)
+	}
+	if !hashOnly.Intact {
+		t.Fatalf("hash-only verify should be fooled by a lockstep re-chain (v1 limit): %s", hashOnly.BrokenReason)
+	}
+	signed, err := l2.VerifyChainSigned(pub, true)
+	if err != nil {
+		t.Fatalf("VerifyChainSigned: %v", err)
+	}
+	if signed.SigState != "forged" || signed.SigBrokenID != 2 {
+		t.Errorf("flipped blocked bit: state=%q brokenID=%d reason=%q, want forged at entry 2", signed.SigState, signed.SigBrokenID, signed.SigBrokenReason)
+	}
+}
+
+// TestSigning_MiddleRowDeletionWithRechainIsForged: deleting a middle row and
+// re-chaining leaves every SURVIVING row signature valid (each covers its own
+// canonical bytes, whose ids are unchanged), so the row layer alone would pass.
+// The chain_head signature — over the head hash and row count — is what catches
+// it: the attacker cannot re-sign the new head. This is the head signature's
+// justification in one test.
+func TestSigning_MiddleRowDeletionWithRechainIsForged(t *testing.T) {
+	l, _, pub := newSigningLogger(t)
+	var dbPath string
+	if err := l.db.QueryRow("SELECT file FROM pragma_database_list WHERE name='main'").Scan(&dbPath); err != nil {
+		t.Fatalf("read db path: %v", err)
+	}
+	for i := 0; i < 4; i++ {
+		if err := l.Log(sampleEvent(EventNetworkBlocked, "network", "exfil.example", true, "s")); err != nil {
+			t.Fatalf("Log: %v", err)
+		}
+	}
+	if err := l.Close(); err != nil {
+		t.Fatalf("close logger: %v", err)
+	}
+
+	db, err := sql.Open("sqlite", dbPath)
+	if err != nil {
+		t.Fatalf("open raw: %v", err)
+	}
+	if _, err := db.Exec("DELETE FROM events WHERE id = 2"); err != nil {
+		t.Fatalf("delete middle row: %v", err)
+	}
+	rechainAll(t, db)
+	if err := db.Close(); err != nil {
+		t.Fatalf("close raw db: %v", err)
+	}
+
+	l2, err := NewLogger(dbPath, "")
+	if err != nil {
+		t.Fatalf("reopen: %v", err)
+	}
+	defer l2.Close()
+
+	hashOnly, err := l2.VerifyChain()
+	if err != nil {
+		t.Fatalf("VerifyChain: %v", err)
+	}
+	if !hashOnly.Intact || hashOnly.EntriesVerified != 3 {
+		t.Fatalf("hash-only verify should be fooled by a lockstep re-chain (v1 limit): intact=%v entries=%d (%s)", hashOnly.Intact, hashOnly.EntriesVerified, hashOnly.BrokenReason)
+	}
+	signed, err := l2.VerifyChainSigned(pub, true)
+	if err != nil {
+		t.Fatalf("VerifyChainSigned: %v", err)
+	}
+	if signed.SigVerified != 3 {
+		t.Errorf("surviving row signatures should still verify: SigVerified=%d, want 3", signed.SigVerified)
+	}
+	if signed.SigState != "forged" || signed.SigBrokenID != 0 || !containsAny(signed.SigBrokenReason, "chain_head") {
+		t.Errorf("deleted middle row: state=%q brokenID=%d reason=%q, want forged via chain_head", signed.SigState, signed.SigBrokenID, signed.SigBrokenReason)
 	}
 }
 
@@ -1019,6 +1396,15 @@ func tamperRowAndRechain(t *testing.T, dbPath string, targetID int64, newDetail 
 	if _, err := db.Exec("UPDATE events SET detail = ? WHERE id = ?", newDetail, targetID); err != nil {
 		t.Fatalf("rewrite detail: %v", err)
 	}
+	rechainAll(t, db)
+}
+
+// rechainAll recomputes prev_hash/entry_hash for every remaining row in id
+// order and rewrites chain_head's hash and count to match — the lockstep
+// re-chain an unkeyed active writer performs after any edit or deletion.
+// Signature columns are left untouched (the attacker has no key).
+func rechainAll(t *testing.T, db *sql.DB) {
+	t.Helper()
 
 	rows, err := db.Query("SELECT id, timestamp, event_type, category, detail, blocked, session_id, prev_hash FROM events ORDER BY id ASC")
 	if err != nil {

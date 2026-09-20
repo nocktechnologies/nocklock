@@ -120,6 +120,39 @@ func TestWriteAuditVerifyResult_SuspectIsDistinctAndExitsNonZero(t *testing.T) {
 	}
 }
 
+// TestWriteAuditVerifyResult_MigrationNoteSaysNotAuthenticated pins the honest
+// wording for pre-migration rows (spec §5): under both the CONSISTENT and the
+// AUTHENTIC verdicts, rows that predate the chain are reported as structurally
+// chained but NOT authenticated. A verify output must never claim pre-migration
+// history is proven.
+func TestWriteAuditVerifyResult_MigrationNoteSaysNotAuthenticated(t *testing.T) {
+	migrated := time.Date(2026, 9, 14, 12, 0, 0, 0, time.UTC)
+	const wantNote = "NOTE: entries 1..3 predate the chain (migrated 2026-09-14T12:00:00Z); structurally chained, not authenticated."
+	for _, state := range []string{"unsigned", "authentic"} {
+		var buf bytes.Buffer
+		res := &logging.ChainVerifyResult{
+			Intact:          true,
+			EntriesVerified: 5,
+			SigState:        state,
+			MigratedAt:      &migrated,
+			LegacyThroughID: 3,
+			HeadHash:        "abc",
+		}
+		if state == "authentic" {
+			genesis := migrated
+			res.SignedGenesisAt = &genesis
+			res.SigVerified, res.SignedEntries, res.UnsignedEntries, res.UnsignedThroughID, res.HeadSigned = 2, 2, 3, 3, true
+		}
+		if err := writeAuditVerifyResult(&buf, res); err != nil {
+			t.Fatalf("state %q: unexpected error: %v", state, err)
+		}
+		out := buf.String()
+		if !strings.Contains(out, wantNote) {
+			t.Errorf("state %q: missing the honest migration note %q in:\n%s", state, wantNote, out)
+		}
+	}
+}
+
 func TestWriteAuditVerifyResult_UnverifiedIsConsistentNotAuthentic(t *testing.T) {
 	var buf bytes.Buffer
 	err := writeAuditVerifyResult(&buf, &logging.ChainVerifyResult{

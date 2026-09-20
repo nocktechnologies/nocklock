@@ -235,9 +235,10 @@ func writeAuditVerifyResult(w io.Writer, result *logging.ChainVerifyResult) erro
 		return &exitCodeError{code: 1}
 	}
 
-	// Signing was explicitly required (--ed25519-pub) but the log has events and
-	// no signatures or adoption markers: possibly fully stripped. Never a clean
-	// pass (No-Silent-Success).
+	// Signing was explicitly required (--ed25519-pub) but the log carries no
+	// signatures and no adoption markers, whether or not any events remain:
+	// possibly fully stripped, or every row deleted and the head reset. Never a
+	// clean pass (No-Silent-Success).
 	if result.SigState == "suspect" {
 		fmt.Fprintf(w, "AUDIT: SUSPECT — hash chain intact but no signatures present though signed verification was required (%s)\n", result.SigBrokenReason)
 		writeAuditBoundaryNotes(w, result)
