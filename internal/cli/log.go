@@ -50,7 +50,14 @@ var logCmd = &cobra.Command{
 			return fmt.Errorf("cannot access event log: %w", statErr)
 		}
 
-		logger, err := logging.NewLogger(dbPath, projectRoot)
+		// --prune rewrites the chain_head and must re-sign it, so a prune of an
+		// adopted log needs the signing key; a read-only listing does not (and
+		// must not create a key). Open with signing only when pruning.
+		var openOpts []logging.Option
+		if pruneStr != "" {
+			openOpts = signingLoggerOpts()
+		}
+		logger, err := logging.NewLogger(dbPath, projectRoot, openOpts...)
 		if err != nil {
 			cmd.SilenceUsage = true
 			return fmt.Errorf("failed to open event log: %w", err)

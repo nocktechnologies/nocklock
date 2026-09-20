@@ -2,6 +2,7 @@
 package logging
 
 import (
+	"crypto/ed25519"
 	"crypto/sha256"
 	"database/sql"
 	"encoding/binary"
@@ -79,7 +80,27 @@ type Stats struct {
 
 // Logger handles SQLite event storage.
 type Logger struct {
-	db *sql.DB
+	db     *sql.DB
+	signer *signer // nil when Ed25519 signing is off
+}
+
+// Option configures a Logger at construction.
+type Option func(*loggerConfig)
+
+type loggerConfig struct {
+	signingEnabled bool
+	signingKeyPath string
+}
+
+// WithSigning enables Ed25519 signing of each row and the chain_head, using the
+// NockLock-managed key at keyPath (generated 0600 on first use if absent). Only
+// the event-writing path (wrap, and log --prune) needs this; read-only opens do
+// not, and an adopted log opened without a key fails closed on any write.
+func WithSigning(keyPath string) Option {
+	return func(c *loggerConfig) {
+		c.signingEnabled = true
+		c.signingKeyPath = keyPath
+	}
 }
 
 // ChainVerifyResult holds the outcome of a chain verification.
@@ -93,6 +114,29 @@ type ChainVerifyResult struct {
 	LegacyThroughID int64      // highest id of pre-migration rows (if applicable)
 	PrunedAt        *time.Time // when chain was re-anchored due to prune (if applicable)
 	PrunedCount     int        // number of events removed in the last prune (if applicable)
+
+	// Signature verdict (v1.1 Ed25519). SigState is one of:
+	//   ""          hash-only verification was requested (no signature awareness)
+	//   "unsigned"  no signatures present, or a public key confirms none adopted
+	//   "unverified" signatures are present but no public key was supplied
+	//   "authentic" every post-adoption row and the chain_head verified against the key
+	//   "forged"    a signature is missing where required or does not verify
+	//   "suspect"   signing was explicitly required but the log carries no
+	//               signatures and no adoption markers (whether or not any
+	//               events remain) — possibly fully stripped or wholly deleted;
+	//               never a clean pass (see classifySigState)
+	// These states are never conflated: a pass on an unsigned chain is CONSISTENT,
+	// not AUTHENTIC.
+	SigState          string
+	SignedEntries     int        // rows carrying a signature
+	UnsignedEntries   int        // rows with no signature
+	SigVerified       int        // rows whose signature verified against the key
+	SigBrokenID       int64      // id of the first row whose signature failed (0 = none)
+	SigBrokenReason   string     // explanation of the signature failure
+	SignedGenesisAt   *time.Time // when signing was adopted (if applicable)
+	UnsignedThroughID int64      // highest id predating signing adoption
+	HeadSigned        bool       // chain_head carries a signature
+	PubKeyProvided    bool       // a public key was available for verification
 }
 
 // chainGenesisHashHex is the entry_hash for genesis (SHA-256 of the empty input).
@@ -108,7 +152,8 @@ CREATE TABLE IF NOT EXISTS events (
 	blocked INTEGER NOT NULL DEFAULT 0,
 	session_id TEXT NOT NULL,
 	prev_hash TEXT NOT NULL DEFAULT '',
-	entry_hash TEXT NOT NULL DEFAULT ''
+	entry_hash TEXT NOT NULL DEFAULT '',
+	entry_sig TEXT NOT NULL DEFAULT ''
 );
 CREATE INDEX IF NOT EXISTS idx_events_session ON events(session_id);
 CREATE INDEX IF NOT EXISTS idx_events_type ON events(event_type);
@@ -121,7 +166,11 @@ CREATE TABLE IF NOT EXISTS chain_head (
 	migrated_at TEXT,
 	legacy_through_id INTEGER,
 	pruned_at TEXT,
-	pruned_count INTEGER
+	pruned_count INTEGER,
+	head_sig TEXT NOT NULL DEFAULT '',
+	signed_genesis_at TEXT,
+	unsigned_through_id INTEGER,
+	signing_pubkey_fingerprint TEXT NOT NULL DEFAULT ''
 );
 `
 
@@ -156,7 +205,12 @@ func validatePath(dbPath, projectRoot string) error {
 // Creates parent directories and the events table if they don't exist.
 // Sets WAL mode and 0600 file permissions.
 // If projectRoot is non-empty, dbPath must reside under it.
-func NewLogger(dbPath string, projectRoot string) (*Logger, error) {
+func NewLogger(dbPath string, projectRoot string, opts ...Option) (*Logger, error) {
+	var lc loggerConfig
+	for _, opt := range opts {
+		opt(&lc)
+	}
+
 	if err := validatePath(dbPath, projectRoot); err != nil {
 		return nil, err
 	}
@@ -259,7 +313,45 @@ func NewLogger(dbPath string, projectRoot string) (*Logger, error) {
 		return nil, fmt.Errorf("failed to migrate audit chain: %w", err)
 	}
 
-	return &Logger{db: db}, nil
+	// Add the v1.1 signature columns to any DB missing them. This runs on every
+	// open — signed or not — so a read-only open of an old DB does not leave it
+	// half-migrated for a later signing write.
+	if err := migrateSigColumns(db); err != nil {
+		db.Close()
+		return nil, fmt.Errorf("failed to migrate signature columns: %w", err)
+	}
+
+	l := &Logger{db: db}
+
+	if lc.signingEnabled {
+		adopted, err := signingAlreadyAdopted(db)
+		if err != nil {
+			db.Close()
+			return nil, fmt.Errorf("failed to check signing adoption state: %w", err)
+		}
+		var s *signer
+		if adopted {
+			// An adopted log must already have its original key. Do not create a
+			// replacement key that could silently sever the signature history.
+			s, err = loadSigner(lc.signingKeyPath)
+		} else {
+			s, err = loadOrCreateSigner(lc.signingKeyPath)
+		}
+		if err != nil {
+			db.Close()
+			return nil, fmt.Errorf("failed to load signing key: %w", err)
+		}
+		l.signer = s
+		// Adopt signing on first signed open: record the genesis marker and sign
+		// the current head. Existing rows stay unsigned; verify treats them as
+		// UNSIGNED-but-consistent, not forged.
+		if err := adoptSigningIfNeeded(db, s); err != nil {
+			db.Close()
+			return nil, fmt.Errorf("failed to adopt signing: %w", err)
+		}
+	}
+
+	return l, nil
 }
 
 // Log records a single event with hash chain. Thread-safe (SQLite WAL handles locking).
@@ -277,6 +369,9 @@ func (l *Logger) Log(event Event) error {
 	defer tx.Rollback()
 	if err := initChainHeadIfNeeded(tx); err != nil {
 		return fmt.Errorf("failed to initialize chain_head: %w", err)
+	}
+	if err := l.ensureWritableSignerState(tx); err != nil {
+		return err
 	}
 
 	var prevHashHex string
@@ -300,23 +395,43 @@ func (l *Logger) Log(event Event) error {
 	}
 
 	// Compute hash chain
-	entryHash, err := chainEntry(eventID, ts, event.EventType, event.Category, event.Detail, event.Blocked, event.SessionID, prevHashHex)
+	cb := canonicalBytes(eventID, ts, event.EventType, event.Category, event.Detail, event.Blocked, event.SessionID)
+	entryHash, err := chainEntryFromCanonical(cb, prevHashHex)
 	if err != nil {
 		return fmt.Errorf("failed to compute chain: %w", err)
 	}
 
-	// Update with computed hashes
+	// Sign over the SAME canonical bytes the hash covers (v1.1). Empty when
+	// signing is off.
+	entrySig := ""
+	if l.signer != nil {
+		entrySig = l.signer.signRow(cb)
+	}
+
+	// Update with computed hashes and signature
 	_, err = tx.Exec(
-		"UPDATE events SET prev_hash = ?, entry_hash = ? WHERE id = ?",
-		prevHashHex, entryHash, eventID,
+		"UPDATE events SET prev_hash = ?, entry_hash = ?, entry_sig = ? WHERE id = ?",
+		prevHashHex, entryHash, entrySig, eventID,
 	)
 	if err != nil {
 		return fmt.Errorf("failed to update event hashes: %w", err)
 	}
 
+	count, err := countEvents(tx)
+	if err != nil {
+		return fmt.Errorf("failed to count events: %w", err)
+	}
+	headMeta, err := readHeadSignatureMetadata(tx)
+	if err != nil {
+		return fmt.Errorf("failed to read chain head signing metadata: %w", err)
+	}
+	headSig, err := signHead(l.signer, entryHash, count, headMeta)
+	if err != nil {
+		return fmt.Errorf("failed to sign chain head: %w", err)
+	}
 	_, err = tx.Exec(
-		"UPDATE chain_head SET entry_hash = ?, row_count = (SELECT COUNT(*) FROM events) WHERE id = 1",
-		entryHash,
+		"UPDATE chain_head SET entry_hash = ?, row_count = ?, head_sig = ? WHERE id = 1",
+		entryHash, count, headSig,
 	)
 	if err != nil {
 		return fmt.Errorf("failed to update chain_head: %w", err)
@@ -344,6 +459,9 @@ func (l *Logger) LogBatch(events []Event) error {
 	// Initialize chain_head if needed
 	if err := initChainHeadIfNeeded(tx); err != nil {
 		return fmt.Errorf("failed to initialize chain_head: %w", err)
+	}
+	if err := l.ensureWritableSignerState(tx); err != nil {
+		return err
 	}
 
 	// Get current head
@@ -377,16 +495,21 @@ func (l *Logger) LogBatch(events []Event) error {
 			return fmt.Errorf("failed to get event ID: %w", err)
 		}
 
-		// Compute hash
-		entryHash, err := chainEntry(eventID, ts, event.EventType, event.Category, event.Detail, event.Blocked, event.SessionID, prevHashHex)
+		// Compute hash and sign the same canonical bytes.
+		cb := canonicalBytes(eventID, ts, event.EventType, event.Category, event.Detail, event.Blocked, event.SessionID)
+		entryHash, err := chainEntryFromCanonical(cb, prevHashHex)
 		if err != nil {
 			return fmt.Errorf("failed to compute chain for event %d: %w", eventID, err)
 		}
+		entrySig := ""
+		if l.signer != nil {
+			entrySig = l.signer.signRow(cb)
+		}
 
-		// Update with computed hash
+		// Update with computed hash and signature
 		_, err = tx.Exec(
-			"UPDATE events SET entry_hash = ? WHERE id = ?",
-			entryHash, eventID,
+			"UPDATE events SET entry_hash = ?, entry_sig = ? WHERE id = ?",
+			entryHash, entrySig, eventID,
 		)
 		if err != nil {
 			return fmt.Errorf("failed to update event hash: %w", err)
@@ -401,9 +524,17 @@ func (l *Logger) LogBatch(events []Event) error {
 		return fmt.Errorf("failed to count events: %w", err)
 	}
 
+	headMeta, err := readHeadSignatureMetadata(tx)
+	if err != nil {
+		return fmt.Errorf("failed to read chain head signing metadata: %w", err)
+	}
+	headSig, err := signHead(l.signer, prevHashHex, count, headMeta)
+	if err != nil {
+		return fmt.Errorf("failed to sign chain head: %w", err)
+	}
 	_, err = tx.Exec(
-		"UPDATE chain_head SET entry_hash = ?, row_count = ? WHERE id = 1",
-		prevHashHex, count,
+		"UPDATE chain_head SET entry_hash = ?, row_count = ?, head_sig = ? WHERE id = 1",
+		prevHashHex, count, headSig,
 	)
 	if err != nil {
 		return fmt.Errorf("failed to update chain_head: %w", err)
@@ -576,6 +707,13 @@ func (l *Logger) Prune(olderThan time.Duration) (int, error) {
 	}
 	defer tx.Rollback()
 
+	if err := initChainHeadIfNeeded(tx); err != nil {
+		return 0, err
+	}
+	if err := l.ensureWritableSignerState(tx); err != nil {
+		return 0, err
+	}
+
 	// Delete old events
 	result, err := tx.Exec("DELETE FROM events WHERE timestamp < ?", cutoff)
 	if err != nil {
@@ -599,9 +737,21 @@ func (l *Logger) Prune(olderThan time.Duration) (int, error) {
 	err = tx.QueryRow("SELECT id, timestamp, event_type, category, detail, blocked, session_id FROM events ORDER BY id ASC LIMIT 1").
 		Scan(&firstID, &firstTS, &firstET, &firstCat, &firstDetail, &firstBlocked, &firstSID)
 	if err == sql.ErrNoRows {
-		// All events were pruned
-		_, err = tx.Exec("UPDATE chain_head SET entry_hash = ?, row_count = 0, pruned_at = ?, pruned_count = ? WHERE id = 1",
-			chainGenesisHashHex, time.Now().UTC().Format(time.RFC3339), pruneCount)
+		// All events were pruned. The head returns to genesis; re-sign it so an
+		// adopted log keeps an authentic head.
+		prunedAt := time.Now().UTC().Format(time.RFC3339)
+		headMeta, metaErr := readHeadSignatureMetadata(tx)
+		if metaErr != nil {
+			return 0, fmt.Errorf("failed to read chain head signing metadata after full prune: %w", metaErr)
+		}
+		headMeta.prunedAt = &prunedAt
+		headMeta.prunedCount = &pruneCount
+		headSig, signErr := signHead(l.signer, chainGenesisHashHex, 0, headMeta)
+		if signErr != nil {
+			return 0, fmt.Errorf("failed to sign chain head after full prune: %w", signErr)
+		}
+		_, err = tx.Exec("UPDATE chain_head SET entry_hash = ?, row_count = 0, pruned_at = ?, pruned_count = ?, head_sig = ? WHERE id = 1",
+			chainGenesisHashHex, prunedAt, pruneCount, headSig)
 		if err != nil {
 			return 0, fmt.Errorf("failed to update chain_head after full prune: %w", err)
 		}
@@ -665,8 +815,19 @@ func (l *Logger) Prune(olderThan time.Duration) (int, error) {
 		return 0, fmt.Errorf("failed to count events after prune: %w", err)
 	}
 
-	_, err = tx.Exec("UPDATE chain_head SET entry_hash = ?, row_count = ?, pruned_at = ?, pruned_count = ? WHERE id = 1",
-		prevHashHex, count, time.Now().UTC().Format(time.RFC3339), pruneCount)
+	prunedAt := time.Now().UTC().Format(time.RFC3339)
+	headMeta, err := readHeadSignatureMetadata(tx)
+	if err != nil {
+		return 0, fmt.Errorf("failed to read chain head signing metadata after re-anchor: %w", err)
+	}
+	headMeta.prunedAt = &prunedAt
+	headMeta.prunedCount = &pruneCount
+	headSig, err := signHead(l.signer, prevHashHex, count, headMeta)
+	if err != nil {
+		return 0, fmt.Errorf("failed to sign chain head after re-anchor: %w", err)
+	}
+	_, err = tx.Exec("UPDATE chain_head SET entry_hash = ?, row_count = ?, pruned_at = ?, pruned_count = ?, head_sig = ? WHERE id = 1",
+		prevHashHex, count, prunedAt, pruneCount, headSig)
 	if err != nil {
 		return 0, fmt.Errorf("failed to update chain_head after re-anchor: %w", err)
 	}
@@ -729,7 +890,14 @@ func canonicalBytes(id int64, ts string, et EventType, cat, detail string, block
 // prevHashHex is the hex-encoded previous entry_hash (or 64 zeros for genesis).
 // Returns (entry_hash hex string, error).
 func chainEntry(id int64, ts string, et EventType, cat, detail string, blocked bool, sid, prevHashHex string) (string, error) {
-	// Decode previous hash from hex to bytes
+	cb := canonicalBytes(id, ts, et, cat, detail, blocked, sid)
+	return chainEntryFromCanonical(cb, prevHashHex)
+}
+
+// chainEntryFromCanonical computes the entry_hash from already-encoded canonical
+// bytes and the previous hash. Split out so the signing path can hash and sign
+// the exact same canonical byte string without encoding it twice.
+func chainEntryFromCanonical(cb []byte, prevHashHex string) (string, error) {
 	prevHashBytes, err := hex.DecodeString(prevHashHex)
 	if err != nil {
 		return "", fmt.Errorf("invalid prev_hash hex: %w", err)
@@ -738,13 +906,11 @@ func chainEntry(id int64, ts string, et EventType, cat, detail string, blocked b
 		return "", fmt.Errorf("prev_hash must be 32 bytes, got %d", len(prevHashBytes))
 	}
 
-	// Compute canonical bytes for this row
-	cb := canonicalBytes(id, ts, et, cat, detail, blocked, sid)
-
-	// Concatenate canonical bytes with previous hash bytes
-	toHash := append(cb, prevHashBytes...)
-
-	// SHA256
+	// Concatenate canonical bytes with previous hash bytes, then SHA-256.
+	// A fresh slice avoids aliasing the caller's cb (append could grow in place).
+	toHash := make([]byte, 0, len(cb)+len(prevHashBytes))
+	toHash = append(toHash, cb...)
+	toHash = append(toHash, prevHashBytes...)
 	h := sha256.Sum256(toHash)
 
 	return hex.EncodeToString(h[:]), nil
@@ -808,6 +974,199 @@ func countEvents(tx *sql.Tx) (int, error) {
 	var count int
 	err := tx.QueryRow("SELECT COUNT(*) FROM events").Scan(&count)
 	return count, err
+}
+
+// columnSet returns the set of column names on a table.
+func columnSet(db *sql.DB, table string) (map[string]bool, error) {
+	rows, err := db.Query(fmt.Sprintf("PRAGMA table_info(%s)", table))
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	cols := map[string]bool{}
+	for rows.Next() {
+		var cid int
+		var name, typ string
+		var notnull int
+		var dflt *string
+		var pk int
+		if err := rows.Scan(&cid, &name, &typ, &notnull, &dflt, &pk); err != nil {
+			return nil, err
+		}
+		cols[name] = true
+	}
+	return cols, rows.Err()
+}
+
+// migrateSigColumns adds the v1.1 signature columns to an existing DB that
+// predates signing (a v1 hash-chain DB has the hash columns but not these).
+// Idempotent: it only ALTERs columns that are missing.
+func migrateSigColumns(db *sql.DB) error {
+	eventCols, err := columnSet(db, "events")
+	if err != nil {
+		return err
+	}
+	headCols, err := columnSet(db, "chain_head")
+	if err != nil {
+		return err
+	}
+
+	var alters []string
+	if !eventCols["entry_sig"] {
+		alters = append(alters, "ALTER TABLE events ADD COLUMN entry_sig TEXT NOT NULL DEFAULT ''")
+	}
+	if !headCols["head_sig"] {
+		alters = append(alters, "ALTER TABLE chain_head ADD COLUMN head_sig TEXT NOT NULL DEFAULT ''")
+	}
+	if !headCols["signed_genesis_at"] {
+		alters = append(alters, "ALTER TABLE chain_head ADD COLUMN signed_genesis_at TEXT")
+	}
+	if !headCols["unsigned_through_id"] {
+		alters = append(alters, "ALTER TABLE chain_head ADD COLUMN unsigned_through_id INTEGER")
+	}
+	if !headCols["signing_pubkey_fingerprint"] {
+		alters = append(alters, "ALTER TABLE chain_head ADD COLUMN signing_pubkey_fingerprint TEXT NOT NULL DEFAULT ''")
+	}
+	if len(alters) == 0 {
+		return nil
+	}
+
+	tx, err := db.Begin()
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	for _, stmt := range alters {
+		if _, err := tx.Exec(stmt); err != nil {
+			return fmt.Errorf("failed to add signature column (%s): %w", stmt, err)
+		}
+	}
+	return tx.Commit()
+}
+
+// signingAlreadyAdopted reports whether this log has a signing-adoption marker.
+// It is checked before loading a key so an adopted log never creates a silent
+// replacement key when its original managed key is missing.
+func signingAlreadyAdopted(db *sql.DB) (bool, error) {
+	var genesis *string
+	err := db.QueryRow("SELECT signed_genesis_at FROM chain_head WHERE id = 1").Scan(&genesis)
+	if err == sql.ErrNoRows {
+		return false, nil
+	}
+	if err != nil {
+		return false, err
+	}
+	return genesis != nil, nil
+}
+
+// readHeadSignatureMetadata loads all chain_head fields authenticated by the
+// versioned head signature.
+func readHeadSignatureMetadata(tx *sql.Tx) (headSignatureMetadata, error) {
+	var meta headSignatureMetadata
+	var fingerprint string
+	if err := tx.QueryRow(
+		"SELECT pruned_at, pruned_count, signed_genesis_at, unsigned_through_id, signing_pubkey_fingerprint FROM chain_head WHERE id = 1",
+	).Scan(&meta.prunedAt, &meta.prunedCount, &meta.signedGenesisAt, &meta.unsignedThroughID, &fingerprint); err != nil {
+		return headSignatureMetadata{}, err
+	}
+	meta.publicKeyFingerprintHex = fingerprint
+	return meta, nil
+}
+
+// adoptSigningIfNeeded records the signing genesis marker on the first signed
+// open of a log: it stamps signed_genesis_at and unsigned_through_id (the
+// highest id predating signing) and signs the current head. Rows written before
+// this point stay unsigned; everything after is signed forward.
+func adoptSigningIfNeeded(db *sql.DB, s *signer) error {
+	tx, err := db.Begin()
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+
+	if err := initChainHeadIfNeeded(tx); err != nil {
+		return err
+	}
+
+	var genesis *string
+	var fingerprint string
+	if err := tx.QueryRow("SELECT signed_genesis_at, signing_pubkey_fingerprint FROM chain_head WHERE id = 1").Scan(&genesis, &fingerprint); err != nil {
+		return fmt.Errorf("failed to read signing genesis: %w", err)
+	}
+	if genesis != nil {
+		if fingerprint == "" {
+			return fmt.Errorf("audit log signing metadata has no public key fingerprint; refusing to write")
+		}
+		if fingerprint != publicKeyFingerprint(s.pub) {
+			return fmt.Errorf("audit log signing key does not match the adopted public key fingerprint; refusing to write")
+		}
+		var headHash, headSig string
+		var rowCount int
+		if err := tx.QueryRow("SELECT entry_hash, row_count, head_sig FROM chain_head WHERE id = 1").Scan(&headHash, &rowCount, &headSig); err != nil {
+			return fmt.Errorf("failed to read chain head for signing key validation: %w", err)
+		}
+		headMeta, err := readHeadSignatureMetadata(tx)
+		if err != nil {
+			return fmt.Errorf("failed to read chain head signing metadata for key validation: %w", err)
+		}
+		if headSig == "" || !verifyHeadSig(s.pub, headHash, rowCount, headMeta, headSig) {
+			return fmt.Errorf("audit log signing key does not verify the adopted chain head; refusing to write")
+		}
+		// Already adopted with the same key.
+		return tx.Commit()
+	}
+
+	var maxID int64
+	if err := tx.QueryRow("SELECT COALESCE(MAX(id), 0) FROM events").Scan(&maxID); err != nil {
+		return fmt.Errorf("failed to read max event id: %w", err)
+	}
+
+	var headHash string
+	var rowCount int
+	if err := tx.QueryRow("SELECT entry_hash, row_count FROM chain_head WHERE id = 1").Scan(&headHash, &rowCount); err != nil {
+		return fmt.Errorf("failed to read chain head for adoption: %w", err)
+	}
+	signedGenesisAt := time.Now().UTC().Format(time.RFC3339)
+	_, err = tx.Exec(
+		"UPDATE chain_head SET signed_genesis_at = ?, unsigned_through_id = ?, signing_pubkey_fingerprint = ? WHERE id = 1",
+		signedGenesisAt, maxID, publicKeyFingerprint(s.pub),
+	)
+	if err != nil {
+		return fmt.Errorf("failed to write signing genesis marker: %w", err)
+	}
+	headMeta, err := readHeadSignatureMetadata(tx)
+	if err != nil {
+		return fmt.Errorf("failed to read chain head signing metadata at adoption: %w", err)
+	}
+	headSig, err := signHead(s, headHash, rowCount, headMeta)
+	if err != nil {
+		return fmt.Errorf("failed to sign chain head at adoption: %w", err)
+	}
+	if _, err = tx.Exec("UPDATE chain_head SET head_sig = ? WHERE id = 1", headSig); err != nil {
+		return fmt.Errorf("failed to sign chain head at adoption: %w", err)
+	}
+	return tx.Commit()
+}
+
+// ensureWritableSignerState fails closed: if signing has been adopted for this
+// log but this Logger holds no key, no write may proceed. This makes an
+// unsigned write (or a prune) after adoption impossible, not merely detectable.
+func (l *Logger) ensureWritableSignerState(tx *sql.Tx) error {
+	if l.signer != nil {
+		return nil
+	}
+	var genesis *string
+	err := tx.QueryRow("SELECT signed_genesis_at FROM chain_head WHERE id = 1").Scan(&genesis)
+	if err == sql.ErrNoRows {
+		return nil
+	}
+	if err != nil {
+		return fmt.Errorf("failed to check signing state: %w", err)
+	}
+	if genesis != nil {
+		return fmt.Errorf("audit log has adopted Ed25519 signing but no signing key is loaded; refusing to write unsigned (open with WithSigning)")
+	}
+	return nil
 }
 
 // migrateToChain adds hash columns to existing DBs and chains existing rows.
@@ -915,9 +1274,28 @@ func migrateToChain(db *sql.DB) error {
 	return tx.Commit()
 }
 
-// VerifyChain walks the hash chain from genesis and returns the verification result.
+// VerifyChain walks the hash chain from genesis and returns the verification
+// result. It performs hash-only (CONSISTENCY) verification: it counts any
+// signatures present but does not check them. Use VerifyChainSigned to verify
+// authenticity against a public key.
 func (l *Logger) VerifyChain() (*ChainVerifyResult, error) {
-	result := &ChainVerifyResult{}
+	return l.verifyChain(nil, false)
+}
+
+// VerifyChainSigned walks the hash chain and, using the supplied Ed25519 public
+// key, verifies every post-adoption row signature and the chain_head signature.
+// A nil key falls back to hash-only verification (equivalent to VerifyChain).
+// When requireSigned is true, a missing signing-adoption record is FORGED rather
+// than an unsigned fallback. Use it only when the caller has an external
+// expectation that this log was signed, such as an explicitly supplied key.
+// The three states — AUTHENTIC, CONSISTENT/UNSIGNED, FORGED/TAMPERED — are kept
+// distinct in the result and never conflated.
+func (l *Logger) VerifyChainSigned(pub ed25519.PublicKey, requireSigned bool) (*ChainVerifyResult, error) {
+	return l.verifyChain(pub, requireSigned)
+}
+
+func (l *Logger) verifyChain(pub ed25519.PublicKey, requireSigned bool) (*ChainVerifyResult, error) {
+	result := &ChainVerifyResult{PubKeyProvided: pub != nil}
 	tx, err := l.db.Begin()
 	if err != nil {
 		return nil, fmt.Errorf("failed to begin chain verification transaction: %w", err)
@@ -931,13 +1309,26 @@ func (l *Logger) VerifyChain() (*ChainVerifyResult, error) {
 	var legacyID *int64
 	var prunedAtStr *string
 	var prunedCountVal *int
+	var headSig string
+	var signedGenesisStr *string
+	var unsignedThroughID *int64
+	var publicKeyFingerprintHex string
 	err = tx.QueryRow(
-		"SELECT entry_hash, row_count, migrated_at, legacy_through_id, pruned_at, pruned_count FROM chain_head WHERE id = 1",
-	).Scan(&headHash, &rowCount, &migratedAtStr, &legacyID, &prunedAtStr, &prunedCountVal)
+		"SELECT entry_hash, row_count, migrated_at, legacy_through_id, pruned_at, pruned_count, head_sig, signed_genesis_at, unsigned_through_id, signing_pubkey_fingerprint FROM chain_head WHERE id = 1",
+	).Scan(&headHash, &rowCount, &migratedAtStr, &legacyID, &prunedAtStr, &prunedCountVal, &headSig, &signedGenesisStr, &unsignedThroughID, &publicKeyFingerprintHex)
 	if err == sql.ErrNoRows {
-		// Empty log
+		// No chain_head row at all: there is nothing to walk, so the (empty)
+		// chain is intact. It is NOT automatically a clean signed pass: a signed
+		// check that was explicitly required still has no adoption marker here,
+		// which is "suspect" exactly as for a populated log. Otherwise a writer
+		// could delete every row and reset the head to downgrade a required
+		// check to an unsigned pass.
 		result.HeadHash = chainGenesisHashHex
 		result.Intact = true
+		result.SigState = classifySigState(pub, false, false, 0, requireSigned)
+		if result.SigState == "suspect" {
+			result.SigBrokenReason = suspectSigReason
+		}
 		return result, nil
 	}
 	if err != nil {
@@ -945,10 +1336,10 @@ func (l *Logger) VerifyChain() (*ChainVerifyResult, error) {
 	}
 
 	result.HeadHash = headHash
+	result.HeadSigned = headSig != ""
 
 	if migratedAtStr != nil {
-		t, err := time.Parse(time.RFC3339, *migratedAtStr)
-		if err == nil {
+		if t, err := time.Parse(time.RFC3339, *migratedAtStr); err == nil {
 			result.MigratedAt = &t
 		}
 	}
@@ -956,30 +1347,56 @@ func (l *Logger) VerifyChain() (*ChainVerifyResult, error) {
 		result.LegacyThroughID = *legacyID
 	}
 	if prunedAtStr != nil {
-		t, err := time.Parse(time.RFC3339, *prunedAtStr)
-		if err == nil {
+		if t, err := time.Parse(time.RFC3339, *prunedAtStr); err == nil {
 			result.PrunedAt = &t
 		}
 	}
 	if prunedCountVal != nil {
 		result.PrunedCount = *prunedCountVal
 	}
+	adopted := signedGenesisStr != nil
+	if adopted {
+		if t, err := time.Parse(time.RFC3339, *signedGenesisStr); err == nil {
+			result.SignedGenesisAt = &t
+		}
+	}
+	if unsignedThroughID != nil {
+		result.UnsignedThroughID = *unsignedThroughID
+	}
+	headMeta := headSignatureMetadata{
+		prunedAt:                prunedAtStr,
+		prunedCount:             prunedCountVal,
+		signedGenesisAt:         signedGenesisStr,
+		unsignedThroughID:       unsignedThroughID,
+		publicKeyFingerprintHex: publicKeyFingerprintHex,
+	}
 
 	// Get all events in order
 	rows, err := tx.Query(
-		"SELECT id, timestamp, event_type, category, detail, blocked, session_id, prev_hash, entry_hash FROM events ORDER BY id ASC",
+		"SELECT id, timestamp, event_type, category, detail, blocked, session_id, prev_hash, entry_hash, entry_sig FROM events ORDER BY id ASC",
 	)
 	if err != nil {
 		return nil, fmt.Errorf("failed to query events for verification: %w", err)
 	}
 	defer rows.Close()
 
+	sigForged := false
+	if pub != nil && adopted {
+		switch {
+		case publicKeyFingerprintHex == "":
+			sigForged = true
+			result.SigBrokenReason = "chain_head signing public key fingerprint missing after signing adoption"
+		case publicKeyFingerprintHex != publicKeyFingerprint(pub):
+			sigForged = true
+			result.SigBrokenReason = "chain_head signing public key fingerprint does not match the supplied key"
+		}
+	}
 	prevHashHex := chainGenesisHashHex
 	for rows.Next() {
 		var id int64
-		var ts, et, cat, detail, sid, storedPrevHash, storedEntryHash string
+		var ts, et, cat, detail, sid, storedPrevHash, storedEntryHash, storedSig string
 		var blocked int
-		if err := rows.Scan(&id, &ts, &et, &cat, &detail, &blocked, &sid, &storedPrevHash, &storedEntryHash); err != nil {
+		if err := rows.Scan(&id, &ts, &et, &cat, &detail, &blocked, &sid, &storedPrevHash, &storedEntryHash, &storedSig); err != nil {
 			return nil, fmt.Errorf("failed to scan event row: %w", err)
 		}
 
@@ -999,8 +1416,9 @@ func (l *Logger) VerifyChain() (*ChainVerifyResult, error) {
 			return result, nil
 		}
 
-		// Recompute entry_hash
-		expectedHash, err := chainEntry(id, ts, EventType(et), cat, detail, blocked != 0, sid, prevHashHex)
+		// Recompute entry_hash over the canonical bytes (reused for signature check).
+		cb := canonicalBytes(id, ts, EventType(et), cat, detail, blocked != 0, sid)
+		expectedHash, err := chainEntryFromCanonical(cb, prevHashHex)
 		if err != nil {
 			result.Intact = false
 			result.FirstBrokenID = id
@@ -1015,14 +1433,47 @@ func (l *Logger) VerifyChain() (*ChainVerifyResult, error) {
 			return result, nil
 		}
 
+		// Signature accounting and, when a key is present, verification.
+		if storedSig != "" {
+			result.SignedEntries++
+			if pub != nil && !sigForged {
+				if verifyRowSig(pub, cb, storedSig) {
+					result.SigVerified++
+				} else {
+					sigForged = true
+					result.SigBrokenID = id
+					result.SigBrokenReason = fmt.Sprintf("entry %d: signature does not verify against the key", id)
+				}
+			}
+		} else {
+			result.UnsignedEntries++
+			// A post-adoption row with no signature is a stripped signature — a
+			// forgery signal, not a benign pre-adoption row.
+			if pub != nil && !sigForged && adopted && id > result.UnsignedThroughID {
+				sigForged = true
+				result.SigBrokenID = id
+				result.SigBrokenReason = fmt.Sprintf("entry %d: signature missing after signing adoption (stripped)", id)
+			}
+		}
+
 		prevHashHex = storedEntryHash
 		result.EntriesVerified++
 	}
 	if err := rows.Err(); err != nil {
 		return nil, fmt.Errorf("error iterating events during verification: %w", err)
 	}
+	if pub != nil && !adopted && (headSig != "" || publicKeyFingerprintHex != "" || result.SignedEntries > 0) {
+		// Signing artifacts remain but the adoption marker is gone — a genuine
+		// inconsistency (a partial strip), so report it forged rather than a
+		// downgraded unsigned pass. A COMPLETE strip leaves no artifacts here;
+		// when the caller explicitly required signing that surfaces as the
+		// distinct "suspect" state below (classifySigState), so a fully stripped
+		// log is never a clean pass either.
+		sigForged = true
+		result.SigBrokenReason = "signing artifacts are present but the signing adoption marker is missing"
+	}
 
-	// Check chain_head consistency
+	// Check chain_head consistency (hash layer)
 	actualRowCount := result.EntriesVerified
 	if rowCount != actualRowCount {
 		result.Intact = false
@@ -1037,5 +1488,71 @@ func (l *Logger) VerifyChain() (*ChainVerifyResult, error) {
 	}
 
 	result.Intact = true
+
+	// Verify the chain_head signature. Signing the head is what upgrades
+	// tail-truncation resistance: an attacker rewriting the head in lockstep
+	// still needs the key.
+	if pub != nil && !sigForged && adopted {
+		if headSig == "" {
+			sigForged = true
+			result.SigBrokenReason = "chain_head signature missing after signing adoption (stripped)"
+		} else if !verifyHeadSig(pub, headHash, rowCount, headMeta, headSig) {
+			sigForged = true
+			result.SigBrokenReason = "chain_head signature does not verify against the key"
+		}
+	}
+
+	result.SigState = classifySigState(pub, adopted, sigForged, result.SignedEntries, requireSigned)
+	if result.SigState == "suspect" {
+		result.SigBrokenReason = suspectSigReason
+	}
 	return result, nil
+}
+
+// suspectSigReason explains the "suspect" state. It applies whether or not the
+// log still has events: a log with zero rows and no adoption marker is exactly
+// what a complete deletion leaves behind.
+const suspectSigReason = "signed verification was required (an Ed25519 public key was explicitly supplied) but the log carries no signatures and no adoption markers; if this log was expected to be signed, its signatures may have been fully stripped or every row deleted. Distinguishing a never-signed log from a fully stripped one requires an external head anchor (scoped follow-on)."
+
+// classifySigState maps the walk outcome to one of the distinct signature
+// states, never conflating them.
+//
+// The "suspect" state closes a No-Silent-Success gap: a writer who clears EVERY
+// signing artifact (all entry_sig, head_sig, signed_genesis_at,
+// unsigned_through_id, signing_pubkey_fingerprint) makes an adopted, tampered
+// log look never-adopted — on disk it is indistinguishable from a log that was
+// legitimately never signed. When the caller EXPLICITLY required signing
+// (requireSigned, i.e. an --ed25519-pub was supplied) and the log carries no
+// signatures and no adoption markers, that is reported "suspect", never a
+// clean pass. This holds regardless of how many events remain: deleting every
+// row and resetting chain_head to genesis is a truncation to zero, and the
+// signed head exists precisely so truncation cannot pass a required check. A
+// merely derived key (from the local key file) is not an assertion about this
+// particular log, so a genuinely unsigned log stays "unsigned". Telling a
+// never-signed log apart from a fully stripped one cryptographically needs an
+// external head anchor (scoped follow-on).
+func classifySigState(pub ed25519.PublicKey, adopted, sigForged bool, signedEntries int, requireSigned bool) string {
+	if sigForged {
+		return "forged"
+	}
+	if pub == nil {
+		if signedEntries > 0 {
+			// Signatures exist but we cannot check them without the key —
+			// never report this as authentic.
+			return "unverified"
+		}
+		return "unsigned"
+	}
+	if !adopted {
+		// A key is available but the log has no adoption marker (partial
+		// artifacts are already "forged" above). If the caller explicitly
+		// required signing, a full strip — or a complete deletion — is
+		// indistinguishable from never-signed on disk, so report the honest,
+		// non-clean "suspect" rather than passing.
+		if requireSigned {
+			return "suspect"
+		}
+		return "unsigned"
+	}
+	return "authentic"
 }
