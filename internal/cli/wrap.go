@@ -168,6 +168,33 @@ var wrapCmd = &cobra.Command{
 			fmt.Fprintf(os.Stderr, "NockLock: secret fence active — no variables blocked\n")
 		}
 
+		// Create the per-session egress decision-log (netns path only) BEFORE the
+		// filesystem fence assembles its deny list, so its directory can be denied
+		// to the child below. The fenced child runs as the SAME uid as wrap, so an
+		// undenied decision log lets a hardened child append FORGED allow/deny
+		// records that wrap would then sign into the audit chain — a forgeable
+		// egress receipt in exactly the config meant to be trustworthy. It is
+		// wrap-user-owned, mode 0600, in a 0700 per-session temp dir; the
+		// transparent proxy opens it as root before it drops to nobody, and wrap's
+		// reader streams it into the signed log. No pre-existing session/bridge temp
+		// dir exists in wrap, so one is created here per session and removed on exit.
+		var decisionLogPath string
+		var decisionLogDir string
+		if useNetns {
+			dir, dirErr := os.MkdirTemp("", "nocklock-egress-decisions-")
+			if dirErr != nil {
+				return fmt.Errorf("create egress decision-log directory: %w", dirErr)
+			}
+			defer os.RemoveAll(dir)
+			decisionLogDir = dir
+			decisionLogPath = filepath.Join(dir, "decisions.log")
+			decisionFile, fileErr := os.OpenFile(decisionLogPath, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o600)
+			if fileErr != nil {
+				return fmt.Errorf("create egress decision-log file: %w", fileErr)
+			}
+			_ = decisionFile.Close()
+		}
+
 		// Apply filesystem fence. Linux: LD_PRELOAD interposition. macOS: Seatbelt
 		// (sandbox-exec) — fsSandboxPrefix wraps the child argv at launch.
 		var fsFenceEvents <-chan fsfence.FenceEvent
@@ -179,8 +206,13 @@ var wrapCmd = &cobra.Command{
 			// Fence the audit log from the CHILD so the fenced agent can't delete
 			// or corrupt the record of its own actions (the unfenced parent still
 			// writes it). Critical on the macOS denylist fence, where the child can
-			// otherwise reach the db unless it's explicitly denied.
-			cfg.Filesystem.Deny = append(cfg.Filesystem.Deny, auditDenyPath(dbPath, projectRoot))
+			// otherwise reach the db unless it's explicitly denied. On the netns
+			// path this also denies the whole egress decision-log dir (see
+			// egressChildDenyPaths) so the child cannot forge signed egress rows.
+			// Like the audit DB, the decision log's integrity against the child
+			// requires the fs fence ON; with no fs fence the child can already
+			// tamper events.db directly, so this is consistent, not a new gap.
+			cfg.Filesystem.Deny = append(cfg.Filesystem.Deny, egressChildDenyPaths(dbPath, projectRoot, decisionLogDir)...)
 
 			fsCfg, err := fsfence.ProcessConfig(cfg.Filesystem)
 			if err != nil {
@@ -310,8 +342,9 @@ var wrapCmd = &cobra.Command{
 		// DB handle or signing key, so it cannot sign an audit row. It instead
 		// appends plain records to a wrap-owned decision-log file; this parent —
 		// which holds the signing key — streams those records into the signed,
-		// hash-chained event log below. These are set only on the useNetns path.
-		var decisionLogPath string
+		// hash-chained event log below. decisionLogPath/decisionLogDir are created
+		// above (before the fs fence) so the child can be denied the log; these two
+		// carry the reader lifecycle and are used only on the useNetns path.
 		var decisionReaderWg sync.WaitGroup
 		decisionDone := make(chan struct{})
 
@@ -341,27 +374,9 @@ var wrapCmd = &cobra.Command{
 				AllowPrivateRanges: effectiveCfg.Network.AllowPrivateRanges,
 				Bridge:             candidate,
 			}
-
-			// Create the per-session egress decision-log file BEFORE spawning the
-			// netns child. It is owned by THIS (wrap) user, mode 0600, in a 0700
-			// per-session temp dir. The transparent proxy opens it as root — before
-			// it drops to the shared nobody uid — and appends allow/deny records;
-			// wrap reads them below and signs each into the audit trail. Note: no
-			// pre-existing session/bridge temp dir exists in wrap, so one is created
-			// here per session and removed on exit. Creation must NOT be deferred to
-			// the proxy: the proxy runs as the shared uid 65534 and the file must be
-			// wrap-user-owned, not nobody-writable.
-			decisionDir, dirErr := os.MkdirTemp("", "nocklock-egress-decisions-")
-			if dirErr != nil {
-				return fmt.Errorf("create egress decision-log directory: %w", dirErr)
-			}
-			defer os.RemoveAll(decisionDir)
-			decisionLogPath = filepath.Join(decisionDir, "decisions.log")
-			decisionFile, fileErr := os.OpenFile(decisionLogPath, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o600)
-			if fileErr != nil {
-				return fmt.Errorf("create egress decision-log file: %w", fileErr)
-			}
-			_ = decisionFile.Close()
+			// The decision-log file was created above (before the fs fence) so its
+			// directory could be added to the child's deny list; hand its path to
+			// the sidecars so the transparent proxy appends decisions to it.
 			netnsEgress.DecisionLogPath = decisionLogPath
 
 			logEvent(logging.EventNetworkPassed, "network", fmt.Sprintf("netns tproxy egress fence active domains=%d", len(netnsEgress.Allow)), false)
@@ -748,6 +763,22 @@ func auditDenyPath(dbPath, projectRoot string) string {
 		return auditDir
 	}
 	return dbPath
+}
+
+// egressChildDenyPaths returns the paths the fenced child must be denied so it
+// cannot tamper with the records the unfenced parent signs into the audit trail:
+// the audit DB (via auditDenyPath) always, plus — on the netns egress path — the
+// WHOLE egress decision-log directory (decisionLogDir, empty otherwise). Denying
+// the directory, not just the file, stops the child (which shares wrap's uid)
+// from truncating the log, creating sibling files, or traversing in to forge the
+// signed egress rows. Factored out so the deny-list assembly is unit-testable
+// without root.
+func egressChildDenyPaths(dbPath, projectRoot, decisionLogDir string) []string {
+	paths := []string{auditDenyPath(dbPath, projectRoot)}
+	if decisionLogDir != "" {
+		paths = append(paths, decisionLogDir)
+	}
+	return paths
 }
 
 // resolvePathBestEffort canonicalizes a path the way the fence does (resolving

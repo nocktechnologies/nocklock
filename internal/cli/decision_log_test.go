@@ -1,6 +1,7 @@
 package cli
 
 import (
+	"path/filepath"
 	"testing"
 
 	"github.com/nocktechnologies/nocklock/internal/logging"
@@ -105,4 +106,42 @@ func TestDecisionLogScannerSkipsMalformed(t *testing.T) {
 	if sink.events[0].EventType != logging.EventNetworkPassed || sink.events[1].EventType != logging.EventNetworkBlocked {
 		t.Errorf("unexpected event ordering/types: %+v", sink.events)
 	}
+}
+
+// TestEgressChildDenyPaths confirms the fenced child's deny list always includes
+// the audit DB path and, on the netns egress path, the whole egress decision-log
+// directory — closing the forgeable-receipt hole (the child shares wrap's uid).
+// With no decision-log dir (non-netns), only the audit path is denied.
+func TestEgressChildDenyPaths(t *testing.T) {
+	projectRoot := t.TempDir()
+	// Audit dir distinct from the project root so auditDenyPath returns the dir.
+	dbPath := filepath.Join(projectRoot, ".nock", "events.db")
+
+	// netns path: decision-log dir present -> must be denied alongside the audit path.
+	decisionDir := t.TempDir()
+	got := egressChildDenyPaths(dbPath, projectRoot, decisionDir)
+	if !containsPath(got, decisionDir) {
+		t.Errorf("netns deny list %v does not include the decision-log dir %q", got, decisionDir)
+	}
+	if !containsPath(got, filepath.Dir(dbPath)) {
+		t.Errorf("netns deny list %v does not include the audit dir %q", got, filepath.Dir(dbPath))
+	}
+
+	// non-netns path: no decision-log dir -> only the audit path is denied.
+	got = egressChildDenyPaths(dbPath, projectRoot, "")
+	if len(got) != 1 {
+		t.Fatalf("non-netns deny list should hold exactly the audit path, got %v", got)
+	}
+	if containsPath(got, decisionDir) {
+		t.Errorf("non-netns deny list %v must not include a decision-log dir", got)
+	}
+}
+
+func containsPath(paths []string, want string) bool {
+	for _, p := range paths {
+		if p == want {
+			return true
+		}
+	}
+	return false
 }
