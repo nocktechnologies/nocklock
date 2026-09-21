@@ -1,6 +1,7 @@
 package cli
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -9,6 +10,7 @@ import (
 	"os"
 	"runtime"
 	"strings"
+	"syscall"
 	"time"
 
 	"github.com/nocktechnologies/nocklock/internal/config"
@@ -63,6 +65,7 @@ type doctorCapabilities struct {
 	syscallBackend func() bool
 	networkBackend func() error
 	sandboxExec    func() error
+	egressHelper   func() egressHelperState
 	now            func() time.Time
 }
 
@@ -73,6 +76,7 @@ var currentDoctorCapabilities = doctorCapabilities{
 	syscallBackend: syscallfence.Supported,
 	networkBackend: localProxyBackendAvailable,
 	sandboxExec:    fsfence.EnsureSandboxExecAvailable,
+	egressHelper:   defaultEgressHelperState,
 	now:            time.Now,
 }
 
@@ -147,6 +151,7 @@ func runDoctor(caps doctorCapabilities) doctorReport {
 	checks = append(checks, syscallDoctorCheck(cfg, caps))
 	checks = append(checks, networkDoctorCheck(cfg, caps))
 	checks = append(checks, secretDoctorCheck(cfg))
+	checks = append(checks, egressHelperDoctorCheck(caps))
 	checks = append(checks, sanityDoctorChecks(cfg, caps)...)
 
 	activity := doctorActivityCheck(cfg, configPath, caps.now())
@@ -262,6 +267,92 @@ func networkDoctorCheck(cfg *config.Config, caps doctorCapabilities) doctorCheck
 			"fix local proxy startup before wrapping agents")
 	}
 	return doctorOKCheck("Fences", "network", "enforceable", "Network fence proxy backend is available.")
+}
+
+// egressHelperState captures the host facts the egress-helper doctor check
+// needs: whether the privileged helper exists at the fixed netnsHelperPath, is a
+// regular root-owned executable, and is reachable through passwordless sudo.
+type egressHelperState struct {
+	exists     bool
+	regular    bool
+	rootOwned  bool
+	executable bool
+	sudoOK     bool
+}
+
+// defaultEgressHelperState is the production probe: it stats the helper at the
+// single-sourced netnsHelperPath and, only if that looks installed, runs the
+// non-mutating `sudo -n <helper> check` (bounded by a short context timeout, and
+// never interactive — sudo -n fails immediately without a NOPASSWD grant).
+func defaultEgressHelperState() egressHelperState {
+	st := egressHelperState{}
+	fi, err := os.Stat(netnsHelperPath)
+	if err != nil {
+		return st
+	}
+	st.exists = true
+	st.regular = fi.Mode().IsRegular()
+	st.executable = fi.Mode().Perm()&0o111 != 0
+	if sys, ok := fi.Sys().(*syscall.Stat_t); ok {
+		st.rootOwned = sys.Uid == 0
+	}
+	if !st.regular || !st.rootOwned || !st.executable {
+		return st
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	st.sudoOK = netnsHelperPreflight(ctx) == nil
+	return st
+}
+
+// egressHelperDoctorCheck reports whether the privileged Linux network-egress
+// helper is installed and reachable. It is a warning (not critical) when the
+// helper is absent or unreachable: the netns egress fence still fails closed at
+// runtime, so this is host-install ergonomics, not a live gap.
+func egressHelperDoctorCheck(caps doctorCapabilities) doctorCheck {
+	if caps.goos != "linux" {
+		return doctorCheck{
+			Group:    "Egress Helper",
+			Name:     "egress-helper",
+			Severity: doctorInfo,
+			Status:   "not-applicable",
+			Message:  "The privileged network-egress helper is Linux-only.",
+		}
+	}
+
+	probe := caps.egressHelper
+	if probe == nil {
+		probe = func() egressHelperState { return egressHelperState{} }
+	}
+	st := probe()
+
+	if st.exists && st.regular && st.rootOwned && st.executable && st.sudoOK {
+		return doctorOKCheck("Egress Helper", "egress-helper", "installed",
+			fmt.Sprintf("Privileged egress helper installed at %s (regular, root-owned, executable) and reachable via passwordless sudo.", netnsHelperPath))
+	}
+
+	var status, reason string
+	switch {
+	case !st.exists:
+		status, reason = "missing", fmt.Sprintf("it is not installed at %s", netnsHelperPath)
+	case !st.regular:
+		status, reason = "not-regular", fmt.Sprintf("%s is not a regular file", netnsHelperPath)
+	case !st.rootOwned:
+		status, reason = "not-root-owned", fmt.Sprintf("%s is not owned by root", netnsHelperPath)
+	case !st.executable:
+		status, reason = "not-executable", fmt.Sprintf("%s is not executable", netnsHelperPath)
+	default:
+		status, reason = "sudo-unreachable", fmt.Sprintf("passwordless sudo to `%s check` is not available (missing NOPASSWD sudoers grant)", netnsHelperPath)
+	}
+
+	return doctorCheck{
+		Group:    "Egress Helper",
+		Name:     "egress-helper",
+		Severity: doctorWarning,
+		Status:   status,
+		Message:  fmt.Sprintf("Privileged network-egress helper is not ready: %s. The netns egress fence will fail closed at runtime until it is installed.", reason),
+		Fix:      "install it with `sudo make install-egress-helper` (or `sudo NOCKLOCK_EGRESS_USER=<user> scripts/install-egress-helper.sh`) and add the NOPASSWD sudoers grant; see README ## Installation",
+	}
 }
 
 func secretDoctorCheck(cfg *config.Config) doctorCheck {

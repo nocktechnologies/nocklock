@@ -258,3 +258,71 @@ jobs:
         run: |
           NOCKLOCK_AUDIT_REQUIRE=1 NOCKLOCK_TEST_BIN=/usr/local/bin/nocklock \
             go test ./internal/cli/ -run '^TestWrapNetnsEgressDecisionAudit$' -v -count=1
+
+  egress-helper-install-readme:
+    name: egress helper install · shipped installer (README path)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      # The privileged `check` verb resolves `ip` and `nft`, so provision them —
+      # same as the sibling root jobs — or the preflight fails for reasons
+      # unrelated to the installer.
+      - name: provision iproute2 + nftables
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y iproute2 nftables
+
+      # Build AS THE RUNNER USER, then install the binary with sudo. We do NOT
+      # run `sudo make install` because sudo's secure_path drops setup-go's Go
+      # toolchain from PATH (and would build as root into the persisted cache);
+      # this mirrors the sibling netns-egress-audit job.
+      - name: build nocklock and install the binary
+        run: |
+          go build -o nocklock ./cmd/nocklock
+          sudo install -m 0755 nocklock /usr/local/bin/nocklock
+
+      # Install the helper by running THE SHIPPED SCRIPT — the README path — so CI
+      # exercises the real installer (root-owned shim + visudo-validated sudoers
+      # drop-in), not an inline tee. The scoped sudoers.d grant is additive to the
+      # hosted runner's NOPASSWD-ALL.
+      - name: install the egress helper via the shipped script
+        run: sudo scripts/install-egress-helper.sh
+
+      - name: assert the helper preflight succeeds
+        run: |
+          out=$(sudo -n /usr/libexec/nocklock-egress-helper check 2>&1) && rc=0 || rc=$?
+          if [ "$rc" -ne 0 ]; then
+            echo "helper preflight FAILED (rc=$rc): $out"
+            exit 1
+          fi
+          echo "helper preflight OK"
+
+      # Receipts that the scoped drop-in actually parsed (independent of the
+      # runner's blanket NOPASSWD): visudo -c parses the whole /etc/sudoers.d,
+      # and `sudo -l` must show the scoped helper commands.
+      - name: show the installed sudoers grant is parsed
+        run: |
+          ls -l /etc/sudoers.d/nocklock-egress
+          sudo visudo -c
+          sudo -l | grep -F nocklock-egress-helper
+
+      # `nocklock doctor` early-returns a critical "config missing" before any
+      # fence check runs, so init a config first. Run doctor as the runner user
+      # (not sudo) and don't let a possible exit-1 sink the step; then assert the
+      # egress-helper check is severity ok.
+      - name: assert nocklock doctor reports egress-helper ok
+        run: |
+          work=$(mktemp -d)
+          cd "$work"
+          nocklock init
+          nocklock doctor --json > doctor.json || true
+          cat doctor.json
+          jq -e '.checks[] | select(.name=="egress-helper") | .severity == "ok"' doctor.json

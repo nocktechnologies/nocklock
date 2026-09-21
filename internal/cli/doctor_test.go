@@ -264,6 +264,89 @@ func TestDoctorJSONShape(t *testing.T) {
 	}
 }
 
+func TestDoctorEgressHelperCheck(t *testing.T) {
+	cases := []struct {
+		name       string
+		goos       string
+		state      egressHelperState
+		wantSev    doctorSeverity
+		wantStatus string
+		wantFix    bool
+	}{
+		{
+			name:       "linux installed and reachable is ok",
+			goos:       "linux",
+			state:      egressHelperState{exists: true, regular: true, rootOwned: true, executable: true, sudoOK: true},
+			wantSev:    doctorOK,
+			wantStatus: "installed",
+			wantFix:    false,
+		},
+		{
+			name:       "linux missing is a warning with a fix",
+			goos:       "linux",
+			state:      egressHelperState{},
+			wantSev:    doctorWarning,
+			wantStatus: "missing",
+			wantFix:    true,
+		},
+		{
+			name:       "linux present but sudo unreachable is a warning",
+			goos:       "linux",
+			state:      egressHelperState{exists: true, regular: true, rootOwned: true, executable: true, sudoOK: false},
+			wantSev:    doctorWarning,
+			wantStatus: "sudo-unreachable",
+			wantFix:    true,
+		},
+		{
+			name:       "darwin is informational not-applicable",
+			goos:       "darwin",
+			state:      egressHelperState{},
+			wantSev:    doctorInfo,
+			wantStatus: "not-applicable",
+			wantFix:    false,
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			state := tc.state
+			caps := doctorCapabilities{
+				goos:         tc.goos,
+				egressHelper: func() egressHelperState { return state },
+			}
+			got := egressHelperDoctorCheck(caps)
+			if got.Name != "egress-helper" {
+				t.Fatalf("check name = %q, want egress-helper", got.Name)
+			}
+			if got.Severity != tc.wantSev {
+				t.Fatalf("severity = %q, want %q", got.Severity, tc.wantSev)
+			}
+			if got.Status != tc.wantStatus {
+				t.Fatalf("status = %q, want %q", got.Status, tc.wantStatus)
+			}
+			if tc.wantFix && got.Fix == "" {
+				t.Fatalf("expected a Fix for %q, got none (message: %s)", tc.name, got.Message)
+			}
+			if !tc.wantFix && got.Fix != "" {
+				t.Fatalf("did not expect a Fix for %q, got %q", tc.name, got.Fix)
+			}
+		})
+	}
+}
+
+func TestDoctorEgressHelperNilCapabilityDegradesToWarning(t *testing.T) {
+	// The six existing capability literals leave egressHelper nil; the check must
+	// degrade to a warning rather than panic.
+	caps := doctorCapabilities{goos: "linux"}
+	got := egressHelperDoctorCheck(caps)
+	if got.Severity != doctorWarning {
+		t.Fatalf("nil egress capability should degrade to a warning, got %q", got.Severity)
+	}
+	if got.Status != "missing" {
+		t.Fatalf("nil egress capability status = %q, want missing", got.Status)
+	}
+}
+
 func doctorTestTOML(allowAll bool) string {
 	toml := config.DefaultTOML()
 	if allowAll {
