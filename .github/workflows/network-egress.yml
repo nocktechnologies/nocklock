@@ -194,3 +194,53 @@ jobs:
       # proxy-death watchdog child termination.
       - name: run Phase-1b protocol matrix as root (skips forbidden)
         run: sudo env "PATH=/usr/local/bin:$PATH" NOCKLOCK_PROTOCOL_REQUIRE=1 ./netns.test -test.run '^TestNetnsProtocolMatrix$' -test.v -test.count=1
+
+  netns-egress-audit:
+    name: netns egress decision audit · signed rows via `nocklock wrap` (root)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: provision iproute2 + nftables + curl
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y iproute2 nftables curl
+
+      # Build the binary the acceptance test drives, and install the privileged
+      # helper the way the spec's HOST INSTALLER would: a fixed, root-owned entry
+      # at /usr/libexec/nocklock-egress-helper that maps the two sudoers vectors
+      # (`check`, `setup`) — plus the internal `__netns-*` sidecar re-execs — onto
+      # the nocklock binary. `exec` preserves the SUDO_UID/SUDO_GID the child
+      # credential check requires, and leaves os.Executable() pointing at the real
+      # binary so sidecar re-execs resolve correctly. On GitHub-hosted runners the
+      # default NOPASSWD-ALL sudoers already satisfies `sudo -n <helper> check`.
+      - name: build nocklock and install the privileged egress helper
+        run: |
+          go build -o nocklock ./cmd/nocklock
+          sudo install -m 0755 nocklock /usr/local/bin/nocklock
+          sudo mkdir -p /usr/libexec
+          sudo tee /usr/libexec/nocklock-egress-helper >/dev/null <<'EOF'
+          #!/bin/sh
+          exec /usr/local/bin/nocklock __netns-helper "$@"
+          EOF
+          sudo chmod 0755 /usr/libexec/nocklock-egress-helper
+          sudo -n /usr/libexec/nocklock-egress-helper check && echo "helper preflight OK"
+
+      # Run the acceptance test AS THE RUNNER USER (NOT under sudo): wrap sudo's
+      # the helper itself, and the fenced child drops to the invoking (runner)
+      # uid — a root invoker would be rejected as the child credential. This is
+      # the OPPOSITE of the matrix/foundation jobs, which invoke a compiled test
+      # binary under sudo. NOCKLOCK_AUDIT_REQUIRE=1 turns a would-be skip
+      # (helper/sudo unreachable) into a hard failure so a misconfigured runner is
+      # loud, not green. NOCKLOCK_TEST_BIN points the test at the installed binary.
+      - name: run egress decision audit acceptance test (runner user, skips forbidden)
+        run: |
+          NOCKLOCK_AUDIT_REQUIRE=1 NOCKLOCK_TEST_BIN=/usr/local/bin/nocklock \
+            go test ./internal/cli/ -run '^TestWrapNetnsEgressDecisionAudit$' -v -count=1
