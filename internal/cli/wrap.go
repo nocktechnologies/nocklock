@@ -104,6 +104,20 @@ var wrapCmd = &cobra.Command{
 		}
 		defer logger.Close()
 
+		// Auto-emit an external chain-head anchor on teardown (N10647). This is the
+		// hook a future NockCC push consumes so tail truncation and rollback become
+		// detectable off-box. Best-effort but LOGGED: a failure must not crash
+		// teardown (the session already ran), yet is never silently swallowed. LIFO
+		// defer order places this BEFORE logger.Close (it needs the open signer) and
+		// AFTER the SessionEnd event that every return path logs last. The anchor
+		// lands next to events.db, inside the audit dir the fenced child is denied.
+		defer func() {
+			anchorPath := logging.DefaultAnchorPath(dbPath)
+			if err := logger.EmitAnchorToFile(anchorPath); err != nil {
+				fmt.Fprintf(os.Stderr, "NockLock: warning: chain anchor not written to %s: %v\n", anchorPath, err)
+			}
+		}()
+
 		// logEvent records one event. logger is guaranteed non-nil here (the open
 		// above fails closed), so no nil guard is needed.
 		logEvent := func(eventType logging.EventType, category, detail string, blocked bool) {
