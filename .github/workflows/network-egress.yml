@@ -312,7 +312,7 @@ jobs:
         run: |
           ls -l /etc/sudoers.d/nocklock-egress
           sudo visudo -c
-          sudo -l | grep -F nocklock-egress-helper
+          sudo -n -l | grep -F nocklock-egress-helper
 
       # `nocklock doctor` early-returns a critical "config missing" before any
       # fence check runs, so init a config first. Run doctor as the runner user

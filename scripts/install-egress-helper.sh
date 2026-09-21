@@ -86,9 +86,13 @@ if ! id "$target_user" >/dev/null 2>&1; then
 fi
 
 # --- temp files, cleaned up on any exit ------------------------------------
+# The sudoers file is staged INSIDE /etc/sudoers.d as a dotted .tmp name: sudo
+# ignores any include filename containing a '.', so the staged file is inert even
+# if left behind, and the final move is an atomic same-directory rename (never a
+# truncated, host-breaking sudoers file).
 tmp_shim="$(mktemp)"
-tmp_sudoers="$(mktemp)"
-cleanup() { rm -f "$tmp_shim" "$tmp_sudoers"; }
+staged_sudoers="${SUDOERS_PATH}.tmp"
+cleanup() { rm -f "$tmp_shim" "$staged_sudoers"; }
 trap cleanup EXIT INT TERM
 
 # --- write the shim (byte-exact, proven in CI) -----------------------------
@@ -104,25 +108,29 @@ install -m 0755 -o root -g root "$tmp_shim" "$HELPER_PATH"
 # The two Cmnd_Alias lines are emitted from a quoted heredoc so the trailing
 # line-continuation backslash and its alignment survive verbatim; the user grant
 # is printed separately so the resolved user is substituted safely.
+mkdir -p "$(dirname "$SUDOERS_PATH")"
+rm -f "$staged_sudoers"
 {
 	cat <<'ALIAS'
 Cmnd_Alias NOCKLOCK_EGRESS = /usr/libexec/nocklock-egress-helper check, \
                              /usr/libexec/nocklock-egress-helper setup
 ALIAS
 	printf '%s ALL = (root) NOPASSWD: NOCKLOCK_EGRESS\n' "$target_user"
-} >"$tmp_sudoers"
+} >"$staged_sudoers"
 
-# Make the temp file match the real install state (root:root, 0440) BEFORE
+# Make the staged file match the real install state (root:root, 0440) BEFORE
 # validating: visudo -c checks owner and mode as well as syntax.
-chown root:root "$tmp_sudoers"
-chmod 0440 "$tmp_sudoers"
+chown root:root "$staged_sudoers"
+chmod 0440 "$staged_sudoers"
 
-if ! visudo -cf "$tmp_sudoers" >/dev/null 2>&1; then
-	visudo -cf "$tmp_sudoers" >&2 || true
+if ! visudo -cf "$staged_sudoers" >/dev/null 2>&1; then
+	visudo -cf "$staged_sudoers" >&2 || true
 	err "refusing to install: the generated sudoers file failed visudo validation (no change made)"
 fi
 
-install -m 0440 -o root -g root "$tmp_sudoers" "$SUDOERS_PATH"
+# Atomic same-directory rename: /etc/sudoers.d/nocklock-egress is either the old
+# content or the new, never a truncated file that would break host-wide sudo.
+mv -f "$staged_sudoers" "$SUDOERS_PATH"
 
 printf 'Installed %s (0755 root:root)\n' "$HELPER_PATH"
 printf 'Installed %s (0440 root:root) granting %s the NOPASSWD egress policy\n' "$SUDOERS_PATH" "$target_user"
