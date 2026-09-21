@@ -1,6 +1,8 @@
 package cli
 
 import (
+	"errors"
+	"io"
 	"path/filepath"
 	"testing"
 
@@ -192,4 +194,82 @@ func containsPath(paths []string, want string) bool {
 		}
 	}
 	return false
+}
+
+// errReader yields data once, then returns (0, err) on the next Read. It models
+// a decision-log read that hits a persistent non-EOF error (e.g. EIO).
+type errReader struct {
+	data []byte
+	err  error
+	done bool
+}
+
+func (r *errReader) Read(p []byte) (int, error) {
+	if !r.done && len(r.data) > 0 {
+		n := copy(p, r.data)
+		r.data = r.data[n:]
+		if len(r.data) == 0 {
+			r.done = true
+		}
+		return n, nil
+	}
+	r.done = true
+	return 0, r.err
+}
+
+// TestDrainDecisionReaderNonEOFErrorFailsClosed is the N3 regression: a non-EOF
+// read error must be RETURNED (so the caller fails the session closed), not
+// swallowed as a clean end. It also confirms complete records read before the
+// error are still signed.
+func TestDrainDecisionReaderNonEOFError(t *testing.T) {
+	sink := &fakeDecisionSink{}
+	scanner := newDecisionLogScanner(sink, "s")
+	r := &errReader{
+		data: []byte("allow\ttls\tok.example\t443\tallowlisted\n"),
+		err:  errors.New("input/output error"),
+	}
+
+	err := drainDecisionReader(r, scanner, make([]byte, 64))
+	if err == nil {
+		t.Fatal("drainDecisionReader returned nil on a non-EOF read error; expected the error to propagate")
+	}
+	if errors.Is(err, io.EOF) {
+		t.Fatalf("a non-EOF error must not be reported as EOF: %v", err)
+	}
+	if len(sink.events) != 1 {
+		t.Errorf("the complete record before the error should still be signed; got %d events", len(sink.events))
+	}
+}
+
+// TestDrainDecisionReaderCleanEOF confirms a clean io.EOF returns nil (normal
+// caught-up state) after signing every complete record.
+func TestDrainDecisionReaderCleanEOF(t *testing.T) {
+	sink := &fakeDecisionSink{}
+	scanner := newDecisionLogScanner(sink, "s")
+	r := &errReader{
+		data: []byte("allow\ttls\tok.example\t443\tallowlisted\n" +
+			"deny\thttp\tno.example\t80\tdisallowed_host\n"),
+		err: io.EOF,
+	}
+
+	if err := drainDecisionReader(r, scanner, make([]byte, 8)); err != nil {
+		t.Fatalf("clean io.EOF should return nil, got %v", err)
+	}
+	if len(sink.events) != 2 {
+		t.Errorf("expected 2 signed records before EOF, got %d", len(sink.events))
+	}
+}
+
+// TestDrainDecisionReaderSinkErrorFailsClosed confirms a signing failure during
+// the drain is propagated (fails closed), not swallowed.
+func TestDrainDecisionReaderSinkErrorFailsClosed(t *testing.T) {
+	sink := &erroringSink{failAfter: 0} // first Log fails
+	scanner := newDecisionLogScanner(sink, "s")
+	r := &errReader{
+		data: []byte("allow\ttls\tok.example\t443\tallowlisted\n"),
+		err:  io.EOF,
+	}
+	if err := drainDecisionReader(r, scanner, make([]byte, 64)); err == nil {
+		t.Fatal("drainDecisionReader returned nil on a sink.Log failure; expected fail-closed error")
+	}
 }

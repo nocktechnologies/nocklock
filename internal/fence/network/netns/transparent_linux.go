@@ -193,22 +193,22 @@ func (p *transparentProxy) close() {
 // reader never observes a torn record; decisionMu serializes concurrent
 // connection goroutines.
 //
-// It FAILS CLOSED (returns a non-nil error) on any condition that would lose or
-// tear the record: a field carrying a tab/newline (which could otherwise forge a
-// second record — mirrors recordTransparentDeny), a write error, or a short
-// write. Callers on the ALLOW path MUST refuse the connection when this returns
-// an error: allowed traffic must never proceed once its decision record is lost,
-// so an unrecordable decision is effectively a denial. A nil decisionLog (no
+// Each field is SANITIZED first — the record delimiters (tab, CR, LF) are
+// replaced with '?' — so a field can neither tear the line nor forge a second
+// record, and the decision is ALWAYS recorded rather than dropped (a deny of a
+// control-char host still lands in the log, well-formed). It therefore FAILS
+// CLOSED (returns a non-nil error) only on a genuine write error or short write.
+// Callers on the ALLOW path MUST refuse the connection when this returns an
+// error: allowed traffic must never proceed once its decision record is lost, so
+// an unrecordable decision is effectively a denial. A nil decisionLog (no
 // DecisionLogPath supplied) is a no-op returning nil — behaviour matches
 // pre-N10649 exactly.
 func (p *transparentProxy) recordDecision(verdict, protocol, host, port, reason string) error {
 	if p.decisionLog == nil {
 		return nil
 	}
-	if strings.ContainsAny(verdict+protocol+host+port+reason, "\t\r\n") {
-		return fmt.Errorf("egress decision record field contains a tab or newline; refusing to write a corruptible record")
-	}
-	line := []byte(verdict + "\t" + protocol + "\t" + host + "\t" + port + "\t" + reason + "\n")
+	line := []byte(sanitizeDecisionField(verdict) + "\t" + sanitizeDecisionField(protocol) + "\t" +
+		sanitizeDecisionField(host) + "\t" + sanitizeDecisionField(port) + "\t" + sanitizeDecisionField(reason) + "\n")
 	p.decisionMu.Lock()
 	defer p.decisionMu.Unlock()
 	n, err := p.decisionLog.Write(line)
@@ -219,6 +219,21 @@ func (p *transparentProxy) recordDecision(verdict, protocol, host, port, reason 
 		return fmt.Errorf("short write of egress decision record: wrote %d of %d bytes", n, len(line))
 	}
 	return nil
+}
+
+// sanitizeDecisionField replaces the TSV/record delimiters (tab, CR, LF) with
+// '?' so no field value can tear the line the parent's reader parses or inject a
+// second record. Every field is sanitized so a hostile or malformed host still
+// produces one well-formed, recorded decision instead of a dropped one.
+func sanitizeDecisionField(s string) string {
+	return strings.Map(func(r rune) rune {
+		switch r {
+		case '\t', '\r', '\n':
+			return '?'
+		default:
+			return r
+		}
+	}, s)
 }
 
 func listenTransparent(networkName, address string) (net.Listener, error) {

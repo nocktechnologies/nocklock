@@ -547,34 +547,24 @@ var wrapCmd = &cobra.Command{
 				scanner := newDecisionLogScanner(logger, sessionID)
 				readBuf := make([]byte, 4096)
 				for {
-					n, readErr := f.Read(readBuf)
-					if n > 0 {
-						if ferr := scanner.Feed(readBuf[:n]); ferr != nil {
-							failDecision(ferr)
-							return
-						}
+					// Drain everything currently available. A clean io.EOF (no data
+					// right now) returns nil; any other read error or a signing
+					// failure fails the session closed rather than looking like a
+					// clean end (N3).
+					if err := drainDecisionReader(f, scanner, readBuf); err != nil {
+						failDecision(err)
+						return
 					}
-					if readErr == nil {
-						continue
-					}
-					// No more data available right now. If the child has exited, the
-					// proxy is stopped and no more records can appear (see the proof
-					// above): do one final drain of any bytes written since the last
-					// read, then stop.
+					// Caught up to the current end of file. If the child has exited,
+					// the proxy is stopped and no more records can appear (see the
+					// proof above): do one final drain of anything written since, then
+					// stop.
 					select {
 					case <-decisionDone:
-						for {
-							m, e := f.Read(readBuf)
-							if m > 0 {
-								if ferr := scanner.Feed(readBuf[:m]); ferr != nil {
-									failDecision(ferr)
-									return
-								}
-							}
-							if e != nil {
-								return
-							}
+						if err := drainDecisionReader(f, scanner, readBuf); err != nil {
+							failDecision(err)
 						}
+						return
 					default:
 						time.Sleep(50 * time.Millisecond)
 					}

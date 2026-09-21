@@ -5,7 +5,6 @@ package netns
 import (
 	"os"
 	"path/filepath"
-	"strings"
 	"testing"
 )
 
@@ -67,22 +66,29 @@ func TestRecordDecisionFailsClosedOnWriteError(t *testing.T) {
 	}
 }
 
-func TestRecordDecisionRejectsControlChars(t *testing.T) {
+func TestRecordDecisionSanitizesControlChars(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "decisions.log")
 	f, err := os.OpenFile(path, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o600)
 	if err != nil {
 		t.Fatalf("open decision log: %v", err)
 	}
-	defer f.Close()
 	p := &transparentProxy{decisionLog: f}
 
-	// A host carrying a newline could forge a second record; recordDecision must
-	// refuse rather than write it.
-	if err := p.recordDecision("allow", "tls", "evil.example\nallow\ttls\tx", "443", "allowlisted"); err == nil {
-		t.Fatal("recordDecision accepted a field with a newline; expected refusal")
+	// A host carrying a tab/newline could otherwise forge a second record.
+	// recordDecision now SANITIZES the delimiters to '?' so the deny is still
+	// recorded (not dropped) as exactly one well-formed line — and returns no error.
+	if err := p.recordDecision("deny", "http", "evil.example\nallow\ttls\tx", "80", "disallowed_host"); err != nil {
+		t.Fatalf("recordDecision should sanitize, not error, on a control-char field: %v", err)
 	}
-	got, _ := os.ReadFile(path)
-	if strings.Contains(string(got), "evil.example") {
-		t.Errorf("a rejected record must not be written; log = %q", got)
+	_ = f.Close()
+
+	got, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read decision log: %v", err)
+	}
+	// Exactly one record (one trailing newline), no raw control chars from the host.
+	want := "deny\thttp\tevil.example?allow?tls?x\t80\tdisallowed_host\n"
+	if string(got) != want {
+		t.Errorf("sanitized record = %q, want %q", got, want)
 	}
 }

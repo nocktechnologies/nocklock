@@ -2,7 +2,9 @@ package cli
 
 import (
 	"bytes"
+	"errors"
 	"fmt"
+	"io"
 	"time"
 
 	"github.com/nocktechnologies/nocklock/internal/logging"
@@ -95,6 +97,33 @@ type decisionLogScanner struct {
 
 func newDecisionLogScanner(sink decisionEventSink, sessionID string) *decisionLogScanner {
 	return &decisionLogScanner{sink: sink, sessionID: sessionID}
+}
+
+// drainDecisionReader reads r until it is exhausted, feeding every chunk to the
+// scanner (which signs each complete record). It returns nil ONLY on a clean
+// io.EOF; ANY other read error, or a Feed (signing) failure, is returned so the
+// caller FAILS CLOSED. This is the crux of the N3 fix: a non-EOF read error
+// (e.g. EIO) must never be mistaken for a clean end of the decision log, which
+// would let wrap report success with unread/unsigned decisions.
+//
+// For a growing regular file, os.File.Read returns io.EOF at the current end and
+// a later Read after more bytes are appended returns them — so wrap calls this
+// repeatedly to tail the file, and once more after the writer is provably gone.
+func drainDecisionReader(r io.Reader, scanner *decisionLogScanner, buf []byte) error {
+	for {
+		n, err := r.Read(buf)
+		if n > 0 {
+			if ferr := scanner.Feed(buf[:n]); ferr != nil {
+				return ferr
+			}
+		}
+		if err != nil {
+			if errors.Is(err, io.EOF) {
+				return nil
+			}
+			return err
+		}
+	}
 }
 
 // Feed appends chunk to the scanner's buffer and logs every complete record now
