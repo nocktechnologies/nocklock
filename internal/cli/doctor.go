@@ -273,11 +273,12 @@ func networkDoctorCheck(cfg *config.Config, caps doctorCapabilities) doctorCheck
 // needs: whether the privileged helper exists at the fixed netnsHelperPath, is a
 // regular root-owned executable, and is reachable through passwordless sudo.
 type egressHelperState struct {
-	exists     bool
-	regular    bool
-	rootOwned  bool
-	executable bool
-	sudoOK     bool
+	exists      bool
+	regular     bool
+	rootOwned   bool
+	executable  bool
+	securePerms bool
+	sudoOK      bool
 }
 
 // defaultEgressHelperState is the production probe: it stats the helper at the
@@ -286,13 +287,14 @@ type egressHelperState struct {
 // never interactive — sudo -n fails immediately without a NOPASSWD grant).
 func defaultEgressHelperState() egressHelperState {
 	st := egressHelperState{}
-	fi, err := os.Stat(netnsHelperPath)
+	fi, err := os.Lstat(netnsHelperPath)
 	if err != nil {
 		return st
 	}
 	st.exists = true
 	st.regular = fi.Mode().IsRegular()
 	st.executable = fi.Mode().Perm()&0o111 != 0
+	st.securePerms = fi.Mode().Perm()&0o022 == 0
 	if sys, ok := fi.Sys().(*syscall.Stat_t); ok {
 		st.rootOwned = sys.Uid == 0
 	}
@@ -326,7 +328,7 @@ func egressHelperDoctorCheck(caps doctorCapabilities) doctorCheck {
 	}
 	st := probe()
 
-	if st.exists && st.regular && st.rootOwned && st.executable && st.sudoOK {
+	if st.exists && st.regular && st.rootOwned && st.executable && st.securePerms && st.sudoOK {
 		return doctorOKCheck("Egress Helper", "egress-helper", "installed",
 			fmt.Sprintf("Privileged egress helper installed at %s (regular, root-owned, executable) and reachable via passwordless sudo.", netnsHelperPath))
 	}
@@ -341,6 +343,8 @@ func egressHelperDoctorCheck(caps doctorCapabilities) doctorCheck {
 		status, reason = "not-root-owned", fmt.Sprintf("%s is not owned by root", netnsHelperPath)
 	case !st.executable:
 		status, reason = "not-executable", fmt.Sprintf("%s is not executable", netnsHelperPath)
+	case !st.securePerms:
+		status, reason = "insecure-perms", fmt.Sprintf("%s is writable by group or other", netnsHelperPath)
 	default:
 		status, reason = "sudo-unreachable", fmt.Sprintf("passwordless sudo to `%s check` is not available (missing NOPASSWD sudoers grant)", netnsHelperPath)
 	}

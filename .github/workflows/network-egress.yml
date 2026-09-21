@@ -320,7 +320,13 @@ jobs:
           # steps prove reachability; this step proves the artifact itself.)
           sudo ls -l /etc/sudoers.d/nocklock-egress
           sudo visudo -cf /etc/sudoers.d/nocklock-egress
-          sudo grep -F 'nocklock-egress-helper' /etc/sudoers.d/nocklock-egress
+          # Prove the grant is exactly scoped: the one runner user-spec, no
+          # blanket NOPASSWD:ALL, and exactly the check+setup vectors — not just
+          # that the helper path appears somewhere.
+          f=/etc/sudoers.d/nocklock-egress
+          sudo grep -qxF 'runner ALL = (root) NOPASSWD: NOCKLOCK_EGRESS' "$f"
+          ! sudo grep -qiE 'NOPASSWD:[[:space:]]*ALL' "$f"
+          test "$(sudo grep -oE 'nocklock-egress-helper [a-z]+' "$f" | sort -u | tr '\n' ',')" = "nocklock-egress-helper check,nocklock-egress-helper setup,"
 
       # `nocklock doctor` early-returns a critical "config missing" before any
       # fence check runs, so init a config first. Run doctor as the runner user

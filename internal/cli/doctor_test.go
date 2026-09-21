@@ -276,10 +276,26 @@ func TestDoctorEgressHelperCheck(t *testing.T) {
 		{
 			name:       "linux installed and reachable is ok",
 			goos:       "linux",
-			state:      egressHelperState{exists: true, regular: true, rootOwned: true, executable: true, sudoOK: true},
+			state:      egressHelperState{exists: true, regular: true, rootOwned: true, executable: true, securePerms: true, sudoOK: true},
 			wantSev:    doctorOK,
 			wantStatus: "installed",
 			wantFix:    false,
+		},
+		{
+			name:       "linux group- or world-writable helper is an insecure-perms warning",
+			goos:       "linux",
+			state:      egressHelperState{exists: true, regular: true, rootOwned: true, executable: true, securePerms: false, sudoOK: true},
+			wantSev:    doctorWarning,
+			wantStatus: "insecure-perms",
+			wantFix:    true,
+		},
+		{
+			name:       "linux non-regular helper is a not-regular warning",
+			goos:       "linux",
+			state:      egressHelperState{exists: true, regular: false},
+			wantSev:    doctorWarning,
+			wantStatus: "not-regular",
+			wantFix:    true,
 		},
 		{
 			name:       "linux missing is a warning with a fix",
@@ -292,7 +308,7 @@ func TestDoctorEgressHelperCheck(t *testing.T) {
 		{
 			name:       "linux present but sudo unreachable is a warning",
 			goos:       "linux",
-			state:      egressHelperState{exists: true, regular: true, rootOwned: true, executable: true, sudoOK: false},
+			state:      egressHelperState{exists: true, regular: true, rootOwned: true, executable: true, securePerms: true, sudoOK: false},
 			wantSev:    doctorWarning,
 			wantStatus: "sudo-unreachable",
 			wantFix:    true,

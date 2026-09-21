@@ -91,7 +91,7 @@ fi
 # if left behind, and the final move is an atomic same-directory rename (never a
 # truncated, host-breaking sudoers file).
 tmp_shim="$(mktemp)"
-staged_sudoers="${SUDOERS_PATH}.tmp"
+staged_sudoers="$(mktemp "${SUDOERS_PATH}.XXXXXXXX")"
 cleanup() { rm -f "$tmp_shim" "$staged_sudoers"; }
 trap cleanup EXIT INT TERM
 
@@ -109,7 +109,6 @@ install -m 0755 -o root -g root "$tmp_shim" "$HELPER_PATH"
 # line-continuation backslash and its alignment survive verbatim; the user grant
 # is printed separately so the resolved user is substituted safely.
 mkdir -p "$(dirname "$SUDOERS_PATH")"
-rm -f "$staged_sudoers"
 {
 	cat <<'ALIAS'
 Cmnd_Alias NOCKLOCK_EGRESS = /usr/libexec/nocklock-egress-helper check, \
