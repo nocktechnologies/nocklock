@@ -310,7 +310,10 @@ jobs:
       # and `sudo -l` must show the scoped helper commands.
       - name: show the installed sudoers grant is parsed
         run: |
-          ls -l /etc/sudoers.d/nocklock-egress
+          # The drop-in is 0440 in the root-only 0750 /etc/sudoers.d, so read it
+          # with sudo; the grant is written for the runner user, so `sudo -l`
+          # (as that user) is where it shows up.
+          sudo ls -l /etc/sudoers.d/nocklock-egress
           sudo visudo -c
           sudo -n -l | grep -F nocklock-egress-helper
 
