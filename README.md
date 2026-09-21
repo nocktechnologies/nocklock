@@ -189,6 +189,43 @@ Requires Go 1.26+. The binary is built to `./nocklock`. On Linux, `build-all` al
 nocklock version
 ```
 
+### Linux network-egress helper (privileged)
+
+On Linux, the network-egress fence (netns transparent-redirect) needs a small
+root-owned helper plus a constrained NOPASSWD sudoers grant. `nocklock wrap`
+runs unprivileged and hands the composed child to that helper over passwordless
+sudo; the child's argv, env, and the credential to drop to travel on **stdin**,
+never on argv, so the fixed two-vector (`check`, `setup`) sudoers policy is a
+real privilege boundary rather than an argument-injection surface. Without the
+helper the egress fence fails closed at runtime.
+
+Install the binary, then the helper:
+
+```bash
+make install                                   # builds and installs the nocklock binary
+sudo make install-egress-helper                # installs the root-owned helper + sudoers grant
+# or, to name the unprivileged wrap user explicitly:
+sudo NOCKLOCK_EGRESS_USER=<user> scripts/install-egress-helper.sh
+```
+
+The installer writes a root-owned shim to `/usr/libexec/nocklock-egress-helper`
+and this constrained grant to `/etc/sudoers.d/nocklock-egress` (validated with
+`visudo -cf` before it is moved into place, so a broken file is never left
+behind). `<user>` is the unprivileged user that runs `nocklock wrap`:
+
+```sudoers
+Cmnd_Alias NOCKLOCK_EGRESS = /usr/libexec/nocklock-egress-helper check, \
+                             /usr/libexec/nocklock-egress-helper setup
+<user> ALL = (root) NOPASSWD: NOCKLOCK_EGRESS
+```
+
+Verify it as the wrap user:
+
+```bash
+sudo -n /usr/libexec/nocklock-egress-helper check   # prints nothing and exits 0
+nocklock doctor                                     # egress-helper check reports ok
+```
+
 ## Works With
 
 NockLock is agent-agnostic. It wraps any CLI tool that respects standard environment variables.

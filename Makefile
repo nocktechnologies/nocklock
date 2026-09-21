@@ -1,4 +1,4 @@
-.PHONY: build build-fence-fs build-all test clean clean-fence-fs install fmt vet lint
+.PHONY: build build-fence-fs build-all test clean clean-fence-fs install install-egress-helper fmt vet lint
 
 VERSION ?= 0.1.0
 LDFLAGS := -ldflags "-X github.com/nocktechnologies/nocklock/internal/version.Version=$(VERSION)"
@@ -27,6 +27,15 @@ clean-fence-fs:
 
 install: build
 	mv nocklock /usr/local/bin/
+
+# The privileged Linux network-egress helper installs SEPARATELY from `install`:
+# it writes a root-owned shim to /usr/libexec and a constrained NOPASSWD sudoers
+# grant, so it must be run with sufficient privilege, e.g.
+# `sudo make install-egress-helper`. The nocklock binary must already be at
+# /usr/local/bin/nocklock (run `make install` first); the script checks and
+# errors with the fix if it is missing.
+install-egress-helper:
+	scripts/install-egress-helper.sh
 
 fmt:
 	go fmt ./...
