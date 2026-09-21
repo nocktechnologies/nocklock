@@ -99,6 +99,15 @@ func newDecisionLogScanner(sink decisionEventSink, sessionID string) *decisionLo
 	return &decisionLogScanner{sink: sink, sessionID: sessionID}
 }
 
+// Pending reports whether the scanner is holding an unterminated (partial)
+// record — bytes after the last newline that have not yet formed a complete
+// line. Mid-stream this is normal (more bytes may arrive), but after the writer
+// is provably gone (wrap's FINAL drain) a leftover partial can never complete,
+// so it signals an incomplete decision log the caller must fail closed on.
+func (s *decisionLogScanner) Pending() bool {
+	return len(s.buf) > 0
+}
+
 // drainDecisionReader reads r until it is exhausted, feeding every chunk to the
 // scanner (which signs each complete record). It returns nil ONLY on a clean
 // io.EOF; ANY other read error, or a Feed (signing) failure, is returned so the

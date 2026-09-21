@@ -273,3 +273,60 @@ func TestDrainDecisionReaderSinkErrorFailsClosed(t *testing.T) {
 		t.Fatal("drainDecisionReader returned nil on a sink.Log failure; expected fail-closed error")
 	}
 }
+
+// TestDecisionLogScannerPending confirms Pending() reports an unterminated
+// partial and clears once the record completes (Q-B).
+func TestDecisionLogScannerPending(t *testing.T) {
+	sink := &fakeDecisionSink{}
+	scanner := newDecisionLogScanner(sink, "s")
+
+	if scanner.Pending() {
+		t.Fatal("fresh scanner should not be Pending")
+	}
+	// Partial line, no trailing newline -> held, not logged, Pending true.
+	if err := scanner.Feed([]byte("allow\ttls\tpartial.example")); err != nil {
+		t.Fatalf("Feed partial returned error: %v", err)
+	}
+	if len(sink.events) != 0 {
+		t.Fatalf("a partial line must not be logged; got %d events", len(sink.events))
+	}
+	if !scanner.Pending() {
+		t.Fatal("scanner should be Pending after a partial line")
+	}
+	// Completing the line clears Pending and logs exactly one record.
+	if err := scanner.Feed([]byte("\t443\tallowlisted\n")); err != nil {
+		t.Fatalf("Feed completion returned error: %v", err)
+	}
+	if scanner.Pending() {
+		t.Fatal("scanner should not be Pending after the record completes")
+	}
+	if len(sink.events) != 1 {
+		t.Fatalf("completed record should log exactly one event; got %d", len(sink.events))
+	}
+}
+
+// TestFinalDrainFailsClosedOnPendingPartial models wrap's FINAL drain: after the
+// writer is gone, the reader hits a clean io.EOF (drain returns nil) but a torn
+// partial remains buffered. The caller must treat Pending() as fatal so the
+// session fails closed instead of reporting success with an incomplete audit.
+func TestFinalDrainFailsClosedOnPendingPartial(t *testing.T) {
+	sink := &fakeDecisionSink{}
+	scanner := newDecisionLogScanner(sink, "s")
+	// A complete record then a torn final record (short write, no newline), then EOF.
+	r := &errReader{
+		data: []byte("allow\ttls\tok.example\t443\tallowlisted\n" +
+			"deny\thttp\ttorn.examp"),
+		err: io.EOF,
+	}
+
+	if err := drainDecisionReader(r, scanner, make([]byte, 8)); err != nil {
+		t.Fatalf("final drain should return nil on clean io.EOF, got %v", err)
+	}
+	if len(sink.events) != 1 {
+		t.Errorf("the one complete record should be signed; got %d events", len(sink.events))
+	}
+	// This is the wrap.go final-drain condition: a leftover partial after EOF.
+	if !scanner.Pending() {
+		t.Fatal("final drain left a partial record but Pending() is false; wrap would report success with an incomplete audit")
+	}
+}

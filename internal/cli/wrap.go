@@ -563,6 +563,16 @@ var wrapCmd = &cobra.Command{
 					case <-decisionDone:
 						if err := drainDecisionReader(f, scanner, readBuf); err != nil {
 							failDecision(err)
+							return
+						}
+						// The writer is provably gone (proof above), so a leftover
+						// unterminated partial can never complete — it means a torn
+						// final record (e.g. a proxy-side short write on ENOSPC). Fail
+						// closed rather than report success with an incomplete audit.
+						// (Only the FINAL drain checks this; a mid-stream partial is
+						// normal — more bytes may still arrive.)
+						if scanner.Pending() {
+							failDecision(errors.New("incomplete egress decision record at end of decision log"))
 						}
 						return
 					default:
