@@ -15,6 +15,7 @@ import (
 	"os/signal"
 	"strconv"
 	"strings"
+	"sync"
 	"syscall"
 	"time"
 
@@ -35,6 +36,14 @@ type transparentProxy struct {
 	dnsUDP    []net.PacketConn
 	health    net.Listener
 	healthSrv *http.Server
+	// decisionLog is the operator decision-log file (EgressConfig.DecisionLogPath),
+	// opened by RunTransparentProxy while it is still root — BEFORE dropProxyIdentity
+	// drops to the shared nobody uid — so the held fd keeps working after the drop.
+	// nil when no DecisionLogPath was supplied (behaviour then matches pre-N10649).
+	decisionLog *os.File
+	// decisionMu serializes the single full-line append per decision so concurrent
+	// connection goroutines never interleave a torn record for the parent's reader.
+	decisionMu sync.Mutex
 }
 
 // RunTransparentProxy starts the namespace-local DNS stub and transparent TCP
@@ -44,6 +53,22 @@ func RunTransparentProxy(cfg EgressConfig) error {
 	p, err := startTransparentProxy(cfg)
 	if err != nil {
 		return err
+	}
+	// Open the operator decision-log BEFORE dropping to the shared nobody uid.
+	// The trusted parent (`wrap`) created it wrap-user-owned mode 0600, and this
+	// process is still root here, so it can open the file; the held fd then keeps
+	// working after the credential drop. We deliberately pass NO O_CREATE (the
+	// parent owns creation) and do NOT reuse recordTransparentDeny's lazy
+	// open-as-nobody pattern, which would require a nobody-writable file on the
+	// SHARED uid 65534. Fail closed if it cannot be opened: the audit trail is not
+	// optional, so a proxy that cannot record its decisions must not serve.
+	if cfg.DecisionLogPath != "" {
+		f, openErr := os.OpenFile(cfg.DecisionLogPath, os.O_APPEND|os.O_WRONLY, 0)
+		if openErr != nil {
+			p.close()
+			return fmt.Errorf("open egress decision-log before privilege drop: %w", openErr)
+		}
+		p.decisionLog = f
 	}
 	if err := dropProxyIdentity(); err != nil {
 		p.close()
@@ -154,6 +179,61 @@ func (p *transparentProxy) close() {
 	if p.health != nil {
 		_ = p.health.Close()
 	}
+	if p.decisionLog != nil {
+		_ = p.decisionLog.Close()
+	}
+}
+
+// recordDecision appends one complete, newline-terminated egress decision record
+// to the operator decision-log opened before the privilege drop. The transparent
+// proxy is the SOLE egress decision point, so every allow/deny is recorded here
+// exactly once (the host-side proxy sees only already-allowed hosts and must stay
+// nil-logger, or every allow would double-count). The record is one Write of a
+// full TSV line — verdict, protocol, host, port, reason — so the parent's line
+// reader never observes a torn record; decisionMu serializes concurrent
+// connection goroutines.
+//
+// Each field is SANITIZED first — the record delimiters (tab, CR, LF) are
+// replaced with '?' — so a field can neither tear the line nor forge a second
+// record, and the decision is ALWAYS recorded rather than dropped (a deny of a
+// control-char host still lands in the log, well-formed). It therefore FAILS
+// CLOSED (returns a non-nil error) only on a genuine write error or short write.
+// Callers on the ALLOW path MUST refuse the connection when this returns an
+// error: allowed traffic must never proceed once its decision record is lost, so
+// an unrecordable decision is effectively a denial. A nil decisionLog (no
+// DecisionLogPath supplied) is a no-op returning nil — behaviour matches
+// pre-N10649 exactly.
+func (p *transparentProxy) recordDecision(verdict, protocol, host, port, reason string) error {
+	if p.decisionLog == nil {
+		return nil
+	}
+	line := []byte(sanitizeDecisionField(verdict) + "\t" + sanitizeDecisionField(protocol) + "\t" +
+		sanitizeDecisionField(host) + "\t" + sanitizeDecisionField(port) + "\t" + sanitizeDecisionField(reason) + "\n")
+	p.decisionMu.Lock()
+	defer p.decisionMu.Unlock()
+	n, err := p.decisionLog.Write(line)
+	if err != nil {
+		return fmt.Errorf("write egress decision record: %w", err)
+	}
+	if n != len(line) {
+		return fmt.Errorf("short write of egress decision record: wrote %d of %d bytes", n, len(line))
+	}
+	return nil
+}
+
+// sanitizeDecisionField replaces the TSV/record delimiters (tab, CR, LF) with
+// '?' so no field value can tear the line the parent's reader parses or inject a
+// second record. Every field is sanitized so a hostile or malformed host still
+// produces one well-formed, recorded decision instead of a dropped one.
+func sanitizeDecisionField(s string) string {
+	return strings.Map(func(r rune) rune {
+		switch r {
+		case '\t', '\r', '\n':
+			return '?'
+		default:
+			return r
+		}
+	}, s)
 }
 
 func listenTransparent(networkName, address string) (net.Listener, error) {
@@ -233,7 +313,20 @@ func (p *transparentProxy) handleTLS(client net.Conn) {
 	hello, host, err := readTLSClientHello(client)
 	if err != nil || !network.IsAllowedHost(p.cfg.Allow, false, host) {
 		recordTransparentDeny("tls", host, "disallowed_sni")
+		// Best-effort: the connection is refused regardless, so a lost deny record
+		// leaks no traffic (unlike the allow path below, which must fail closed).
+		_ = p.recordDecision("deny", "tls", host, "443", "disallowed_sni")
 		fmt.Fprintln(os.Stderr, "NockLock: transparent TLS connection denied (missing or disallowed SNI)")
+		return
+	}
+	// Record the ALLOW DECISION as soon as it is made — after the allowlist check
+	// passes, BEFORE dialing. The decision is "allowlisted"; the tunnel's success
+	// or failure is a connection outcome, not part of the decision, so an
+	// allowlisted-but-unreachable host still yields a signed row. Fail closed if
+	// the record cannot be durably written: allowed traffic must not proceed
+	// without its receipt.
+	if err := p.recordDecision("allow", "tls", host, "443", "allowlisted"); err != nil {
+		fmt.Fprintln(os.Stderr, "NockLock: transparent TLS connection refused (decision record could not be written)")
 		return
 	}
 	upstream, err := openHostTunnel(client, p.cfg.Bridge.hostProxyAddr(), host, "443")
@@ -258,9 +351,20 @@ func (p *transparentProxy) handleHTTP(client net.Conn) {
 	}
 	if !network.IsAllowedHost(p.cfg.Allow, false, host) {
 		recordTransparentDeny("http", host, "disallowed_host")
+		// Best-effort: the connection is refused regardless (see handleTLS).
+		_ = p.recordDecision("deny", "http", host, "80", "disallowed_host")
 		fmt.Fprintln(os.Stderr, "NockLock: transparent HTTP connection denied (disallowed Host)")
 		body := "NockLock: domain not in allowlist\n"
 		_, _ = fmt.Fprintf(client, "HTTP/1.1 403 Forbidden\r\nContent-Length: %d\r\nConnection: close\r\n\r\n%s", len(body), body)
+		return
+	}
+	// Record the ALLOW DECISION before dialing (see handleTLS): the decision is
+	// final here and must be captured even if the upstream is unreachable. Fail
+	// closed if it cannot be recorded — allowed traffic must not proceed without
+	// its receipt.
+	if err := p.recordDecision("allow", "http", host, "80", "allowlisted"); err != nil {
+		fmt.Fprintln(os.Stderr, "NockLock: transparent HTTP connection refused (decision record could not be written)")
+		_, _ = io.WriteString(client, "HTTP/1.1 503 Service Unavailable\r\nConnection: close\r\n\r\n")
 		return
 	}
 	upstream, err := openHostTunnel(client, p.cfg.Bridge.hostProxyAddr(), host, "80")

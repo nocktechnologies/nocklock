@@ -168,6 +168,33 @@ var wrapCmd = &cobra.Command{
 			fmt.Fprintf(os.Stderr, "NockLock: secret fence active — no variables blocked\n")
 		}
 
+		// Create the per-session egress decision-log (netns path only) BEFORE the
+		// filesystem fence assembles its deny list, so its directory can be denied
+		// to the child below. The fenced child runs as the SAME uid as wrap, so an
+		// undenied decision log lets a hardened child append FORGED allow/deny
+		// records that wrap would then sign into the audit chain — a forgeable
+		// egress receipt in exactly the config meant to be trustworthy. It is
+		// wrap-user-owned, mode 0600, in a 0700 per-session temp dir; the
+		// transparent proxy opens it as root before it drops to nobody, and wrap's
+		// reader streams it into the signed log. No pre-existing session/bridge temp
+		// dir exists in wrap, so one is created here per session and removed on exit.
+		var decisionLogPath string
+		var decisionLogDir string
+		if useNetns {
+			dir, dirErr := os.MkdirTemp("", "nocklock-egress-decisions-")
+			if dirErr != nil {
+				return fmt.Errorf("create egress decision-log directory: %w", dirErr)
+			}
+			defer os.RemoveAll(dir)
+			decisionLogDir = dir
+			decisionLogPath = filepath.Join(dir, "decisions.log")
+			decisionFile, fileErr := os.OpenFile(decisionLogPath, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o600)
+			if fileErr != nil {
+				return fmt.Errorf("create egress decision-log file: %w", fileErr)
+			}
+			_ = decisionFile.Close()
+		}
+
 		// Apply filesystem fence. Linux: LD_PRELOAD interposition. macOS: Seatbelt
 		// (sandbox-exec) — fsSandboxPrefix wraps the child argv at launch.
 		var fsFenceEvents <-chan fsfence.FenceEvent
@@ -179,8 +206,13 @@ var wrapCmd = &cobra.Command{
 			// Fence the audit log from the CHILD so the fenced agent can't delete
 			// or corrupt the record of its own actions (the unfenced parent still
 			// writes it). Critical on the macOS denylist fence, where the child can
-			// otherwise reach the db unless it's explicitly denied.
-			cfg.Filesystem.Deny = append(cfg.Filesystem.Deny, auditDenyPath(dbPath, projectRoot))
+			// otherwise reach the db unless it's explicitly denied. On the netns
+			// path this also denies the whole egress decision-log dir (see
+			// egressChildDenyPaths) so the child cannot forge signed egress rows.
+			// Like the audit DB, the decision log's integrity against the child
+			// requires the fs fence ON; with no fs fence the child can already
+			// tamper events.db directly, so this is consistent, not a new gap.
+			cfg.Filesystem.Deny = append(cfg.Filesystem.Deny, egressChildDenyPaths(dbPath, projectRoot, decisionLogDir)...)
 
 			fsCfg, err := fsfence.ProcessConfig(cfg.Filesystem)
 			if err != nil {
@@ -305,6 +337,21 @@ var wrapCmd = &cobra.Command{
 		var proxyFailed atomic.Bool
 		var netnsEgress *netns.EgressConfig
 
+		// Egress decision-log plumbing (Nock N10649). The fenced transparent proxy
+		// makes every allow/deny decision but runs as the shared nobody uid with no
+		// DB handle or signing key, so it cannot sign an audit row. It instead
+		// appends plain records to a wrap-owned decision-log file; this parent —
+		// which holds the signing key — streams those records into the signed,
+		// hash-chained event log below. decisionLogPath/decisionLogDir are created
+		// above (before the fs fence) so the child can be denied the log; these
+		// carry the reader lifecycle and are used only on the useNetns path.
+		// decisionFailed is set (once) if the reader cannot open or sign the log, so
+		// the session FAILS CLOSED rather than reporting success with a lost receipt.
+		var decisionReaderWg sync.WaitGroup
+		decisionDone := make(chan struct{})
+		var decisionFailed atomic.Bool
+		var decisionFailErr error
+
 		if useNetns {
 			// Kernel-enforced network egress floor. Confirm the privileged helper
 			// is reachable via passwordless sudo (the DECIDED acquisition path)
@@ -331,6 +378,11 @@ var wrapCmd = &cobra.Command{
 				AllowPrivateRanges: effectiveCfg.Network.AllowPrivateRanges,
 				Bridge:             candidate,
 			}
+			// The decision-log file was created above (before the fs fence) so its
+			// directory could be added to the child's deny list; hand its path to
+			// the sidecars so the transparent proxy appends decisions to it.
+			netnsEgress.DecisionLogPath = decisionLogPath
+
 			logEvent(logging.EventNetworkPassed, "network", fmt.Sprintf("netns tproxy egress fence active domains=%d", len(netnsEgress.Allow)), false)
 			fmt.Fprintf(os.Stderr, "NockLock: network egress fence active — netns tproxy allowlist (%d domain(s))\n", len(netnsEgress.Allow))
 		} else if !cfg.Network.AllowAll {
@@ -442,13 +494,120 @@ var wrapCmd = &cobra.Command{
 			}()
 		}
 
+		// failDecision records a fatal egress-audit failure exactly once and forces
+		// the session closed: it surfaces an EventNetworkError, cancels the child
+		// (harmless if the child has already exited), and stores the error for the
+		// SessionEnd verdict. Called from the reader goroutine on an open, read, or
+		// signing failure — a fail-closed receipts feature must never report success
+		// after losing or failing to sign a decision.
+		failDecision := func(err error) {
+			if decisionFailed.CompareAndSwap(false, true) {
+				decisionFailErr = err
+				// Surface on stderr FIRST: the failure modes that trigger this
+				// (disk full, DB lock, signing key) are exactly the ones that also
+				// break logEvent below, and SilenceErrors on the exitCodeError means
+				// a fail-closed exit would otherwise carry zero diagnostic. Mirrors
+				// the proxy-watchdog death path.
+				fmt.Fprintf(os.Stderr, "NockLock: fatal: egress decision audit failed: %v — terminating session\n", err)
+				logEvent(logging.EventNetworkError, "network", fmt.Sprintf("egress decision audit failed: %v", err), true)
+				childCancel()
+			}
+		}
+
+		// Stream the egress decision-log line-by-line WHILE the child runs, then
+		// drain the remaining complete lines after it exits. The transparent proxy
+		// appends one full record per Write, so the scanner only ever acts on
+		// complete, newline-terminated lines; a trailing partial is held until its
+		// terminator arrives. Each complete record is signed into the audit trail;
+		// any open/read/sign failure fails the whole session closed via failDecision.
+		//
+		// Draining on child exit is provably complete, not a race: the transparent
+		// proxy is a sidecar of the privileged helper (SetupEgressAndSupervise),
+		// which supervises the fenced child and only then returns — its deferred
+		// stopSidecar SIGTERMs the proxy and BLOCKS on cmd.Wait() (reaping it) before
+		// the helper process returns, which is before wrap's child.Run() returns
+		// here. recordDecision writes via *os.File.Write (a direct write(2), no
+		// userspace buffer), so every record a returned recordDecision produced is
+		// already durable in the file by the time the proxy is reaped. Thus once
+		// decisionDone is closed no further records can appear, and reading to EOF
+		// captures them all.
+		if decisionLogPath != "" {
+			decisionReaderWg.Add(1)
+			go func() {
+				defer decisionReaderWg.Done()
+				f, err := os.Open(decisionLogPath)
+				if err != nil {
+					// Very low reachability (same-uid file wrap just created O_EXCL),
+					// but a reader that cannot open the log would silently drop every
+					// egress row — surface it and fail closed rather than swallow.
+					failDecision(fmt.Errorf("open egress decision-log for reading: %w", err))
+					return
+				}
+				defer f.Close()
+				scanner := newDecisionLogScanner(logger, sessionID)
+				readBuf := make([]byte, 4096)
+				for {
+					// Drain everything currently available. A clean io.EOF (no data
+					// right now) returns nil; any other read error or a signing
+					// failure fails the session closed rather than looking like a
+					// clean end (N3).
+					if err := drainDecisionReader(f, scanner, readBuf); err != nil {
+						failDecision(err)
+						return
+					}
+					// Caught up to the current end of file. If the child has exited,
+					// the proxy is stopped and no more records can appear (see the
+					// proof above): do one final drain of anything written since, then
+					// stop.
+					select {
+					case <-decisionDone:
+						if err := drainDecisionReader(f, scanner, readBuf); err != nil {
+							failDecision(err)
+							return
+						}
+						// The writer is provably gone (proof above), so a leftover
+						// unterminated partial can never complete — it means a torn
+						// final record (e.g. a proxy-side short write on ENOSPC). Fail
+						// closed rather than report success with an incomplete audit.
+						// (Only the FINAL drain checks this; a mid-stream partial is
+						// normal — more bytes may still arrive.)
+						if scanner.Pending() {
+							failDecision(errors.New("incomplete egress decision record at end of decision log"))
+						}
+						return
+					default:
+						time.Sleep(50 * time.Millisecond)
+					}
+				}
+			}()
+		}
+
 		childErr := child.Run()
+
+		// The child (and thus the proxy that writes the decision-log) has exited.
+		// Signal the reader to do its final drain and wait for it before the
+		// deferred logger.Close, so no signed egress row is lost.
+		close(decisionDone)
+		decisionReaderWg.Wait()
 
 		// Cancel the fence context to stop the listener, then wait for event goroutine.
 		if fsFenceCancel != nil {
 			fsFenceCancel()
 		}
 		eventsWg.Wait()
+
+		// FAIL CLOSED on any egress-audit failure: an allowed/denied decision that
+		// could not be signed (or a decision-log that could not be read) means the
+		// audit trail is incomplete, so the session must not report success — even
+		// if the child itself exited 0. Checked before the childErr branch so this
+		// verdict wins. The reader goroutine has finished (Wait above), establishing
+		// happens-before for decisionFailErr.
+		if decisionFailed.Load() {
+			logEvent(logging.EventSessionEnd, "session", fmt.Sprintf("exit_code=2 decision_audit_failed=true err=%v", decisionFailErr), true)
+			cmd.SilenceErrors = true
+			cmd.SilenceUsage = true
+			return &exitCodeError{code: 2}
+		}
 
 		if childErr != nil {
 			if proxyFailed.Load() {
@@ -664,6 +823,22 @@ func auditDenyPath(dbPath, projectRoot string) string {
 		return auditDir
 	}
 	return dbPath
+}
+
+// egressChildDenyPaths returns the paths the fenced child must be denied so it
+// cannot tamper with the records the unfenced parent signs into the audit trail:
+// the audit DB (via auditDenyPath) always, plus — on the netns egress path — the
+// WHOLE egress decision-log directory (decisionLogDir, empty otherwise). Denying
+// the directory, not just the file, stops the child (which shares wrap's uid)
+// from truncating the log, creating sibling files, or traversing in to forge the
+// signed egress rows. Factored out so the deny-list assembly is unit-testable
+// without root.
+func egressChildDenyPaths(dbPath, projectRoot, decisionLogDir string) []string {
+	paths := []string{auditDenyPath(dbPath, projectRoot)}
+	if decisionLogDir != "" {
+		paths = append(paths, decisionLogDir)
+	}
+	return paths
 }
 
 // resolvePathBestEffort canonicalizes a path the way the fence does (resolving
