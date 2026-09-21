@@ -503,6 +503,12 @@ var wrapCmd = &cobra.Command{
 		failDecision := func(err error) {
 			if decisionFailed.CompareAndSwap(false, true) {
 				decisionFailErr = err
+				// Surface on stderr FIRST: the failure modes that trigger this
+				// (disk full, DB lock, signing key) are exactly the ones that also
+				// break logEvent below, and SilenceErrors on the exitCodeError means
+				// a fail-closed exit would otherwise carry zero diagnostic. Mirrors
+				// the proxy-watchdog death path.
+				fmt.Fprintf(os.Stderr, "NockLock: fatal: egress decision audit failed: %v — terminating session\n", err)
 				logEvent(logging.EventNetworkError, "network", fmt.Sprintf("egress decision audit failed: %v", err), true)
 				childCancel()
 			}
