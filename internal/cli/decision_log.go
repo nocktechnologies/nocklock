@@ -99,17 +99,25 @@ func newDecisionLogScanner(sink decisionEventSink, sessionID string) *decisionLo
 
 // Feed appends chunk to the scanner's buffer and logs every complete record now
 // available. Any bytes after the last newline are kept for the next Feed.
-func (s *decisionLogScanner) Feed(chunk []byte) {
+//
+// It FAILS CLOSED: on the FIRST sink.Log error it stops and returns that error so
+// the caller (wrap's reader goroutine) can cancel the session and exit non-zero.
+// A signed audit write that failed must never be silently dropped while wrap
+// reports success — the whole point of the feature is that every recorded
+// decision is durably signed.
+func (s *decisionLogScanner) Feed(chunk []byte) error {
 	s.buf = append(s.buf, chunk...)
 	for {
 		i := bytes.IndexByte(s.buf, '\n')
 		if i < 0 {
-			return
+			return nil
 		}
 		line := string(s.buf[:i])
 		s.buf = s.buf[i+1:]
 		if rec, ok := parseDecisionRecord(line); ok {
-			_ = s.sink.Log(decisionRecordToEvent(rec, s.sessionID))
+			if err := s.sink.Log(decisionRecordToEvent(rec, s.sessionID)); err != nil {
+				return fmt.Errorf("sign egress decision into audit log: %w", err)
+			}
 		}
 	}
 }

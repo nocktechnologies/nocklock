@@ -89,11 +89,26 @@ func TestWrapNetnsEgressDecisionAudit(t *testing.T) {
 	if err := os.MkdirAll(nockDir, 0o755); err != nil {
 		t.Fatalf("create .nock dir: %v", err)
 	}
-	// Minimal config: netns needs a non-empty allowlist and allow_all=false. No
-	// filesystem.root (avoids needing libfence_fs.so) and syscall enforcement off
-	// (curl needs no seccomp interference; the netns egress floor is what we test).
+	// Keep the FILESYSTEM FENCE ON so this test also exercises the child-deny of
+	// the decision log (wrap adds the decision-log dir to the child's deny list
+	// only when the fs fence is on). root="/" lets sh+curl reach the whole
+	// filesystem (the userspace interposer allows everything under root except the
+	// deny list, into which wrap injects the audit DB and the decision-log dir),
+	// so the fence is genuinely active without breaking the child. The CI job
+	// installs libfence_fs.so, which the fs fence requires. linux_enforcement="off"
+	// keeps this to the LD_PRELOAD interposer (Landlock cannot subtract a deny from
+	// a root="/" grant anyway). syscall enforcement off — curl needs no seccomp
+	// interference; the netns egress floor is what we test. netns needs a non-empty
+	// allowlist and allow_all=false.
 	config := `[project]
 name = "n10649-egress-audit"
+
+[filesystem]
+root = "/"
+mode = "read-write"
+linux_enforcement = "off"
+allow = []
+deny = []
 
 [network]
 allow = ["example.com"]

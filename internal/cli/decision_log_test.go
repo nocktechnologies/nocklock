@@ -30,9 +30,11 @@ func TestDecisionLogScanner(t *testing.T) {
 
 	// Chunk 1: one complete allow line, one complete deny line, and a trailing
 	// PARTIAL line (no terminator). Only the two complete records must log.
-	scanner.Feed([]byte("allow\ttls\texample.com\t443\tallowlisted\n" +
+	if err := scanner.Feed([]byte("allow\ttls\texample.com\t443\tallowlisted\n" +
 		"deny\thttp\tblocked.test\t80\tdisallowed_host\n" +
-		"allow\ttls\tpartial.example"))
+		"allow\ttls\tpartial.example")); err != nil {
+		t.Fatalf("Feed chunk 1 returned error: %v", err)
+	}
 
 	if len(sink.events) != 2 {
 		t.Fatalf("after chunk 1: expected 2 logged events (partial line must NOT log), got %d: %+v", len(sink.events), sink.events)
@@ -73,7 +75,9 @@ func TestDecisionLogScanner(t *testing.T) {
 
 	// Chunk 2: completes the partial line from chunk 1. It must NOW log exactly
 	// one more event — the record split across the two feeds, reassembled.
-	scanner.Feed([]byte("\t443\tallowlisted\n"))
+	if err := scanner.Feed([]byte("\t443\tallowlisted\n")); err != nil {
+		t.Fatalf("Feed chunk 2 returned error: %v", err)
+	}
 	if len(sink.events) != 3 {
 		t.Fatalf("after chunk 2: expected 3 total events (partial completed), got %d", len(sink.events))
 	}
@@ -93,18 +97,62 @@ func TestDecisionLogScannerSkipsMalformed(t *testing.T) {
 	sink := &fakeDecisionSink{}
 	scanner := newDecisionLogScanner(sink, "s")
 
-	scanner.Feed([]byte(
+	if err := scanner.Feed([]byte(
 		"allow\ttls\tok.example\t443\tallowlisted\n" + // valid
 			"garbage-with-no-tabs\n" + // wrong field count
 			"maybe\ttls\tx.example\t443\treason\n" + // unknown verdict
 			"deny\thttp\tno.example\t80\tdisallowed_host\n", // valid
-	))
+	)); err != nil {
+		t.Fatalf("Feed returned error on valid+malformed mix: %v", err)
+	}
 
 	if len(sink.events) != 2 {
 		t.Fatalf("expected 2 valid events (malformed lines skipped), got %d: %+v", len(sink.events), sink.events)
 	}
 	if sink.events[0].EventType != logging.EventNetworkPassed || sink.events[1].EventType != logging.EventNetworkBlocked {
 		t.Errorf("unexpected event ordering/types: %+v", sink.events)
+	}
+}
+
+// erroringSink returns an error from Log after failAfter successful calls, so the
+// test can assert the reader FAILS CLOSED on a signing failure rather than
+// silently dropping records.
+type erroringSink struct {
+	calls     int
+	failAfter int
+}
+
+func (s *erroringSink) Log(logging.Event) error {
+	s.calls++
+	if s.calls > s.failAfter {
+		return errTestSinkFailed
+	}
+	return nil
+}
+
+var errTestSinkFailed = testError("simulated audit-log write failure")
+
+type testError string
+
+func (e testError) Error() string { return string(e) }
+
+// TestDecisionLogScannerStopsOnSinkError confirms Feed propagates the first
+// sink.Log error and STOPS — it does not go on to log later records after a
+// signing failure (F2 fail-closed).
+func TestDecisionLogScannerStopsOnSinkError(t *testing.T) {
+	sink := &erroringSink{failAfter: 1} // first Log ok, second fails
+	scanner := newDecisionLogScanner(sink, "s")
+
+	err := scanner.Feed([]byte(
+		"allow\ttls\tok.example\t443\tallowlisted\n" + // logged ok
+			"deny\thttp\tno.example\t80\tdisallowed_host\n" + // Log() fails here
+			"allow\ttls\tthird.example\t443\tallowlisted\n", // must NOT be attempted
+	))
+	if err == nil {
+		t.Fatal("Feed returned nil; expected the sink.Log failure to propagate")
+	}
+	if sink.calls != 2 {
+		t.Errorf("expected exactly 2 Log calls (stop on the first failure), got %d", sink.calls)
 	}
 }
 

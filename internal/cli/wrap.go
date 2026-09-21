@@ -343,10 +343,14 @@ var wrapCmd = &cobra.Command{
 		// appends plain records to a wrap-owned decision-log file; this parent —
 		// which holds the signing key — streams those records into the signed,
 		// hash-chained event log below. decisionLogPath/decisionLogDir are created
-		// above (before the fs fence) so the child can be denied the log; these two
+		// above (before the fs fence) so the child can be denied the log; these
 		// carry the reader lifecycle and are used only on the useNetns path.
+		// decisionFailed is set (once) if the reader cannot open or sign the log, so
+		// the session FAILS CLOSED rather than reporting success with a lost receipt.
 		var decisionReaderWg sync.WaitGroup
 		decisionDone := make(chan struct{})
+		var decisionFailed atomic.Bool
+		var decisionFailErr error
 
 		if useNetns {
 			// Kernel-enforced network egress floor. Confirm the privileged helper
@@ -490,17 +494,47 @@ var wrapCmd = &cobra.Command{
 			}()
 		}
 
+		// failDecision records a fatal egress-audit failure exactly once and forces
+		// the session closed: it surfaces an EventNetworkError, cancels the child
+		// (harmless if the child has already exited), and stores the error for the
+		// SessionEnd verdict. Called from the reader goroutine on an open, read, or
+		// signing failure — a fail-closed receipts feature must never report success
+		// after losing or failing to sign a decision.
+		failDecision := func(err error) {
+			if decisionFailed.CompareAndSwap(false, true) {
+				decisionFailErr = err
+				logEvent(logging.EventNetworkError, "network", fmt.Sprintf("egress decision audit failed: %v", err), true)
+				childCancel()
+			}
+		}
+
 		// Stream the egress decision-log line-by-line WHILE the child runs, then
 		// drain the remaining complete lines after it exits. The transparent proxy
 		// appends one full record per Write, so the scanner only ever acts on
 		// complete, newline-terminated lines; a trailing partial is held until its
-		// terminator arrives. Each complete record is signed into the audit trail.
+		// terminator arrives. Each complete record is signed into the audit trail;
+		// any open/read/sign failure fails the whole session closed via failDecision.
+		//
+		// Draining on child exit is provably complete, not a race: the transparent
+		// proxy is a sidecar of the privileged helper (SetupEgressAndSupervise),
+		// which supervises the fenced child and only then returns — its deferred
+		// stopSidecar SIGTERMs the proxy and BLOCKS on cmd.Wait() (reaping it) before
+		// the helper process returns, which is before wrap's child.Run() returns
+		// here. recordDecision writes via *os.File.Write (a direct write(2), no
+		// userspace buffer), so every record a returned recordDecision produced is
+		// already durable in the file by the time the proxy is reaped. Thus once
+		// decisionDone is closed no further records can appear, and reading to EOF
+		// captures them all.
 		if decisionLogPath != "" {
 			decisionReaderWg.Add(1)
 			go func() {
 				defer decisionReaderWg.Done()
 				f, err := os.Open(decisionLogPath)
 				if err != nil {
+					// Very low reachability (same-uid file wrap just created O_EXCL),
+					// but a reader that cannot open the log would silently drop every
+					// egress row — surface it and fail closed rather than swallow.
+					failDecision(fmt.Errorf("open egress decision-log for reading: %w", err))
 					return
 				}
 				defer f.Close()
@@ -509,20 +543,27 @@ var wrapCmd = &cobra.Command{
 				for {
 					n, readErr := f.Read(readBuf)
 					if n > 0 {
-						scanner.Feed(readBuf[:n])
+						if ferr := scanner.Feed(readBuf[:n]); ferr != nil {
+							failDecision(ferr)
+							return
+						}
 					}
 					if readErr == nil {
 						continue
 					}
 					// No more data available right now. If the child has exited, the
-					// proxy is stopped and no more records can appear: do one final
-					// drain of any bytes written since the last read, then stop.
+					// proxy is stopped and no more records can appear (see the proof
+					// above): do one final drain of any bytes written since the last
+					// read, then stop.
 					select {
 					case <-decisionDone:
 						for {
 							m, e := f.Read(readBuf)
 							if m > 0 {
-								scanner.Feed(readBuf[:m])
+								if ferr := scanner.Feed(readBuf[:m]); ferr != nil {
+									failDecision(ferr)
+									return
+								}
 							}
 							if e != nil {
 								return
@@ -548,6 +589,19 @@ var wrapCmd = &cobra.Command{
 			fsFenceCancel()
 		}
 		eventsWg.Wait()
+
+		// FAIL CLOSED on any egress-audit failure: an allowed/denied decision that
+		// could not be signed (or a decision-log that could not be read) means the
+		// audit trail is incomplete, so the session must not report success — even
+		// if the child itself exited 0. Checked before the childErr branch so this
+		// verdict wins. The reader goroutine has finished (Wait above), establishing
+		// happens-before for decisionFailErr.
+		if decisionFailed.Load() {
+			logEvent(logging.EventSessionEnd, "session", fmt.Sprintf("exit_code=2 decision_audit_failed=true err=%v", decisionFailErr), true)
+			cmd.SilenceErrors = true
+			cmd.SilenceUsage = true
+			return &exitCodeError{code: 2}
+		}
 
 		if childErr != nil {
 			if proxyFailed.Load() {
