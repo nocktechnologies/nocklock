@@ -69,8 +69,12 @@ var verifyCmd = &cobra.Command{
 		asAudit, _ := cmd.Flags().GetBool("audit")
 		exportPub, _ := cmd.Flags().GetBool("export-pubkey")
 		pubFlag, _ := cmd.Flags().GetString("ed25519-pub")
+		anchorFile, _ := cmd.Flags().GetString("against-anchor")
 		if exportPub {
 			return runExportPubkey(cmd.OutOrStdout())
+		}
+		if anchorFile != "" {
+			return runVerifyAgainstAnchor(cmd.OutOrStdout(), anchorFile, pubFlag)
 		}
 		if asAudit {
 			return runAuditVerify(cmd.Context(), cmd.OutOrStdout(), pubFlag)
@@ -101,39 +105,114 @@ func init() {
 	verifyCmd.Flags().Bool("audit", false, "verify the audit chain instead of running fence probes")
 	verifyCmd.Flags().Bool("export-pubkey", false, "print the Ed25519 audit-log public key (base64) for out-of-band verification")
 	verifyCmd.Flags().String("ed25519-pub", "", "trusted Ed25519 public key (base64 or hex); requires the audit log to be signed")
+	verifyCmd.Flags().String("against-anchor", "", "verify the local audit chain against an external anchor file (detects tail truncation and rollback)")
 	rootCmd.AddCommand(verifyCmd)
 }
 
-func runAuditVerify(ctx context.Context, w io.Writer, pubFlag string) error {
-	configPath, err := config.FindConfig()
-	if err != nil {
-		if errors.Is(err, os.ErrNotExist) {
-			return fmt.Errorf("no NockLock config found. Run 'nocklock init' first")
-		}
-		return fmt.Errorf("config lookup failed: %w", err)
-	}
-
-	cfg, err := config.Load(configPath)
+// runVerifyAgainstAnchor authenticates an external anchor and checks the local
+// chain against it: FEWER rows than attested is truncation/rollback, a head-hash
+// mismatch at the attested count is tamper, and a bad/forged anchor is FORGED.
+// The anchor's own signature is authenticated with the same key resolution as
+// verify --audit (an explicit --ed25519-pub, else the local managed key). The
+// log is opened READ-ONLY (no signing option): verifying never writes.
+func runVerifyAgainstAnchor(w io.Writer, anchorFile, pubFlag string) error {
+	dbPath, projectRoot, err := resolveAuditDBPath()
 	if err != nil {
 		return err
 	}
 
-	// Get the logging DB path from config
-	if cfg.Logging.DB == "" {
-		return fmt.Errorf("no logging DB configured")
+	anchor, err := logging.ReadAnchor(anchorFile)
+	if err != nil {
+		return fmt.Errorf("failed to read anchor file %s: %w", anchorFile, err)
 	}
 
-	dbPath := cfg.Logging.DB
-	projectRoot := filepath.Dir(filepath.Dir(configPath))
+	pub, err := resolveVerifyPublicKey(pubFlag)
+	if err != nil {
+		return err
+	}
 
-	// Make path absolute if relative
+	logger, err := logging.NewLogger(dbPath, projectRoot)
+	if err != nil {
+		return fmt.Errorf("failed to open event log: %w", err)
+	}
+	defer logger.Close()
+
+	result, err := logger.VerifyAgainstAnchor(anchor, pub)
+	if err != nil {
+		return fmt.Errorf("anchor verification failed: %w", err)
+	}
+	return writeAnchorVerifyResult(w, result)
+}
+
+// writeAnchorVerifyResult renders an anchor verification verdict, mirroring the
+// AUDIT: verdict shape. Any non-OK outcome exits non-zero (No-Silent-Success).
+func writeAnchorVerifyResult(w io.Writer, result *logging.AnchorVerifyResult) error {
+	switch result.Classification {
+	case "ok":
+		fmt.Fprintf(w, "ANCHOR: OK — %s (anchor attests %d rows, local has %d)\n", result.Reason, result.AnchorRowCount, result.LocalRowCount)
+		fmt.Fprintf(w, "Anchor head: %s\n", result.AnchorHeadHash)
+		return nil
+	case "truncation":
+		fmt.Fprintf(w, "ANCHOR: TRUNCATION — %s\n", result.Reason)
+		if result.PrunedAfterAnchor {
+			fmt.Fprintln(w, "NOTE: the local chain_head records a prune after this anchor was emitted; a legitimate compaction can look like truncation. Re-emit the anchor after a prune.")
+		}
+		return &exitCodeError{code: 1}
+	case "tampered":
+		fmt.Fprintf(w, "ANCHOR: TAMPERED — %s\n", result.Reason)
+		if result.PrunedAfterAnchor {
+			fmt.Fprintln(w, "NOTE: the local chain_head records a prune after this anchor was emitted; a legitimate compaction re-chains surviving rows. Re-emit the anchor after a prune.")
+		}
+		return &exitCodeError{code: 1}
+	case "identity_mismatch", "forged":
+		fmt.Fprintf(w, "ANCHOR: FORGED — %s\n", result.Reason)
+		return &exitCodeError{code: 1}
+	case "no_key":
+		fmt.Fprintf(w, "ANCHOR: FAILED — %s\n", result.Reason)
+		return &exitCodeError{code: 1}
+	default:
+		fmt.Fprintf(w, "ANCHOR: FAILED — unexpected verification state %q: %s\n", result.Classification, result.Reason)
+		return &exitCodeError{code: 1}
+	}
+}
+
+// resolveAuditDBPath finds the NockLock config and returns the absolute event
+// log path and project root, requiring the DB to exist on disk. Shared by every
+// audit-log command (verify --audit, verify --against-anchor, anchor emit).
+func resolveAuditDBPath() (dbPath, projectRoot string, err error) {
+	configPath, err := config.FindConfig()
+	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return "", "", fmt.Errorf("no NockLock config found. Run 'nocklock init' first")
+		}
+		return "", "", fmt.Errorf("config lookup failed: %w", err)
+	}
+
+	cfg, err := config.Load(configPath)
+	if err != nil {
+		return "", "", err
+	}
+
+	if cfg.Logging.DB == "" {
+		return "", "", fmt.Errorf("no logging DB configured")
+	}
+
+	dbPath = cfg.Logging.DB
+	projectRoot = filepath.Dir(filepath.Dir(configPath))
 	if !filepath.IsAbs(dbPath) {
 		dbPath = filepath.Join(projectRoot, dbPath)
 	}
 
-	// Open the logger (will error if DB doesn't exist)
 	if _, err := os.Stat(dbPath); err != nil {
-		return fmt.Errorf("event log not found at %s: %w", dbPath, err)
+		return "", "", fmt.Errorf("event log not found at %s: %w", dbPath, err)
+	}
+	return dbPath, projectRoot, nil
+}
+
+func runAuditVerify(ctx context.Context, w io.Writer, pubFlag string) error {
+	dbPath, projectRoot, err := resolveAuditDBPath()
+	if err != nil {
+		return err
 	}
 
 	// Resolve a public key for authenticity checking. An explicit --ed25519-pub
