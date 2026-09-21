@@ -305,6 +305,16 @@ var wrapCmd = &cobra.Command{
 		var proxyFailed atomic.Bool
 		var netnsEgress *netns.EgressConfig
 
+		// Egress decision-log plumbing (Nock N10649). The fenced transparent proxy
+		// makes every allow/deny decision but runs as the shared nobody uid with no
+		// DB handle or signing key, so it cannot sign an audit row. It instead
+		// appends plain records to a wrap-owned decision-log file; this parent —
+		// which holds the signing key — streams those records into the signed,
+		// hash-chained event log below. These are set only on the useNetns path.
+		var decisionLogPath string
+		var decisionReaderWg sync.WaitGroup
+		decisionDone := make(chan struct{})
+
 		if useNetns {
 			// Kernel-enforced network egress floor. Confirm the privileged helper
 			// is reachable via passwordless sudo (the DECIDED acquisition path)
@@ -331,6 +341,29 @@ var wrapCmd = &cobra.Command{
 				AllowPrivateRanges: effectiveCfg.Network.AllowPrivateRanges,
 				Bridge:             candidate,
 			}
+
+			// Create the per-session egress decision-log file BEFORE spawning the
+			// netns child. It is owned by THIS (wrap) user, mode 0600, in a 0700
+			// per-session temp dir. The transparent proxy opens it as root — before
+			// it drops to the shared nobody uid — and appends allow/deny records;
+			// wrap reads them below and signs each into the audit trail. Note: no
+			// pre-existing session/bridge temp dir exists in wrap, so one is created
+			// here per session and removed on exit. Creation must NOT be deferred to
+			// the proxy: the proxy runs as the shared uid 65534 and the file must be
+			// wrap-user-owned, not nobody-writable.
+			decisionDir, dirErr := os.MkdirTemp("", "nocklock-egress-decisions-")
+			if dirErr != nil {
+				return fmt.Errorf("create egress decision-log directory: %w", dirErr)
+			}
+			defer os.RemoveAll(decisionDir)
+			decisionLogPath = filepath.Join(decisionDir, "decisions.log")
+			decisionFile, fileErr := os.OpenFile(decisionLogPath, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o600)
+			if fileErr != nil {
+				return fmt.Errorf("create egress decision-log file: %w", fileErr)
+			}
+			_ = decisionFile.Close()
+			netnsEgress.DecisionLogPath = decisionLogPath
+
 			logEvent(logging.EventNetworkPassed, "network", fmt.Sprintf("netns tproxy egress fence active domains=%d", len(netnsEgress.Allow)), false)
 			fmt.Fprintf(os.Stderr, "NockLock: network egress fence active — netns tproxy allowlist (%d domain(s))\n", len(netnsEgress.Allow))
 		} else if !cfg.Network.AllowAll {
@@ -442,7 +475,58 @@ var wrapCmd = &cobra.Command{
 			}()
 		}
 
+		// Stream the egress decision-log line-by-line WHILE the child runs, then
+		// drain the remaining complete lines after it exits. The transparent proxy
+		// appends one full record per Write, so the scanner only ever acts on
+		// complete, newline-terminated lines; a trailing partial is held until its
+		// terminator arrives. Each complete record is signed into the audit trail.
+		if decisionLogPath != "" {
+			decisionReaderWg.Add(1)
+			go func() {
+				defer decisionReaderWg.Done()
+				f, err := os.Open(decisionLogPath)
+				if err != nil {
+					return
+				}
+				defer f.Close()
+				scanner := newDecisionLogScanner(logger, sessionID)
+				readBuf := make([]byte, 4096)
+				for {
+					n, readErr := f.Read(readBuf)
+					if n > 0 {
+						scanner.Feed(readBuf[:n])
+					}
+					if readErr == nil {
+						continue
+					}
+					// No more data available right now. If the child has exited, the
+					// proxy is stopped and no more records can appear: do one final
+					// drain of any bytes written since the last read, then stop.
+					select {
+					case <-decisionDone:
+						for {
+							m, e := f.Read(readBuf)
+							if m > 0 {
+								scanner.Feed(readBuf[:m])
+							}
+							if e != nil {
+								return
+							}
+						}
+					default:
+						time.Sleep(50 * time.Millisecond)
+					}
+				}
+			}()
+		}
+
 		childErr := child.Run()
+
+		// The child (and thus the proxy that writes the decision-log) has exited.
+		// Signal the reader to do its final drain and wait for it before the
+		// deferred logger.Close, so no signed egress row is lost.
+		close(decisionDone)
+		decisionReaderWg.Wait()
 
 		// Cancel the fence context to stop the listener, then wait for event goroutine.
 		if fsFenceCancel != nil {

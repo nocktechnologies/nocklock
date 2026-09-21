@@ -50,6 +50,18 @@ type EgressConfig struct {
 	Allow              []string   `json:"allow"`
 	AllowPrivateRanges bool       `json:"allow_private_ranges"`
 	Bridge             BridgeSpec `json:"bridge"`
+	// DecisionLogPath is the OPERATOR decision-log path. When non-empty, the
+	// transparent proxy appends one newline-terminated allow/deny record per
+	// egress decision to this file so the trusted parent (`wrap`) can fold those
+	// decisions into the signed, hash-chained audit trail. It is created
+	// wrap-user-owned mode 0600 by the parent and opened by the transparent proxy
+	// BEFORE it drops to the shared nobody uid (see transparent_linux.go).
+	//
+	// This is DISTINCT from the test-only NOCKLOCK_TRANSPARENT_DENY_LOG env
+	// mechanism (which recordTransparentDeny opens lazily, as nobody): that path
+	// remains intact for the existing protocol-matrix tests and is never used for
+	// the signed audit write.
+	DecisionLogPath string `json:"decision_log_path,omitempty"`
 }
 
 var subnetReservationMutex sync.Mutex
