@@ -70,8 +70,19 @@ var verifyCmd = &cobra.Command{
 		exportPub, _ := cmd.Flags().GetBool("export-pubkey")
 		pubFlag, _ := cmd.Flags().GetString("ed25519-pub")
 		anchorFile, _ := cmd.Flags().GetString("against-anchor")
+		remoteAnchor, _ := cmd.Flags().GetBool("against-remote-anchor")
 		if exportPub {
 			return runExportPubkey(cmd.OutOrStdout())
+		}
+		if anchorFile != "" && remoteAnchor {
+			return fmt.Errorf("--against-anchor and --against-remote-anchor are mutually exclusive")
+		}
+		if remoteAnchor {
+			ctx := cmd.Context()
+			if ctx == nil {
+				ctx = context.Background()
+			}
+			return runVerifyAgainstRemoteAnchor(ctx, cmd.OutOrStdout(), pubFlag)
 		}
 		if anchorFile != "" {
 			return runVerifyAgainstAnchor(cmd.OutOrStdout(), anchorFile, pubFlag)
@@ -106,6 +117,7 @@ func init() {
 	verifyCmd.Flags().Bool("export-pubkey", false, "print the Ed25519 audit-log public key (base64) for out-of-band verification")
 	verifyCmd.Flags().String("ed25519-pub", "", "trusted Ed25519 public key (base64 or hex); requires the audit log to be signed")
 	verifyCmd.Flags().String("against-anchor", "", "verify the local audit chain against an external anchor file (detects tail truncation and rollback)")
+	verifyCmd.Flags().Bool("against-remote-anchor", false, "verify the local audit chain against the latest anchor in the off-box store at $NOCKLOCK_ANCHOR_URL (absence fails)")
 	rootCmd.AddCommand(verifyCmd)
 }
 
@@ -169,6 +181,9 @@ func writeAnchorVerifyResult(w io.Writer, result *logging.AnchorVerifyResult) er
 		return &exitCodeError{code: 1}
 	case "no_key":
 		fmt.Fprintf(w, "ANCHOR: FAILED — %s\n", result.Reason)
+		return &exitCodeError{code: 1}
+	case "anchor_unavailable":
+		fmt.Fprintf(w, "ANCHOR: UNAVAILABLE (anchor_unavailable) — %s\n", result.Reason)
 		return &exitCodeError{code: 1}
 	default:
 		fmt.Fprintf(w, "ANCHOR: FAILED — unexpected verification state %q: %s\n", result.Classification, result.Reason)
