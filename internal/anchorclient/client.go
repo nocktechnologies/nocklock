@@ -207,17 +207,17 @@ func do(req *http.Request) (int, []byte, error) {
 	return resp.StatusCode, data, nil
 }
 
-// errorBodyText renders server body text for an error: truncated to
-// maxErrorBodyBytes and scrubbed of the token should a server echo it.
+// errorBodyText renders server body text for an error: scrubbed of the token
+// should a server echo it, then truncated to maxErrorBodyBytes.
 func errorBodyText(body []byte, token string) string {
 	s := string(body)
+	if token != "" {
+		s = strings.ReplaceAll(s, token, "[redacted]")
+	}
 	if len(s) > maxErrorBodyBytes {
 		s = s[:maxErrorBodyBytes] + "...(truncated)"
 	}
 	s = strings.TrimSpace(s)
-	if token != "" {
-		s = strings.ReplaceAll(s, token, "[redacted]")
-	}
 	if s == "" {
 		return "(empty body)"
 	}

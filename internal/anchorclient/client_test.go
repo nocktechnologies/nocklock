@@ -128,6 +128,26 @@ func TestPush409IsRegression(t *testing.T) {
 	assertNoToken(t, err)
 }
 
+func TestPush409RedactsTokenStraddlingTruncation(t *testing.T) {
+	a, pub := signedAnchor(t)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusConflict)
+		io.WriteString(w, strings.Repeat("x", maxErrorBodyBytes-len(testToken)+1)+testToken+strings.Repeat("x", 2000))
+	}))
+	defer srv.Close()
+	err := Push(context.Background(), srv.URL, testToken, a, pub)
+	if !errors.Is(err, ErrAnchorRegression) {
+		t.Fatalf("409 must wrap ErrAnchorRegression, got %v", err)
+	}
+	if !strings.HasSuffix(err.Error(), "...(truncated)") {
+		t.Errorf("server body must remain truncated, got %v", err)
+	}
+	if strings.Contains(err.Error(), testToken[:len(testToken)-1]) {
+		t.Fatalf("error string leaks a truncated bearer token: %v", err)
+	}
+	assertNoToken(t, err)
+}
+
 func TestPush500IsError(t *testing.T) {
 	a, pub := signedAnchor(t)
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
