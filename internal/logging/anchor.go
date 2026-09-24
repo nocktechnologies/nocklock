@@ -239,11 +239,32 @@ func ReadAnchor(path string) (*Anchor, error) {
 	if err != nil {
 		return nil, err
 	}
-	var a Anchor
-	if err := json.Unmarshal(data, &a); err != nil {
+	a, err := UnmarshalAnchor(data)
+	if err != nil {
 		return nil, fmt.Errorf("failed to parse anchor file %s: %w", path, err)
 	}
+	return a, nil
+}
+
+// UnmarshalAnchor decodes an anchor from its JSON encoding. It is the single
+// decode path for every anchor source (a local file, or one fetched from the
+// off-box store), so a remote anchor is parsed exactly like a local one; the
+// authenticity and chain checks live in VerifyAgainstAnchor.
+func UnmarshalAnchor(data []byte) (*Anchor, error) {
+	var a Anchor
+	if err := json.Unmarshal(data, &a); err != nil {
+		return nil, err
+	}
 	return &a, nil
+}
+
+// SigningPublicKey returns the Ed25519 public key this logger signs with, or
+// nil when the log was opened without signing.
+func (l *Logger) SigningPublicKey() ed25519.PublicKey {
+	if l.signer == nil {
+		return nil
+	}
+	return l.signer.pub
 }
 
 // VerifyAgainstAnchor checks the local chain against an anchor, using pub to
