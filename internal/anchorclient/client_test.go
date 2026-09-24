@@ -23,7 +23,7 @@ const testToken = "tok-SENTINEL-do-not-leak-4f1c"
 func signedAnchor(t *testing.T) (*logging.Anchor, ed25519.PublicKey) {
 	t.Helper()
 	dir := t.TempDir()
-	l, err := logging.NewLogger(filepath.Join(dir, "events.db"), "", logging.WithSigning(filepath.Join(dir, "key", "signing-ed25519.key")))
+	l, err := logging.NewLogger(filepath.Join(dir, "events.db"), "", logging.WithSigning(filepath.Join(dir, "state", "signing")))
 	if err != nil {
 		t.Fatalf("logger: %v", err)
 	}
