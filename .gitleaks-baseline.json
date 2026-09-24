@@ -1,6 +1,15 @@
 [
   {
     "RuleID": "generic-api-key",
+    "Description": "Test-only signing-state path; not a credential.",
+    "StartLine": 26,
+    "EndLine": 26,
+    "File": "internal/anchorclient/client_test.go",
+    "Commit": "850ac0ba4b291ab5be78c0b090236e54b5e24439",
+    "Fingerprint": "850ac0ba4b291ab5be78c0b090236e54b5e24439:internal/anchorclient/client_test.go:generic-api-key:26"
+  },
+  {
+    "RuleID": "generic-api-key",
     "Description": "Detected a Generic API Key, potentially exposing access to various services and sensitive operations.",
     "StartLine": 465,
     "EndLine": 466,
