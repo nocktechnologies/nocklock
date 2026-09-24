@@ -3,6 +3,7 @@ package cli
 import (
 	"context"
 	"crypto/ed25519"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -62,7 +63,7 @@ const errNoAnchorURL = "no anchor URL configured (NOCKLOCK_ANCHOR_URL)"
 func runAnchorPush(ctx context.Context, w io.Writer, file string) error {
 	baseURL, token := anchorRemoteConfig()
 	if baseURL == "" {
-		return fmt.Errorf(errNoAnchorURL)
+		return errors.New(errNoAnchorURL)
 	}
 	if file == "" {
 		dbPath, _, err := resolveAuditDBPath()
