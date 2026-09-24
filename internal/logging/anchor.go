@@ -176,8 +176,9 @@ func (l *Logger) EmitAnchor() (*Anchor, error) {
 }
 
 // EmitAnchorToFile emits an anchor and writes it as compact JSON to path, 0600,
-// via a temp file + rename so a crash cannot leave a torn anchor. Used by wrap
-// teardown; the path is DefaultAnchorPath(dbPath) by default.
+// via a temp file + rename so a crash cannot leave a torn anchor. wrap teardown
+// performs the same two steps (EmitAnchor + WriteAnchor) itself because it also
+// needs the anchor object for the off-box push.
 func (l *Logger) EmitAnchorToFile(path string) error {
 	a, err := l.EmitAnchor()
 	if err != nil {
