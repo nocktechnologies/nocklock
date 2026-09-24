@@ -345,6 +345,13 @@ func verifyHeadSig(pub ed25519.PublicKey, headHashHex string, rowCount int, meta
 	return ed25519.Verify(pub, hb, sig)
 }
 
+// PublicKeyFingerprint returns the signing identity of pub: the hex SHA-256 of
+// the Ed25519 public key. It is the agent_id an anchor carries and the
+// fingerprint chain_head records.
+func PublicKeyFingerprint(pub ed25519.PublicKey) string {
+	return publicKeyFingerprint(pub)
+}
+
 func publicKeyFingerprint(pub ed25519.PublicKey) string {
 	sum := sha256.Sum256(pub)
 	return hex.EncodeToString(sum[:])

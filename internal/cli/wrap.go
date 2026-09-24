@@ -111,11 +111,23 @@ var wrapCmd = &cobra.Command{
 		// defer order places this BEFORE logger.Close (it needs the open signer) and
 		// AFTER the SessionEnd event that every return path logs last. The anchor
 		// lands next to events.db, inside the audit dir the fenced child is denied.
+		//
+		// When NOCKLOCK_ANCHOR_URL is set, the written anchor is then pushed off-box
+		// under a hard timeout. The push is FAIL-OPEN: the session already ran, so
+		// a push failure prints a loud warning and never changes the exit code (this
+		// defer does not touch RunE's return value). With the URL unset nothing
+		// further happens.
 		defer func() {
 			anchorPath := logging.DefaultAnchorPath(dbPath)
-			if err := logger.EmitAnchorToFile(anchorPath); err != nil {
-				fmt.Fprintf(os.Stderr, "NockLock: warning: chain anchor not written to %s: %v\n", anchorPath, err)
+			anchor, err := logger.EmitAnchor()
+			if err == nil {
+				err = logging.WriteAnchor(anchorPath, anchor)
 			}
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "NockLock: warning: chain anchor not written to %s: %v\n", anchorPath, err)
+				return
+			}
+			pushAnchorOffBox(os.Stderr, anchor, logger.SigningPublicKey())
 		}()
 
 		// logEvent records one event. logger is guaranteed non-nil here (the open
@@ -144,6 +156,9 @@ var wrapCmd = &cobra.Command{
 		}
 		var blockedNames []string
 		childEnv, blockedNames := fence.Filter(os.Environ())
+		// The off-box anchor store's URL and bearer token are wrap's, never the
+		// fenced agent's: strip them before the child env is logged or launched.
+		childEnv = stripAnchorEnv(childEnv)
 
 		// Log all blocked env vars in a single transaction.
 		if len(blockedNames) > 0 {

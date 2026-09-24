@@ -73,9 +73,31 @@ $ nocklock verify --against-anchor .nock/chain-anchor.json
 ANCHOR: OK — local chain reproduces the anchored head at 247 rows (anchor attests 247 rows, local has 247)
 ```
 
-`verify --against-anchor` first authenticates the anchor itself (the supplied `--ed25519-pub`, else the local managed key; without a key it fails closed rather than falling back to a hash-only pass), then checks the local chain: **fewer rows than attested** is `ANCHOR: TRUNCATION` (tail truncation *or* rollback to an earlier snapshot — both present a shorter chain), a **head-hash mismatch at the attested count** is `ANCHOR: TAMPERED`, a bad or wrong-key anchor is `ANCHOR: FORGED`, and every non-OK verdict exits non-zero. A chain that has legitimately **grown** past the anchor still passes. A `nocklock wrap` session emits an anchor to `<db-dir>/chain-anchor.json` on teardown (best-effort but logged), the hook a future off-box push consumes.
+`verify --against-anchor` first authenticates the anchor itself (the supplied `--ed25519-pub`, else the local managed key; without a key it fails closed rather than falling back to a hash-only pass), then checks the local chain: **fewer rows than attested** is `ANCHOR: TRUNCATION` (tail truncation *or* rollback to an earlier snapshot — both present a shorter chain), a **head-hash mismatch at the attested count** is `ANCHOR: TAMPERED`, a bad or wrong-key anchor is `ANCHOR: FORGED`, and every non-OK verdict exits non-zero. A chain that has legitimately **grown** past the anchor still passes. A `nocklock wrap` session emits an anchor to `<db-dir>/chain-anchor.json` on teardown (best-effort but logged) and, when configured, pushes it off-box (see below).
 
 Two honest limits. First, a legitimate `--prune` re-anchors the chain and invalidates any anchor emitted before it; verify surfaces a `NOTE` when the local `chain_head` records a prune after the anchor's timestamp, and a fresh anchor should be emitted after a prune (wrap re-emits on every teardown). Second, `chain-anchor.json` sits in the **same trust boundary** as `events.db` — a file-access attacker can delete it or swap an older valid anchor alongside a matching database rollback. Its real value is as the **off-box** push hook: once the head is pinned somewhere the agent cannot reach (e.g. NockCC), rollback and truncation become observable even against a full-file adversary.
+
+### Off-box anchor push
+
+Set two environment variables to pin anchors somewhere the agent cannot reach:
+
+- `NOCKLOCK_ANCHOR_URL`: base URL of the anchor store. It must be `https://`; plain `http://` is accepted only for loopback hosts (`127.0.0.1`, `::1`, `localhost`) for local development and tests.
+- `NOCKLOCK_ANCHOR_TOKEN`: optional bearer token, read from the environment only (never a config key or flag) and never printed in errors or logs.
+
+`nocklock wrap` strips both variables from the fenced child's environment, whatever the secret-fence config says. With the URL set, wrap pushes the anchor it writes on teardown under a hard 5-second timeout. The push is **fail-open**: on any failure wrap prints `NockLock: warning: chain anchor NOT pushed off-box: <reason>` and exits with the wrapped command's own exit code. With the URL unset, teardown behaves exactly as before. `nocklock anchor push [--file <path>]` pushes an anchor by hand (default: `<db-dir>/chain-anchor.json`).
+
+```
+$ nocklock verify --against-remote-anchor
+ANCHOR: TRUNCATION — truncation detected: anchor attests 247 rows, local has 190
+```
+
+`verify --against-remote-anchor` fetches the latest stored anchor for the local signing identity and runs the same checks as `--against-anchor` (the two flags are mutually exclusive). An unset URL, an unreachable store, or no stored anchor prints `ANCHOR: UNAVAILABLE (anchor_unavailable)` and exits non-zero: a missing off-box pin is reported, never read as a pass.
+
+Server contract (the NockCC endpoint ships separately):
+
+- `POST {base}/api/nocklock/anchors/` with `{"anchor": <anchor object>, "pubkey": "<base64 Ed25519 public key>"}` and `Authorization: Bearer <token>`. Any 2xx means stored.
+- `GET {base}/api/nocklock/anchors/{agent_id}/latest/` returns the latest anchor, or 404 when none is stored.
+- The server answers **409** when a pushed anchor's `row_count` is lower than the latest one it holds for that `agent_id`. This server-side monotonic check is what makes a local rollback observable: a rolled-back host can no longer re-pin a shorter chain, and `--against-remote-anchor` then reports the gap as `TRUNCATION`. Redirects are not followed and response bodies are capped at 64 KiB.
 
 ## Configuration
 

@@ -1,6 +1,7 @@
 package cli
 
 import (
+	"context"
 	"fmt"
 	"io"
 
@@ -31,9 +32,30 @@ var anchorEmitCmd = &cobra.Command{
 	},
 }
 
+var anchorPushCmd = &cobra.Command{
+	Use:   "push",
+	Short: "Push a signed anchor to the off-box anchor store",
+	Long: "Push an anchor file to the off-box anchor store at $NOCKLOCK_ANCHOR_URL, authenticated\n" +
+		"with the bearer token in $NOCKLOCK_ANCHOR_TOKEN (environment only). The body carries the\n" +
+		"anchor and the base64 Ed25519 public key it is signed with. The store refuses (HTTP 409) an\n" +
+		"anchor whose row_count is below the latest one it holds for the same agent_id.\n\n" +
+		"Defaults to the anchor 'wrap' writes on teardown next to events.db.",
+	RunE: func(cmd *cobra.Command, args []string) error {
+		file, _ := cmd.Flags().GetString("file")
+		ctx := cmd.Context()
+		if ctx == nil {
+			ctx = context.Background()
+		}
+		cmd.SilenceUsage = true
+		return runAnchorPush(ctx, cmd.OutOrStdout(), file)
+	},
+}
+
 func init() {
 	anchorEmitCmd.Flags().String("out", "", "write the anchor JSON to this file (0600) instead of stdout")
 	anchorCmd.AddCommand(anchorEmitCmd)
+	anchorPushCmd.Flags().String("file", "", "anchor file to push (default: <db-dir>/chain-anchor.json)")
+	anchorCmd.AddCommand(anchorPushCmd)
 	rootCmd.AddCommand(anchorCmd)
 }
 
