@@ -209,9 +209,12 @@ func VerifySession(dbPath string, pub ed25519.PublicKey, sessionID string) (Resu
 	return res, nil
 }
 
+// beforeSQLiteOpen is a test seam for deterministic path-swap regression tests.
+var beforeSQLiteOpen = func() {}
+
 // openReadOnly opens an existing SQLite file read only. It refuses a missing,
-// symlinked, or non-regular path up front: sql.Open is lazy, and SQLite must
-// never be handed a path it could create.
+// symlinked, or non-regular path and verifies after SQLite opens the file that
+// the path still names the same file.
 func openReadOnly(dbPath string) (*sql.DB, error) {
 	if dbPath == "" {
 		return nil, errors.New("receipt: DB path is empty")
@@ -231,18 +234,11 @@ func openReadOnly(dbPath string) (*sql.DB, error) {
 		return nil, fmt.Errorf("receipt: refusing audit log %s: not a regular file", abs)
 	}
 
-	// mode=ro opens without write access and without create; query_only is a
-	// second guard. On a WAL-mode log, mode=ro alone still creates -shm and
-	// -wal side files. When no non-empty -wal exists the main file holds every
-	// committed row, so immutable=1 is safe and creates nothing. When a
-	// non-empty -wal exists (a writer is live or did not checkpoint), immutable
-	// would ignore those rows, so plain mode=ro is used to read them; the side
-	// files already exist in that case.
-	query := "mode=ro&immutable=1&_pragma=query_only(1)"
-	if wi, err := os.Stat(abs + "-wal"); err == nil && wi.Size() > 0 {
-		query = "mode=ro&_pragma=query_only(1)"
-	}
-	u := url.URL{Scheme: "file", Path: abs, RawQuery: query}
+	// Always use SQLite's normal read-only locking. Inferring immutable mode
+	// from a pre-open WAL check races a writer creating the WAL and can make
+	// committed tail rows invisible.
+	beforeSQLiteOpen()
+	u := url.URL{Scheme: "file", Path: abs, RawQuery: "mode=ro&_pragma=query_only(1)"}
 	db, err := sql.Open("sqlite", u.String())
 	if err != nil {
 		return nil, fmt.Errorf("receipt: open audit log %s read only: %w", abs, err)
@@ -251,6 +247,14 @@ func openReadOnly(dbPath string) (*sql.DB, error) {
 	if err := db.Ping(); err != nil {
 		db.Close()
 		return nil, fmt.Errorf("receipt: open audit log %s read only: %w", abs, err)
+	}
+	openedFI, err := os.Lstat(abs)
+	if err != nil || openedFI.Mode()&os.ModeSymlink != 0 || !os.SameFile(fi, openedFI) {
+		db.Close()
+		if err != nil {
+			return nil, fmt.Errorf("receipt: audit log %s changed while opening: %w", abs, err)
+		}
+		return nil, fmt.Errorf("receipt: audit log %s changed while opening", abs)
 	}
 	return db, nil
 }

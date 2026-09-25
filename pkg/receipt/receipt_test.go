@@ -283,10 +283,47 @@ func TestVerifySession_DBIsNotModified(t *testing.T) {
 		b, a := sha256.Sum256(before), sha256.Sum256(after)
 		t.Fatalf("DB bytes changed: before %x after %x", b, a)
 	}
-	for _, side := range []string{"-wal", "-shm", "-journal"} {
-		if _, err := os.Stat(dbPath + side); err == nil {
-			t.Fatalf("VerifySession left a %s side file next to the DB", side)
-		}
+}
+
+func TestVerifySession_PathSwapIsUnverifiable(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		swap func(t *testing.T, dbPath, replacement string)
+	}{
+		{
+			name: "regular file",
+			swap: func(t *testing.T, dbPath, replacement string) {
+				t.Helper()
+				if err := os.Rename(replacement, dbPath); err != nil {
+					t.Fatalf("replace DB: %v", err)
+				}
+			},
+		},
+		{
+			name: "symlink",
+			swap: func(t *testing.T, dbPath, replacement string) {
+				t.Helper()
+				if err := os.Remove(dbPath); err != nil {
+					t.Fatalf("remove DB: %v", err)
+				}
+				if err := os.Symlink(replacement, dbPath); err != nil {
+					t.Fatalf("symlink DB: %v", err)
+				}
+			},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			dir := t.TempDir()
+			dbPath, pub := buildSignedDB(t, dir)
+			replacement, _ := buildSignedDB(t, t.TempDir())
+			beforeSQLiteOpen = func() { tc.swap(t, dbPath, replacement) }
+			t.Cleanup(func() { beforeSQLiteOpen = func() {} })
+
+			r, err := VerifySession(dbPath, pub, sessA)
+			if err == nil || r.Verdict != VerdictUnverifiable {
+				t.Fatalf("verdict=%s err=%v, want UNVERIFIABLE after path swap", r.Verdict, err)
+			}
+		})
 	}
 }
 
@@ -378,6 +415,37 @@ func TestVerifySession_ReadsUncheckpointedWAL(t *testing.T) {
 	r, err := VerifySession(dbPath, pub, sessA)
 	if err != nil || r.Verdict != VerdictIntact || r.RowsChecked != 3 {
 		t.Fatalf("verdict=%s rows=%d err=%v (%s), want INTACT over the 3 rows still in the WAL", r.Verdict, r.RowsChecked, err, r.Reason)
+	}
+}
+
+func TestVerifySession_WALCreatedDuringOpenIsRead(t *testing.T) {
+	dir := t.TempDir()
+	dbPath, pub := buildSignedDB(t, dir)
+	keyPath := filepath.Join(dir, "keys", "signing-ed25519.key")
+	var writer *logging.Logger
+	beforeSQLiteOpen = func() {
+		var err error
+		writer, err = logging.NewLogger(dbPath, "", logging.WithSigning(keyPath))
+		if err != nil {
+			t.Fatalf("open concurrent writer: %v", err)
+		}
+		if err := writer.Log(logging.Event{
+			Timestamp: time.Now(), EventType: logging.EventFilePassed,
+			Category: "filesystem", Detail: "new-tail", SessionID: sessA,
+		}); err != nil {
+			t.Fatalf("append concurrent WAL row: %v", err)
+		}
+	}
+	t.Cleanup(func() {
+		beforeSQLiteOpen = func() {}
+		if writer != nil {
+			_ = writer.Close()
+		}
+	})
+
+	r, err := VerifySession(dbPath, pub, sessA)
+	if err != nil || r.Verdict != VerdictIntact || r.RowsChecked != 4 {
+		t.Fatalf("verdict=%s rows=%d err=%v (%s), want INTACT including the WAL tail", r.Verdict, r.RowsChecked, err, r.Reason)
 	}
 }
 
