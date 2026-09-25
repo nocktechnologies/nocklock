@@ -11,6 +11,15 @@ All notable changes to NockLock will be documented in this file.
 
 ### Added
 
+- `pkg/receipt`: a public, read-only `VerifySession(dbPath, pub, sessionID)`
+  that another module can import to verify one session's audit chain offline
+  with only the Ed25519 public key. It opens the log read only (never creates,
+  writes, or migrates it), walks the whole hash chain in id order because the
+  link spans sessions, checks every session row's signature, and returns exactly
+  one fail-closed verdict: `INTACT`, `TAMPERED`, `UNSIGNED`, `NO_ROWS`, or
+  `UNVERIFIABLE`. A row with a valid signature and a forged `prev_hash` is
+  `TAMPERED`. The chain primitives stay in `internal/logging` behind thin
+  exported wrappers (`chain_export.go`), so there is one implementation.
 - `nocklock wrap --net-fence=netns` now layers the Phase-1b working egress
   allowlist onto its kernel default-drop floor. A per-run link-local veth grants
   the namespace no default route and reaches only a host-side allowlist proxy;
