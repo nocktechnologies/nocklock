@@ -467,6 +467,13 @@ var wrapCmd = &cobra.Command{
 		// (kernel-enforced, inherited by all descendants). On Linux fsSandboxPrefix
 		// is empty and the child runs directly with the LD_PRELOAD env above.
 		childArgv := composeChildArgv(args, landlockPrefix, fsSandboxPrefix)
+		// Export this run's session id to the child (N10647) so a co-located tool
+		// can stamp the SAME id. Done here, after every other env mutation and
+		// immediately before the single point where childEnv is consumed, so it
+		// covers all launch paths: the plain exec below, the Linux netns helper
+		// request, and the macOS sandbox-exec / Linux landlock shim prefixes (all of
+		// which inherit or forward childEnv). Any inherited value is overwritten.
+		childEnv = setSessionIDEnv(childEnv, sessionID)
 		var child *exec.Cmd
 		if useNetns {
 			// Hand the fully-composed child (any fs/syscall shim prefix included) to
@@ -780,6 +787,18 @@ func mergeFSFenceEnv(childEnv, fenceEnv []string) []string {
 		}
 	}
 	return append(childEnv, fenceEnv...)
+}
+
+// sessionIDEnv is the env var through which wrap tells the child which audit
+// session it belongs to. The id is not a secret; it lets a co-located tool
+// (NockGuard) stamp the same id so one verifier can join both chains.
+const sessionIDEnv = "NOCKLOCK_SESSION_ID"
+
+// setSessionIDEnv returns env with NOCKLOCK_SESSION_ID set to sessionID. Any
+// inherited value is removed first, so a stale or spoofed id from the parent
+// environment can never survive: the child sees only this run's real id.
+func setSessionIDEnv(env []string, sessionID string) []string {
+	return append(removeEnvVars(env, sessionIDEnv), sessionIDEnv+"="+sessionID)
 }
 
 // removeEnvVars returns env with any entries whose key matches one of the given

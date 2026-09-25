@@ -1128,3 +1128,53 @@ func TestWrapExitCodePassthrough(t *testing.T) {
 		t.Errorf("expected exit code 42, got %d", exitCode)
 	}
 }
+
+// ---------------------------------------------------------------------------
+// N10647: wrap exports the run's session id to the child
+// ---------------------------------------------------------------------------
+
+// TestWrapExportsSessionIDMatchingAuditDB drives the REAL binary and verifies the
+// child sees NOCKLOCK_SESSION_ID equal to the session id recorded in events.db,
+// and that an inherited (stale/spoofed) value is overwritten, not passed through.
+func TestWrapExportsSessionIDMatchingAuditDB(t *testing.T) {
+	// Pass the var through the secret allowlist so an inherited value would reach
+	// the child if wrap did not overwrite it.
+	cfg := strings.Replace(testConfig(),
+		`pass = ["HOME", "PATH", "SHELL", "USER", "LANG", "TERM"]`,
+		`pass = ["HOME", "PATH", "SHELL", "USER", "LANG", "TERM", "NOCKLOCK_SESSION_ID"]`, 1)
+	dir := setupTestDirWithConfig(t, cfg)
+
+	stdout, stderr, code := runNocklock(t, dir, []string{"NOCKLOCK_SESSION_ID=stale"},
+		"wrap", "--", "/bin/sh", "-c", `printf %s "$NOCKLOCK_SESSION_ID"`) // absolute: the landlock shim execs argv[0] without a PATH lookup
+	if code != 0 {
+		t.Fatalf("wrap exited %d, stderr: %s", code, stderr)
+	}
+
+	db, err := sql.Open("sqlite", filepath.Join(dir, ".nock", "events.db"))
+	if err != nil {
+		t.Fatalf("failed to open events.db: %v", err)
+	}
+	defer db.Close()
+	rows, err := db.Query("SELECT DISTINCT session_id FROM events")
+	if err != nil {
+		t.Fatalf("failed to query session ids: %v", err)
+	}
+	defer rows.Close()
+	var ids []string
+	for rows.Next() {
+		var id string
+		if err := rows.Scan(&id); err != nil {
+			t.Fatalf("scan: %v", err)
+		}
+		ids = append(ids, id)
+	}
+	if len(ids) != 1 {
+		t.Fatalf("expected exactly one session id in events.db, got %v", ids)
+	}
+	if stdout == "stale" {
+		t.Fatalf("inherited NOCKLOCK_SESSION_ID=stale survived into the child")
+	}
+	if stdout != ids[0] {
+		t.Fatalf("child NOCKLOCK_SESSION_ID = %q, events.db session id = %q; they must be equal", stdout, ids[0])
+	}
+}
