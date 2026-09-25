@@ -17,6 +17,8 @@ import (
 	"path/filepath"
 
 	"github.com/nocktechnologies/nocklock/internal/logging"
+
+	_ "modernc.org/sqlite" // registers the "sqlite" driver
 )
 
 // Verdicts. Exactly one is set on every Result; only VerdictIntact is success.

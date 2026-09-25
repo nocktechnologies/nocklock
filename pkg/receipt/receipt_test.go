@@ -290,6 +290,70 @@ func TestVerifySession_DBIsNotModified(t *testing.T) {
 	}
 }
 
+// A writer that died without checkpointing leaves a non-empty -wal and no live
+// connection. The plain mode=ro path reads it; neither the main file nor the
+// -wal may change (SQLite may create the -shm index, which holds no rows).
+func TestVerifySession_DBIsNotModified_UncheckpointedWALNoWriter(t *testing.T) {
+	dir := t.TempDir()
+	srcPath := filepath.Join(dir, "events.db")
+	keyPath := filepath.Join(dir, "keys", "signing-ed25519.key")
+	l, err := logging.NewLogger(srcPath, "", logging.WithSigning(keyPath))
+	if err != nil {
+		t.Fatalf("NewLogger: %v", err)
+	}
+	for i := 0; i < 3; i++ {
+		if err := l.Log(logging.Event{Timestamp: time.Now(), EventType: logging.EventFilePassed, Category: "filesystem", Detail: "f", SessionID: sessA}); err != nil {
+			t.Fatalf("Log: %v", err)
+		}
+	}
+	// Snapshot main file + -wal while the writer is still open: this is what a
+	// crash leaves on disk.
+	crashDir := t.TempDir()
+	dbPath := filepath.Join(crashDir, "events.db")
+	for _, s := range []string{"", "-wal"} {
+		b, err := os.ReadFile(srcPath + s)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(dbPath+s, b, 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := l.Close(); err != nil {
+		t.Fatal(err)
+	}
+	pub, err := logging.LoadPublicKeyFile(keyPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	read := func() (main, wal []byte) {
+		main, err := os.ReadFile(dbPath)
+		if err != nil {
+			t.Fatal(err)
+		}
+		wal, err = os.ReadFile(dbPath + "-wal")
+		if err != nil {
+			t.Fatal(err)
+		}
+		return main, wal
+	}
+	mainBefore, walBefore := read()
+	if len(walBefore) == 0 {
+		t.Fatal("precondition: want a non-empty -wal")
+	}
+	r, err := VerifySession(dbPath, pub, sessA)
+	if err != nil || r.Verdict != VerdictIntact || r.RowsChecked != 3 {
+		t.Fatalf("verdict=%s rows=%d err=%v (%s), want INTACT over 3 rows", r.Verdict, r.RowsChecked, err, r.Reason)
+	}
+	mainAfter, walAfter := read()
+	if !bytes.Equal(mainBefore, mainAfter) {
+		t.Fatal("main DB bytes changed: VerifySession checkpointed or wrote the log")
+	}
+	if !bytes.Equal(walBefore, walAfter) {
+		t.Fatal("-wal bytes changed: VerifySession wrote the log")
+	}
+}
+
 func TestVerifySession_ReadsUncheckpointedWAL(t *testing.T) {
 	dir := t.TempDir()
 	dbPath := filepath.Join(dir, "events.db")
