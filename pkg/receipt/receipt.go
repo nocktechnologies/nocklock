@@ -96,7 +96,7 @@ func VerifySession(dbPath string, pub ed25519.PublicKey, sessionID string) (Resu
 		return fail(errors.New("receipt: session id is empty"))
 	}
 
-	db, err := openReadOnly(dbPath)
+	db, absPath, preOpen, err := openReadOnly(dbPath)
 	if err != nil {
 		return fail(err)
 	}
@@ -193,6 +193,14 @@ func VerifySession(dbPath string, pub ed25519.PublicKey, sessionID string) (Resu
 	}
 	res.RowsChecked = len(res.Rows)
 
+	post, err := os.Lstat(absPath)
+	if err != nil {
+		return fail(fmt.Errorf("receipt: re-check audit log %s after read: %w", absPath, err))
+	}
+	if err := checkSameFile(absPath, preOpen, post); err != nil {
+		return fail(err)
+	}
+
 	switch {
 	case chainBadID != 0:
 		res.Verdict, res.FirstBadRow, res.Reason = VerdictTampered, chainBadID, chainBadReason
@@ -213,48 +221,70 @@ func VerifySession(dbPath string, pub ed25519.PublicKey, sessionID string) (Resu
 var beforeSQLiteOpen = func() {}
 
 // openReadOnly opens an existing SQLite file read only. It refuses a missing,
-// symlinked, or non-regular path and verifies after SQLite opens the file that
-// the path still names the same file.
-func openReadOnly(dbPath string) (*sql.DB, error) {
+// symlinked, or non-regular path up front: sql.Open is lazy, and SQLite must
+// never be handed a path it could create. It returns the absolute path and the
+// pre-open FileInfo so the caller can bind the check to the file it read (see
+// checkSameFile).
+func openReadOnly(dbPath string) (*sql.DB, string, os.FileInfo, error) {
 	if dbPath == "" {
-		return nil, errors.New("receipt: DB path is empty")
+		return nil, "", nil, errors.New("receipt: DB path is empty")
 	}
 	abs, err := filepath.Abs(dbPath)
 	if err != nil {
-		return nil, fmt.Errorf("receipt: resolve DB path %s: %w", dbPath, err)
+		return nil, "", nil, fmt.Errorf("receipt: resolve DB path %s: %w", dbPath, err)
 	}
 	fi, err := os.Lstat(abs)
 	if err != nil {
-		return nil, fmt.Errorf("receipt: cannot read audit log %s: %w", abs, err)
+		return nil, "", nil, fmt.Errorf("receipt: cannot read audit log %s: %w", abs, err)
 	}
-	if fi.Mode()&os.ModeSymlink != 0 {
-		return nil, fmt.Errorf("receipt: refusing audit log %s: path is a symlink", abs)
-	}
-	if !fi.Mode().IsRegular() {
-		return nil, fmt.Errorf("receipt: refusing audit log %s: not a regular file", abs)
+	if err := requireRegular(abs, fi); err != nil {
+		return nil, "", nil, err
 	}
 
-	// Always use SQLite's normal read-only locking. Inferring immutable mode
-	// from a pre-open WAL check races a writer creating the WAL and can make
-	// committed tail rows invisible.
+	// mode=ro opens without write access and without create; query_only is a
+	// second guard. On a WAL-mode log SQLite may create the -shm index next to
+	// the DB; it holds no rows. The main file and any -wal are never written.
 	beforeSQLiteOpen()
 	u := url.URL{Scheme: "file", Path: abs, RawQuery: "mode=ro&_pragma=query_only(1)"}
 	db, err := sql.Open("sqlite", u.String())
 	if err != nil {
-		return nil, fmt.Errorf("receipt: open audit log %s read only: %w", abs, err)
+		return nil, "", nil, fmt.Errorf("receipt: open audit log %s read only: %w", abs, err)
 	}
 	db.SetMaxOpenConns(1)
 	if err := db.Ping(); err != nil {
 		db.Close()
-		return nil, fmt.Errorf("receipt: open audit log %s read only: %w", abs, err)
+		return nil, "", nil, fmt.Errorf("receipt: open audit log %s read only: %w", abs, err)
 	}
-	openedFI, err := os.Lstat(abs)
-	if err != nil || openedFI.Mode()&os.ModeSymlink != 0 || !os.SameFile(fi, openedFI) {
-		db.Close()
-		if err != nil {
-			return nil, fmt.Errorf("receipt: audit log %s changed while opening: %w", abs, err)
-		}
-		return nil, fmt.Errorf("receipt: audit log %s changed while opening", abs)
+	return db, abs, fi, nil
+}
+
+// requireRegular rejects a symlink or any non-regular file.
+func requireRegular(path string, fi os.FileInfo) error {
+	if fi.Mode()&os.ModeSymlink != 0 {
+		return fmt.Errorf("receipt: refusing audit log %s: path is a symlink", path)
 	}
-	return db, nil
+	if !fi.Mode().IsRegular() {
+		return fmt.Errorf("receipt: refusing audit log %s: not a regular file", path)
+	}
+	return nil
+}
+
+// checkSameFile binds the pre-open check to the file that was read: after the
+// rows are read, the path must still be a regular, non-symlink file and the
+// same file (os.SameFile) as the pre-open Lstat. This catches a path swapped
+// between the Lstat and the open.
+//
+// Residual: a swap and swap-back entirely inside the window is not caught
+// here. It is still bound cryptographically: the rows that were read must
+// hash-chain from genesis and verify under the caller's key for the caller's
+// session id, so a swapped-in file can only yield INTACT if it is itself a
+// valid log signed by that key for that session.
+func checkSameFile(path string, pre, post os.FileInfo) error {
+	if err := requireRegular(path, post); err != nil {
+		return fmt.Errorf("%w (after read)", err)
+	}
+	if !os.SameFile(pre, post) {
+		return fmt.Errorf("receipt: audit log %s changed identity between the pre-open check and the read", path)
+	}
+	return nil
 }

@@ -19,6 +19,9 @@ import (
 const (
 	sessA = "session-a"
 	sessB = "session-b"
+
+	// testKeyFile names the throwaway signing key each test generates.
+	testKeyFile = "audit.key"
 )
 
 // buildSignedDB writes an interleaved two-session log through the real signing
@@ -27,7 +30,7 @@ const (
 func buildSignedDB(t *testing.T, dir string) (string, ed25519.PublicKey) {
 	t.Helper()
 	dbPath := filepath.Join(dir, "events.db")
-	keyPath := filepath.Join(dir, "keys", "signing-ed25519.key")
+	keyPath := filepath.Join(dir, "keys", testKeyFile)
 	writeSessions(t, dbPath, keyPath, time.Now())
 	pub, err := logging.LoadPublicKeyFile(keyPath)
 	if err != nil {
@@ -283,57 +286,56 @@ func TestVerifySession_DBIsNotModified(t *testing.T) {
 		b, a := sha256.Sum256(before), sha256.Sum256(after)
 		t.Fatalf("DB bytes changed: before %x after %x", b, a)
 	}
+	// SQLite may create the -shm index and an empty -wal for a read-only
+	// WAL-mode open; neither holds rows. A -wal with content or a rollback
+	// -journal would mean something was written.
+	if wi, err := os.Stat(dbPath + "-wal"); err == nil && wi.Size() != 0 {
+		t.Fatalf("VerifySession left a non-empty -wal (%d bytes)", wi.Size())
+	}
+	if _, err := os.Stat(dbPath + "-journal"); err == nil {
+		t.Fatal("VerifySession left a rollback -journal next to the DB")
+	}
 }
 
-func TestVerifySession_PathSwapIsUnverifiable(t *testing.T) {
-	for _, tc := range []struct {
-		name string
-		swap func(t *testing.T, dbPath, replacement string)
-	}{
-		{
-			name: "regular file",
-			swap: func(t *testing.T, dbPath, replacement string) {
-				t.Helper()
-				if err := os.Rename(replacement, dbPath); err != nil {
-					t.Fatalf("replace DB: %v", err)
-				}
-			},
-		},
-		{
-			name: "symlink",
-			swap: func(t *testing.T, dbPath, replacement string) {
-				t.Helper()
-				if err := os.Remove(dbPath); err != nil {
-					t.Fatalf("remove DB: %v", err)
-				}
-				if err := os.Symlink(replacement, dbPath); err != nil {
-					t.Fatalf("symlink DB: %v", err)
-				}
-			},
-		},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
-			dir := t.TempDir()
-			dbPath, pub := buildSignedDB(t, dir)
-			replacement, _ := buildSignedDB(t, t.TempDir())
-			beforeSQLiteOpen = func() { tc.swap(t, dbPath, replacement) }
-			t.Cleanup(func() { beforeSQLiteOpen = func() {} })
-
-			r, err := VerifySession(dbPath, pub, sessA)
-			if err == nil || r.Verdict != VerdictUnverifiable {
-				t.Fatalf("verdict=%s err=%v, want UNVERIFIABLE after path swap", r.Verdict, err)
-			}
-		})
+func TestCheckSameFile(t *testing.T) {
+	dir := t.TempDir()
+	a := filepath.Join(dir, "a.db")
+	b := filepath.Join(dir, "b.db")
+	link := filepath.Join(dir, "link.db")
+	for _, p := range []string{a, b} {
+		if err := os.WriteFile(p, []byte("x"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := os.Symlink(a, link); err != nil {
+		t.Fatal(err)
+	}
+	lstat := func(p string) os.FileInfo {
+		fi, err := os.Lstat(p)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return fi
+	}
+	pre := lstat(a)
+	if err := checkSameFile(a, pre, lstat(a)); err != nil {
+		t.Fatalf("same file: %v, want nil", err)
+	}
+	if err := checkSameFile(a, pre, lstat(b)); err == nil {
+		t.Fatal("different inode: got nil, want an identity error")
+	}
+	if err := checkSameFile(a, pre, lstat(link)); err == nil {
+		t.Fatal("symlink after read: got nil, want an error")
 	}
 }
 
 // A writer that died without checkpointing leaves a non-empty -wal and no live
-// connection. The plain mode=ro path reads it; neither the main file nor the
+// connection. VerifySession must read it; neither the main file nor the
 // -wal may change (SQLite may create the -shm index, which holds no rows).
 func TestVerifySession_DBIsNotModified_UncheckpointedWALNoWriter(t *testing.T) {
 	dir := t.TempDir()
 	srcPath := filepath.Join(dir, "events.db")
-	keyPath := filepath.Join(dir, "keys", "signing-ed25519.key")
+	keyPath := filepath.Join(dir, "keys", testKeyFile)
 	l, err := logging.NewLogger(srcPath, "", logging.WithSigning(keyPath))
 	if err != nil {
 		t.Fatalf("NewLogger: %v", err)
@@ -394,7 +396,7 @@ func TestVerifySession_DBIsNotModified_UncheckpointedWALNoWriter(t *testing.T) {
 func TestVerifySession_ReadsUncheckpointedWAL(t *testing.T) {
 	dir := t.TempDir()
 	dbPath := filepath.Join(dir, "events.db")
-	keyPath := filepath.Join(dir, "keys", "signing-ed25519.key")
+	keyPath := filepath.Join(dir, "keys", testKeyFile)
 	l, err := logging.NewLogger(dbPath, "", logging.WithSigning(keyPath))
 	if err != nil {
 		t.Fatalf("NewLogger: %v", err)
@@ -418,10 +420,52 @@ func TestVerifySession_ReadsUncheckpointedWAL(t *testing.T) {
 	}
 }
 
+func TestVerifySession_PathSwapIsUnverifiable(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		swap func(t *testing.T, dbPath, replacement string)
+	}{
+		{
+			name: "regular file",
+			swap: func(t *testing.T, dbPath, replacement string) {
+				t.Helper()
+				if err := os.Rename(replacement, dbPath); err != nil {
+					t.Fatalf("replace DB: %v", err)
+				}
+			},
+		},
+		{
+			name: "symlink",
+			swap: func(t *testing.T, dbPath, replacement string) {
+				t.Helper()
+				if err := os.Remove(dbPath); err != nil {
+					t.Fatalf("remove DB: %v", err)
+				}
+				if err := os.Symlink(replacement, dbPath); err != nil {
+					t.Fatalf("symlink DB: %v", err)
+				}
+			},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			dir := t.TempDir()
+			dbPath, pub := buildSignedDB(t, dir)
+			replacement, _ := buildSignedDB(t, t.TempDir())
+			beforeSQLiteOpen = func() { tc.swap(t, dbPath, replacement) }
+			t.Cleanup(func() { beforeSQLiteOpen = func() {} })
+
+			r, err := VerifySession(dbPath, pub, sessA)
+			if err == nil || r.Verdict != VerdictUnverifiable {
+				t.Fatalf("verdict=%s err=%v, want UNVERIFIABLE after path swap", r.Verdict, err)
+			}
+		})
+	}
+}
+
 func TestVerifySession_WALCreatedDuringOpenIsRead(t *testing.T) {
 	dir := t.TempDir()
 	dbPath, pub := buildSignedDB(t, dir)
-	keyPath := filepath.Join(dir, "keys", "signing-ed25519.key")
+	keyPath := filepath.Join(dir, "keys", testKeyFile)
 	var writer *logging.Logger
 	beforeSQLiteOpen = func() {
 		var err error
@@ -457,7 +501,7 @@ func TestWriteExternalFixture(t *testing.T) {
 	}
 	tmp := t.TempDir()
 	dbPath := filepath.Join(tmp, "events.db")
-	keyPath := filepath.Join(tmp, "keys", "signing-ed25519.key")
+	keyPath := filepath.Join(tmp, "keys", testKeyFile)
 	writeSessions(t, dbPath, keyPath, time.Date(2026, 9, 25, 12, 0, 0, 0, time.UTC))
 	pub, err := logging.LoadPublicKeyFile(keyPath)
 	if err != nil {
