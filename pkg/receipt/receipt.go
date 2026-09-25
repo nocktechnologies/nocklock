@@ -5,6 +5,42 @@
 // delegates every chain primitive (canonical bytes, hash link, row signature)
 // to internal/logging. There is one implementation of the chain; this package
 // only walks it.
+//
+// # Tail evidence
+//
+// A row walk alone proves the rows present are intact; it cannot see rows
+// deleted from the end. NockLock keeps a signed chain head (the chain_head
+// record: the last row's entry_hash, the row count, and an Ed25519 signature
+// under domain byte 0x03). VerifySession reads it with the same reader
+// nocklock verify uses (logging.ReadChainHead), checks its signature under the
+// caller's key, and requires its hash and count to equal the chain it walked.
+// Only then is Result.TailVerified true, and INTACT requires it.
+//
+// # Verdict precedence
+//
+// Exactly one verdict is reported, the first that applies, fail closed:
+//
+//  1. TAMPERED: a hash or link break anywhere in the DB.
+//  2. TAMPERED: the chain head disagrees with the walked chain (its row count
+//     or hash differs, as when rows are deleted after the head was written or
+//     the head is from an older state), or its signature does not verify
+//     under the key.
+//  3. NO_ROWS: the session has no rows.
+//  4. UNSIGNED: a session row carries no signature.
+//  5. TAMPERED: a session row's signature does not verify under the key.
+//  6. UNANCHORED: every check above passed, but there is no signed head to
+//     prove the tail (no head record, a schema without one, or an unsigned
+//     head that agrees with the chain).
+//  7. INTACT: everything above passed and the tail is verified.
+//
+// # Residual: head rollback
+//
+// The signed head lives in the same file as the rows. An attacker who rolls
+// back the rows AND the head together to an older genuine state (a validly
+// signed earlier head with the rows it anchored) passes every local check,
+// because that state was once real. Only an external anchor closes this:
+// nocklock verify --against-remote-anchor compares the local head with the
+// head last pushed to NockCC. This package does not consult it.
 package receipt
 
 import (
@@ -23,17 +59,24 @@ import (
 
 // Verdicts. Exactly one is set on every Result; only VerdictIntact is success.
 const (
-	// VerdictIntact: every row in the DB links and hashes correctly, and every
-	// row of the session carries a signature that verifies under the key.
+	// VerdictIntact: every row in the DB links and hashes correctly, every
+	// row of the session carries a signature that verifies under the key, and
+	// the signed chain head anchors exactly the chain walked (TailVerified).
 	VerdictIntact = "INTACT"
 	// VerdictTampered: a hash or link breaks anywhere in the DB (in or outside
-	// the session), or a session row's signature does not verify under the key.
+	// the session), the chain head disagrees with the chain or carries a bad
+	// signature, or a session row's signature does not verify under the key.
 	VerdictTampered = "TAMPERED"
 	// VerdictUnsigned: the chain is consistent but a session row has no
 	// signature, so its authorship cannot be proven.
 	VerdictUnsigned = "UNSIGNED"
 	// VerdictNoRows: the chain is consistent but the session has no rows.
 	VerdictNoRows = "NO_ROWS"
+	// VerdictUnanchored: every row check passed, but the log has no signed
+	// chain head (no head record, a pre-signing schema, or an unsigned head
+	// that agrees with the chain), so rows deleted from the tail could not be
+	// detected. It is not success.
+	VerdictUnanchored = "UNANCHORED"
 	// VerdictUnverifiable: the input could not be read or the key is unusable.
 	VerdictUnverifiable = "UNVERIFIABLE"
 )
@@ -54,9 +97,16 @@ type Result struct {
 	SessionID   string      // the session that was requested
 	KeyID       string      // hex(sha256(pub)), empty when the key was unusable
 	RowsChecked int         // rows of the session that were examined
-	FirstBadRow int64       // events.id of the row behind the verdict, 0 if none
+	FirstBadRow int64       // events.id of the row behind the verdict, 0 if none or if the head's own signature is bad
 	Reason      string      // why the verdict is not INTACT
 	Rows        []RowResult // per-row outcomes for the session's rows, in id order
+
+	// TailVerified is true only when the stored chain head is present, its
+	// signature verifies under the key, and its hash and row count equal the
+	// last row's entry_hash and the number of rows walked. INTACT requires it.
+	TailVerified bool
+	// TailReason explains why the tail is not verified; empty when it is.
+	TailReason string
 }
 
 // VerifySession verifies the audit chain in the NockLock SQLite log at dbPath
@@ -71,8 +121,14 @@ type Result struct {
 // signature does not excuse a broken link: the signature covers the canonical
 // bytes only, not prev_hash.
 //
+// After the walk, the stored chain head is read in the same read transaction
+// and must verify under pub and anchor exactly the walked chain (last
+// entry_hash and total row count); see the package doc for tail evidence and
+// its rollback residual.
+//
 // Verdict precedence, fail closed: TAMPERED (any hash or link break) >
-// NO_ROWS > UNSIGNED > TAMPERED (session signature failure) > INTACT.
+// TAMPERED (chain head mismatch or bad head signature) > NO_ROWS > UNSIGNED >
+// TAMPERED (session signature failure) > UNANCHORED > INTACT.
 //
 // Callers must treat Verdict == VerdictIntact as the only success. The error is
 // diagnostic: it is non-nil for a nil or short key, an empty sessionID, or a DB
@@ -85,6 +141,8 @@ func VerifySession(dbPath string, pub ed25519.PublicKey, sessionID string) (Resu
 		res.Rows = nil
 		res.RowsChecked = 0
 		res.FirstBadRow = 0
+		res.TailVerified = false
+		res.TailReason = ""
 		return res, err
 	}
 
@@ -110,6 +168,13 @@ func VerifySession(dbPath string, pub ed25519.PublicKey, sessionID string) (Resu
 	}
 	defer tx.Rollback()
 
+	// Read the head before the rows, in the same snapshot, so the row it
+	// claims as its last can be located during the walk.
+	head, headFound, err := logging.ReadChainHead(tx)
+	if err != nil {
+		return fail(fmt.Errorf("receipt: %s: %w", dbPath, err))
+	}
+
 	rows, err := tx.Query(
 		"SELECT id, timestamp, event_type, category, detail, blocked, session_id, prev_hash, entry_hash, entry_sig FROM events ORDER BY id ASC",
 	)
@@ -124,6 +189,9 @@ func VerifySession(dbPath string, pub ed25519.PublicKey, sessionID string) (Resu
 		unsignedID     int64 // first unsigned session row
 		sigBadID       int64 // first session row whose signature fails
 		sigBadReason   string
+		walked         int   // rows in the whole DB, every session
+		lastID         int64 // id of the last row walked
+		beyondHeadID   int64 // id of the first row past the head's row count
 	)
 	prevHashHex := logging.ChainGenesisHashHex
 	for rows.Next() {
@@ -187,6 +255,11 @@ func VerifySession(dbPath string, pub ed25519.PublicKey, sessionID string) (Resu
 		// Advance on the stored hash, as VerifyChain does; a break was already
 		// recorded above and decides the verdict.
 		prevHashHex = storedEntry
+		walked++
+		lastID = id
+		if headFound && walked == head.RowCount+1 {
+			beyondHeadID = id
+		}
 	}
 	if err := rows.Err(); err != nil {
 		return fail(fmt.Errorf("receipt: iterate events: %w", err))
@@ -201,9 +274,14 @@ func VerifySession(dbPath string, pub ed25519.PublicKey, sessionID string) (Resu
 		return fail(err)
 	}
 
+	tail := checkTail(head, headFound, pub, res.KeyID, walked, prevHashHex, lastID, beyondHeadID)
+	res.TailVerified, res.TailReason = tail.verified, tail.reason
+
 	switch {
 	case chainBadID != 0:
 		res.Verdict, res.FirstBadRow, res.Reason = VerdictTampered, chainBadID, chainBadReason
+	case tail.tampered:
+		res.Verdict, res.FirstBadRow, res.Reason = VerdictTampered, tail.firstBad, tail.reason
 	case res.RowsChecked == 0:
 		res.Verdict, res.Reason = VerdictNoRows, fmt.Sprintf("no rows for session %q", sessionID)
 	case unsignedID != 0:
@@ -211,10 +289,67 @@ func VerifySession(dbPath string, pub ed25519.PublicKey, sessionID string) (Resu
 		res.Reason = fmt.Sprintf("entry %d of session %q carries no signature", unsignedID, sessionID)
 	case sigBadID != 0:
 		res.Verdict, res.FirstBadRow, res.Reason = VerdictTampered, sigBadID, sigBadReason
+	case !tail.verified:
+		res.Verdict, res.Reason = VerdictUnanchored, tail.reason
 	default:
 		res.Verdict, res.Reason = VerdictIntact, ""
 	}
 	return res, nil
+}
+
+// tailCheck is the outcome of comparing the stored chain head with the chain.
+type tailCheck struct {
+	verified bool   // head present, signature valid under the key, and it anchors the walked chain
+	tampered bool   // head disagrees with the chain, or its signature is bad
+	firstBad int64  // events.id behind a tampered tail, 0 when the head's own signature is bad
+	reason   string // empty only when verified
+}
+
+// checkTail compares the stored head with the walked chain: walked rows in
+// total, ending at lastID with entry_hash lastHash (genesis when empty).
+// beyondHeadID is the id of the first row past the head's row count, 0 if the
+// chain is not longer than the head.
+func checkTail(head logging.ChainHead, found bool, pub []byte, keyID string, walked int, lastHash string, lastID, beyondHeadID int64) tailCheck {
+	if !found {
+		return tailCheck{reason: "no chain_head record in the log: rows deleted from the tail cannot be detected"}
+	}
+
+	// A head that disagrees with the chain is tampering whether or not it is
+	// signed: the log is internally inconsistent.
+	var mismatch tailCheck
+	switch {
+	case head.RowCount > walked:
+		mismatch = tailCheck{tampered: true, firstBad: lastID + 1, reason: fmt.Sprintf(
+			"chain_head anchors %d rows but the log holds %d: %d row(s) missing from the tail after id %d",
+			head.RowCount, walked, head.RowCount-walked, lastID)}
+	case head.RowCount < walked:
+		mismatch = tailCheck{tampered: true, firstBad: beyondHeadID, reason: fmt.Sprintf(
+			"chain_head anchors %d rows but the log holds %d: rows from id %d are beyond the head (stale or rolled-back head)",
+			head.RowCount, walked, beyondHeadID)}
+	case head.Hash != lastHash:
+		mismatch = tailCheck{tampered: true, firstBad: lastID, reason: fmt.Sprintf(
+			"chain_head anchors %d rows and the log holds %d, but its hash %s does not match the last row's entry_hash %s",
+			head.RowCount, walked, head.Hash, lastHash)}
+	}
+
+	if head.Sig == "" {
+		if mismatch.tampered {
+			return mismatch
+		}
+		return tailCheck{reason: "chain_head is unsigned: its row count cannot be trusted to detect tail truncation"}
+	}
+	if !head.VerifySig(pub) {
+		msg := fmt.Sprintf("chain_head signature does not verify under key %s", keyID)
+		if mismatch.tampered {
+			mismatch.reason += "; " + msg
+			return mismatch
+		}
+		return tailCheck{tampered: true, reason: msg}
+	}
+	if mismatch.tampered {
+		return mismatch
+	}
+	return tailCheck{verified: true}
 }
 
 // beforeSQLiteOpen is a test seam for deterministic path-swap regression tests.

@@ -6,10 +6,12 @@ import (
 	"crypto/rand"
 	"crypto/sha256"
 	"database/sql"
+	"encoding/base64"
 	"encoding/hex"
 	"errors"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -131,6 +133,213 @@ func TestVerifySession_IntactSignedSession(t *testing.T) {
 	if r.FirstBadRow != 0 || r.SessionID != sessA {
 		t.Fatalf("FirstBadRow=%d SessionID=%q, want 0 and %q", r.FirstBadRow, r.SessionID, sessA)
 	}
+	if !r.TailVerified || r.TailReason != "" {
+		t.Fatalf("TailVerified=%v TailReason=%q, want a verified tail on an intact signed log", r.TailVerified, r.TailReason)
+	}
+}
+
+// rawExecN is rawExec for statements that must touch exactly want rows.
+func rawExecN(t *testing.T, dbPath string, want int64, stmt string, args ...any) {
+	t.Helper()
+	db, err := sql.Open("sqlite", dbPath)
+	if err != nil {
+		t.Fatalf("raw open: %v", err)
+	}
+	defer db.Close()
+	res, err := db.Exec(stmt, args...)
+	if err != nil {
+		t.Fatalf("raw exec %q: %v", stmt, err)
+	}
+	if n, _ := res.RowsAffected(); n != want {
+		t.Fatalf("raw exec %q affected %d rows, want %d", stmt, n, want)
+	}
+}
+
+func TestVerifySession_IntactRequiresHead(t *testing.T) {
+	dbPath, pub := buildSignedDB(t, t.TempDir())
+	r, err := VerifySession(dbPath, pub, sessA)
+	if err != nil {
+		t.Fatalf("VerifySession: %v", err)
+	}
+	if r.Verdict != VerdictIntact || !r.TailVerified || r.TailReason != "" {
+		t.Fatalf("with signed head: verdict=%s TailVerified=%v TailReason=%q (%s), want INTACT with a verified tail", r.Verdict, r.TailVerified, r.TailReason, r.Reason)
+	}
+
+	// The same rows, head removed: every row check still passes, and the
+	// verdict must no longer be INTACT.
+	rawExec(t, dbPath, "DELETE FROM chain_head WHERE id = 1")
+	r, err = VerifySession(dbPath, pub, sessA)
+	if err != nil {
+		t.Fatalf("VerifySession without head: %v", err)
+	}
+	if r.Verdict == VerdictIntact || r.TailVerified {
+		t.Fatalf("without head: verdict=%s TailVerified=%v, want not INTACT and no tail evidence", r.Verdict, r.TailVerified)
+	}
+}
+
+func TestVerifySession_TailTruncationIsTampered(t *testing.T) {
+	for _, tc := range []struct {
+		name      string
+		deleteSQL string
+		deleted   int64
+		wantFirst int64
+		wantFound string
+	}{
+		// Row 5 is session-b: session-a's own rows are untouched and still
+		// link, hash, and verify. Only the signed head can see the loss.
+		{"other session's tail row", "DELETE FROM events WHERE id = 5", 1, 5, "holds 4"},
+		// Rows 4 (session-a's end) and 5: the tail of the requested session.
+		{"requested session's tail rows", "DELETE FROM events WHERE id >= 4", 2, 4, "holds 3"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			dbPath, pub := buildSignedDB(t, t.TempDir())
+			rawExecN(t, dbPath, tc.deleted, tc.deleteSQL)
+			r, err := VerifySession(dbPath, pub, sessA)
+			if err != nil {
+				t.Fatalf("VerifySession: %v", err)
+			}
+			if r.Verdict != VerdictTampered || r.FirstBadRow != tc.wantFirst {
+				t.Fatalf("verdict=%s FirstBadRow=%d (%s), want TAMPERED at row %d after tail truncation", r.Verdict, r.FirstBadRow, r.Reason, tc.wantFirst)
+			}
+			if r.TailVerified {
+				t.Fatal("TailVerified after tail truncation")
+			}
+			if !strings.Contains(r.Reason, "anchors 5 rows") || !strings.Contains(r.Reason, tc.wantFound) {
+				t.Fatalf("reason %q must name the anchored count (5) and the found count (%s)", r.Reason, tc.wantFound)
+			}
+			for _, row := range r.Rows {
+				if !row.LinkOK || !row.HashOK || !row.SigOK {
+					t.Fatalf("row %+v: surviving rows must still verify; the verdict comes from the head", row)
+				}
+			}
+		})
+	}
+}
+
+func TestVerifySession_StaleHeadIsTampered(t *testing.T) {
+	dir := t.TempDir()
+	dbPath := filepath.Join(dir, "events.db")
+	keyPath := filepath.Join(dir, "keys", testKeyFile)
+	logN := func(n int) {
+		t.Helper()
+		l, err := logging.NewLogger(dbPath, "", logging.WithSigning(keyPath))
+		if err != nil {
+			t.Fatalf("NewLogger: %v", err)
+		}
+		for i := 0; i < n; i++ {
+			if err := l.Log(logging.Event{Timestamp: time.Now(), EventType: logging.EventFilePassed, Category: "filesystem", Detail: "f", SessionID: sessA}); err != nil {
+				t.Fatalf("Log: %v", err)
+			}
+		}
+		if err := l.Close(); err != nil {
+			t.Fatal(err)
+		}
+	}
+	logN(3)
+	db, err := sql.Open("sqlite", dbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var oldHash, oldSig string
+	var oldCount int
+	if err := db.QueryRow("SELECT entry_hash, row_count, head_sig FROM chain_head WHERE id = 1").Scan(&oldHash, &oldCount, &oldSig); err != nil {
+		t.Fatal(err)
+	}
+	db.Close()
+	if oldCount != 3 || oldSig == "" {
+		t.Fatalf("precondition: head count=%d signed=%v, want a signed head over 3 rows", oldCount, oldSig != "")
+	}
+	logN(2)
+	// Roll the head back to its genuine, validly signed 3-row state.
+	rawExec(t, dbPath, "UPDATE chain_head SET entry_hash = ?, row_count = ?, head_sig = ? WHERE id = 1", oldHash, oldCount, oldSig)
+
+	pub, err := logging.LoadPublicKeyFile(keyPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	r, err := VerifySession(dbPath, pub, sessA)
+	if err != nil {
+		t.Fatalf("VerifySession: %v", err)
+	}
+	if r.Verdict != VerdictTampered || r.FirstBadRow != 4 || r.TailVerified {
+		t.Fatalf("verdict=%s FirstBadRow=%d TailVerified=%v (%s), want TAMPERED at row 4 (first row beyond the head)", r.Verdict, r.FirstBadRow, r.TailVerified, r.Reason)
+	}
+	if !strings.Contains(r.Reason, "anchors 3 rows") || !strings.Contains(r.Reason, "holds 5") {
+		t.Fatalf("reason %q must name the anchored count (3) and the found count (5)", r.Reason)
+	}
+}
+
+func TestVerifySession_MissingHeadIsUnanchored(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		stmt string
+	}{
+		{"head row deleted", "DELETE FROM chain_head WHERE id = 1"},
+		{"head table dropped", "DROP TABLE chain_head"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			dbPath, pub := buildSignedDB(t, t.TempDir())
+			db, err := sql.Open("sqlite", dbPath)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if _, err := db.Exec(tc.stmt); err != nil {
+				t.Fatalf("%s: %v", tc.stmt, err)
+			}
+			db.Close()
+			r, err := VerifySession(dbPath, pub, sessA)
+			if err != nil {
+				t.Fatalf("VerifySession: %v", err)
+			}
+			if r.Verdict != VerdictUnanchored || r.TailVerified {
+				t.Fatalf("verdict=%s TailVerified=%v (%s), want UNANCHORED with no tail evidence", r.Verdict, r.TailVerified, r.Reason)
+			}
+			if r.TailReason == "" || r.Reason == "" {
+				t.Fatalf("TailReason=%q Reason=%q, want both to explain the missing head", r.TailReason, r.Reason)
+			}
+		})
+	}
+}
+
+func TestVerifySession_HeadBadSignatureIsTampered(t *testing.T) {
+	dbPath, pub := buildSignedDB(t, t.TempDir())
+	_, otherPriv, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Re-sign the stored head, unchanged, with a different key: hash, count,
+	// and metadata still match the chain, only the signer is wrong.
+	db, err := sql.Open("sqlite", dbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	tx, err := db.Begin()
+	if err != nil {
+		t.Fatal(err)
+	}
+	head, found, err := logging.ReadChainHead(tx)
+	tx.Rollback()
+	db.Close()
+	if err != nil || !found {
+		t.Fatalf("ReadChainHead: found=%v err=%v", found, err)
+	}
+	hb, err := head.CanonicalBytes()
+	if err != nil {
+		t.Fatal(err)
+	}
+	foreign := base64.StdEncoding.EncodeToString(ed25519.Sign(otherPriv, hb))
+	rawExec(t, dbPath, "UPDATE chain_head SET head_sig = ? WHERE id = 1", foreign)
+
+	r, err := VerifySession(dbPath, pub, sessA)
+	if err != nil {
+		t.Fatalf("VerifySession: %v", err)
+	}
+	if r.Verdict != VerdictTampered || r.TailVerified {
+		t.Fatalf("verdict=%s TailVerified=%v (%s), want TAMPERED for a head signed by another key", r.Verdict, r.TailVerified, r.Reason)
+	}
+	if !strings.Contains(r.Reason, "chain_head signature") {
+		t.Fatalf("reason %q must name the chain_head signature", r.Reason)
+	}
 }
 
 func TestVerifySession_SingleRowMutationFlips(t *testing.T) {
@@ -233,8 +442,10 @@ func TestVerifySession_WrongKeyFails(t *testing.T) {
 		t.Fatal(err)
 	}
 	r, _ := VerifySession(dbPath, other, sessA)
-	if r.Verdict != VerdictTampered || r.FirstBadRow != 1 {
-		t.Fatalf("verdict=%s FirstBadRow=%d (%s), want TAMPERED at row 1 under a foreign key", r.Verdict, r.FirstBadRow, r.Reason)
+	// The head signature fails under the foreign key too, and a bad head
+	// outranks a bad row signature, so the head is named as the reason.
+	if r.Verdict != VerdictTampered || r.TailVerified || !strings.Contains(r.Reason, "chain_head signature") {
+		t.Fatalf("verdict=%s TailVerified=%v (%s), want TAMPERED naming the chain_head signature under a foreign key", r.Verdict, r.TailVerified, r.Reason)
 	}
 	if row := rowFor(t, r, 1); row.SigOK {
 		t.Fatalf("row 1 SigOK under a foreign key: %+v", row)
