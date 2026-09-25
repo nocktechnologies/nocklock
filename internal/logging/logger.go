@@ -1294,6 +1294,31 @@ func (l *Logger) VerifyChainSigned(pub ed25519.PublicKey, requireSigned bool) (*
 	return l.verifyChain(pub, requireSigned)
 }
 
+// chainHeadRecord is the stored chain_head row: the tail anchor (hash and row
+// count), its signature, and the metadata the signature covers.
+type chainHeadRecord struct {
+	hash            string
+	rowCount        int
+	migratedAt      *string
+	legacyThroughID *int64
+	sig             string
+	meta            headSignatureMetadata
+}
+
+// readChainHeadRecord reads the chain_head row. It returns sql.ErrNoRows when
+// the table holds no head. It is the single reader of the head for both
+// verifyChain (nocklock verify) and the public receipt verifier.
+func readChainHeadRecord(tx *sql.Tx) (chainHeadRecord, error) {
+	var h chainHeadRecord
+	err := tx.QueryRow(
+		"SELECT entry_hash, row_count, migrated_at, legacy_through_id, pruned_at, pruned_count, head_sig, signed_genesis_at, unsigned_through_id, signing_pubkey_fingerprint FROM chain_head WHERE id = 1",
+	).Scan(&h.hash, &h.rowCount, &h.migratedAt, &h.legacyThroughID, &h.meta.prunedAt, &h.meta.prunedCount, &h.sig, &h.meta.signedGenesisAt, &h.meta.unsignedThroughID, &h.meta.publicKeyFingerprintHex)
+	if err != nil {
+		return chainHeadRecord{}, err
+	}
+	return h, nil
+}
+
 func (l *Logger) verifyChain(pub ed25519.PublicKey, requireSigned bool) (*ChainVerifyResult, error) {
 	result := &ChainVerifyResult{PubKeyProvided: pub != nil}
 	tx, err := l.db.Begin()
@@ -1303,19 +1328,7 @@ func (l *Logger) verifyChain(pub ed25519.PublicKey, requireSigned bool) (*ChainV
 	defer tx.Rollback()
 
 	// Get chain_head state
-	var headHash string
-	var rowCount int
-	var migratedAtStr *string
-	var legacyID *int64
-	var prunedAtStr *string
-	var prunedCountVal *int
-	var headSig string
-	var signedGenesisStr *string
-	var unsignedThroughID *int64
-	var publicKeyFingerprintHex string
-	err = tx.QueryRow(
-		"SELECT entry_hash, row_count, migrated_at, legacy_through_id, pruned_at, pruned_count, head_sig, signed_genesis_at, unsigned_through_id, signing_pubkey_fingerprint FROM chain_head WHERE id = 1",
-	).Scan(&headHash, &rowCount, &migratedAtStr, &legacyID, &prunedAtStr, &prunedCountVal, &headSig, &signedGenesisStr, &unsignedThroughID, &publicKeyFingerprintHex)
+	head, err := readChainHeadRecord(tx)
 	if err == sql.ErrNoRows {
 		// No chain_head row at all: there is nothing to walk, so the (empty)
 		// chain is intact. It is NOT automatically a clean signed pass: a signed
@@ -1334,6 +1347,13 @@ func (l *Logger) verifyChain(pub ed25519.PublicKey, requireSigned bool) (*ChainV
 	if err != nil {
 		return nil, fmt.Errorf("failed to read chain_head: %w", err)
 	}
+
+	headHash, rowCount, headSig := head.hash, head.rowCount, head.sig
+	migratedAtStr, legacyID := head.migratedAt, head.legacyThroughID
+	prunedAtStr, prunedCountVal := head.meta.prunedAt, head.meta.prunedCount
+	signedGenesisStr, unsignedThroughID := head.meta.signedGenesisAt, head.meta.unsignedThroughID
+	publicKeyFingerprintHex := head.meta.publicKeyFingerprintHex
+	headMeta := head.meta
 
 	result.HeadHash = headHash
 	result.HeadSigned = headSig != ""
@@ -1363,14 +1383,6 @@ func (l *Logger) verifyChain(pub ed25519.PublicKey, requireSigned bool) (*ChainV
 	if unsignedThroughID != nil {
 		result.UnsignedThroughID = *unsignedThroughID
 	}
-	headMeta := headSignatureMetadata{
-		prunedAt:                prunedAtStr,
-		prunedCount:             prunedCountVal,
-		signedGenesisAt:         signedGenesisStr,
-		unsignedThroughID:       unsignedThroughID,
-		publicKeyFingerprintHex: publicKeyFingerprintHex,
-	}
-
 	// Get all events in order
 	rows, err := tx.Query(
 		"SELECT id, timestamp, event_type, category, detail, blocked, session_id, prev_hash, entry_hash, entry_sig FROM events ORDER BY id ASC",

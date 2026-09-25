@@ -43,8 +43,8 @@ func TestExternal_VerifySessionFromPublicAPI(t *testing.T) {
 	if err != nil {
 		t.Fatalf("VerifySession: %v", err)
 	}
-	if r.Verdict != receipt.VerdictIntact || r.RowsChecked != 3 {
-		t.Fatalf("session-a: verdict=%s rows=%d (%s), want INTACT over 3 rows", r.Verdict, r.RowsChecked, r.Reason)
+	if r.Verdict != receipt.VerdictIntact || r.RowsChecked != 3 || !r.TailVerified {
+		t.Fatalf("session-a: verdict=%s rows=%d tail=%v (%s), want INTACT over 3 rows with a verified tail", r.Verdict, r.RowsChecked, r.TailVerified, r.Reason)
 	}
 
 	r, _ = receipt.VerifySession(dbPath, pub, "no-such-session")

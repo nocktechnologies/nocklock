@@ -11,6 +11,16 @@ All notable changes to NockLock will be documented in this file.
 
 ### Added
 
+- `pkg/receipt` tail evidence: `VerifySession` now reads the signed chain head
+  (the same reader `nocklock verify` uses, exported as
+  `logging.ReadChainHead`) and reports `TailVerified` and `TailReason`. `INTACT`
+  now requires a head that verifies under the key and anchors exactly the
+  walked chain. A head whose row count or hash disagrees with the chain (rows
+  deleted from the tail, or a stale head) or whose signature fails is
+  `TAMPERED`, naming the anchored and found counts; a log with no signed head is
+  the new non-success verdict `UNANCHORED`. A head rolled back together with its
+  rows to an older genuine state still passes locally; only
+  `nocklock verify --against-remote-anchor` closes that.
 - `pkg/receipt`: a public, read-only `VerifySession(dbPath, pub, sessionID)`
   that another module can import to verify one session's audit chain offline
   with only the Ed25519 public key. It opens the log read only (never creates,
