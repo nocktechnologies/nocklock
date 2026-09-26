@@ -249,6 +249,7 @@ Candidate runtimes intentionally not preset here:
 | `nocklock wrap -- <cmd>` | Run a command inside the fence |
 | `nocklock wrap --profile list` | List embedded runtime presets |
 | `nocklock wrap --dry-run` | Validate config without starting fences or a command |
+| `nocklock scan [path ...]` | Scan selected local files; `--env` adds environment values and `--json` prints structured results |
 | `nocklock validate [config-path]` | Validate a config file and print the effective policy |
 | `nocklock doctor` | Check whether each fence can be enforced on this host |
 | `nocklock verify` | Run the adversarial fence self-test (proof-of-block) |

@@ -168,3 +168,35 @@ func TestSecretPreflightUsesProjectRootFromNestedDirectory(t *testing.T) {
 		t.Fatalf("scan did not use project root: %v", err)
 	}
 }
+
+func TestSecretPreflightDryRunDoesNotScanOrCreateAuditLog(t *testing.T) {
+	dir := scanTestDir(t)
+	toml := strings.Replace(plainLaunchTOML(t), "scan_paths = []", "scan_paths = [\"missing\"]", 1)
+	writeTestConfig(t, dir, toml)
+	cmd := &cobra.Command{}
+	cmd.SetContext(context.Background())
+	if err := wrapCmd.RunE(cmd, []string{"--dry-run"}); err != nil {
+		t.Fatalf("dry run executed preflight: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(dir, ".nock", "events.db")); !errors.Is(err, os.ErrNotExist) {
+		t.Fatal("dry run created audit DB")
+	}
+}
+
+func TestSecretPreflightExceptionsCannotOverrideNameBlocks(t *testing.T) {
+	cfg := config.DefaultConfig()
+	cfg.Secrets.ScanEnv = true
+	cfg.Secrets.ScanEnvAllow = []string{"AWS_ACCESS_KEY_ID"}
+	fence, err := secrets.NewFence(cfg.Secrets.Pass, cfg.Secrets.Block)
+	if err != nil {
+		t.Fatal(err)
+	}
+	filtered, blocked := fence.Filter([]string{"AWS_ACCESS_KEY_ID=AKIA" + strings.Repeat("A", 16)})
+	if len(filtered) != 0 || len(blocked) != 1 {
+		t.Fatal("name block weakened")
+	}
+	err = runSecretPreflight(context.Background(), &cfg, ".nock/config.toml", filtered, "test", func([]logging.Event) error { return nil }, io.Discard)
+	if err != nil {
+		t.Fatalf("removed variable should not cause a scan refusal: %v", err)
+	}
+}
