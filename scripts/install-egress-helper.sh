@@ -9,10 +9,12 @@
 #      the sudoers policy names.
 #   2. A constrained NOPASSWD sudoers grant at /etc/sudoers.d/nocklock-egress
 #      that lets the unprivileged `nocklock wrap` user run exactly the two helper
-#      vectors (`check`, `setup`) via passwordless sudo. The child argv, env, and
-#      the credential to drop to travel on stdin, never on argv, so the fixed
-#      two-vector policy is a real boundary rather than an argument-injection
-#      surface.
+#      vectors (`check`, `setup --request-file <path>`) via passwordless sudo. The
+#      child argv, env, and the credential to drop to travel in a 0600 per-session
+#      request FILE (only the path rides argv), never on argv itself, so the fixed
+#      policy is a real boundary rather than an argument-injection surface. Moving
+#      the request off stdin lets sudo pass the caller's real stdin through to the
+#      fenced child unchanged (N10711).
 #
 # Run it with root privilege, e.g. `sudo scripts/install-egress-helper.sh` or
 # `sudo make install-egress-helper`. It is idempotent and fail-closed: it never
@@ -124,7 +126,7 @@ install -m 0755 -o root -g root "$tmp_shim" "$HELPER_PATH"
 {
 	cat <<'ALIAS'
 Cmnd_Alias NOCKLOCK_EGRESS = /usr/libexec/nocklock-egress-helper check, \
-                             /usr/libexec/nocklock-egress-helper setup
+                             /usr/libexec/nocklock-egress-helper setup --request-file *
 ALIAS
 	printf '%s ALL = (root) NOPASSWD: NOCKLOCK_EGRESS\n' "$target_user"
 } >"$staged_sudoers"

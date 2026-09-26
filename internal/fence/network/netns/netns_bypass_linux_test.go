@@ -100,7 +100,7 @@ func TestMain(m *testing.M) {
 		switch os.Args[1] {
 		case "__netns-proxy":
 			var cfg EgressConfig
-			if err := json.NewDecoder(os.Stdin).Decode(&cfg); err != nil {
+			if err := ReadSidecarPayload(&cfg); err != nil {
 				fmt.Fprintln(os.Stderr, err)
 				os.Exit(2)
 			}
@@ -111,7 +111,7 @@ func TestMain(m *testing.M) {
 			os.Exit(0)
 		case "__netns-host-proxy":
 			var cfg EgressConfig
-			if err := json.NewDecoder(os.Stdin).Decode(&cfg); err != nil {
+			if err := ReadSidecarPayload(&cfg); err != nil {
 				fmt.Fprintln(os.Stderr, err)
 				os.Exit(2)
 			}
@@ -122,7 +122,7 @@ func TestMain(m *testing.M) {
 			os.Exit(0)
 		case "__netns-child":
 			var req Request
-			if err := json.NewDecoder(os.Stdin).Decode(&req); err != nil {
+			if err := ReadSidecarPayload(&req); err != nil {
 				fmt.Fprintln(os.Stderr, err)
 				os.Exit(2)
 			}

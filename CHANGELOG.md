@@ -20,6 +20,21 @@ All notable changes to NockLock will be documented in this file.
   of NockLock's threat model; see ARCHITECTURE.md. Removed the redundant
   path-based `os.Chmod` (the descriptor-based chmod already covers it) and added
   `TestResidual_AncestorSwapBetweenValidateAndOpen` with a no-swap control.
+- `nocklock wrap --net-fence=netns` no longer consumes the child's stdin
+  (N10711). The privileged `setup` request previously rode the helper's stdin, so
+  the fenced child inherited a drained stream — `printf 'x' | nocklock wrap
+  --net-fence=netns -- cat` printed nothing and interactive/MCP agents lost input
+  entirely. The request now travels in a 0600 per-session file whose path rides
+  argv (`setup --request-file <path>`; validated regular/0600/owned-by-`SUDO_UID`,
+  opened `O_NOFOLLOW` and unlinked after read, both relative to a retained
+  directory fd so a swapped parent directory cannot redirect the root unlink),
+  and the sidecar payloads ride a dedicated inherited descriptor (fd 3), so the caller's real stdin — a TTY or a
+  pipe — flows through to the child unchanged. This was forced by `sudo` closing
+  descriptors ≥ 3 (`closefrom`), which rules out passing the request itself on an
+  fd across the sudo boundary; see ADR-004. Fence semantics are unchanged; both
+  the helper and sidecar legs fail closed if their setup channel is missing,
+  covered by negative-control tests. **Host installers must update the NOPASSWD
+  sudoers grant to `setup --request-file *`.**
 - `scripts/install-egress-helper.sh` now arms its cleanup trap before creating
   either temp file, so an interrupt or error between the two `mktemp` calls no
   longer leaks a temp file (N10655). The INT and TERM handlers now terminate
