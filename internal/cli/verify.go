@@ -15,7 +15,6 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
-	"runtime"
 	"strings"
 	"time"
 
@@ -431,10 +430,13 @@ func verifySkipReason(fence string, cfg *config.Config, caps doctorCapabilities)
 		if check.Severity == doctorCritical {
 			return true, check.Message
 		}
-		if runtime.GOOS == "linux" && linuxEnforcementMode(cfg.Filesystem.LinuxEnforcement) == linuxEnforcementOff {
+		// caps.goos (not runtime.GOOS) so the Linux-only backend checks below key
+		// off the same platform the rest of verifySkipReason reads through caps;
+		// caps.goos is runtime.GOOS in production and stubbable in tests.
+		if caps.goos == "linux" && linuxEnforcementMode(cfg.Filesystem.LinuxEnforcement) == linuxEnforcementOff {
 			return true, "Filesystem kernel enforcement is off by config."
 		}
-		if runtime.GOOS == "linux" {
+		if caps.goos == "linux" {
 			if _, err := verifyFilesystemBackend(); err != nil {
 				return true, fmt.Sprintf("Filesystem userspace backend is unavailable: %v", err)
 			}

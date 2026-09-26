@@ -27,8 +27,23 @@ func TestRightsForABIMasksUnknownBits(t *testing.T) {
 	}
 }
 
+// resolvedTempDir returns a t.TempDir() with symlinks resolved. RulesFromConfig
+// canonicalizes the Landlock root (filepath.EvalSymlinks) for security, so the
+// emitted root-child rule paths are always the resolved form. On macOS
+// t.TempDir() sits under /var/folders, a symlink to /private/var/folders, so a
+// test comparing against the raw temp path would mismatch; resolving up front
+// keeps the test and the ruleset in the same frame (a no-op on Linux).
+func resolvedTempDir(t *testing.T) string {
+	t.Helper()
+	dir, err := filepath.EvalSymlinks(t.TempDir())
+	if err != nil {
+		t.Fatalf("resolve temp dir: %v", err)
+	}
+	return dir
+}
+
 func TestRulesFromConfigMapsReadOnlyAndReadWriteRights(t *testing.T) {
-	root := t.TempDir()
+	root := resolvedTempDir(t)
 	readOnly := filepath.Join(root, "readonly")
 	if err := os.Mkdir(readOnly, 0o755); err != nil {
 		t.Fatalf("mkdir readonly: %v", err)
@@ -133,7 +148,7 @@ func TestRulesFromConfigLimitsRegularFileRights(t *testing.T) {
 }
 
 func TestRulesFromConfigEnumeratesRootButSkipsNockAuditDir(t *testing.T) {
-	root := t.TempDir()
+	root := resolvedTempDir(t)
 	if err := os.Mkdir(filepath.Join(root, ".nock"), 0o700); err != nil {
 		t.Fatalf("mkdir .nock: %v", err)
 	}
@@ -234,7 +249,7 @@ func TestSpecRoundTrip(t *testing.T) {
 // LD_PRELOAD would reach it). RulesFromConfig must fail closed instead of
 // silently emitting a ruleset that grants the denied path.
 func TestRulesFromConfigRejectsDenyPathInsideRoot(t *testing.T) {
-	root := t.TempDir()
+	root := resolvedTempDir(t)
 	src := filepath.Join(root, "src")
 	if err := os.Mkdir(src, 0o755); err != nil {
 		t.Fatalf("mkdir src: %v", err)
