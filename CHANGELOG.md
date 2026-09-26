@@ -115,7 +115,8 @@ All notable changes to NockLock will be documented in this file.
   `visudo`-validated, exactly-scoped NOPASSWD sudoers drop-in by atomic same-dir
   rename, and `nocklock doctor` gained an `egress-helper` check (Lstat, root
   ownership, no group/world write, passwordless-sudo reachability). A CI job
-  installs via the shipped script and asserts the drop-in is exactly scoped.
+  installs via the shipped script and asserts the drop-in is exactly scoped
+  (N10654).
 - Audit-log v1.2: an external, Ed25519-signed chain-head anchor (#93). `nocklock
   anchor emit` writes it, `wrap` emits one on teardown, and `nocklock verify
   --against-anchor` authenticates the anchor and recomputes the cumulative
@@ -165,8 +166,12 @@ All notable changes to NockLock will be documented in this file.
   that contain locations rather than secret values. Optional `[secrets]`
   `scan_env` / `scan_paths` preflight prevents `wrap` from launching on findings,
   incomplete scans or audit-write failure. Existing configurations keep their
-  behavior, and profile overlays cannot weaken enabled checks. This is a
-  prelaunch check, not runtime redaction or complete secret detection.
+  behavior, and profile overlays cannot weaken enabled checks. The scanner walks
+  through `os.Root` with `O_NOFOLLOW` opens and pins recursive descent to the
+  enumerated parent directory handle, so a replaced intermediate directory cannot
+  redirect the walk, and it rechecks inode and content before reading. Scan
+  refusals are written to the audit chain. This is a prelaunch check, not runtime
+  redaction or complete secret detection (#101, N10715).
 
 ### Changed
 
@@ -239,8 +244,6 @@ All notable changes to NockLock will be documented in this file.
 
 - Documented the previously-undocumented `nocklock doctor` and `nocklock verify`
   commands in the README command table.
-- `verifyChain` now reports tampered, instead of an intact empty chain, when the
-  `chain_head` row is missing but event rows remain (N10650, #103).
 - The audit logger no longer refuses to start on first run when the project is
   reached through a symlinked path (N10714). `validatePath` resolved the project
   root's symlinks but left the not-yet-created DB path in its raw frame, so on
@@ -266,11 +269,8 @@ All notable changes to NockLock will be documented in this file.
   `verifySkipReason` keys its Linux-only backend checks off the stubbable
   `caps.goos` instead of `runtime.GOOS` (a no-op in production) so verify's skip
   accounting is platform-deterministic under test.
-- Audit DB validate-then-open window documented (N10717): a same-uid writer that
-  swaps a validated ancestor for a symlink can redirect the DB. That racer is out
-  of NockLock's threat model; see ARCHITECTURE.md. Removed the redundant
-  path-based `os.Chmod` (the descriptor-based chmod already covers it) and added
-  `TestResidual_AncestorSwapBetweenValidateAndOpen` with a no-swap control.
+- `verifyChain` now reports tampered, instead of an intact empty chain, when the
+  `chain_head` row is missing but event rows remain (N10650, #103).
 - `scripts/install-egress-helper.sh` now arms its cleanup trap before creating
   either temp file, so an interrupt or error between the two `mktemp` calls no
   longer leaks a temp file (N10655). The INT and TERM handlers now terminate
@@ -280,6 +280,11 @@ All notable changes to NockLock will be documented in this file.
   continue, recreating the predictable path without `O_EXCL` (a symlink-plant /
   root-owned overwrite window for another local user). Pinned by a sandboxed
   signal-injection test with a negative control that reverts the handler.
+- Audit DB validate-then-open window documented (N10717): a same-uid writer that
+  swaps a validated ancestor for a symlink can redirect the DB. That racer is out
+  of NockLock's threat model; see ARCHITECTURE.md. Removed the redundant
+  path-based `os.Chmod` (the descriptor-based chmod already covers it) and added
+  `TestResidual_AncestorSwapBetweenValidateAndOpen` with a no-swap control.
 - `nocklock wrap --net-fence=netns` no longer consumes the child's stdin
   (N10711). The privileged `setup` request previously rode the helper's stdin, so
   the fenced child inherited a drained stream — `printf 'x' | nocklock wrap
