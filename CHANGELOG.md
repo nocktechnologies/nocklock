@@ -123,6 +123,13 @@ All notable changes to NockLock will be documented in this file.
 
 ### Added
 
+- Local `nocklock scan [path ...]` with `--env` and `--json`, bounded detection of
+  AWS access-key IDs, GitHub token formats and private-key headers, and reports
+  that contain locations rather than secret values. Optional `[secrets]`
+  `scan_env` / `scan_paths` preflight prevents `wrap` from launching on findings,
+  incomplete scans or audit-write failure. Existing configurations keep their
+  behavior, and profile overlays cannot weaken enabled checks. This is a
+  prelaunch check, not runtime redaction or complete secret detection.
 - `pkg/receipt` tail evidence: `VerifySession` now reads the signed chain head
   (the same reader `nocklock verify` uses, exported as
   `logging.ReadChainHead`) and reports `TailVerified` and `TailReason`. `INTACT`

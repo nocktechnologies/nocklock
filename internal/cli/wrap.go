@@ -187,6 +187,10 @@ var wrapCmd = &cobra.Command{
 		if len(passedNames) > 0 {
 			logEvent(logging.EventSecretPassed, "secret", strings.Join(passedNames, ", "), false)
 		}
+		if err := runSecretPreflight(cmd.Context(), cfg, configPath, childEnv, sessionID, logger.LogBatch, cmd.ErrOrStderr()); err != nil {
+			cmd.SilenceUsage = true
+			return err
+		}
 
 		if len(blockedNames) > 0 {
 			fmt.Fprintf(os.Stderr, "NockLock: secret fence active — blocked %d environment variable(s)\n", len(blockedNames))

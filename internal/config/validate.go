@@ -2,6 +2,9 @@ package config
 
 import (
 	"fmt"
+	"io/fs"
+	"path/filepath"
+	"regexp"
 	"strings"
 )
 
@@ -22,6 +25,16 @@ func (e ValidationError) Error() string {
 // whether the config should be rejected.
 func Validate(cfg *Config) []ValidationError {
 	var errs []ValidationError
+	for _, p := range cfg.Secrets.ScanPaths {
+		if !fs.ValidPath(filepath.ToSlash(p)) || filepath.IsAbs(p) {
+			errs = append(errs, ValidationError{Field: "secrets.scan_paths", Message: "use project-relative paths without '..' or empty components", Severity: "error"})
+		}
+	}
+	for _, name := range cfg.Secrets.ScanEnvAllow {
+		if !envScanName.MatchString(name) {
+			errs = append(errs, ValidationError{Field: "secrets.scan_env_allow", Message: "use exact environment names (letters, digits and underscores), not globs or values", Severity: "error"})
+		}
+	}
 
 	// filesystem.mode must be one of the known values.
 	switch cfg.Filesystem.Mode {
@@ -181,6 +194,10 @@ func (cfg *Config) EffectivePolicy() string {
 	// Secrets
 	fmt.Fprintf(&b, "  Secrets: block=%d pattern(s), pass=%d pattern(s)\n",
 		len(cfg.Secrets.Block), len(cfg.Secrets.Pass))
+	if cfg.Secrets.ScanEnv || len(cfg.Secrets.ScanPaths) > 0 {
+		fmt.Fprintf(&b, "  Secret preflight: environment=%t paths=%d env_exceptions=%d (required before launch)\n",
+			cfg.Secrets.ScanEnv, len(cfg.Secrets.ScanPaths), len(cfg.Secrets.ScanEnvAllow))
+	}
 
 	// Cloud
 	if cfg.Cloud.Enabled {
@@ -193,6 +210,8 @@ func (cfg *Config) EffectivePolicy() string {
 
 	return b.String()
 }
+
+var envScanName = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]*$`)
 
 // containsTraversal reports whether a path contains ".." components.
 func containsTraversal(p string) bool {

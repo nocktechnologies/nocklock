@@ -35,6 +35,8 @@ func DefaultConfig() Config {
 			AllowAll: false,
 		},
 		Secrets: SecretsConfig{
+			ScanPaths:    []string{},
+			ScanEnvAllow: []string{},
 			Pass: []string{
 				"HOME",
 				"PATH",
@@ -105,6 +107,11 @@ allow = [
 allow_all = false
 
 [secrets]
+# Optional local preflight. A finding or incomplete scan prevents launch.
+# Paths are relative to the project containing this .nock directory.
+scan_env = false
+scan_paths = []
+scan_env_allow = []
 pass = [
     "HOME",
     "PATH",

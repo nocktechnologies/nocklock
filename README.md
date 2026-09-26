@@ -112,6 +112,70 @@ Server contract (the NockCC endpoint ships separately):
 - `GET {base}/api/nocklock/anchors/{agent_id}/latest/` returns the latest anchor, or 404 when none is stored.
 - The server answers **409** when a pushed anchor's `row_count` is lower than the latest one it holds for that `agent_id`. This server-side monotonic check is what makes a local rollback observable: a rolled-back host can no longer re-pin a shorter chain, and `--against-remote-anchor` then reports the gap as `TRUNCATION`. Redirects are not followed and response bodies are capped at 64 KiB.
 
+## Secret preflight scanning
+
+Check selected local files before giving them to an agent:
+
+```bash
+nocklock scan src .env
+nocklock scan --json src
+nocklock scan --env src   # also inspect the invoking environment, without filtering
+```
+
+No config or account is required. Paths are relative to the current directory;
+omitting them scans `.`. Exit status is zero only when the scan completes with
+no findings. JSON reports distinguish `complete` from `findings`: a complete
+scan can still find a credential. Reports show detector IDs and locations, never
+matching values or source lines.
+Recognized credential formats in filenames or environment names are also
+replaced with `[redacted]` in report locations.
+
+The initial detectors recognize AWS access-key IDs (`AKIA`/`ASIA`), GitHub token
+formats (classic, OAuth, app, refresh and fine-grained), and PEM private-key
+headers. These are format checks, not checks that a credential is valid.
+Unrecognized, encoded or compressed secrets can go undetected.
+
+To require preflight before every `wrap` launch, add settings to your existing
+`[secrets]` table:
+
+```toml
+[secrets]
+# Keep your existing pass/block rules here.
+scan_env = true
+scan_paths = ["src", ".env"]
+# Optional exact names intentionally available to the agent:
+scan_env_allow = []
+```
+
+`wrap` checks environment values **after** pass/block filtering and removal of
+its own anchor credentials. `scan_env_allow` exempts exact names from value
+scanning only; it never overrides a block rule. Scan paths are relative to the
+project containing `.nock/config.toml`, even when launched from a subdirectory.
+With a profile and no project config, the root is the current directory.
+Profile overlays can add paths/enable scanning, but cannot disable a base scan,
+remove its paths or add environment exceptions. Absent/false `scan_env` and
+empty `scan_paths` leave existing behavior unchanged. `--dry-run` displays the
+configured policy without scanning.
+
+There are no implicit exclusions: hidden and binary files are inspected, and
+ignore files are not consulted. Use explicit paths to choose scope. Symlinks,
+special files, unreadable/missing inputs and detected concurrent changes make
+the scan incomplete. Bounds are 1 MiB per file/environment value, 32 MiB of
+content, 10,000 entries (unique traversed paths plus environment values),
+10,000 selected-path arguments and 64 levels below each selected path. An
+explicit path is counted once; duplicate paths are not scanned again.
+Exceeding a bound is an incomplete scan, not a silent skip. Safe file opens
+are supported on Linux and macOS. Recursive traversal uses open directory
+handles, so replacing a directory path cannot redirect a child read. Identity,
+metadata and bounded content rereads detect observed changes; they do not
+provide an atomic snapshot or rule out all concurrent writes.
+
+A required scan finding or incomplete result prevents child execution and is
+recorded in the local audit log. Failure to record that result also prevents
+launch. This is a **point-in-time preflight check**. It does not redact reads,
+monitor agent context, protect paths outside the selected scope, or prevent
+files from changing after the scan. Runtime secret-file protection is separate.
+
 ## Configuration
 
 `nocklock init` creates `.nock/config.toml` with sensible defaults:
@@ -205,6 +269,7 @@ Candidate runtimes intentionally not preset here:
 | `nocklock wrap -- <cmd>` | Run a command inside the fence |
 | `nocklock wrap --profile list` | List embedded runtime presets |
 | `nocklock wrap --dry-run` | Validate config without starting fences or a command |
+| `nocklock scan [path ...]` | Scan selected local files; `--env` adds environment values and `--json` prints structured results |
 | `nocklock validate [config-path]` | Validate a config file and print the effective policy |
 | `nocklock doctor` | Check whether each fence can be enforced on this host |
 | `nocklock verify` | Run the adversarial fence self-test (proof-of-block) |
