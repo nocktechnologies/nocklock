@@ -1383,13 +1383,24 @@ func (l *Logger) verifyChain(pub ed25519.PublicKey, requireSigned bool) (*ChainV
 	// Get chain_head state
 	head, err := readChainHeadRecord(tx)
 	if err == sql.ErrNoRows {
-		// No chain_head row at all: there is nothing to walk, so the (empty)
-		// chain is intact. It is NOT automatically a clean signed pass: a signed
+		var actualRowCount int
+		if countErr := tx.QueryRow("SELECT COUNT(*) FROM events").Scan(&actualRowCount); countErr != nil {
+			return nil, fmt.Errorf("failed to count events without chain_head: %w", countErr)
+		}
+
+		result.HeadHash = chainGenesisHashHex
+		if actualRowCount > 0 {
+			result.Intact = false
+			result.BrokenReason = fmt.Sprintf("chain_head missing while events table contains %d row(s)", actualRowCount)
+			return result, nil
+		}
+
+		// No chain_head row and no events: there is nothing to walk, so the
+		// empty chain is intact. It is NOT automatically a clean signed pass: a signed
 		// check that was explicitly required still has no adoption marker here,
 		// which is "suspect" exactly as for a populated log. Otherwise a writer
 		// could delete every row and reset the head to downgrade a required
 		// check to an unsigned pass.
-		result.HeadHash = chainGenesisHashHex
 		result.Intact = true
 		result.SigState = classifySigState(pub, false, false, 0, requireSigned)
 		if result.SigState == "suspect" {
