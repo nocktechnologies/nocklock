@@ -178,3 +178,76 @@ func TestReadSetupRequestFailsClosed(t *testing.T) {
 		}
 	})
 }
+
+// TestRemoveValidatedRequestBoundToDirectoryFD is the negative control for the
+// deferred-unlink race (review finding on #107): after the request's parent
+// directory is opened, renaming it away and planting a symlink to a victim
+// directory at the original path must not redirect the unlink — the victim's
+// same-named file (standing in for a root-owned /etc/sudoers.d entry) survives —
+// and an entry replaced after validation is not removed either.
+func TestRemoveValidatedRequestBoundToDirectoryFD(t *testing.T) {
+	base := t.TempDir()
+	reqDir := filepath.Join(base, "req")
+	victimDir := filepath.Join(base, "victim")
+	for _, d := range []string{reqDir, victimDir} {
+		if err := os.Mkdir(d, 0o700); err != nil {
+			t.Fatalf("mkdir %s: %v", d, err)
+		}
+	}
+	const name = "setup-request.json"
+	reqPath := filepath.Join(reqDir, name)
+	victim := filepath.Join(victimDir, name)
+	for _, p := range []string{reqPath, victim} {
+		if err := os.WriteFile(p, []byte("{}"), 0o600); err != nil {
+			t.Fatalf("write %s: %v", p, err)
+		}
+	}
+	root, err := os.OpenRoot(reqDir)
+	if err != nil {
+		t.Fatalf("OpenRoot: %v", err)
+	}
+	defer root.Close()
+	fi, err := root.Lstat(name)
+	if err != nil {
+		t.Fatalf("lstat validated request: %v", err)
+	}
+
+	// Swap the parent directory for a symlink to the victim directory.
+	moved := filepath.Join(base, "req-moved")
+	if err := os.Rename(reqDir, moved); err != nil {
+		t.Fatalf("rename request dir: %v", err)
+	}
+	if err := os.Symlink(victimDir, reqDir); err != nil {
+		t.Fatalf("symlink swap: %v", err)
+	}
+
+	removeValidatedRequest(root, name, fi)
+	if _, err := os.Stat(victim); err != nil {
+		t.Fatalf("victim file was deleted through the swapped parent path: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(moved, name)); !os.IsNotExist(err) {
+		t.Fatalf("validated request should be unlinked from the original directory, stat err = %v", err)
+	}
+
+	// An entry replaced after validation (different inode) must not be removed.
+	// The validated file is kept alive under another name so its inode cannot be
+	// reused by the replacement.
+	dir := moved
+	if err := os.WriteFile(filepath.Join(dir, name), []byte("{}"), 0o600); err != nil {
+		t.Fatalf("write second request: %v", err)
+	}
+	fi2, err := root.Lstat(name)
+	if err != nil {
+		t.Fatalf("lstat second request: %v", err)
+	}
+	if err := os.Rename(filepath.Join(dir, name), filepath.Join(dir, name+".old")); err != nil {
+		t.Fatalf("rename validated request aside: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, name), []byte("{}"), 0o600); err != nil {
+		t.Fatalf("write replacement: %v", err)
+	}
+	removeValidatedRequest(root, name, fi2)
+	if _, err := os.Stat(filepath.Join(dir, name)); err != nil {
+		t.Fatalf("replaced entry must not be removed, stat err = %v", err)
+	}
+}

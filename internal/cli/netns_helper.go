@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"syscall"
@@ -268,15 +269,24 @@ func setupRequestPath(args []string) (string, error) {
 }
 
 // readSetupRequest opens, validates, decodes, and unlinks the setup request file.
-// It runs as root (under sudo), so it opens O_NOFOLLOW to refuse a symlink
-// swapped in at the path and confirms the file is a regular 0600 file owned by
-// the sudo-invoking user before decoding — a caller can only ever make the helper
-// read a file it already owns, never another user's. validateChildCredential
-// inside SetupAndExec remains the real credential boundary; this is
-// defense-in-depth plus a fail-closed setup channel.
+// It runs as root (under sudo), so it opens the request's parent directory once
+// (os.OpenRoot retains that directory fd) and does every later step — open,
+// re-check, unlink — relative to it, so validation and deletion are bound to the
+// same directory identity and a parent component swapped for a symlink after the
+// open cannot redirect the unlink. The file is opened O_NOFOLLOW and must be a
+// regular 0600 file owned by the sudo-invoking user before it is decoded — a
+// caller can only ever make the helper read a file it already owns, never another
+// user's. validateChildCredential inside SetupAndExec remains the real credential
+// boundary; this is defense-in-depth plus a fail-closed setup channel.
 func readSetupRequest(path string) (netns.Request, error) {
 	var req netns.Request
-	f, err := os.OpenFile(path, os.O_RDONLY|syscall.O_NOFOLLOW|syscall.O_CLOEXEC, 0)
+	root, err := os.OpenRoot(filepath.Dir(path))
+	if err != nil {
+		return req, fmt.Errorf("open netns setup request directory for %q: %w", path, err)
+	}
+	defer root.Close()
+	name := filepath.Base(path)
+	f, err := root.OpenFile(name, os.O_RDONLY|syscall.O_NOFOLLOW|syscall.O_CLOEXEC, 0)
 	if err != nil {
 		return req, fmt.Errorf("open netns setup request %q: %w", path, err)
 	}
@@ -295,24 +305,28 @@ func readSetupRequest(path string) (netns.Request, error) {
 		return req, err
 	}
 	// SECURITY: only NOW — the file is confirmed a regular 0600 file owned by the
-	// sudo-invoking user — is it safe to unlink it as root. A caller can only ever
-	// make the helper remove a file it already owns, never an arbitrary root-owned
-	// path. Registering this defer before validation would hand the NOPASSWD grant
-	// an arbitrary root file-deletion primitive (e.g. --request-file
-	// /etc/sudoers.d/nocklock-egress). Deferred so the single-use request is still
-	// cleaned on a decode failure; wrap's per-session RemoveAll is the backstop.
-	//
-	// This is a path-based unlink after an fd-based validation, so a residual
-	// TOCTOU exists, but it is bounded to caller-owned paths: the request dir is
-	// the caller's own 0700 session dir, unlink() does not follow a final-component
-	// symlink, and protected_hardlinks (the standard kernel default) blocks
-	// hardlinking a root-owned file into that dir — so at worst a caller can make
-	// the helper delete a file it already owns.
-	defer os.Remove(path)
+	// sudo-invoking user — is it safe to unlink it as root. An earlier unlink would
+	// hand the NOPASSWD grant an arbitrary root file-deletion primitive (e.g.
+	// --request-file /etc/sudoers.d/nocklock-egress). The unlink goes through the
+	// retained directory fd (unlinkat), never the path string, and is skipped unless
+	// the entry still names the inode that was validated, so at worst a caller can
+	// make the helper delete a file it already owns. Deferred so the single-use
+	// request is still cleaned on a decode failure; wrap's per-session RemoveAll is
+	// the backstop.
+	defer removeValidatedRequest(root, name, fi)
 	if err := json.NewDecoder(f).Decode(&req); err != nil {
 		return req, fmt.Errorf("decode netns setup request %q: %w", path, err)
 	}
 	return req, nil
+}
+
+// removeValidatedRequest unlinks name from root's retained directory fd, but only
+// while the entry still names the inode that was validated (fi); a replaced entry
+// is left alone.
+func removeValidatedRequest(root *os.Root, name string, fi os.FileInfo) {
+	if cur, err := root.Lstat(name); err == nil && os.SameFile(fi, cur) {
+		_ = root.Remove(name)
+	}
 }
 
 // assertSetupRequestOwner refuses a setup request file not owned by the
