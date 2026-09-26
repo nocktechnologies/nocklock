@@ -65,11 +65,18 @@ func TestRulesFromConfigMapsReadOnlyAndReadWriteRights(t *testing.T) {
 	if spec.HandledAccessFS&RightTruncate == 0 {
 		t.Fatalf("ABI v3 handled rights should include truncate: %#x", spec.HandledAccessFS)
 	}
-	// Root child, allow, and extra rules are appended first (baseline device
-	// grants follow), so indices 0-2 stay stable. The total is >= 3; the exact
-	// count depends on which /dev nodes exist on the host, so assert a floor.
-	if len(spec.Paths) < 3 {
-		t.Fatalf("expected at least root child + allow + extra paths, got %d: %+v", len(spec.Paths), spec.Paths)
+	// Root child, allow, and extra rules are appended first, so indices 0-2 stay
+	// stable. Baseline device grants follow and vary by host, so filter them out
+	// and keep the exact-count assertion on everything else — an unintended
+	// extra grant from RulesFromConfig must still fail this test.
+	var configured []PathRule
+	for _, r := range spec.Paths {
+		if !IsBaselineDeviceNode(r.Path) {
+			configured = append(configured, r)
+		}
+	}
+	if len(configured) != 3 {
+		t.Fatalf("expected exactly root child + allow + extra paths, got %d: %+v", len(configured), configured)
 	}
 	if spec.Paths[0].Path != readOnly || spec.Paths[0].Access != AccessReadOnly {
 		t.Fatalf("root child rule = %+v, want read-only %s", spec.Paths[0], readOnly)
