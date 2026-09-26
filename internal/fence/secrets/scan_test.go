@@ -153,6 +153,44 @@ func TestScanEmptyFileIsCleanAndDuplicatePathsAreNotRepeated(t *testing.T) {
 	}
 }
 
+func TestScanExplicitPathConsumesOneEntry(t *testing.T) {
+	root := t.TempDir()
+	if err := os.WriteFile(filepath.Join(root, "empty"), nil, 0600); err != nil {
+		t.Fatal(err)
+	}
+	env := make([]string, MaxScanEntries-1)
+	for i := range env {
+		env[i] = "VALUE="
+	}
+	r := Scan(context.Background(), root, []string{"empty"}, env)
+	if !r.Safe() || r.FilesScanned != 1 || r.EnvScanned != len(env) {
+		t.Fatalf("one explicit file consumed more than one entry: %+v", r)
+	}
+	r = Scan(context.Background(), root, []string{"empty"}, append(env, "EXTRA="))
+	if r.Complete || r.FilesScanned != 0 {
+		t.Fatalf("file beyond total entry budget accepted: %+v", r)
+	}
+}
+
+func TestScanBoundsDuplicatePathArguments(t *testing.T) {
+	root := t.TempDir()
+	if err := os.WriteFile(filepath.Join(root, "empty"), nil, 0600); err != nil {
+		t.Fatal(err)
+	}
+	paths := make([]string, MaxScanEntries)
+	for i := range paths {
+		paths[i] = "empty"
+	}
+	r := Scan(context.Background(), root, paths, nil)
+	if !r.Safe() || r.FilesScanned != 1 {
+		t.Fatalf("duplicate paths consumed traversal entries: %+v", r)
+	}
+	r = Scan(context.Background(), root, append(paths, "empty"), nil)
+	if r.Complete || r.FilesScanned != 1 {
+		t.Fatalf("unbounded path arguments accepted: %+v", r)
+	}
+}
+
 func TestScanRedactsRecognizedCredentialsInMetadata(t *testing.T) {
 	root := t.TempDir()
 	value := syntheticToken()

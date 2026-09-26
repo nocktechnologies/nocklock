@@ -37,3 +37,16 @@ func openScanFile(root *os.Root, path string) (*os.File, error) {
 	}
 	return f, nil
 }
+
+// Recursive descent uses the open parent, never its potentially replaced path.
+// Only a single child name is accepted so this cannot escape that directory.
+func openScanChild(parent *os.File, name string) (*os.File, error) {
+	if !fs.ValidPath(name) || name == "." || strings.Contains(name, "/") {
+		return nil, fs.ErrInvalid
+	}
+	fd, err := unix.Openat(int(parent.Fd()), name, unix.O_RDONLY|unix.O_NOFOLLOW|unix.O_NONBLOCK|unix.O_CLOEXEC, 0)
+	if err != nil {
+		return nil, err
+	}
+	return os.NewFile(uintptr(fd), name), nil
+}

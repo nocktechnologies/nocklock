@@ -89,33 +89,28 @@ func Scan(ctx context.Context, root string, paths, environ []string) ScanReport 
 		s.report.EnvScanned++
 	}
 	if len(paths) > 0 && !s.stopped {
+		// Bound argument processing separately from unique traversed entries, so
+		// duplicate paths cannot cause unbounded work or consume the budget twice.
+		if len(paths) > MaxScanEntries {
+			s.issue("scan paths", "scan exceeds 10000 selected paths; select a smaller explicit scope")
+			paths = paths[:MaxScanEntries]
+		}
 		r, err := os.OpenRoot(root)
 		if err != nil {
 			s.issue(".", "cannot open scan root; check that it exists and is readable")
 		} else {
 			defer r.Close()
 			for _, path := range paths {
-				if !s.next("scan paths") {
+				if s.stopped {
 					break
 				}
 				if !fs.ValidPath(filepath.ToSlash(path)) || filepath.IsAbs(path) {
-					s.issue(path, "scan paths must be relative without '..' or empty components")
+					if s.next(path) {
+						s.issue(path, "scan paths must be relative without '..' or empty components")
+					}
 					continue
 				}
-				// Validate explicit parents too: selecting link/file must not bypass
-				// the symlink rejection applied during ordinary tree traversal.
-				parentOK := true
-				for parent := filepath.Dir(path); parent != "."; parent = filepath.Dir(parent) {
-					info, err := r.Lstat(parent)
-					if err != nil || !info.IsDir() {
-						s.issue(path, "parent is unreadable or not a real directory; choose a non-symlink path")
-						parentOK = false
-						break
-					}
-				}
-				if parentOK {
-					s.walk(r, path, 0)
-				}
+				s.walk(r, path, 0, nil)
 			}
 		}
 	}
@@ -206,7 +201,7 @@ func (s *scanner) inspect(data []byte, source, location string) {
 	}
 }
 
-func (s *scanner) walk(root *os.Root, path string, depth int) {
+func (s *scanner) walk(root *os.Root, path string, depth int, parent *os.File) {
 	if s.seen[path] {
 		return
 	}
@@ -227,9 +222,16 @@ func (s *scanner) walk(root *os.Root, path string, depth int) {
 		s.issue(path, "symlink or special file is unsupported; select regular files/directories")
 		return
 	}
-	f, err := openScanFile(root, path)
+	var f *os.File
+	if parent == nil {
+		f, err = openScanFile(root, path)
+	} else {
+		// Keep child lookup bound to the directory we enumerated, even if its
+		// original pathname is replaced while this walk is in progress.
+		f, err = openScanChild(parent, filepath.Base(path))
+	}
 	if err != nil {
-		s.issue(path, "cannot open input safely; check permissions, platform support and concurrent changes")
+		s.issue(path, "cannot open input safely; check permissions, symlinks, platform support and concurrent changes")
 		return
 	}
 	defer f.Close()
@@ -243,7 +245,7 @@ func (s *scanner) walk(root *os.Root, path string, depth int) {
 		for !s.stopped {
 			entries, err := f.ReadDir(128)
 			for _, entry := range entries {
-				s.walk(root, filepath.Join(path, entry.Name()), depth+1)
+				s.walk(root, filepath.Join(path, entry.Name()), depth+1, f)
 				if s.stopped {
 					break
 				}

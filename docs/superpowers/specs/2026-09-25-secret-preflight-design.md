@@ -33,12 +33,18 @@ rewrite reads, monitor agent context, or promise detection of arbitrary secrets.
 Use the existing Go standard library and existing dependencies only. Read via
 `os.Root`, refuse symlinks/special files, and open with no-follow/nonblocking
 flags on Linux/macOS. Inspect every byte of regular files, including binary
-data, up to 1 MiB/file, 32 MiB/run, 10,000 filesystem entries and depth 64.
+data, up to 1 MiB/file and 32 MiB/run. Limit unique traversed paths plus
+environment entries to 10,000, selected-path arguments to 10,000, and recursive
+depth below each selected path to 64. Count each explicit path once. Descend
+from already-open directory handles so a substituted pathname cannot redirect
+child reads. Keep both inode-replacement and in-place-rewrite regressions.
 Oversize/unreadable/changed inputs, traversal, unsupported platforms and
 cancellation make the scan incomplete. Never silently truncate or skip.
 Limits are fixed in this increment to keep the policy small and predictable.
 Preflight is a point-in-time check: later changes, encoded/compressed values,
 unrecognized formats and paths outside the selected scope are not covered.
+Identity/metadata checks and bounded content rereads detect observed changes;
+they are not an atomic snapshot and cannot rule out every concurrent write.
 
 ## Implementation sequence
 

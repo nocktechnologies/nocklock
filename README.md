@@ -148,9 +148,14 @@ There are no implicit exclusions: hidden and binary files are inspected, and
 ignore files are not consulted. Use explicit paths to choose scope. Symlinks,
 special files, unreadable/missing inputs and detected concurrent changes make
 the scan incomplete. Bounds are 1 MiB per file/environment value, 32 MiB of
-content, 10,000 entries (including selected paths, directories and environment
-values) and directory depth 64. Exceeding a bound is an incomplete scan, not a
-silent skip. Safe file opens are supported on Linux and macOS.
+content, 10,000 entries (unique traversed paths plus environment values),
+10,000 selected-path arguments and 64 levels below each selected path. An
+explicit path is counted once; duplicate paths are not scanned again.
+Exceeding a bound is an incomplete scan, not a silent skip. Safe file opens
+are supported on Linux and macOS. Recursive traversal uses open directory
+handles, so replacing a directory path cannot redirect a child read. Identity,
+metadata and bounded content rereads detect observed changes; they do not
+provide an atomic snapshot or rule out all concurrent writes.
 
 A required scan finding or incomplete result prevents child execution and is
 recorded in the local audit log. Failure to record that result also prevents
