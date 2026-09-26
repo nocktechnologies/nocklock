@@ -1,7 +1,7 @@
-# PROMPT: NockLock PR #1 — CLI Skeleton + Project Structure
+# PROMPT: NockLock PR #1, CLI Skeleton + Project Structure
 
 ## Context
-NockLock is a Go CLI tool that wraps AI coding agents (Claude Code, Codex, Cursor, Copilot, Gemini) in an invisible security fence. This is the FIRST PR — just the skeleton. No fence implementations yet. We're setting up the project structure, the CLI commands, and making sure `nocklock version` and `nocklock init` work.
+NockLock is a Go CLI tool that wraps AI coding agents (Claude Code, Codex, Cursor, Copilot, Gemini) in an invisible security fence. This is the FIRST PR, just the skeleton. No fence implementations yet. We're setting up the project structure, the CLI commands, and making sure `nocklock version` and `nocklock init` work.
 
 ## Repo
 nocktechnologies/nocklock (already created, cloned locally)
@@ -65,8 +65,8 @@ NockLock v0.1.0 (dev)
 - Prints "NockLock initialized. Config at .nock/config.toml"
 
 **nocklock wrap -- <command>**
-- For PR #1, this is a PASSTHROUGH — it just runs the wrapped command with no fencing
-- Prints "NockLock v0.1.0 — fences not yet active (coming in PR #3-6)"
+- For PR #1, this is a PASSTHROUGH, it just runs the wrapped command with no fencing
+- Prints "NockLock v0.1.0, fences not yet active (coming in PR #3-6)"
 - Spawns the child process and forwards stdin/stdout/stderr
 - Exits with the child's exit code
 - This proves the wrap mechanism works before we add fences
@@ -219,17 +219,17 @@ lint: fmt vet
 
 ### 7. Update README.md
 
-Replace the auto-generated README with the draft from DESIGN_NOCK_CLI_ARCHITECTURE.md (the README section). Keep it short for now — the full README comes in PR #8.
+Replace the auto-generated README with the draft from DESIGN_NOCK_CLI_ARCHITECTURE.md (the README section). Keep it short for now, the full README comes in PR #8.
 
 ### 8. Tests
 
-- `internal/config/config_test.go` — test TOML parsing, default generation, missing config handling
+- `internal/config/config_test.go`: test TOML parsing, default generation, missing config handling
 - At minimum: TestParseConfig, TestDefaultConfig, TestConfigNotFound
 
 ## Dependencies
 
-- `github.com/spf13/cobra` — CLI framework
-- `github.com/BurntSushi/toml` — TOML parser
+- `github.com/spf13/cobra`: CLI framework
+- `github.com/BurntSushi/toml`: TOML parser
 
 That's it. Two dependencies. Keep it minimal.
 
@@ -309,16 +309,16 @@ NockLock is an AI agent security fence. Go CLI that wraps coding agents with fil
 
 ## Plugin & Review Pipeline
 
-This repo has a STRICT review pipeline. NockLock is a security tool — code quality IS the product.
+This repo has a STRICT review pipeline. NockLock is a security tool, code quality IS the product.
 
 ### Plugins to Use DURING Development
 
 These plugins are installed. Use them as you build, not just at the end:
 
-1. **superpowers** — Run FIRST before writing any code. Plan the approach. `/superpowers`
-2. **security-guidance** — Run on ALL code that touches subprocess spawning, file paths, env vars, or network. `/security-guidance`
-3. **code-simplifier** — Run after completing each major file. Spawns 3 agents to review and simplify. `/code-simplifier`
-4. **frontend-design** — Not needed for PR #1 (CLI only, no UI)
+1. **superpowers**: Run FIRST before writing any code. Plan the approach. `/superpowers`
+2. **security-guidance**: Run on ALL code that touches subprocess spawning, file paths, env vars, or network. `/security-guidance`
+3. **code-simplifier**: Run after completing each major file. Spawns 3 agents to review and simplify. `/code-simplifier`
+4. **frontend-design**: Not needed for PR #1 (CLI only, no UI)
 
 ### Pre-Push Quality Gates
 
@@ -366,9 +366,9 @@ Step 8: Push → PR opened
 
 Once the PR is opened on GitHub, these run automatically:
 
-- **Claude GitHub App** — auto-reviews the PR with inline comments
-- **Gemini Code Review** — auto-reviews the PR
-- **Codex plugin (coderabbit)** — additional review layer
+- **Claude GitHub App**: auto-reviews the PR with inline comments
+- **Gemini Code Review**: auto-reviews the PR
+- **Codex plugin (coderabbit)**: additional review layer
 
 ### Final Review
 
@@ -408,11 +408,11 @@ Kevin + Mara manual review
 Merge
 ```
 
-This is 10+ AI reviewers per PR. For a security tool, that's not overkill — that's the standard.
+This is 10+ AI reviewers per PR. For a security tool, that's not overkill, that's the standard.
 
 ## Notes
 - This is a NEW Go project. Take time to set up the structure right.
 - The wrap command is intentionally a passthrough in PR #1. We prove the child process spawning works before adding fences.
-- Config parsing is the foundation — get it right now because every future PR reads the config.
+- Config parsing is the foundation: get it right now because every future PR reads the config.
 - Keep the code clean, well-commented, and idiomatic Go.
 - USE THE PLUGINS. They are installed for a reason. Don't skip steps.

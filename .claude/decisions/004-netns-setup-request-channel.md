@@ -8,15 +8,15 @@
 Under `nocklock wrap --net-fence=netns`, the unprivileged parent hands the
 composed child (argv, env, credential, egress config) to the privileged helper
 via `sudo -n <helper> setup`. The request was JSON-encoded onto the helper's
-**stdin**. That consumed the caller's stdin: the fenced child — reached several
-processes deep (wrap → sudo → setup helper → `__netns-child` sidecar → child) —
+**stdin**. That consumed the caller's stdin: the fenced child, reached several
+processes deep (wrap, then sudo, then the setup helper, then the `__netns-child` sidecar, then the child),
 inherited a drained stdin, so `printf 'x' | nocklock wrap --net-fence=netns -- cat`
 printed the setup JSON (or nothing), and interactive/MCP agents lost their input
 stream entirely. The helper's own doc comment carried this as a known
 "FOUNDATION LIMITATION."
 
-The obvious fix — pass the JSON on a dedicated inherited descriptor (fd 3) and
-leave stdin alone — does not survive the `sudo` boundary: sudo's default
+The obvious fix, pass the JSON on a dedicated inherited descriptor (fd 3) and
+leave stdin alone, does not survive the `sudo` boundary: sudo's default
 `closefrom=3` closes every descriptor ≥ 3 before exec'ing the helper, and
 `closefrom_override` (`sudo -C`) is not permitted under the shipped policy
 (verified empirically on the target host). Env vars are also stripped by
@@ -24,23 +24,23 @@ leave stdin alone — does not survive the `sudo` boundary: sudo's default
 the fixed `check`/`setup` sudoers vectors.
 
 ## Decision
-- **Helper leg (wrap → sudo → setup):** wrap writes the JSON request to a fresh
+- **Helper leg (wrap to sudo to setup):** wrap writes the JSON request to a fresh
   **0600 file** in the wrap-owned, 0700 per-session directory and invokes
   `sudo -n <helper> setup --request-file <path>`. Only the *path* rides argv. The
   sudo command inherits the caller's real stdin (`cmd.Stdin = os.Stdin`); the
-  helper reads the request from the file — never stdin — so stdin flows through to
+  helper reads the request from the file, never stdin, so stdin flows through to
   the child untouched (a real TTY stays a TTY). The helper opens the file
   `O_NOFOLLOW` relative to a retained directory fd (`os.OpenRoot`), requires a
   regular 0600 file owned by `SUDO_UID`, and unlinks it after read via `unlinkat`
   on that same directory fd (skipped if the entry was replaced after validation),
   so a parent directory swapped for a symlink cannot redirect the root unlink.
   Before opening the file it also stats the parent through that fd and refuses
-  unless it is mode 0700 and owned by `SUDO_UID` — so no principal other than the
+  unless it is mode 0700 and owned by `SUDO_UID`, so no principal other than the
   invoking user can touch the directory between the inode re-check and the
   `unlinkat`.
   `validateChildCredential` remains the real credential boundary; the
   file checks are defense-in-depth and a fail-closed setup channel.
-- **Sidecar leg (setup → `__netns-child` / proxies):** no sudo here, so the JSON
+- **Sidecar leg (setup to `__netns-child` / proxies):** no sudo here, so the JSON
   payload rides a **dedicated inherited descriptor (fd 3)** via `ExtraFiles`
   (matching the existing cleanup/watchdog pattern). The `__netns-child` sidecar
   inherits the helper's stdin (the caller's real stdin); the two policy proxies
@@ -48,7 +48,7 @@ the fixed `check`/`setup` sudoers vectors.
 
 ## Rationale
 - The file+path split is the only channel that both survives `sudo` and keeps the
-  request off argv — the request's argv/env/credential still never ride the sudo
+  request off argv, the request's argv/env/credential still never ride the sudo
   argument vector, so the sudoers policy stays a fixed vector, not an
   argument-injection surface. Only a small, owner-validated path token is added.
 - No new `netns.Request` field is introduced, so the darwin mirror
@@ -56,8 +56,8 @@ the fixed `check`/`setup` sudoers vectors.
 - Fence semantics are unchanged: same namespace, cap drop, credential drop,
   NO_NEW_PRIVS, and audit chain.
 - Deferred (out of scope for N10711): a persistent privileged helper reached over
-  a unix socket with `SCM_RIGHTS` fd-passing — instead of a fresh `sudo` exec per
-  session — could collapse both legs onto a single channel and hand the child's
+  a unix socket with `SCM_RIGHTS` fd-passing, instead of a fresh `sudo` exec per
+  session, could collapse both legs onto a single channel and hand the child's
   real stdin fd across directly. That is a larger architectural change to the
   helper's lifecycle and sudoers model; recorded here so the option stays visible.
 
@@ -74,7 +74,7 @@ the fixed `check`/`setup` sudoers vectors.
   *fd* unchanged (TTY or pipe), reaching parity with a directly-run wrapped agent
   (`cli/wrap.go` sets `child.Stdin = os.Stdin` + `Setpgid` for the non-netns path
   too). This change adds no terminal job-control handling (no `setsid`, `Ctty`,
-  `Foreground`, or `tcsetpgrp`) — foreground-process-group / SIGTTIN behavior is
+  `Foreground`, or `tcsetpgrp`), foreground-process-group / SIGTTIN behavior is
   identical to the rest of the product and is out of scope for N10711.
 - **Grant drift is not auto-detected:** the runtime preflight probes only the
   unchanged `check` vector, so a host that upgrades the binary but not the sudoers

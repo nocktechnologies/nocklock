@@ -2,7 +2,7 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** Intercept file system calls made by wrapped processes via LD_PRELOAD, blocking access outside allowed directory trees — Linux only.
+**Goal:** Intercept file system calls made by wrapped processes via LD_PRELOAD, blocking access outside allowed directory trees, Linux only.
 
 **Architecture:** A small C shared library (`libfence_fs.so`) intercepts libc file operations and checks paths against rules passed via the `NOCKLOCK_FS_ALLOWED` environment variable. Blocked calls return `EACCES` and report events over a Unix domain socket to the Go parent process, which logs them to SQLite via the existing logging engine.
 
@@ -50,7 +50,7 @@ The Go parent serializes path rules into a single environment variable using `\x
 ```
 
 - Field 0: root path (absolute)
-- Field 1: mode — `rw` (read-write) or `ro` (read-only)
+- Field 1: mode, `rw` (read-write) or `ro` (read-only)
 - Field 2: Unix domain socket path (absolute)
 - Fields 3+: `+path` for allow entries, `-path` for deny entries
 
@@ -59,10 +59,10 @@ Example: `/home/agent/project\x1frw\x1f/tmp/nocklock-abc.sock\x1f+/tmp\x1f+/usr/
 ### C Library Path Checking Logic
 
 1. Resolve incoming path to absolute (handle relative paths, `.`, `..`)
-2. Check deny list → if path starts with any deny entry → **BLOCK**
-3. Check root → if path starts with root → **ALLOW** (respect mode: `ro` blocks writes)
-4. Check allow list → if path starts with any allow entry → **ALLOW reads only**
-5. Default → **BLOCK**
+2. Check deny list: if path starts with any deny entry, **BLOCK**
+3. Check root: if path starts with root, **ALLOW** (respect mode: `ro` blocks writes)
+4. Check allow list: if path starts with any allow entry, **ALLOW reads only**
+5. Default: **BLOCK**
 
 ### Write Detection
 
@@ -138,7 +138,7 @@ endpoint = "https://cc.nocktechnologies.io/api/fence/events/"
 - [ ] **Step 2: Run test to verify it fails**
 
 Run: `go test ./internal/config/ -run TestParseConfigWithFilesystemRootAndMode -v`
-Expected: FAIL — `unknown config keys at ...: [filesystem.root filesystem.mode]` (strict TOML validation rejects unknown fields)
+Expected: FAIL, `unknown config keys at ...: [filesystem.root filesystem.mode]` (strict TOML validation rejects unknown fields)
 
 - [ ] **Step 3: Add Root and Mode fields to FilesystemConfig**
 
@@ -178,7 +178,7 @@ func TestDefaultConfigFilesystemRootAndMode(t *testing.T) {
 - [ ] **Step 6: Run test to verify it fails**
 
 Run: `go test ./internal/config/ -run TestDefaultConfigFilesystemRootAndMode -v`
-Expected: FAIL — Root is `""` and Mode is `""`
+Expected: FAIL, Root is `""` and Mode is `""`
 
 - [ ] **Step 7: Update DefaultConfig with new fields**
 
@@ -227,7 +227,7 @@ deny = [
 
 Run: `go test ./internal/config/ -run TestDefaultTOMLMatchesDefaultConfig -v`
 
-If it fails because existing tests reference the old defaults (e.g., `TestDefaultConfig` checks for `"~/.ssh/"` in Deny — that's still there, so it should pass). Fix any tests that break due to the removed entries (`"."` from Allow, `"../"` from Deny).
+If it fails because existing tests reference the old defaults (e.g., `TestDefaultConfig` checks for `"~/.ssh/"` in Deny, that's still there, so it should pass). Fix any tests that break due to the removed entries (`"."` from Allow, `"../"` from Deny).
 
 - [ ] **Step 10: Run all config tests**
 
@@ -312,7 +312,7 @@ func TestExpandTilde_TildeOnly(t *testing.T) {
 - [ ] **Step 2: Run test to verify it fails**
 
 Run: `go test ./internal/fence/fs/ -run TestExpandTilde -v`
-Expected: FAIL — package/function doesn't exist
+Expected: FAIL, package/function doesn't exist
 
 - [ ] **Step 3: Implement ExpandTilde**
 
@@ -353,7 +353,7 @@ func ExpandTilde(path string) (string, error) {
 Run: `go test ./internal/fence/fs/ -run TestExpandTilde -v`
 Expected: PASS
 
-- [ ] **Step 5: Write failing test for ProcessConfig — valid config**
+- [ ] **Step 5: Write failing test for ProcessConfig, valid config**
 
 Add to `internal/fence/fs/config_test.go`:
 
@@ -394,9 +394,9 @@ func TestProcessConfig_Valid(t *testing.T) {
 - [ ] **Step 6: Run test to verify it fails**
 
 Run: `go test ./internal/fence/fs/ -run TestProcessConfig_Valid -v`
-Expected: FAIL — `ProcessConfig` not defined
+Expected: FAIL, `ProcessConfig` not defined
 
-- [ ] **Step 7: Write failing test for ProcessConfig — invalid mode**
+- [ ] **Step 7: Write failing test for ProcessConfig, invalid mode**
 
 Add to `internal/fence/fs/config_test.go`:
 
@@ -414,7 +414,7 @@ func TestProcessConfig_InvalidMode(t *testing.T) {
 }
 ```
 
-- [ ] **Step 8: Write failing test for ProcessConfig — missing root errors**
+- [ ] **Step 8: Write failing test for ProcessConfig, missing root errors**
 
 Add to `internal/fence/fs/config_test.go`:
 
@@ -431,7 +431,7 @@ func TestProcessConfig_MissingRoot(t *testing.T) {
 }
 ```
 
-- [ ] **Step 9: Write failing test for ProcessConfig — empty config means disabled**
+- [ ] **Step 9: Write failing test for ProcessConfig, empty config means disabled**
 
 Add to `internal/fence/fs/config_test.go`:
 
@@ -632,7 +632,7 @@ func TestSerialize_ReadOnlyMode(t *testing.T) {
 - [ ] **Step 2: Run test to verify it fails**
 
 Run: `go test ./internal/fence/fs/ -run TestSerialize -v`
-Expected: FAIL — `Serialize` and `ParseSerialized` not defined
+Expected: FAIL, `Serialize` and `ParseSerialized` not defined
 
 - [ ] **Step 3: Implement Serialize and ParseSerialized**
 
@@ -758,7 +758,7 @@ func TestUnsupportedError(t *testing.T) {
 - [ ] **Step 2: Run test to verify it fails**
 
 Run: `go test ./internal/fence/fs/ -run TestIsSupported -v`
-Expected: FAIL — `IsSupported` not defined
+Expected: FAIL, `IsSupported` not defined
 
 - [ ] **Step 3: Implement IsSupported, CheckSupported, and FenceEvent**
 
@@ -859,7 +859,7 @@ FenceEvent models the JSON events the C library sends over the Unix socket."
 
 ---
 
-## Task 5: Go Fence Wrapper — Socket and LD_PRELOAD Setup
+## Task 5: Go Fence Wrapper, Socket and LD_PRELOAD Setup
 
 **Files:**
 - Modify: `internal/fence/fs/fence.go`
@@ -907,7 +907,7 @@ func TestNewFence_CreatesSocket(t *testing.T) {
 - [ ] **Step 2: Run test to verify it fails**
 
 Run: `go test ./internal/fence/fs/ -run TestNewFence_CreatesSocket -v`
-Expected: FAIL — `NewFence` not defined
+Expected: FAIL, `NewFence` not defined
 
 - [ ] **Step 3: Write failing test for EnvVars**
 
@@ -1774,7 +1774,7 @@ clean:
 Run on Linux: `cd internal/fence/fs && make build`
 Expected: `libfence_fs.so` created without errors.
 
-On macOS: Skip this step — compilation is Linux-only due to Linux-specific headers.
+On macOS: Skip this step, compilation is Linux-only due to Linux-specific headers.
 
 - [ ] **Step 4: Commit**
 
@@ -1901,7 +1901,7 @@ After the child process section (after the `child.Run()` error handling), add ev
 - [ ] **Step 6: Run all tests to verify nothing is broken**
 
 Run: `go test ./... -v`
-Expected: ALL PASS — the filesystem fence code paths are only activated when config has a non-empty Root AND the OS is Linux.
+Expected: ALL PASS, the filesystem fence code paths are only activated when config has a non-empty Root AND the OS is Linux.
 
 - [ ] **Step 7: Run go vet and go fmt**
 
@@ -2012,14 +2012,14 @@ make build-fence-fs
 **How it works:**
 1. NockLock sets `LD_PRELOAD` to load `libfence_fs.so` into the child process
 2. The library intercepts `open`, `openat`, `fopen`, `access`, `unlink`, `rename`, `mkdir`, `rmdir`, `readlink`, and `realpath`
-3. Each intercepted call resolves the path to absolute and checks it against deny → root → allow rules
+3. Each intercepted call resolves the path to absolute and checks it against deny, then root, then allow rules
 4. Blocked calls return `EACCES` (permission denied)
 5. All blocked attempts are logged to SQLite
 
 **Platform support:**
-- ✅ Linux (LD_PRELOAD)
-- ❌ macOS (coming soon — requires different mechanism due to SIP)
-- ❌ Windows (not planned)
+- Supported: Linux (LD_PRELOAD)
+- Not yet: macOS (coming soon, requires a different mechanism due to SIP)
+- Not supported: Windows (not planned)
 ```
 
 Update the roadmap checklist to mark filesystem fence as complete.
@@ -2103,7 +2103,7 @@ Tell Kevin: "Ready for code review pipeline. Filesystem fence implementation com
 | TestProcessConfig_InvalidMode | fs/config_test.go | Bad mode rejected |
 | TestProcessConfig_MissingRoot | fs/config_test.go | Nonexistent root rejected |
 | TestProcessConfig_EmptyRootDisablesFence | fs/config_test.go | Empty root = fence disabled |
-| TestSerialize_RoundTrip | fs/config_test.go | Serialize → ParseSerialized roundtrip |
+| TestSerialize_RoundTrip | fs/config_test.go | Serialize to ParseSerialized roundtrip |
 | TestSerialize_ReadOnlyMode | fs/config_test.go | ro mode serializes correctly |
 | TestIsSupported | fs/fence_test.go | OS detection matches runtime.GOOS |
 | TestUnsupportedError | fs/fence_test.go | Clear error on non-Linux |

@@ -1,4 +1,4 @@
-# Tamper-Evident Audit Log — Spec (v1: hash chain)
+# Tamper-Evident Audit Log: Spec (v1: hash chain)
 
 **Status:** Scoped, design questions answered. Ready to build.
 **Author:** Mira (product owner). Filed 2026-09-14.
@@ -7,8 +7,8 @@
 
 NockLock records every fence decision to a SQLite event log (`internal/logging`,
 shipped). But the log is a plain table: `id, timestamp, event_type, category,
-detail, blocked, session_id`. Anyone with file access — including a compromised
-wrapped agent that can reach the `.db` — can edit a `blocked` row to `passed`,
+detail, blocked, session_id`. Anyone with file access, including a compromised
+wrapped agent that can reach the `.db`, can edit a `blocked` row to `passed`,
 delete the record of an exfiltration attempt, or truncate the tail, and nothing
 detects it. `nocklock verify` today tests the *fences*, not the *record*.
 
@@ -55,7 +55,7 @@ database-assigned `id` is included so reordering changes the encoded row.
 `prev_hash` is decoded from its 64 lowercase hexadecimal characters to 32 bytes
 and appended separately by the chain formula below. Include a test that asserts
 the exact canonical byte string for a known row **independent of the hashing
-function** (a test that hashes `_canonical_bytes()` itself cannot catch drift —
+function** (a test that hashes `_canonical_bytes()` itself cannot catch drift,
 that was the #1902 lesson).
 
 **3. Chain construction.**
@@ -66,7 +66,7 @@ maintained inside the same transaction as the INSERT so a crash can't leave a
 row without its link. Reads (`Query`, `log` command) are unchanged; the chain is
 verification metadata.
 
-**4. Detection guarantee — honest about the limit.**
+**4. Detection guarantee, honest about the limit.**
 A pure per-row prev-hash chain detects mutation, deletion, and reordering only
 when the editor does not recompute the affected hashes. Maintain a single-row
 `chain_head` table holding the highest `entry_hash` and row count, updated in
@@ -86,7 +86,7 @@ Existing DBs have rows with no hash columns. On first open after upgrade:
 `ALTER TABLE events ADD COLUMN prev_hash` / `entry_hash` (nullable add, then
 populate). Walk existing rows in `id` order and chain them forward once. These
 pre-existing rows are **structurally chained but not retroactively
-authenticated** — they were written before the chain existed, so the chain only
+authenticated**: they were written before the chain existed, so the chain only
 proves they haven't changed *since migration*. Mark the migration point with a
 `chain_genesis` event carrying the migration timestamp, and say so in verify
 output. Never claim pre-migration history is proven.
@@ -104,7 +104,7 @@ it.
   test, chain-on-insert (transactional), migration/backfill, `chain_head`
   table, a `VerifyChain()` method returning a structured result.
 - `internal/cli/verify.go`: add `--audit` flag (or `nocklock audit verify`
-  subcommand — builder's call, keep it discoverable) wired to `VerifyChain()`.
+  subcommand, builder's call, keep it discoverable) wired to `VerifyChain()`.
 - Tests: canonical byte-literal pin; chain intact over N rows; each tamper class
   detected (mutate a `blocked` bit, reorder, delete a middle row, mutate
   `detail`); migration backfill; concurrency (chain stays consistent under the
@@ -119,16 +119,16 @@ cross-session chaining.
 ## Build constraints
 
 - Pure Go crypto (`crypto/sha256`), no CGO, no new heavy deps.
-- **Safe to build and test from any host** — no netns, no root, no sudo, no
+- **Safe to build and test from any host**: no netns, no root, no sudo, no
   fence enforcement. Standard `go test ./internal/logging/ -race` only.
 - Gate on the repo's normal review legs (claude-review + CodeRabbit at head, CI
-  green, 0 unresolved threads) — merge is the product owner's call.
+  green, 0 unresolved threads), merge is the product owner's call.
 
 ## Follow-on (filed intent, not this build)
 
 1. **Ed25519 signing** over the same canonical bytes, per-row, key in the
-   user's OS keychain / a NockLock-managed key file with 0600 perms — turns
+   user's OS keychain / a NockLock-managed key file with 0600 perms, turns
    tamper-evidence into authenticity. This chain is the substrate.
-2. **External head anchor** — on session end, push `chain_head` to NockCC (or a
+2. **External head anchor**: on session end, push `chain_head` to NockCC (or a
    local append-only anchor file the agent can't reach) so tail-truncation is
    detectable even if `chain_head` in the DB is rewritten.

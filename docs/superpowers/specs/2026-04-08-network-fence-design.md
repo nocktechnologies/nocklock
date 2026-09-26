@@ -1,4 +1,4 @@
-# Network Fence Design — NockLock PR #7
+# Network Fence Design: NockLock PR #7
 
 **Date:** 2026-04-08  
 **Status:** Approved  
@@ -10,7 +10,7 @@
 
 The network fence is the third and final fence in NockLock MVP. It prevents the wrapped AI agent from making HTTP/HTTPS requests to domains not in the allowlist. It works by starting a local HTTP proxy on a random high port, injecting the proxy address into the child process's environment, and allowing/blocking each request at the proxy based on the destination hostname.
 
-**Core principle:** Hostname inspection only — no MITM, no certificate injection, no payload inspection. NockLock sees where traffic is going, not what it says.
+**Core principle:** Hostname inspection only, no MITM, no certificate injection, no payload inspection. NockLock sees where traffic is going, not what it says.
 
 ---
 
@@ -43,7 +43,7 @@ HTTPS uses the HTTP CONNECT tunnel mechanism:
 - `"*.example.com"` matches `sub.example.com` but NOT `example.com`
 - Matching is case-insensitive
 - Port is stripped before matching
-- Raw IP addresses are blocked (no reverse DNS — fail closed for MVP)
+- Raw IP addresses are blocked (no reverse DNS, fail closed for MVP)
 - If allowlist is empty and `allow_all = false`: all traffic blocked (correct fail-closed behavior)
 
 ### NO_PROXY Bypass Prevention
@@ -99,7 +99,7 @@ func (p *ProxyServer) ServeHTTP(w http.ResponseWriter, r *http.Request)
 - `isAllowed` strips port, checks exact match + wildcard subdomain + raw IP block
 - `ServeHTTP` routes CONNECT to `handleConnect`, else handles as forward proxy
 - Logs `EventNetworkPassed` (allowed) or `EventNetworkBlocked` (blocked)
-- Never logs request bodies or headers — hostname and decision only
+- Never logs request bodies or headers: hostname and decision only
 
 ### connect.go
 
@@ -177,7 +177,7 @@ Last event: 2026-04-08 22:15:03
 
 ### handler_test.go
 - `isAllowed`: exact hostname match
-- `isAllowed`: subdomain wildcard (github.com → api.github.com)
+- `isAllowed`: subdomain wildcard (github.com covers api.github.com)
 - `isAllowed`: wildcard does NOT match apex (*.example.com ≠ example.com)
 - `isAllowed`: case-insensitive
 - `isAllowed`: strips port before matching
@@ -237,8 +237,8 @@ Last event: 2026-04-08 22:15:03
 
 ## Files to Modify
 
-- `internal/logging/logger.go` — add `EventProxyStart`, `EventProxyStop`, `EventNetworkError`
-- `internal/cli/wrap.go` — integrate network fence after secret fence
-- `internal/cli/status.go` — show real network fence status
-- `internal/config/defaults.go` — no changes (already has `network.allow` defaults)
-- `CLAUDE.md`, `CHANGELOG.md`, `README.md` — docs update
+- `internal/logging/logger.go`: add `EventProxyStart`, `EventProxyStop`, `EventNetworkError`
+- `internal/cli/wrap.go`: integrate network fence after secret fence
+- `internal/cli/status.go`: show real network fence status
+- `internal/config/defaults.go`: no changes (already has `network.allow` defaults)
+- `CLAUDE.md`, `CHANGELOG.md`, `README.md`, docs update

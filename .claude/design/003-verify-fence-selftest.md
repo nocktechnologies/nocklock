@@ -1,4 +1,4 @@
-# Design 003: `nocklock verify` — adversarial fence self-test (proof-of-block)
+# Design 003: `nocklock verify`, adversarial fence self-test (proof-of-block)
 
 **Status:** Accepted (scoped, ready to build)
 **Date:** 2026-07-23
@@ -17,7 +17,7 @@ benign probe **under the live fences** that attempts to escape each one and asse
   wiring in `internal/cli/wrap.go`: secrets.Filter, fsfence, network proxy, syscallfence) and,
   instead of the user's agent command, runs a built-in probe that tries to escape each fence.
 
-## Design questions — ANSWERED
+## Design questions: ANSWERED
 
 1. **How does the probe run without a second binary?**
    A hidden self-exec subcommand `nocklock __probe <fence>` (unlisted, `Hidden: true`). `verify`
@@ -25,7 +25,7 @@ benign probe **under the live fences** that attempts to escape each one and asse
    binary. The probe writes a structured result to stdout as JSON `{fence, attempted, blocked, detail}`
    and sets exit code (0=blocked-as-expected, 1=ESCAPED). `verify` reads that back per fence.
 
-2. **Per-fence probe (all benign — no exfiltration, no damage):**
+2. **Per-fence probe (all benign, no exfiltration, no damage):**
    - **filesystem:** `verify` creates a canary file in a temp dir GUARANTEED outside the config's
      allowed roots, writes a random token, and first runs the probe unfenced as a positive control
      proving the canary exists and is readable. If no outside temp location can be proven (for
@@ -55,8 +55,8 @@ benign probe **under the live fences** that attempts to escape each one and asse
 
 3. **Cross-platform:** reuse `doctor`'s backend detection (filesystem/syscall/network doctor checks).
    Where a fence is configured but NOT enforceable on this platform/host, `verify` reports **SKIP**
-   (not FAIL) with the same reason `doctor` gives. Linux → Landlock/seccomp; macOS → Seatbelt/SBPL.
-   A fence that is OFF by config → SKIP ("not configured").
+   (not FAIL) with the same reason `doctor` gives. Linux: Landlock/seccomp; macOS: Seatbelt/SBPL.
+   A fence that is OFF by config gives SKIP ("not configured").
 
 4. **Output + exit codes:** per-fence line `[PASS]/[FAIL]/[SKIP] <fence>: <detail>` + a summary,
    plus `--json` (mirror `doctor`'s `--json` shape: `{checks:[{fence,result,detail}], summary}`).
@@ -66,18 +66,18 @@ benign probe **under the live fences** that attempts to escape each one and asse
    mistake "nothing was verified" for "the fence actually holds."
 
 5. **Safety contract (documented in `Long` help):** probes never exfiltrate, never write outside a
-   temp dir, never touch real secrets — they read a self-created non-secret canary, dial an invalid/
+   temp dir, never touch real secrets, they read a self-created non-secret canary, dial an invalid/
    example host, check env absence, and attempt one side-effect-free denied syscall. `verify` is safe
    to run in CI and onboarding. Each child probe has an overall timeout, and network requests have
    their own request timeout.
 
 ## Files
-- `internal/cli/verify.go` (+ `verify_test.go`) — the command + result aggregation.
-- `internal/cli/probe.go` — the hidden `__probe` self-exec + per-fence attempt functions
+- `internal/cli/verify.go` (+ `verify_test.go`), the command + result aggregation.
+- `internal/cli/probe.go`: the hidden `__probe` self-exec + per-fence attempt functions
   (build-tagged where a fence is platform-specific, mirroring the existing fence packages).
 - Wire into `internal/cli/root.go`; reuse `wrap.go`'s fence construction (refactor the shared
-  child-env/fence build into a helper if needed — keep `wrap` behavior identical).
-- Tests: table-driven per fence — a config that WOULD block (expect PASS) and a deliberately-open
+  child-env/fence build into a helper if needed, keep `wrap` behavior identical).
+- Tests: table-driven per fence, a config that WOULD block (expect PASS) and a deliberately-open
   config (expect the probe to detect an escape = FAIL), plus SKIP paths. Mirror the build-tagged
   test style already in `internal/fence/*`.
 - `CHANGELOG.md` [Unreleased]: `### Added — nocklock verify: adversarial fence self-test`.

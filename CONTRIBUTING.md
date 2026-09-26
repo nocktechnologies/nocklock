@@ -1,8 +1,8 @@
 # Contributing to NockLock
 
-Thanks for your interest in making AI agents safer. NockLock is open source under the MIT license and we welcome contributions.
+Thanks for your interest in making AI agents safer. NockLock is open source under the MIT license, and contributions are welcome.
 
-## Quick Start
+## Quick start
 
 ```bash
 # Fork and clone
@@ -19,43 +19,32 @@ go test ./...
 ./nocklock wrap -- echo "hello from inside the fence"
 ```
 
-## What We're Looking For
+## What we're looking for
 
-**High priority — we'd love help with:**
+The areas where help would matter most right now:
+
 - Windows filesystem fence implementation (job objects, minifilter)
-- Linux mount namespace fence as alternative to LD_PRELOAD
+- Linux mount namespace fence as an alternative to LD_PRELOAD
 - Additional network proxy features (HTTPS inspection, WebSocket support)
 - Performance benchmarks across different OS and hardware
 - Integration testing with more AI agents (Cursor, Copilot, Windsurf, Codex)
 
-**Always welcome:**
-- Bug reports with reproduction steps
-- Documentation improvements
-- Test coverage improvements
-- CI/CD improvements
+Bug reports with reproduction steps, documentation improvements, test coverage improvements, and CI/CD improvements are always welcome.
 
-**Please discuss first:**
-- New fence types or major architectural changes — open an issue before building
-- Changes to the config format — backwards compatibility matters
-- Anything that adds external dependencies
+Some changes need a conversation first. Open an issue before building a new fence type or making a major architectural change. Changes to the config format need discussion because backwards compatibility matters, and so does anything that adds an external dependency.
 
-## How to Contribute
+## How to contribute
 
-1. **Fork** the repo and create a branch from `main`
-2. **Write tests** for any new functionality
-3. **Run the full test suite** — `go test ./...` must pass
-4. **Follow the code style** — `go fmt` and `go vet` must pass clean
-5. **Write a clear PR description** — what does it do, why, how to test it
-6. **One PR per feature** — keep PRs focused and reviewable
+1. Fork the repo and create a branch from `main`.
+2. Write tests for any new functionality.
+3. Run the full test suite; `go test ./...` must pass.
+4. Follow the code style; `go fmt` and `go vet` must pass clean.
+5. Write a clear PR description: what it does, why, and how to test it.
+6. Keep each PR to one feature, so it stays focused and reviewable.
 
-## Code Standards
+## Code standards
 
-- Go 1.22+ required
-- All exported functions need doc comments
-- Error messages should be actionable ("failed to create proxy listener on port 8080: address already in use" not "proxy error")
-- No external dependencies without discussion — the CLI should stay lightweight
-- Config file changes must be backwards compatible
-- Fence implementations must fail closed (if the fence can't initialize, block everything, don't allow everything)
+Go 1.26 or newer is required. All exported functions need doc comments. Error messages should tell the reader what to do about them: "failed to create proxy listener on port 8080: address already in use" rather than "proxy error". Do not add external dependencies without discussion; the CLI should stay lightweight. Config file changes must be backwards compatible. Fence implementations must fail closed: if a fence cannot initialize, block everything rather than allow everything.
 
 ## Testing
 
@@ -74,9 +63,9 @@ go test -coverprofile=coverage.out ./...
 go tool cover -html=coverage.out
 ```
 
-Every PR must include tests. If you're fixing a bug, write a test that reproduces it first.
+Every PR must include tests. If you are fixing a bug, write a test that reproduces it first.
 
-## Project Structure
+## Project structure
 
 ```
 nocklock/
@@ -99,7 +88,7 @@ nocklock/
 └── go.mod
 ```
 
-## Commit Messages
+## Commit messages
 
 Use conventional commits:
 
@@ -111,9 +100,10 @@ test: add integration tests for secret filtering
 chore: update Go to 1.22.3
 ```
 
-## Reporting Bugs
+## Reporting bugs
 
 Open an issue with:
+
 - OS and version (macOS 15.x, Ubuntu 24.04, Windows 11, etc.)
 - Go version (`go version`)
 - NockLock version (`nocklock version`)
@@ -122,28 +112,29 @@ Open an issue with:
 - Steps to reproduce
 - Config file (redact any secrets)
 
-## Security Issues
+## Security issues
 
-If you find a security vulnerability in NockLock, **do not open a public issue.** Email security@nocktechnologies.com instead. We take security seriously — this is literally a security tool.
+If you find a security vulnerability in NockLock, do not open a public issue. Email security@nocktechnologies.com instead.
 
-## Feature Requests
+## Feature requests
 
 Open an issue tagged `enhancement`. Include:
+
 - What problem does this solve?
 - Who benefits from this?
 - How should it work from the user's perspective?
 
-We're more likely to accept features that align with the core philosophy: invisible fences that prevent escape, not guardrails that constrain behavior.
+The project is about fences that prevent escape. Features that fit that approach are the most likely to be accepted. Features that add guardrails to constrain the agent's behavior are a harder sell.
 
-## Code of Conduct
+## Code of conduct
 
-Be respectful. Be constructive. We're all here to make AI agents safer. If you wouldn't say it in a code review with a colleague you respect, don't say it here.
+Be respectful and constructive. Everyone here wants to make AI agents safer.
 
 ## License
 
 By contributing, you agree that your contributions will be licensed under the MIT License.
 
-## Questions?
+## Questions
 
 - GitHub Discussions for general questions
 - GitHub Issues for bugs and feature requests
@@ -151,4 +142,4 @@ By contributing, you agree that your contributions will be licensed under the MI
 
 Thanks for helping make AI agents safer for everyone.
 
-— Nock Technologies
+Nock Technologies

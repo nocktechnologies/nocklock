@@ -2,7 +2,7 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** Build the NockLock CLI skeleton with cobra commands, TOML config parsing, passthrough wrap, and project structure — no fence implementations.
+**Goal:** Build the NockLock CLI skeleton with cobra commands, TOML config parsing, passthrough wrap, and project structure, no fence implementations.
 
 **Architecture:** Single Go binary using cobra for CLI and BurntSushi/toml for config. Six commands (version, init, wrap, config, log, status). The `wrap` command is a passthrough that spawns a child process and forwards stdio. Config lives in `.nock/config.toml` per project.
 
@@ -248,7 +248,7 @@ func TestConfigNotFound(t *testing.T) {
 go test ./internal/config/ -v
 ```
 
-Expected: compilation failure — `Load` and `DefaultConfig` not defined.
+Expected: compilation failure, `Load` and `DefaultConfig` not defined.
 
 - [ ] **Step 3: Create config.go with Config struct and Load function**
 
@@ -481,7 +481,7 @@ git commit -m "feat: add config struct, TOML parsing, defaults, and tests"
 
 ---
 
-### Task 4: CLI Commands — Root + Version
+### Task 4: CLI Commands, Root + Version
 
 **Files:**
 - Create: `internal/cli/root.go`
@@ -1096,9 +1096,9 @@ Your agent never knew the fence was there. You sleep better at night.
 ## Roadmap
 
 - [x] CLI skeleton + config system (PR #1)
-- [ ] Secret fence — environment variable filtering (PR #3)
-- [ ] Filesystem fence — LD_PRELOAD/DYLD_INSERT_LIBRARIES (PR #5)
-- [ ] Network fence — local proxy with domain allowlist (PR #6)
+- [ ] Secret fence: environment variable filtering (PR #3)
+- [ ] Filesystem fence: LD_PRELOAD/DYLD_INSERT_LIBRARIES (PR #5)
+- [ ] Network fence: local proxy with domain allowlist (PR #6)
 - [ ] SQLite event logging (PR #4)
 - [ ] Homebrew tap + CI (PR #8)
 
@@ -1107,7 +1107,7 @@ Your agent never knew the fence was there. You sleep better at night.
 Connect to [NockCC](https://nocktechnologies.io) for cloud monitoring:
 - See fence events across all your machines
 - Get Telegram/Slack alerts on blocked escape attempts
-- Team visibility — know what every developer's agents are doing
+- Team visibility: know what every developer's agents are doing
 
 ## License
 

@@ -12,9 +12,9 @@ NockLock has three fence types. Each has multiple implementation approaches with
 ### Filesystem Fence: LD_PRELOAD / DYLD_INSERT_LIBRARIES
 - Intercept syscalls (open, openat, stat, access, readlink) via shared library
 - Check paths against allow/deny lists before passing to real syscall
-- Blocked paths return ENOENT — agent doesn't know the fence exists
+- Blocked paths return ENOENT: agent doesn't know the fence exists
 - Works on macOS and Linux; doesn't work on statically-linked binaries
-- Claude Code (Node.js) is dynamically linked — this works
+- Claude Code (Node.js) is dynamically linked, this works
 
 **Rejected alternatives:**
 - Mount namespaces: strongest isolation, but Linux-only
@@ -37,7 +37,7 @@ NockLock has three fence types. Each has multiple implementation approaches with
 - Block takes precedence over pass
 - Will be implemented via Go's `os/exec.Cmd.Env`
 
-> **Implementation status:** All three fences are planned but not yet implemented in code. The current `wrap` command (`internal/cli/wrap.go`) spawns the child process with passthrough — no env filtering, no preload, no proxy. Fences will be added incrementally.
+> **Implementation status:** All three fences are planned but not yet implemented in code. The current `wrap` command (`internal/cli/wrap.go`) spawns the child process with passthrough, no env filtering, no preload, no proxy. Fences will be added incrementally.
 
 ## Fail-Closed Rule
 If any enabled fence fails to initialize, the system must fail closed: block command execution entirely rather than running the agent unprotected. This is non-negotiable for a security tool.

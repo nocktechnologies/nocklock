@@ -2,7 +2,7 @@
 
 > **STATUS: SHIPPED (as of 2026-09.** `internal/logging/logger.go` + tests are
 > built and integrated into `wrap`, `log`, and `status`. The unchecked `- [ ]`
-> boxes below are the original TDD steps and are historical — do NOT read them
+> boxes below are the original TDD steps and are historical, do NOT read them
 > as "not built." Next work on the audit log is tamper-evidence:
 > `docs/superpowers/specs/2026-09-14-tamper-evident-audit-log.md`.)
 
@@ -70,7 +70,7 @@ git commit -m "chore: add modernc.org/sqlite and google/uuid dependencies"
 
 ---
 
-### Task 2: Logger Core — Types, NewLogger, Log, Close
+### Task 2: Logger Core, Types, NewLogger, Log, Close
 
 **Files:**
 - Create: `internal/logging/logger.go`
@@ -349,9 +349,9 @@ cd /Users/kevin/Dev/nocklock
 go test ./internal/logging/ -v -count=1
 ```
 
-Expected: compilation error — `logging` package doesn't exist yet.
+Expected: compilation error, `logging` package doesn't exist yet.
 
-- [ ] **Step 3: Write minimal implementation — types, NewLogger, Log, Close**
+- [ ] **Step 3: Write minimal implementation, types, NewLogger, Log, Close**
 
 Create `internal/logging/logger.go`:
 

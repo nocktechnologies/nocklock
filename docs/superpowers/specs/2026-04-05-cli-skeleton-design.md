@@ -1,4 +1,4 @@
-# NockLock PR #1: CLI Skeleton + Project Structure — Design Spec
+# NockLock PR #1: CLI Skeleton + Project Structure, Design Spec
 
 **Status:** Approved  
 **Date:** 2026-04-05  
@@ -8,7 +8,7 @@
 
 ## Summary
 
-First PR for NockLock — a Go CLI that wraps AI coding agents with filesystem, network, and secret isolation. This PR builds only the skeleton: project structure, CLI commands via cobra, TOML config parsing, and a passthrough `wrap` command. No fence implementations.
+First PR for NockLock, a Go CLI that wraps AI coding agents with filesystem, network, and secret isolation. This PR builds only the skeleton: project structure, CLI commands via cobra, TOML config parsing, and a passthrough `wrap` command. No fence implementations.
 
 ## Architecture
 
@@ -52,18 +52,18 @@ nocklock/
 
 ## Config Structure
 
-Six TOML sections: `project`, `filesystem`, `network`, `secrets`, `logging`, `cloud`. Security-first defaults — deny sensitive dirs (`~/.ssh/`, `~/.aws/`), block secret env vars (`AWS_*`, `*_TOKEN*`), allow only common dev domains. Full struct and defaults as specified in PROMPT_NOCKLOCK_PR1_CLI_SKELETON.md.
+Six TOML sections: `project`, `filesystem`, `network`, `secrets`, `logging`, `cloud`. Security-first defaults, deny sensitive dirs (`~/.ssh/`, `~/.aws/`), block secret env vars (`AWS_*`, `*_TOKEN*`), allow only common dev domains. Full struct and defaults as specified in PROMPT_NOCKLOCK_PR1_CLI_SKELETON.md.
 
 ## Wrap Passthrough
 
-Critical proof-of-concept. `nocklock wrap -- echo "hello"` spawns the child process, forwards stdin/stdout/stderr, and exits with the child's exit code. No fencing or filtering — validates the mechanism before fences are added in PR #3-6.
+Critical proof-of-concept. `nocklock wrap -- echo "hello"` spawns the child process, forwards stdin/stdout/stderr, and exits with the child's exit code. No fencing or filtering, validates the mechanism before fences are added in PR #3-6.
 
 ## Tests
 
 `internal/config/config_test.go`:
-- `TestParseConfig` — valid TOML parses correctly
-- `TestDefaultConfig` — generated defaults match expected values
-- `TestConfigNotFound` — missing file returns appropriate error
+- `TestParseConfig`: valid TOML parses correctly
+- `TestDefaultConfig`: generated defaults match expected values
+- `TestConfigNotFound`: missing file returns appropriate error
 
 ## README
 

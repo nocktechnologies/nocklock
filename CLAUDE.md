@@ -1,4 +1,4 @@
-# CLAUDE.md — NockLock
+# CLAUDE.md: NockLock
 
 ## Project
 NockLock is an AI agent security fence. Go CLI that wraps coding agents with filesystem, network, and secret isolation.
@@ -10,32 +10,32 @@ NockLock is an AI agent security fence. Go CLI that wraps coding agents with fil
 - SQLite (event logging via modernc.org/sqlite)
 
 ## Commands
-- `go build ./cmd/nocklock` — build
-- `make build` — build with version ldflags
-- `go test ./... -v` — run all tests
-- `go fmt ./...` — format
-- `go vet ./...` — lint
-- `make lint` — fmt + vet
+- `go build ./cmd/nocklock`: build
+- `make build`: build with version ldflags
+- `go test ./... -v`: run all tests
+- `go fmt ./...`: format
+- `go vet ./...`: lint
+- `make lint`: fmt + vet
 
 ## Structure
-- `cmd/nocklock/` — entry point (main.go)
-- `internal/cli/` — cobra command tree (wrap, init, config, log, status, version)
-- `internal/config/` — TOML config parsing, defaults, validation
-- `internal/version/` — build version info
-- `internal/fence/` — fence implementations: filesystem, network, secrets
-- `internal/fence/fs/` — filesystem fence: config processing, Go wrapper, event listener
-- `internal/fence/fs/interposer/` — C shared library for LD_PRELOAD interception (Linux only)
-- `internal/fence/network/` — network fence: local HTTP/HTTPS proxy, domain allowlist, CONNECT tunnel
-- `internal/logging/` — SQLite event logging
-- `pkg/receipt/` — public read-only per-session audit-chain verifier (importable by other modules)
+- `cmd/nocklock/`: entry point (main.go)
+- `internal/cli/`: cobra command tree (wrap, init, config, log, status, version)
+- `internal/config/`: TOML config parsing, defaults, validation
+- `internal/version/`: build version info
+- `internal/fence/`: fence implementations: filesystem, network, secrets
+- `internal/fence/fs/`: filesystem fence: config processing, Go wrapper, event listener
+- `internal/fence/fs/interposer/`: C shared library for LD_PRELOAD interception (Linux only)
+- `internal/fence/network/`: network fence: local HTTP/HTTPS proxy, domain allowlist, CONNECT tunnel
+- `internal/logging/`: SQLite event logging
+- `pkg/receipt/`: public read-only per-session audit-chain verifier (importable by other modules)
 
 ## Detailed Context
 All detailed documentation lives in the .claude/ directory:
-- `.claude/diagrams/` — Mermaid architecture diagrams
-- `.claude/design/` — DESIGN.md with brand tokens and UI spec
-- `.claude/lessons/` — Lessons learned, anti-patterns, incident notes
-- `.claude/decisions/` — Architecture Decision Records (ADRs)
-- `.claude/review/` — Review pipeline instructions, pre-push checklist
+- `.claude/diagrams/`: Mermaid architecture diagrams
+- `.claude/design/`: DESIGN.md with brand tokens and UI spec
+- `.claude/lessons/`: Lessons learned, anti-patterns, incident notes
+- `.claude/decisions/`: Architecture Decision Records (ADRs)
+- `.claude/review/`: Review pipeline instructions, pre-push checklist
 
 ## Branch-Lock Hook
 `.claude/hooks/branch-lock.sh` runs as a PreToolUse hook on every Bash
@@ -62,9 +62,9 @@ counts, concise notes, and 2-5 highlights. Include `nocklock` in the session
 id or notes so NockCC can trace the report back to this repo.
 
 ## Pre-Push Checklist
-1. `go test ./... -v` — all tests pass
-2. `go vet ./...` — no warnings
-3. `go fmt ./...` — code formatted
+1. `go test ./... -v`: all tests pass
+2. `go vet ./...`: no warnings
+3. `go fmt ./...`: code formatted
 4. Self-review for: hardcoded secrets, path traversal, race conditions, subprocess injection
 5. Review pipeline complete (see `.claude/review/PIPELINE.md`)
 6. CHANGELOG.md updated
