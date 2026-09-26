@@ -57,6 +57,18 @@ func TestScanDetectors(t *testing.T) {
 	}
 }
 
+func TestScanPrivateKeyFileReportsLineAndRedactsMetadata(t *testing.T) {
+	root := t.TempDir()
+	header := "-----BEGIN " + "PRIVATE KEY-----"
+	if err := os.WriteFile(filepath.Join(root, header), []byte("comment\n"+header+"\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	r := Scan(context.Background(), root, []string{header}, nil)
+	if !r.Complete || len(r.Findings) != 1 || r.Findings[0].Rule != "private-key" || r.Findings[0].Line != 2 || r.Findings[0].Location != "[redacted]" {
+		t.Fatalf("unexpected private-key finding: %+v", r)
+	}
+}
+
 func TestScanFailsClosedOnIncompleteInputs(t *testing.T) {
 	for _, kind := range []string{"missing", "symlink", "oversize", "traversal", "cancelled"} {
 		t.Run(kind, func(t *testing.T) {

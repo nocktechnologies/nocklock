@@ -68,9 +68,9 @@ type scanner struct {
 }
 
 // Scan inspects relative paths beneath root and the supplied environment values.
-// It never follows encountered symlinks, skips hidden/binary files, or uses ignore
-// files. Unsupported or incomplete inputs make the report non-safe. This is a
-// bounded preflight check, not a filesystem snapshot or a runtime security fence.
+// Hidden and binary files are included; ignore files are not applied. Encountered
+// symlinks are rejected. Unsupported or incomplete inputs make the report non-safe.
+// This is a bounded preflight check, not a snapshot or a runtime security fence.
 func Scan(ctx context.Context, root string, paths, environ []string) ScanReport {
 	s := scanner{ctx: ctx, report: ScanReport{Complete: true, Findings: []Finding{}, Issues: []ScanIssue{}}, seen: make(map[string]bool)}
 	for _, entry := range environ {
@@ -271,8 +271,23 @@ func (s *scanner) walk(root *os.Root, path string, depth int) {
 		s.inspect(data, "file", path)
 		s.report.FilesScanned++
 	}
-	after, err := f.Stat()
-	if err != nil || info.Size() != after.Size() || !info.ModTime().Equal(after.ModTime()) {
+	if !scanInputUnchanged(root, path, f, info) {
 		s.issue(path, "input changed during scan; stop concurrent changes and retry")
 	}
+}
+
+// Recheck the selected path as well as the open file. An unchanged descriptor
+// alone would miss a rename that leaves different content at the selected path.
+func scanInputUnchanged(root *os.Root, path string, f *os.File, before os.FileInfo) bool {
+	after, err := f.Stat()
+	if err != nil || before.Size() != after.Size() || !before.ModTime().Equal(after.ModTime()) {
+		return false
+	}
+	current, err := openScanFile(root, path)
+	if err != nil {
+		return false
+	}
+	defer current.Close()
+	info, err := current.Stat()
+	return err == nil && os.SameFile(before, info) && before.Size() == info.Size() && before.ModTime().Equal(info.ModTime())
 }
