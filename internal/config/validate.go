@@ -177,6 +177,9 @@ func (cfg *Config) EffectivePolicy() string {
 	if cfg.Filesystem.Hardened {
 		b.WriteString(" hardened=true")
 	}
+	if cfg.Filesystem.MacOSAllowUnfenced {
+		b.WriteString(" macos_allow_unfenced=true (temporary; removed in v0.6)")
+	}
 	b.WriteString("\n")
 
 	// Syscall (Linux seccomp-BPF). Empty enforcement defaults to "required".

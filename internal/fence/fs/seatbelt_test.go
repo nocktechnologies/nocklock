@@ -25,7 +25,7 @@ func TestDefaultSensitivePaths_CoversCredentialStores(t *testing.T) {
 	// originals plus the credential paths added alongside them; if you remove
 	// one, you are widening the fence's blind spot — do it deliberately.
 	mustFence := []string{
-		".ssh", ".aws", ".gnupg", ".kube", ".config/gcloud",
+		".ssh", ".aws", ".config", ".gnupg", ".kube",
 		filepath.Join("Library", "Keychains"),
 		".netrc", ".docker", ".git-credentials",
 	}
@@ -33,6 +33,22 @@ func TestDefaultSensitivePaths_CoversCredentialStores(t *testing.T) {
 		want := filepath.Join(home, rel)
 		if !set[want] {
 			t.Errorf("DefaultSensitivePaths missing credential store %q (fence blind spot)", want)
+		}
+	}
+}
+
+func TestWrapArgv_UsesEndOfOptionsMarker(t *testing.T) {
+	argv, err := WrapArgv("/tmp/nocklock.sb", []string{"/bin/echo", "ok"})
+	if err != nil {
+		t.Fatalf("WrapArgv: %v", err)
+	}
+	want := []string{SandboxExecPath, "-f", "/tmp/nocklock.sb", "--", "/bin/echo", "ok"}
+	if len(argv) != len(want) {
+		t.Fatalf("WrapArgv = %q, want %q", argv, want)
+	}
+	for i := range want {
+		if argv[i] != want[i] {
+			t.Fatalf("WrapArgv[%d] = %q, want %q", i, argv[i], want[i])
 		}
 	}
 }

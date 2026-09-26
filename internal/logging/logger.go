@@ -21,18 +21,19 @@ import (
 type EventType string
 
 const (
-	EventSecretBlocked  EventType = "secret_blocked"
-	EventSecretPassed   EventType = "secret_passed"
-	EventFileBlocked    EventType = "file_blocked"
-	EventFilePassed     EventType = "file_passed"
-	EventNetworkBlocked EventType = "network_blocked"
-	EventNetworkPassed  EventType = "network_passed"
-	EventProxyStart     EventType = "proxy_start"
-	EventProxyStop      EventType = "proxy_stop"
-	EventNetworkError   EventType = "network_error"
-	EventSessionStart   EventType = "session_start"
-	EventSessionEnd     EventType = "session_end"
-	EventConfigLoaded   EventType = "config_loaded"
+	EventSecretBlocked        EventType = "secret_blocked"
+	EventSecretPassed         EventType = "secret_passed"
+	EventFileBlocked          EventType = "file_blocked"
+	EventFilePassed           EventType = "file_passed"
+	EventFilesystemFenceState EventType = "filesystem_fence_state"
+	EventNetworkBlocked       EventType = "network_blocked"
+	EventNetworkPassed        EventType = "network_passed"
+	EventProxyStart           EventType = "proxy_start"
+	EventProxyStop            EventType = "proxy_stop"
+	EventNetworkError         EventType = "network_error"
+	EventSessionStart         EventType = "session_start"
+	EventSessionEnd           EventType = "session_end"
+	EventConfigLoaded         EventType = "config_loaded"
 )
 
 // formatTimestampForChain formats a time.Time as UTC RFC3339 with exactly 9 fractional second digits and trailing Z.

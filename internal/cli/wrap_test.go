@@ -449,14 +449,8 @@ func TestWrapDryRunProfileUsesEmbeddedBaseWithoutConfig(t *testing.T) {
 		runErr = wrapCmd.RunE(cmd, []string{"--profile", "codex", "--dry-run"})
 	})
 	if runtime.GOOS == "darwin" {
-		// The codex base profile sets filesystem.root, which macOS Seatbelt
-		// cannot enforce as a root-only sandbox: dry-run must fail closed with
-		// the documented refusal instead of printing a policy (the same posture
-		// TestWrapDryRunFailsClosedForMacOSFilesystemRoot proves from a config).
-		if runErr == nil || !strings.Contains(runErr.Error(), "filesystem.root cannot be enforced as a root-only sandbox on macOS") {
-			t.Fatalf("expected macOS Seatbelt root-only refusal, got err=%v out=%s", runErr, stdout)
-		}
-		return
+		// macOS has a real Seatbelt denylist backend, so dry-run validates and
+		// prints its policy without trying to execute sandbox-exec.
 	}
 	if runErr != nil {
 		t.Fatalf("dry run profile should not require project config: %v", runErr)
@@ -508,9 +502,6 @@ func TestComposeChildArgvAddsPrefixesWithoutDroppingPriorShim(t *testing.T) {
 }
 
 func TestValidateWrapRuntimeConfigRejectsUnsupportedFilesystemFence(t *testing.T) {
-	if runtime.GOOS == "darwin" {
-		t.Skip("darwin has its own explicit filesystem.root fail-closed test")
-	}
 	if fsfence.IsSupported() {
 		t.Skip("filesystem fence is supported on this platform")
 	}
@@ -525,11 +516,11 @@ func TestValidateWrapRuntimeConfigRejectsUnsupportedFilesystemFence(t *testing.T
 	}
 }
 
-// TestWrapDryRunFailsClosedForMacOSFilesystemRoot verifies dry-run rejects the
-// macOS Seatbelt path when filesystem.root asks for Linux-style root isolation.
-func TestWrapDryRunFailsClosedForMacOSFilesystemRoot(t *testing.T) {
+// TestWrapDryRunUsesMacOSSeatbeltConfig verifies macOS dry-run accepts the
+// configured sensitive-path denylist without claiming Linux root isolation.
+func TestWrapDryRunUsesMacOSSeatbeltConfig(t *testing.T) {
 	if runtime.GOOS != "darwin" {
-		t.Skip("macOS Seatbelt posture only applies on darwin")
+		t.Skip("macOS Seatbelt path only applies on darwin")
 	}
 
 	dir := t.TempDir()
@@ -538,12 +529,8 @@ func TestWrapDryRunFailsClosedForMacOSFilesystemRoot(t *testing.T) {
 
 	cmd := &cobra.Command{}
 	err := wrapCmd.RunE(cmd, []string{"--dry-run"})
-	if err == nil {
-		t.Fatal("expected macOS filesystem.root dry run to fail closed")
-	}
-	if !strings.Contains(err.Error(), "filesystem.root cannot be enforced as a root-only sandbox on macOS") ||
-		!strings.Contains(err.Error(), "filesystem.root = \"\"") {
-		t.Fatalf("expected macOS root-only fail-closed error, got: %v", err)
+	if err != nil {
+		t.Fatalf("expected macOS Seatbelt dry run to accept the configured fence: %v", err)
 	}
 }
 

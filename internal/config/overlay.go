@@ -27,6 +27,9 @@ func restrictOverlay(base, overlay Config, fields map[string]bool) Config {
 	if fields["filesystem.linux_enforcement"] {
 		cfg.Filesystem.LinuxEnforcement = restrictiveEnforcement(base.Filesystem.LinuxEnforcement, overlay.Filesystem.LinuxEnforcement)
 	}
+	// An overlay may turn the temporary macOS escape hatch OFF, but never ON:
+	// profile overlays can only tighten the base fence.
+	cfg.Filesystem.MacOSAllowUnfenced = base.Filesystem.MacOSAllowUnfenced && overlay.Filesystem.MacOSAllowUnfenced
 	cfg.Filesystem.Hardened = base.Filesystem.Hardened || overlay.Filesystem.Hardened
 
 	if fields["network.allow"] {
@@ -149,6 +152,8 @@ func addMetadataFields(fields map[string]bool, md toml.MetaData) {
 		"root":                 "root",
 		"linuxenforcement":     "linux_enforcement",
 		"linux_enforcement":    "linux_enforcement",
+		"macosallowunfenced":   "macos_allow_unfenced",
+		"macos_allow_unfenced": "macos_allow_unfenced",
 		"allowall":             "allow_all",
 		"allow_all":            "allow_all",
 		"allowprivateranges":   "allow_private_ranges",

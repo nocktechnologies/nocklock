@@ -26,6 +26,8 @@ import (
 	"github.com/spf13/cobra"
 )
 
+var ensureSandboxExecAvailable = fsfence.EnsureSandboxExecAvailable
+
 var wrapCmd = &cobra.Command{
 	Use:   "wrap -- <command> [args...]",
 	Short: "Wrap a command with NockLock fences",
@@ -142,6 +144,19 @@ var wrapCmd = &cobra.Command{
 				SessionID: sessionID,
 			})
 		}
+		// macOS filesystem-fence state is an enforcement prerequisite, unlike
+		// ordinary best-effort access telemetry: the child must not run unless
+		// ENGAGED or the explicit DEGRADED escape hatch is durably recorded.
+		recordMacOSFilesystemFenceState := func(state, detail string, blocked bool) error {
+			return logger.Log(logging.Event{
+				Timestamp: time.Now(),
+				EventType: logging.EventFilesystemFenceState,
+				Category:  "filesystem",
+				Detail:    "macOS filesystem-fence " + state + ": " + detail,
+				Blocked:   blocked,
+				SessionID: sessionID,
+			})
+		}
 
 		// Log session start with the command being run.
 		logEvent(logging.EventSessionStart, "session", args[0], false)
@@ -254,6 +269,11 @@ var wrapCmd = &cobra.Command{
 
 			fsCfg, err := fsfence.ProcessConfig(cfg.Filesystem)
 			if err != nil {
+				if runtime.GOOS == "darwin" {
+					if logErr := recordMacOSFilesystemFenceState("REFUSED-TO-START", "invalid filesystem configuration", true); logErr != nil {
+						return fmt.Errorf("cannot record macOS filesystem fence refusal; refusing to start: %w", logErr)
+					}
+				}
 				return fmt.Errorf("invalid filesystem fence config: %w", err)
 			}
 			if fsCfg != nil {
@@ -320,12 +340,85 @@ var wrapCmd = &cobra.Command{
 					logEvent(logging.EventFilePassed, "filesystem", fmt.Sprintf("root=%s mode=%s", fsCfg.Root, fsCfg.Mode), false)
 
 				case "darwin":
-					return fmt.Errorf("filesystem.root cannot be enforced as a root-only sandbox on macOS with Seatbelt; refusing to start rather than run an allow-default denylist. Run on Linux Landlock for filesystem-root isolation or set filesystem.root = \"\" to disable it")
+					// Seatbelt is a kernel-enforced sensitive-path DENYLIST, not the
+					// Linux root-only allowlist. It is the selected macOS v0.5 fence
+					// and is intentionally explicit in both output and audit state.
+					degradeOrRefuse := func(stage string, setupErr error) error {
+						if cfg.Filesystem.MacOSAllowUnfenced {
+							if logErr := recordMacOSFilesystemFenceState("DEGRADED", stage+"; explicit filesystem.macos_allow_unfenced=true", false); logErr != nil {
+								return fmt.Errorf("cannot record macOS filesystem fence degradation; refusing to start: %w", logErr)
+							}
+							fmt.Fprintf(os.Stderr, "NockLock: WARNING: macOS filesystem fence DEGRADED — %s; starting unfenced because filesystem.macos_allow_unfenced = true (temporary; removed in v0.6)\n", stage)
+							return nil
+						}
+						if logErr := recordMacOSFilesystemFenceState("REFUSED-TO-START", stage, true); logErr != nil {
+							return fmt.Errorf("cannot record macOS filesystem fence refusal; refusing to start: %w", logErr)
+						}
+						return fmt.Errorf("filesystem fence cannot be enforced (fail-closed): %s: %w", stage, setupErr)
+					}
+
+					if err := ensureSandboxExecAvailable(); err != nil {
+						if setupErr := degradeOrRefuse("sandbox-exec unavailable", err); setupErr != nil {
+							return setupErr
+						}
+						break
+					}
+
+					defaultSensitive := fsfence.DefaultSensitivePaths()
+					if len(defaultSensitive) == 0 {
+						if setupErr := degradeOrRefuse("default sensitive paths unavailable", errors.New("cannot resolve the current user's home directory")); setupErr != nil {
+							return setupErr
+						}
+						break
+					}
+					sensitive := append(defaultSensitive, fsCfg.DenyPaths...)
+					profile, pathCount, err := fsfence.GenerateProfileAndCount(sensitive, cfg.Filesystem.Hardened)
+					if err != nil {
+						if setupErr := degradeOrRefuse("profile generation failed", err); setupErr != nil {
+							return setupErr
+						}
+						break
+					}
+
+					profilePath, err := fsfence.WriteProfile(profile)
+					if err != nil {
+						if setupErr := degradeOrRefuse("profile write failed", err); setupErr != nil {
+							return setupErr
+						}
+						break
+					}
+					defer os.Remove(profilePath)
+
+					if err := fsfence.ValidateProfile(profilePath); err != nil {
+						if setupErr := degradeOrRefuse("profile rejected", err); setupErr != nil {
+							return setupErr
+						}
+						break
+					}
+
+					sandboxArgv, err := fsfence.WrapArgv(profilePath, args)
+					if err != nil {
+						if setupErr := degradeOrRefuse("sandbox-exec argv construction failed", err); setupErr != nil {
+							return setupErr
+						}
+						break
+					}
+					fsSandboxPrefix = sandboxArgv[:len(sandboxArgv)-len(args)]
+
+					if err := recordMacOSFilesystemFenceState("ENGAGED", fmt.Sprintf("Seatbelt profile applied; paths=%d", pathCount), false); err != nil {
+						return fmt.Errorf("cannot record macOS filesystem fence engagement; refusing to start: %w", err)
+					}
+					fmt.Fprintf(os.Stderr, "NockLock: macOS filesystem fence ENGAGED — Seatbelt profile applied to %d sensitive path(s)\n", pathCount)
 
 				default:
 					return fmt.Errorf("filesystem fence configured but not supported on %s", runtime.GOOS)
 				}
 			}
+		} else if runtime.GOOS == "darwin" {
+			if err := recordMacOSFilesystemFenceState("DEGRADED", "explicitly disabled by filesystem.root = \"\"", false); err != nil {
+				return fmt.Errorf("cannot record macOS filesystem fence degradation; refusing to start: %w", err)
+			}
+			fmt.Fprintln(os.Stderr, "NockLock: WARNING: macOS filesystem fence DEGRADED — explicitly disabled by filesystem.root = \"\"")
 		}
 
 		// Apply syscall fence (Linux seccomp-BPF). Opt-in and nil-safe: when
@@ -838,9 +931,6 @@ func validateWrapRuntimeConfig(cfg *config.Config) error {
 	}
 
 	if cfg.Filesystem.Root != "" {
-		if runtime.GOOS == "darwin" {
-			return fmt.Errorf("filesystem.root cannot be enforced as a root-only sandbox on macOS with Seatbelt; refusing to start rather than run an allow-default denylist. Run on Linux Landlock for filesystem-root isolation or set filesystem.root = \"\" to disable it")
-		}
 		if !fsfence.IsSupported() {
 			return fmt.Errorf("filesystem fence configured but not supported on %s", runtime.GOOS)
 		}
