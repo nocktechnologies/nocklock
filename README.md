@@ -10,7 +10,7 @@ Your AI agent runs with full shell access — your environment, your filesystem,
 
 - **Secret Fence** — Filter environment variables. Your agent sees `PATH` and `HOME`. It never sees `AWS_SECRET_ACCESS_KEY`.
 - **Filesystem Fence** — Your agent can't read outside the configured project root on Linux. Landlock provides kernel enforcement and LD_PRELOAD records blocked-access events. macOS `filesystem.root` is explicitly unsupported: `nocklock wrap` refuses to start the child because Seatbelt cannot enforce the same root-only allowlist.
-- **Network Fence** — Local proxy with domain allowlist. Your agent can reach GitHub and `api.anthropic.com`. It can't phone home to anywhere else.
+- **Network Fence** — Local proxy with domain allowlist. Your agent can reach GitHub and `api.anthropic.com`. It can't phone home to anywhere else. On Linux, `nocklock wrap --net-fence=netns` opts into a kernel-enforced version: a network namespace with an nftables default-drop floor and a transparent HTTP(S) and DNS allowlist, so nothing outside `network.allow` leaves the namespace on any transport.
 
 ## Quick Start
 
@@ -22,6 +22,8 @@ nocklock wrap -- claude
 ```
 
 That's it. Four commands. Your agent is fenced.
+
+On macOS, `nocklock init` writes the same secure default `filesystem.root = "."`, and `nocklock wrap` refuses to start the child with that setting because root-only filesystem isolation is Linux-only (see "Filesystem platform boundary" below). To run the secret and network fences on macOS, set `filesystem.root = ""` in `.nock/config.toml` first.
 
 For a runtime-specific first run, scaffold from a preset:
 
@@ -39,7 +41,8 @@ nocklock init --runtime goose
 
 1. **Filters environment variables** based on pass/block lists with glob patterns — Linux, macOS
 2. **Fences the filesystem** — Linux: Landlock applies a kernel allowlist and LD_PRELOAD records blocked-access events. On macOS, configuring `filesystem.root` fails closed before the child starts; it is not a root-isolation backend. In either case, a requested filesystem fence never silently degrades.
-3. **Routes network traffic** through a local proxy that enforces a domain allowlist. On Linux, when the syscall fence is enabled and the network fence is active, IP socket creation is denied so native code cannot bypass the proxy; this is a fail-closed no-network posture. Disable `[syscall]` only if you accept the proxy as a userspace boundary. For HTTPS, only the hostname is inspected — no certificate injection, no payload decryption. If the proxy is not confirmed healthy, the agent does not start.
+3. **Routes network traffic** through a local proxy that enforces a domain allowlist. On Linux, when the syscall fence is enabled and the network fence is active in this default proxy mode, IP socket creation is denied so native code cannot bypass the proxy; this is a fail-closed no-network posture. Disable `[syscall]` only if you accept the proxy as a userspace boundary. For HTTPS, only the hostname is inspected — no certificate injection, no payload decryption. If the proxy is not confirmed healthy, the agent does not start.
+   On Linux you can instead pass `--net-fence=netns`. The child then runs in its own network namespace behind a kernel default-drop floor, keeps its configured IP socket families, and reaches only `network.allow` hosts through a transparent HTTP(S) proxy and a fixed-answer DNS stub; every other transport (UDP, QUIC, SCTP, raw) is dropped in the kernel. This mode needs the privileged egress helper described under "Linux network-egress helper" and fails closed without it.
 
 Every blocked access is logged to `.nock/events.db`. Blocked file opens and access-style checks return EACCES (permission denied); denied stat-family probes return ENOENT to avoid existence enumeration. Blocked domains return 403.
 
@@ -72,7 +75,7 @@ v1 is a tamper-*evident* log, not an unforgeable receipt. The hash chain alone c
 
 ## Signed Audit Log (v1.1: Ed25519)
 
-v1.1 layers an Ed25519 signature over the same canonical bytes the hash chain already covers. Signing adds **authenticity** — it proves NockLock, holder of the private key, wrote each row — which the unkeyed hash chain provably cannot: because the chain algorithm is public and keyless, an active writer with access to `.nock/events.db` can recompute every hash and rewrite `chain_head` in lockstep, and v1 verification still passes. A signature the attacker cannot produce without the key defeats exactly that writer. The key is a NockLock-managed file at `~/.config/nocklock/signing-ed25519.key` (mode `0600`, generated on first use, and kept outside the database so a db-only attacker cannot sign). The key directory is resolved canonically and must end at a directory owned by the current user and not group/world-accessible: a benign user-owned symlink in the path is accepted (macOS temp dirs and a symlinked `~/.config` are normal, on every platform), while a symlink whose target is owned by another user or is group/world-accessible is rejected. The versioned `chain_head` signature binds the head, prune boundary, signing-adoption boundary, and the public-key fingerprint; an adopted log refuses writes unless its managed key matches that fingerprint and verifies the existing head. `nocklock verify --audit` reports states it never conflates: **AUTHENTIC** (signed and valid), **CONSISTENT** (hash chain intact but unsigned, or signed with no key supplied to check), **FORGED** (a signature does not verify, or signing artifacts remain without their adoption marker), and **SUSPECT** (a signed check was explicitly required via `--ed25519-pub` but the log carries no signatures and no adoption markers, whether or not any events remain — possibly a full strip of every signing artifact, or a deletion of every row with the head reset; reported non-zero, never a clean pass). Supplying `--ed25519-pub` is the external expectation that the log is signed: without it, a genuinely unsigned or pre-adoption log reads CONSISTENT, while with it a completely erased signing record reads SUSPECT. Cryptographically telling a never-signed log apart from a fully stripped one requires anchoring the signed head off-box (external head anchoring remains a follow-on). Signing is adopted going forward, so rows written before adoption verify as consistent-but-unsigned, not forged. Run `nocklock verify --export-pubkey` to publish the public key for out-of-band checking. Because the head is signed, freshly deleting the newest rows and rewriting `chain_head` in lockstep — the attack the unkeyed chain cannot resist — is now caught as FORGED, since the attacker cannot re-sign the shortened head. The residual gap is **rollback**: an attacker who restores an earlier, legitimately-signed snapshot of the whole database presents a shorter log that still verifies, because its head was validly signed at the time. Detecting that requires anchoring the signed head off-box, which is exactly what the external chain-head anchor below adds.
+v1.1 layers an Ed25519 signature over the same canonical bytes the hash chain already covers. Signing adds **authenticity** — it proves NockLock, holder of the private key, wrote each row — which the unkeyed hash chain provably cannot: because the chain algorithm is public and keyless, an active writer with access to `.nock/events.db` can recompute every hash and rewrite `chain_head` in lockstep, and v1 verification still passes. A signature the attacker cannot produce without the key defeats exactly that writer. The key is a NockLock-managed file at `~/.config/nocklock/signing-ed25519.key` (mode `0600`, generated on first use, and kept outside the database so a db-only attacker cannot sign). The key directory is resolved canonically and must end at a directory owned by the current user and not group/world-accessible: a benign user-owned symlink in the path is accepted (macOS temp dirs and a symlinked `~/.config` are normal, on every platform), while a symlink whose target is owned by another user or is group/world-accessible is rejected. The versioned `chain_head` signature binds the head, prune boundary, signing-adoption boundary, and the public-key fingerprint; an adopted log refuses writes unless its managed key matches that fingerprint and verifies the existing head. `nocklock verify --audit` reports states it never conflates: **AUTHENTIC** (signed and valid), **CONSISTENT** (hash chain intact but unsigned, or signed with no key supplied to check), **FORGED** (a signature does not verify, or signing artifacts remain without their adoption marker), and **SUSPECT** (a signed check was explicitly required via `--ed25519-pub` but the log carries no signatures and no adoption markers, whether or not any events remain — possibly a full strip of every signing artifact, or a deletion of every row with the head reset; reported non-zero, never a clean pass). Supplying `--ed25519-pub` is the external expectation that the log is signed: without it, a genuinely unsigned or pre-adoption log reads CONSISTENT, while with it a completely erased signing record reads SUSPECT. Cryptographically telling a never-signed log apart from a fully stripped one requires anchoring the signed head off-box (the v1.2 external chain-head anchor below). Signing is adopted going forward, so rows written before adoption verify as consistent-but-unsigned, not forged. Run `nocklock verify --export-pubkey` to publish the public key for out-of-band checking. Because the head is signed, freshly deleting the newest rows and rewriting `chain_head` in lockstep — the attack the unkeyed chain cannot resist — is now caught as FORGED, since the attacker cannot re-sign the shortened head. The residual gap is **rollback**: an attacker who restores an earlier, legitimately-signed snapshot of the whole database presents a shorter log that still verifies, because its head was validly signed at the time. Detecting that requires anchoring the signed head off-box, which is exactly what the external chain-head anchor below adds.
 
 ## External Chain-Head Anchor (v1.2)
 
@@ -203,11 +206,18 @@ Candidate runtimes intentionally not preset here:
 | `nocklock init` | Create `.nock/config.toml` with safe defaults |
 | `nocklock init --runtime <name>` | Create `.nock/config.toml` from an embedded runtime preset |
 | `nocklock wrap -- <cmd>` | Run a command inside the fence |
+| `nocklock wrap --net-fence=netns -- <cmd>` | Linux only: run inside the kernel-enforced netns egress fence (needs the privileged helper) |
 | `nocklock wrap --profile list` | List embedded runtime presets |
 | `nocklock wrap --dry-run` | Validate config without starting fences or a command |
 | `nocklock validate [config-path]` | Validate a config file and print the effective policy |
 | `nocklock doctor` | Check whether each fence can be enforced on this host |
 | `nocklock verify` | Run the adversarial fence self-test (proof-of-block) |
+| `nocklock verify --audit` | Verify the audit log hash chain and signatures |
+| `nocklock verify --against-anchor <file>` | Verify the audit chain against an external chain-head anchor file |
+| `nocklock verify --against-remote-anchor` | Verify the audit chain against the latest anchor in the off-box store |
+| `nocklock verify --export-pubkey` | Print the Ed25519 audit-log public key for out-of-band verification |
+| `nocklock anchor emit [--out <file>]` | Emit a signed chain-head anchor |
+| `nocklock anchor push [--file <file>]` | Push an anchor to the off-box store at `NOCKLOCK_ANCHOR_URL` |
 | `nocklock egress-probe` | Probe Linux network-egress enforcement feasibility on this host (structured `--json`) |
 | `nocklock status` | Show fence state and event log summary |
 | `nocklock log` | View fence event history |
@@ -242,8 +252,9 @@ nocklock version
 
 ### Linux network-egress helper (privileged)
 
-On Linux, the network-egress fence (netns transparent-redirect) needs a small
-root-owned helper plus a constrained NOPASSWD sudoers grant. `nocklock wrap`
+On Linux, the opt-in network-egress fence (`nocklock wrap --net-fence=netns`,
+netns transparent-redirect) needs a small root-owned helper plus a constrained
+NOPASSWD sudoers grant. `nocklock wrap`
 runs unprivileged and hands the composed child to that helper over passwordless
 sudo; the child's argv, env, and the credential to drop to travel in a 0600
 per-session request **file** (only the file path rides argv), never on argv
@@ -326,7 +337,7 @@ NockLock is a fence, not guardrails. The distinction matters.
 
 **Guardrails** tell the agent what not to do. The agent can ignore them, work around them, or hallucinate past them. Guardrails are prompts.
 
-**A fence** sits between the agent and the resource. How hard the boundary is depends on the fence. The **secret fence** is absolute — a blocked variable is gone from the environment before the agent starts. On **Linux the filesystem fence** is kernel-enforced with Landlock by default and composes with LD_PRELOAD logging; static binaries and children that clear `LD_PRELOAD` are still denied by the kernel. On **macOS `filesystem.root` is unsupported by the shipped CLI**: NockLock fails closed instead of treating Seatbelt's allow-default denylist component as root isolation. The **network fence** stops normal and prompt-injected attempts to reach unapproved domains and logs every try; on Linux with syscall fencing enabled, network-fenced runs allow only Unix-domain sockets, so the bypass-resistant posture is no IP sockets rather than proxy-based allowlisting.
+**A fence** sits between the agent and the resource. How hard the boundary is depends on the fence. The **secret fence** is absolute — a blocked variable is gone from the environment before the agent starts. On **Linux the filesystem fence** is kernel-enforced with Landlock by default and composes with LD_PRELOAD logging; static binaries and children that clear `LD_PRELOAD` are still denied by the kernel. On **macOS `filesystem.root` is unsupported by the shipped CLI**: NockLock fails closed instead of treating Seatbelt's allow-default denylist component as root isolation. The **network fence** stops normal and prompt-injected attempts to reach unapproved domains and logs every try; on Linux with syscall fencing enabled, proxy-mode runs allow only Unix-domain sockets, so the bypass-resistant posture is no IP sockets rather than proxy-based allowlisting. With `--net-fence=netns` the child keeps IP sockets and the kernel namespace, not the proxy, is the boundary: only allowlisted HTTP(S) and stub DNS leave it, and every other transport is dropped.
 
 NockLock doesn't restrict how your agent works. It restricts what your agent can reach. Your agent still has full permissions — inside the fence.
 

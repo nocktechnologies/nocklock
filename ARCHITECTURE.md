@@ -4,11 +4,18 @@
 NockLock is a Go CLI that wraps AI coding agents with three security fences: filesystem, network, and secret isolation.
 
 **Current state:** The secret and network fences are active, and Linux has a
-kernel-enforced root filesystem fence (Landlock plus LD_PRELOAD event logging).
-All fence events are logged to SQLite. macOS supports secret and network
-fencing, but the shipped CLI deliberately refuses a configured
-`filesystem.root`: its Seatbelt component is an allow-default sensitive-path
-denylist, not a root-only filesystem boundary.
+kernel-enforced root filesystem fence (Landlock plus LD_PRELOAD event logging)
+and a seccomp syscall fence. The network fence has two modes: the default
+userspace domain-allowlist proxy on Linux and macOS, and on Linux only the
+opt-in `nocklock wrap --net-fence=netns` kernel egress fence (a fresh network
+namespace with an nftables default-drop floor and a transparent HTTP(S) and
+DNS allowlist, set up by a root-owned helper over a constrained sudo grant).
+All fence events are logged to a tamper-evident SQLite audit log: a SHA-256
+hash chain (v1), Ed25519 signatures over the rows and the chain head (v1.1),
+and an external chain-head anchor that can be pushed off-box (v1.2). macOS
+supports secret and network fencing, but the shipped CLI deliberately refuses
+a configured `filesystem.root`: its Seatbelt component is an allow-default
+sensitive-path denylist, not a root-only filesystem boundary.
 
 **Target state:** Preserve all three active fence categories while adding a
 macOS filesystem backend only when it can prove the same root-only boundary as
@@ -22,10 +29,18 @@ internal/
   cli/                  Cobra command tree
     root.go             Root command + Execute() + exitCodeError
     wrap.go             Primary command — wraps child process with secret + filesystem fences
-    init_cmd.go         Creates .nock/config.toml with safe defaults
+    init_cmd.go         Creates .nock/config.toml with safe defaults (or from a runtime preset)
     config.go           Prints current config to stdout
-    log.go              Views fence event log (stub)
-    status.go           Shows active fenced sessions (stub)
+    validate.go         Validates a config file and prints the effective policy
+    doctor.go           Reports whether each fence can be enforced on this host
+    verify.go           Adversarial fence self-test; --audit verifies the audit chain and anchors
+    anchor.go           `anchor emit` and `anchor push` for the external chain-head anchor
+    anchor_push.go      Off-box anchor push client (NOCKLOCK_ANCHOR_URL, fail-open on teardown)
+    egress_probe.go     Structured feasibility probe for the Linux netns egress fence
+    netns_helper.go     Privileged `__netns-helper` and the `__netns-*` sidecar entry points
+    decision_log.go     Per-session egress decision log consumed into the audit chain
+    log.go              Views fence event log
+    status.go           Shows fence state and event log summary
     version.go          Prints version string
   config/               Configuration
     config.go           Config structs (6 sections) + Load() with strict TOML parsing
@@ -38,9 +53,15 @@ internal/
     secrets/            Secret fence — environment variable filtering (pass/block lists)
     fs/                 Filesystem fence — config processing, Linux enforcement, Seatbelt profile component
       interposer/       C shared library for LD_PRELOAD interception (Linux only)
-    network/            Network fence — local proxy with domain allowlist
-  logging/              Event logging
+      landlock/         Landlock ruleset generation (Linux only)
+    syscallfence/       seccomp syscall fence: socket-family and syscall denylist policy
+    network/            Network fence: local proxy with domain allowlist (default mode)
+      netns/            Linux netns egress fence: privileged helper, default-drop base, tproxy and DNS sidecars
+  logging/              Event logging and audit chain
     logger.go           SQLite event store — Log, LogBatch, Query, Stats, Prune
+                        plus the hash chain, Ed25519 signing, chain head and anchor primitives
+pkg/
+  receipt/              Public read-only VerifySession(dbPath, pub, sessionID) for one session's chain
 ```
 
 ## Data Flow
@@ -54,21 +75,67 @@ internal/
    Landlock and LD_PRELOAD with libfence_fs.so, then opens a Unix socket for events
 6. With `filesystem.root` configured on macOS, NockLock refuses before child
    launch because Seatbelt cannot provide the requested root-only boundary
-7. The network fence starts its domain-allowlist proxy when configured
-8. Child process is spawned with the filtered environment and active fence wiring
-9. Filesystem and network decisions are logged to `.nock/events.db`
-10. NockLock exits with the child's exit code
+7. On Linux with `[syscall] enforcement` on, the seccomp fence is installed in
+   the child. In the default proxy mode it narrows the child to Unix-domain
+   sockets; under `--net-fence=netns` the child keeps its configured IP socket
+   families because the kernel floor is the boundary
+8. The network fence starts its domain-allowlist proxy when configured. With
+   `--net-fence=netns` (Linux only) `wrap` instead hands the composed child to
+   the privileged helper over `sudo -n`; the request travels in a 0600
+   per-session file whose path rides argv, so the caller's stdin reaches the
+   child unchanged (ADR-004). The helper creates the namespace, installs the
+   default-drop nftables base, starts the tproxy and DNS sidecars, drops
+   `CAP_NET_ADMIN` and `CAP_SYS_ADMIN` from all five capability sets, drops to
+   the invoking user and execs the agent. If privilege cannot be acquired or a
+   sidecar dies, the fence fails closed
+9. Child process is spawned with the filtered environment and active fence wiring
+10. Filesystem, network and per-host egress decisions are logged to
+    `.nock/events.db` as hash-chained, signed rows; on teardown `wrap` emits a
+    chain-head anchor to `<db-dir>/chain-anchor.json` and, when
+    `NOCKLOCK_ANCHOR_URL` is set, pushes it off-box
+11. NockLock exits with the child's exit code
 
 ### Future
 - A macOS filesystem-root backend must prove out-of-root write refusal before
   `filesystem.root` can be enabled there.
 - Optional: events batched and synced to NockCC cloud dashboard
 
+## Network egress fence (Linux, opt-in)
+
+`nocklock wrap --net-fence=netns` is the kernel-enforced egress fence. It is
+opt-in (`internal/cli/flagparse.go`) and Linux-only; on any other platform the
+flag refuses rather than falling back to the proxy. Its guarantees are proven
+by root-gated CI jobs in `.github/workflows/network-egress.yml`, each run with
+a `*_REQUIRE=1` gate so a skipped test fails instead of reporting green:
+
+- `netns-foundation`: with the default-drop base installed, a capability-dropped
+  child is denied loopback, external TCP and UDP/53, with a no-drop control.
+- `q6-acceptance`: the capped child gets EPERM on nftables, route and interface
+  mutation, with a privileged-parent control.
+- `netns-protocol-matrix`: allowlisted HTTP and HTTPS succeed end to end,
+  non-allowlisted HTTP gets a proxy 403, non-allowlisted TLS is closed at the
+  proxy, no-SNI direct-IP TLS is terminated, the fixed DNS stub answers over
+  UDP and TCP, direct resolvers get no reply, UDP/443 and SCTP stay dropped,
+  curl, Node and Python succeed over the TCP-only path, and proxy death
+  terminates the child.
+- `netns-composed-default`: Landlock required, seccomp required, netns and the
+  signed audit log compose through a real `nocklock wrap`; one allowlisted fetch
+  is permitted, one off-allowlist fetch is refused, both land signed and
+  `nocklock verify --audit` passes.
+- `egress-helper-install-readme`: the shipped installer produces a sudoers
+  drop-in scoped to exactly `check` and `setup --request-file *`, and
+  `nocklock doctor` reports the helper ok.
+
 ## Key Design Decisions
 - See `.claude/decisions/` for Architecture Decision Records
 - Go chosen for single-binary distribution and cross-platform support (ADR-001)
-- MVP fences use userspace techniques — no root required (ADR-002)
+- MVP fences use userspace techniques, no root required (ADR-002). The
+  Linux netns egress fence is the deliberate exception: it needs a root-owned
+  helper reachable through a constrained NOPASSWD sudoers grant
 - TOML config with strict parsing — unknown keys are errors (ADR-003)
+- The netns setup request travels in a 0600 file named on argv, not on stdin,
+  because sudo closes descriptors above 2 and the child must keep its stdin
+  (ADR-004)
 
 ## Audit database: threat model and the validate-then-open window
 
