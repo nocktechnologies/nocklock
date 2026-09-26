@@ -308,9 +308,10 @@ func readSetupRequest(path string) (netns.Request, error) {
 	// --request-file /etc/sudoers.d/nocklock-egress). The unlink goes through the
 	// retained directory fd (unlinkat), never the path string. The inode re-check
 	// only narrows the residual Lstat→unlinkat window; that window is bounded to
-	// caller-owned entries (unlink does not follow a final-component symlink and
-	// protected_hardlinks blocks planting a root-owned hardlink), so at worst a
-	// caller can make the helper delete a file it already owns. Deferred so the
+	// entries in the caller's own directory (unlinkat does not follow a
+	// final-component symlink, and unlinking a hardlinked name removes only that
+	// name, never the root-owned inode's other links), so at worst a caller can
+	// make the helper delete a name it already controls. Deferred so the
 	// single-use request is still cleaned on a decode failure; wrap's per-session
 	// RemoveAll is the backstop.
 	defer removeValidatedRequest(root, name, fi)
