@@ -386,15 +386,17 @@ func sanityDoctorChecks(cfg *config.Config, caps doctorCapabilities) []doctorChe
 		})
 	}
 
-	// Inert-allowlist footgun: on Linux, when the network fence is active
-	// (allow_all = false) AND the syscall fence is on, buildSyscallPolicy forces
-	// the socket-family allowlist to unix-only (syscall_wire.go). The proxy that
-	// enforces network.allow listens on TCP 127.0.0.1, which the child can no
-	// longer reach — so the posture collapses to no-IP-network and the curated
-	// domain allowlist is inert (the agent reaches NONE of the allowed domains,
-	// not a selective subset). This is the intended hardened no-network posture,
-	// but a user who spent effort curating network.allow will not expect it, so
-	// surface it rather than let the allowlist silently do nothing.
+	// Inert-allowlist footgun: on Linux, plain `nocklock wrap` (the userspace
+	// proxy) with the network fence active (allow_all = false) AND the syscall
+	// fence on narrows the child to unix-only sockets (buildSyscallPolicy /
+	// networkFenceProxy). The proxy that enforces network.allow listens on TCP
+	// 127.0.0.1, which the child can no longer reach — so the posture collapses
+	// to no-IP-network and the curated domain allowlist is inert (the agent
+	// reaches NONE of the allowed domains). doctor works from config alone and
+	// cannot see the runtime --net-fence flag, so it warns whenever the config
+	// COULD hit this; the message names the `--net-fence=netns` escape, where the
+	// child keeps inet/inet6 and the kernel egress floor enforces the allowlist
+	// (N10710), so the footgun does NOT apply there.
 	if caps.goos == "linux" &&
 		!cfg.Network.AllowAll &&
 		len(cfg.Network.Allow) > 0 &&
@@ -405,9 +407,9 @@ func sanityDoctorChecks(cfg *config.Config, caps doctorCapabilities) []doctorChe
 			Severity: doctorWarning,
 			Status:   "warning",
 			Message: fmt.Sprintf(
-				"Network allowlist is inert on Linux: the syscall fence restricts the child to unix-domain sockets while the network fence is active, so the agent gets no IP network at all — your %d allowed domain(s) are not selectively reachable. This is the hardened no-network posture.",
+				"Network allowlist is inert on Linux under plain `nocklock wrap`: the syscall fence restricts the child to unix-domain sockets while the userspace network proxy is active, so the agent gets no IP network at all — your %d allowed domain(s) are not selectively reachable. (Under `nocklock wrap --net-fence=netns` the child keeps IP sockets and the kernel egress floor enforces the allowlist, so this does not apply.)",
 				len(cfg.Network.Allow)),
-			Fix: "for a working (but userspace-bypassable) domain allowlist set [syscall] enforcement = \"off\"; otherwise the posture is no-network by design and network.allow is documentation-only",
+			Fix: "wrap with --net-fence=netns for a kernel-enforced domain allowlist; or, for a userspace-bypassable allowlist under plain wrap, set [syscall] enforcement = \"off\"; otherwise plain wrap is no-network by design and network.allow is documentation-only",
 		})
 	}
 	if len(cfg.Secrets.Block) == 0 {

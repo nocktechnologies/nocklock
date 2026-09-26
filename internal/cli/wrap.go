@@ -203,18 +203,23 @@ var wrapCmd = &cobra.Command{
 		// undenied decision log lets a hardened child append FORGED allow/deny
 		// records that wrap would then sign into the audit chain — a forgeable
 		// egress receipt in exactly the config meant to be trustworthy. It is
-		// wrap-user-owned, mode 0600, in a 0700 per-session temp dir; the
-		// transparent proxy opens it as root before it drops to nobody, and wrap's
-		// reader streams it into the signed log. No pre-existing session/bridge temp
-		// dir exists in wrap, so one is created here per session and removed on exit.
+		// wrap-user-owned, mode 0600, in a 0700 per-session dir UNDER THE AUDIT
+		// STATE ROOT (never the system temp dir — see egressDecisionDir for why
+		// that location is Landlock-enforceable, N10710); the transparent proxy
+		// opens it as root before it drops to nobody, and wrap's reader streams it
+		// into the signed log.
 		var decisionLogPath string
 		var decisionLogDir string
 		if useNetns {
-			dir, dirErr := os.MkdirTemp("", "nocklock-egress-decisions-")
-			if dirErr != nil {
+			dir := egressDecisionDir(dbPath, sessionID)
+			if dirErr := os.MkdirAll(dir, 0o700); dirErr != nil {
 				return fmt.Errorf("create egress decision-log directory: %w", dirErr)
 			}
-			defer os.RemoveAll(dir)
+			// Remove the whole <state>/sessions/<id> tree on exit. Best-effort:
+			// a SIGKILL skips this defer, so a stale per-session dir can survive
+			// under .nock — harmless (it is denied to the child and re-created per
+			// session), same as the old temp-dir cleanup.
+			defer os.RemoveAll(filepath.Dir(dir))
 			decisionLogDir = dir
 			decisionLogPath = filepath.Join(dir, "decisions.log")
 			decisionFile, fileErr := os.OpenFile(decisionLogPath, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o600)
@@ -326,7 +331,11 @@ var wrapCmd = &cobra.Command{
 		// seccomp filter just before execve (see landlock_exec.go). On non-Linux
 		// the syscall fence is a no-op and we skip the wiring entirely.
 		if runtime.GOOS == "linux" {
-			if policy, ok := buildSyscallPolicy(cfg); ok {
+			// Tell the syscall fence which network mode is active EXPLICITLY, so
+			// it can grant the child inet/inet6 sockets under the netns egress
+			// floor while keeping unix-only for the userspace proxy (N10710).
+			netFence := wrapNetworkFenceMode(useNetns, cfg.Network.AllowAll)
+			if policy, ok := buildSyscallPolicy(cfg, netFence); ok {
 				encoded, err := marshalSyscallPolicy(policy)
 				if err != nil {
 					return fmt.Errorf("failed to serialize syscall policy: %w", err)
@@ -887,6 +896,26 @@ func egressChildDenyPaths(dbPath, projectRoot, decisionLogDir string) []string {
 		paths = append(paths, decisionLogDir)
 	}
 	return paths
+}
+
+// egressDecisionDir returns the per-session directory that holds the egress
+// decision log, under the audit state root (the directory that holds events.db)
+// as <state>/sessions/<sessionID>/egress — NEVER the system temp dir. The dir
+// is denied to the child (egressChildDenyPaths) so it cannot forge signed egress
+// rows.
+//
+// Why the state root and not /tmp (N10710): the default filesystem preset GRANTs
+// /tmp, and Landlock is allow-only, so a deny path under a granted tree fails
+// rule generation (assertDenyPathsEnforceable). Placing the dir under the audit
+// root keeps its deny enforceable — but ONLY because landlock.rootPathRules
+// skips the literal ".nock" child of the filesystem root when it grants the
+// tree, so a decision dir under .nock sits outside every granted tree. That
+// coupling is to the ".nock" name specifically (narrower than "the audit dir"):
+// a logging.db relocated out of .nock would reintroduce the overlap, exactly as
+// it already does for the audit DB's own deny (auditDenyPath). Factored out so
+// the path is unit-testable without root.
+func egressDecisionDir(dbPath, sessionID string) string {
+	return filepath.Join(filepath.Dir(dbPath), "sessions", sessionID, "egress")
 }
 
 // resolvePathBestEffort canonicalizes a path the way the fence does (resolving
