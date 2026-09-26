@@ -6,6 +6,7 @@ import (
 	"path/filepath"
 	"reflect"
 	"strconv"
+	"strings"
 	"testing"
 
 	"github.com/nocktechnologies/nocklock/internal/fence/network/netns"
@@ -19,6 +20,17 @@ func netnsRequestFixture() netns.Request {
 		GID:    4242,
 		Groups: []int{4242},
 	}
+}
+
+// privateDir returns a fresh 0700 directory owned by the test user, matching
+// wrap's per-session request directory (t.TempDir's own leaf is 0755).
+func privateDir(t *testing.T) string {
+	t.Helper()
+	dir := filepath.Join(t.TempDir(), "private")
+	if err := os.Mkdir(dir, 0o700); err != nil {
+		t.Fatalf("mkdir private dir: %v", err)
+	}
+	return dir
 }
 
 func mustMarshal(t *testing.T, v any) []byte {
@@ -69,7 +81,7 @@ func TestSetupRequestPath(t *testing.T) {
 // channel and confirms the file is created with the mode the helper validates.
 func TestWriteAndReadSetupRequest(t *testing.T) {
 	t.Setenv("SUDO_UID", strconv.Itoa(os.Getuid()))
-	dir := t.TempDir()
+	dir := privateDir(t)
 
 	want := netnsRequestFixture()
 	reqBytes := mustMarshal(t, want)
@@ -106,14 +118,14 @@ func TestReadSetupRequestFailsClosed(t *testing.T) {
 
 	t.Run("missing file", func(t *testing.T) {
 		t.Setenv("SUDO_UID", strconv.Itoa(uid))
-		if _, err := readSetupRequest(filepath.Join(t.TempDir(), "nope.json")); err == nil {
+		if _, err := readSetupRequest(filepath.Join(privateDir(t), "nope.json")); err == nil {
 			t.Fatal("expected error for missing request file")
 		}
 	})
 
 	t.Run("wrong mode", func(t *testing.T) {
 		t.Setenv("SUDO_UID", strconv.Itoa(uid))
-		path := filepath.Join(t.TempDir(), "req.json")
+		path := filepath.Join(privateDir(t), "req.json")
 		if err := os.WriteFile(path, mustMarshal(t, netnsRequestFixture()), 0o644); err != nil {
 			t.Fatalf("write 0644 request: %v", err)
 		}
@@ -131,7 +143,7 @@ func TestReadSetupRequestFailsClosed(t *testing.T) {
 	t.Run("owner mismatch", func(t *testing.T) {
 		// Claim a different invoking user than the file's owner.
 		t.Setenv("SUDO_UID", strconv.Itoa(uid+1))
-		path := filepath.Join(t.TempDir(), "req.json")
+		path := filepath.Join(privateDir(t), "req.json")
 		if err := os.WriteFile(path, mustMarshal(t, netnsRequestFixture()), 0o600); err != nil {
 			t.Fatalf("write request: %v", err)
 		}
@@ -145,7 +157,7 @@ func TestReadSetupRequestFailsClosed(t *testing.T) {
 
 	t.Run("sudo_uid unset", func(t *testing.T) {
 		t.Setenv("SUDO_UID", "")
-		path := filepath.Join(t.TempDir(), "req.json")
+		path := filepath.Join(privateDir(t), "req.json")
 		if err := os.WriteFile(path, mustMarshal(t, netnsRequestFixture()), 0o600); err != nil {
 			t.Fatalf("write request: %v", err)
 		}
@@ -156,7 +168,7 @@ func TestReadSetupRequestFailsClosed(t *testing.T) {
 
 	t.Run("symlink refused", func(t *testing.T) {
 		t.Setenv("SUDO_UID", strconv.Itoa(uid))
-		dir := t.TempDir()
+		dir := privateDir(t)
 		target := filepath.Join(dir, "real.json")
 		if err := os.WriteFile(target, mustMarshal(t, netnsRequestFixture()), 0o600); err != nil {
 			t.Fatalf("write target: %v", err)
@@ -177,4 +189,135 @@ func TestReadSetupRequestFailsClosed(t *testing.T) {
 			t.Fatalf("symlink target must not be deleted, stat err = %v", err)
 		}
 	})
+}
+
+// TestReadSetupRequestRefusesUnsafeParentDir pins the parent-directory check: a
+// request in a group/world-accessible or foreign-owned directory is refused before
+// it is read or unlinked, while the per-session 0700 directory still passes.
+func TestReadSetupRequestRefusesUnsafeParentDir(t *testing.T) {
+	uid := os.Getuid()
+	write := func(t *testing.T, dir string) string {
+		t.Helper()
+		path := filepath.Join(dir, "req.json")
+		if err := os.WriteFile(path, mustMarshal(t, netnsRequestFixture()), 0o600); err != nil {
+			t.Fatalf("write request: %v", err)
+		}
+		return path
+	}
+
+	// refused asserts the directory check (not the file checks) rejected the read
+	// and that the request was left in place.
+	refused := func(t *testing.T, path string, err error) {
+		t.Helper()
+		if err == nil {
+			t.Fatal("expected refusal for an unsafe parent directory")
+		}
+		if !strings.Contains(err.Error(), "directory") {
+			t.Fatalf("refusal should come from the directory check, got: %v", err)
+		}
+		if _, err := os.Stat(path); err != nil {
+			t.Fatalf("request in a refused directory must not be unlinked, stat err = %v", err)
+		}
+	}
+
+	t.Run("0700 owned dir passes (control)", func(t *testing.T) {
+		t.Setenv("SUDO_UID", strconv.Itoa(uid))
+		if _, err := readSetupRequest(write(t, privateDir(t))); err != nil {
+			t.Fatalf("0700 owned directory must be accepted: %v", err)
+		}
+	})
+
+	for _, mode := range []os.FileMode{0o755, 0o750, 0o770, 0o777} {
+		t.Run("mode "+strconv.FormatUint(uint64(mode), 8), func(t *testing.T) {
+			t.Setenv("SUDO_UID", strconv.Itoa(uid))
+			dir := privateDir(t)
+			path := write(t, dir)
+			if err := os.Chmod(dir, mode); err != nil {
+				t.Fatalf("chmod dir: %v", err)
+			}
+			_, err := readSetupRequest(path)
+			refused(t, path, err)
+		})
+	}
+
+	t.Run("foreign-owned dir", func(t *testing.T) {
+		// Claim a different invoking user than the directory's (and file's) owner;
+		// the directory check must fire on its own, so pin it by message.
+		t.Setenv("SUDO_UID", strconv.Itoa(uid+1))
+		path := write(t, privateDir(t))
+		_, err := readSetupRequest(path)
+		refused(t, path, err)
+	})
+}
+
+// TestRemoveValidatedRequestBoundToDirectoryFD is the negative control for the
+// deferred-unlink race: after the request's parent
+// directory is opened, renaming it away and planting a symlink to a victim
+// directory at the original path must not redirect the unlink — the victim's
+// same-named file (standing in for a root-owned /etc/sudoers.d entry) survives —
+// and an entry replaced after validation is not removed either.
+func TestRemoveValidatedRequestBoundToDirectoryFD(t *testing.T) {
+	base := t.TempDir()
+	reqDir := filepath.Join(base, "req")
+	victimDir := filepath.Join(base, "victim")
+	for _, d := range []string{reqDir, victimDir} {
+		if err := os.Mkdir(d, 0o700); err != nil {
+			t.Fatalf("mkdir %s: %v", d, err)
+		}
+	}
+	const name = "setup-request.json"
+	reqPath := filepath.Join(reqDir, name)
+	victim := filepath.Join(victimDir, name)
+	for _, p := range []string{reqPath, victim} {
+		if err := os.WriteFile(p, []byte("{}"), 0o600); err != nil {
+			t.Fatalf("write %s: %v", p, err)
+		}
+	}
+	root, err := os.OpenRoot(reqDir)
+	if err != nil {
+		t.Fatalf("OpenRoot: %v", err)
+	}
+	defer root.Close()
+	fi, err := root.Lstat(name)
+	if err != nil {
+		t.Fatalf("lstat validated request: %v", err)
+	}
+
+	// Swap the parent directory for a symlink to the victim directory.
+	moved := filepath.Join(base, "req-moved")
+	if err := os.Rename(reqDir, moved); err != nil {
+		t.Fatalf("rename request dir: %v", err)
+	}
+	if err := os.Symlink(victimDir, reqDir); err != nil {
+		t.Fatalf("symlink swap: %v", err)
+	}
+
+	removeValidatedRequest(root, name, fi)
+	if _, err := os.Stat(victim); err != nil {
+		t.Fatalf("victim file was deleted through the swapped parent path: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(moved, name)); !os.IsNotExist(err) {
+		t.Fatalf("validated request should be unlinked from the original directory, stat err = %v", err)
+	}
+
+	// An entry replaced after validation (different inode) must not be removed.
+	// The validated file is kept alive under another name so its inode cannot be
+	// reused by the replacement.
+	if err := os.WriteFile(filepath.Join(moved, name), []byte("{}"), 0o600); err != nil {
+		t.Fatalf("write second request: %v", err)
+	}
+	fi2, err := root.Lstat(name)
+	if err != nil {
+		t.Fatalf("lstat second request: %v", err)
+	}
+	if err := os.Rename(filepath.Join(moved, name), filepath.Join(moved, name+".old")); err != nil {
+		t.Fatalf("rename validated request aside: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(moved, name), []byte("{}"), 0o600); err != nil {
+		t.Fatalf("write replacement: %v", err)
+	}
+	removeValidatedRequest(root, name, fi2)
+	if _, err := os.Stat(filepath.Join(moved, name)); err != nil {
+		t.Fatalf("replaced entry must not be removed, stat err = %v", err)
+	}
 }

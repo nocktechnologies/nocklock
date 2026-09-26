@@ -30,8 +30,15 @@ the fixed `check`/`setup` sudoers vectors.
   sudo command inherits the caller's real stdin (`cmd.Stdin = os.Stdin`); the
   helper reads the request from the file — never stdin — so stdin flows through to
   the child untouched (a real TTY stays a TTY). The helper opens the file
-  `O_NOFOLLOW`, requires a regular 0600 file owned by `SUDO_UID`, and unlinks it
-  after read. `validateChildCredential` remains the real credential boundary; the
+  `O_NOFOLLOW` relative to a retained directory fd (`os.OpenRoot`), requires a
+  regular 0600 file owned by `SUDO_UID`, and unlinks it after read via `unlinkat`
+  on that same directory fd (skipped if the entry was replaced after validation),
+  so a parent directory swapped for a symlink cannot redirect the root unlink.
+  Before opening the file it also stats the parent through that fd and refuses
+  unless it is mode 0700 and owned by `SUDO_UID` — so no principal other than the
+  invoking user can touch the directory between the inode re-check and the
+  `unlinkat`.
+  `validateChildCredential` remains the real credential boundary; the
   file checks are defense-in-depth and a fail-closed setup channel.
 - **Sidecar leg (setup → `__netns-child` / proxies):** no sudo here, so the JSON
   payload rides a **dedicated inherited descriptor (fd 3)** via `ExtraFiles`
