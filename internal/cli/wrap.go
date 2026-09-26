@@ -26,6 +26,8 @@ import (
 	"github.com/spf13/cobra"
 )
 
+var ensureSandboxExecAvailable = fsfence.EnsureSandboxExecAvailable
+
 var wrapCmd = &cobra.Command{
 	Use:   "wrap -- <command> [args...]",
 	Short: "Wrap a command with NockLock fences",
@@ -351,7 +353,7 @@ var wrapCmd = &cobra.Command{
 						return fmt.Errorf("filesystem fence cannot be enforced (fail-closed): %s: %w", stage, setupErr)
 					}
 
-					if err := fsfence.EnsureSandboxExecAvailable(); err != nil {
+					if err := ensureSandboxExecAvailable(); err != nil {
 						if setupErr := degradeOrRefuse("sandbox-exec unavailable", err); setupErr != nil {
 							return setupErr
 						}
