@@ -4,6 +4,16 @@ All notable changes to NockLock will be documented in this file.
 
 ## [Unreleased]
 
+### Fixed
+
+- The CLI now compiles on darwin again: the non-Linux `netns.EgressConfig` stub
+  gained the `DecisionLogPath` field that `wrap.go` assigns cross-platform, which
+  N10649 added only to the Linux struct (broke `GOOS=darwin go build ./...` at
+  `wrap.go:413`). The darwin field is inert — its helper stub still refuses to
+  run. CI now guards this: the ubuntu job cross-builds for darwin on every push,
+  and the macOS job builds, vets and runs the non-root unit suite natively
+  (seven darwin test-portability cases skipped by name pending N10714).
+
 ### Changed
 
 - Corrected the tamper-evident audit-log v1 specification to state the limits of

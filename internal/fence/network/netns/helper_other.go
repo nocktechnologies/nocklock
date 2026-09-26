@@ -41,6 +41,10 @@ type EgressConfig struct {
 	Allow              []string   `json:"allow"`
 	AllowPrivateRanges bool       `json:"allow_private_ranges"`
 	Bridge             BridgeSpec `json:"bridge"`
+	// DecisionLogPath mirrors the Linux field (see egress_linux.go for its
+	// meaning); on non-Linux it exists only so the struct shape matches
+	// wrap.go's cross-platform assignment. The darwin helper stub never runs.
+	DecisionLogPath string `json:"decision_log_path,omitempty"`
 }
 
 // ChildExitError mirrors the Linux helper's child-status transport.
