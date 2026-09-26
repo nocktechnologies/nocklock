@@ -517,7 +517,7 @@ func TestValidateWrapRuntimeConfigRejectsUnsupportedFilesystemFence(t *testing.T
 }
 
 // TestWrapDryRunUsesMacOSSeatbeltConfig verifies macOS dry-run accepts the
-// configured sensitive-path denylist without claiming Linux root isolation.
+// configured Seatbelt root-write-confinement profile.
 func TestWrapDryRunUsesMacOSSeatbeltConfig(t *testing.T) {
 	if runtime.GOOS != "darwin" {
 		t.Skip("macOS Seatbelt path only applies on darwin")

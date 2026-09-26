@@ -14,7 +14,8 @@ import (
 
 // IsSupported returns true when the shipped CLI can enforce its filesystem
 // fence contract on the current OS. Linux uses Landlock with LD_PRELOAD event
-// logging. macOS uses a kernel-enforced Seatbelt sensitive-path denylist.
+// logging. macOS uses a kernel-enforced Seatbelt write-confinement profile with
+// sensitive-path read/write denies.
 func IsSupported() bool {
 	return runtime.GOOS == "linux" || runtime.GOOS == "darwin"
 }

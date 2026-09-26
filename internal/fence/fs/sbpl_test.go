@@ -118,6 +118,130 @@ func TestGenerateProfileAndCountReportsDistinctCanonicalPaths(t *testing.T) {
 	}
 }
 
+// TestGenerateWriteConfinementProfile_EmitsRootAndRuntimeAllows proves the
+// Phase 2 profile keeps allow-default for process startup while adding the
+// deny-all-writes then narrow-allow shape. The sensitive deny is deliberately
+// emitted after the grants so a sensitive child of root remains blocked.
+func TestGenerateWriteConfinementProfile_EmitsRootAndRuntimeAllows(t *testing.T) {
+	root := t.TempDir()
+	stateDir := filepath.Join(root, ".nock")
+	if err := os.Mkdir(stateDir, 0700); err != nil {
+		t.Fatal(err)
+	}
+	sensitive := filepath.Join(root, "private-key")
+	if err := os.Mkdir(sensitive, 0700); err != nil {
+		t.Fatal(err)
+	}
+
+	profile, count, err := GenerateWriteConfinementProfile(
+		[]string{sensitive}, root, "read-write", stateDir, false,
+	)
+	if err != nil {
+		t.Fatalf("GenerateWriteConfinementProfile: %v", err)
+	}
+	if count != 1 {
+		t.Fatalf("sensitive path count = %d, want 1", count)
+	}
+	if strings.Contains(profile, "(deny default)") {
+		t.Fatalf("write-confinement profile must not use deny-default:\n%s", profile)
+	}
+
+	denyWrites := strings.Index(profile, "(deny file-write*)")
+	allowWrites := strings.Index(profile, "(allow file-write*")
+	sensitiveDeny := strings.Index(profile, "(deny file-read* file-write*")
+	if denyWrites < 0 || allowWrites < 0 || sensitiveDeny < 0 || !(denyWrites < allowWrites && allowWrites < sensitiveDeny) {
+		t.Fatalf("write and sensitive policy ordering is wrong:\n%s", profile)
+	}
+
+	cacheDir, err := os.UserCacheDir()
+	if err != nil {
+		t.Fatalf("UserCacheDir: %v", err)
+	}
+	for _, path := range []string{root, stateDir, os.TempDir(), cacheDir, "/private/tmp"} {
+		canonical, err := canonicalizeForProfile(path)
+		if err != nil {
+			t.Fatalf("canonicalize %q: %v", path, err)
+		}
+		want := "(subpath " + sbplString(canonical) + ")"
+		if !strings.Contains(profile, want) {
+			t.Errorf("profile missing canonical write allow %s:\n%s", want, profile)
+		}
+	}
+	for _, want := range []string{
+		`(literal "/dev/null")`,
+		`(literal "/dev/tty")`,
+		`(regex #"^/dev/tty.*$")`,
+		`(literal "/dev/fd")`,
+		`(regex #"^/dev/fd/")`,
+	} {
+		if !strings.Contains(profile, want) {
+			t.Errorf("profile missing runtime write allow %q:\n%s", want, profile)
+		}
+	}
+
+	canonicalSensitive, err := canonicalizeForProfile(sensitive)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(profile, "(subpath "+sbplString(canonicalSensitive)+")") {
+		t.Errorf("profile lost the Phase 1 sensitive read/write deny for %q:\n%s", canonicalSensitive, profile)
+	}
+}
+
+func TestGenerateWriteConfinementProfile_ReadOnlyOmitsRootWriteAllow(t *testing.T) {
+	root := t.TempDir()
+	stateDir := filepath.Join(root, ".nock")
+	if err := os.Mkdir(stateDir, 0700); err != nil {
+		t.Fatal(err)
+	}
+	sensitive := t.TempDir()
+
+	profile, _, err := GenerateWriteConfinementProfile(
+		[]string{sensitive}, root, "read-only", stateDir, false,
+	)
+	if err != nil {
+		t.Fatalf("GenerateWriteConfinementProfile: %v", err)
+	}
+	canonicalRoot, err := canonicalizeForProfile(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(profile, "    (subpath "+sbplString(canonicalRoot)+")\n") {
+		t.Errorf("read-only profile must not grant writes to root %q:\n%s", canonicalRoot, profile)
+	}
+}
+
+func TestGenerateWriteConfinementProfile_CanonicalizesRoot(t *testing.T) {
+	base := t.TempDir()
+	realRoot := filepath.Join(base, "real-root")
+	if err := os.Mkdir(realRoot, 0700); err != nil {
+		t.Fatal(err)
+	}
+	link := filepath.Join(base, "root-link")
+	if err := os.Symlink(realRoot, link); err != nil {
+		t.Skipf("symlink unsupported: %v", err)
+	}
+	stateDir := filepath.Join(realRoot, ".nock")
+	if err := os.Mkdir(stateDir, 0700); err != nil {
+		t.Fatal(err)
+	}
+
+	profile, _, err := GenerateWriteConfinementProfile([]string{t.TempDir()}, link, "read-write", stateDir, false)
+	if err != nil {
+		t.Fatalf("GenerateWriteConfinementProfile: %v", err)
+	}
+	canonicalRoot, err := filepath.EvalSymlinks(realRoot)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(profile, "(subpath "+sbplString(canonicalRoot)+")") {
+		t.Errorf("profile missing canonical root %q:\n%s", canonicalRoot, profile)
+	}
+	if canonicalRoot != link && strings.Contains(profile, "(subpath "+sbplString(link)+")") {
+		t.Errorf("profile contains non-canonical root symlink %q:\n%s", link, profile)
+	}
+}
+
 // TestCanonicalize_ResolvesSymlink is the FAIL-OPEN regression test. macOS
 // matches sandbox rules against the canonical path, so a rule built from a
 // symlinked path silently never matches and the fence fails open (this exact

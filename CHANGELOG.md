@@ -6,12 +6,18 @@ All notable changes to NockLock will be documented in this file.
 
 ### Changed
 
+- macOS `filesystem.root` now enforces a kernel Seatbelt write boundary (N10722):
+  the canonical profile keeps `(allow default)`, denies all file writes, then
+  allows only the configured root in read-write mode, `.nock`, the invoking
+  user's required temp/cache locations, and required `/dev` pseudo-devices.
+  Phase 1 credential and configured sensitive paths remain denied for reads and
+  writes, including beneath the root. Read confinement outside the root is not
+  claimed.
 - macOS filesystem fencing is now active in `nocklock wrap` (N9222). NockLock
   generates and preflights a canonical Seatbelt (`sandbox-exec`) profile before
   launching the child, then records exactly one `ENGAGED`, `REFUSED-TO-START`,
-  or `DEGRADED` filesystem-fence state. The macOS boundary is an interim
-  sensitive-path denylist, not Linux-style root-only isolation; per-file deny
-  event logging remains a follow-up.
+  or `DEGRADED` filesystem-fence state. Per-file deny event logging remains a
+  follow-up.
 - Added the temporary v0.5-only `filesystem.macos_allow_unfenced = true`
   compatibility escape hatch. It is loud and audit-recorded, applies only when
   Seatbelt cannot be enforced, defaults to false, and is removed in v0.6.

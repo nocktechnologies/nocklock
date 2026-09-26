@@ -5,12 +5,14 @@ NockLock is a Go CLI that wraps AI coding agents with three security fences: fil
 
 **Current state:** The secret and network fences are active. Linux has a
 kernel-enforced root filesystem fence (Landlock plus LD_PRELOAD event logging),
-while macOS has a kernel-enforced Seatbelt sensitive-path denylist. macOS
-records fence state in SQLite; per-file deny events remain a follow-up.
+while macOS has a kernel-enforced Seatbelt write-confinement profile plus
+sensitive-path read/write denies. macOS does not currently confine reads
+outside `filesystem.root`, records fence state in SQLite, and has no per-file
+deny events.
 
 **Target state:** Preserve all three active fence categories while adding an
-Endpoint Security macOS backend for strict root-only isolation and native
-per-file events; optional NockCC cloud dashboard sync remains separate.
+Endpoint Security macOS backend for read confinement and native per-file events;
+optional NockCC cloud dashboard sync remains separate.
 
 ## Package Structure
 
@@ -51,15 +53,17 @@ internal/
 5. With `filesystem.root` configured on Linux, the filesystem fence applies
    Landlock and LD_PRELOAD with libfence_fs.so, then opens a Unix socket for events
 6. With `filesystem.root` configured on macOS, NockLock builds a canonical
-   Seatbelt denylist profile, validates it, and wraps the child with sandbox-exec
+   Seatbelt profile that denies writes outside the root and required runtime
+   paths, preserves sensitive-path read/write denies, validates it, and wraps
+   the child with sandbox-exec
 7. The network fence starts its domain-allowlist proxy when configured
 8. Child process is spawned with the filtered environment and active fence wiring
 9. Filesystem and network decisions are logged to `.nock/events.db`
 10. NockLock exits with the child's exit code
 
 ### Future
-- A macOS Endpoint Security backend can add strict root-only isolation and
-  native per-file deny events.
+- A macOS Endpoint Security backend can add read confinement and native per-file
+  deny events.
 - Optional: events batched and synced to NockCC cloud dashboard
 
 ## Key Design Decisions

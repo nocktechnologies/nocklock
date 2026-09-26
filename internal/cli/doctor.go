@@ -194,7 +194,7 @@ func filesystemDoctorCheck(cfg *config.Config, caps doctorCapabilities) doctorCh
 				fmt.Sprintf("Filesystem fence configured, but macOS Seatbelt is unavailable: %v", err),
 				"install or restore sandbox-exec; wrap will otherwise refuse to start")
 		}
-		return doctorOKCheck("Fences", "filesystem", "enforceable", "Filesystem fence enforceable with the macOS Seatbelt sensitive-path denylist.")
+		return doctorOKCheck("Fences", "filesystem", "enforceable", "Filesystem fence enforceable with macOS Seatbelt root-write confinement and sensitive-path denies.")
 	case "linux":
 		if err := caps.fsBackend(); err != nil {
 			return doctorCriticalCheck("Fences", "filesystem", "configured-but-backend-missing",
