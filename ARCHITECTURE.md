@@ -96,7 +96,9 @@ pkg/
    `sudo -n`; the request travels in a 0600 per-session file whose path rides
    argv, so the caller's stdin reaches the child unchanged (ADR-004). The
    helper creates the namespace, installs the default-drop nftables base,
-   starts the tproxy and DNS sidecars, drops `CAP_NET_ADMIN` and
+   starts the tproxy and DNS sidecars (the DNS stub answers UDP and TCP port 53
+   inside the namespace; direct resolvers, non-DNS UDP, QUIC, SCTP and raw IP
+   get no path out), drops `CAP_NET_ADMIN` and
    `CAP_SYS_ADMIN` from all five capability sets, drops to the invoking user
    and execs the agent, and that exec is the single spawn of the child. If
    privilege cannot be acquired or a sidecar dies, the fence fails closed
@@ -130,7 +132,8 @@ a `*_REQUIRE=1` gate so a skipped test fails instead of reporting green:
 - `netns-protocol-matrix`: allowlisted HTTP and HTTPS succeed end to end,
   non-allowlisted HTTP gets a proxy 403, non-allowlisted TLS is closed at the
   proxy, no-SNI direct-IP TLS is terminated, the fixed DNS stub answers over
-  UDP and TCP, direct resolvers get no reply, UDP/443 and SCTP stay dropped,
+  UDP and TCP inside the namespace, direct resolvers get no reply, UDP/443
+  (QUIC) and SCTP stay dropped,
   curl, Node and Python succeed over the TCP-only path, and proxy death
   terminates the child.
 - `netns-composed-default`: Landlock required, seccomp required, netns and the
