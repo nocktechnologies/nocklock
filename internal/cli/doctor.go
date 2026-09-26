@@ -181,7 +181,7 @@ func filesystemDoctorCheck(cfg *config.Config, caps doctorCapabilities) doctorCh
 	case "darwin":
 		return doctorCriticalCheck("Fences", "filesystem", "configured-but-unsupported",
 			"Filesystem-root fencing is unsupported on macOS; nocklock wrap will refuse filesystem.root rather than run a weaker Seatbelt denylist.",
-			"run NockLock on Linux for filesystem-root isolation or remove filesystem.root")
+			"run NockLock on Linux for filesystem-root isolation or set filesystem.root = \"\" to disable it")
 	case "linux":
 		if err := caps.fsBackend(); err != nil {
 			return doctorCriticalCheck("Fences", "filesystem", "configured-but-backend-missing",

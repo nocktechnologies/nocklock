@@ -52,7 +52,9 @@ Seatbelt (`sandbox-exec`) component is a tested sensitive-path denylist proof,
 but it deliberately uses `allow default`; it cannot satisfy the CLI's
 root-only allowlist contract and is not enabled as a substitute. A future
 macOS backend must prove that it refuses writes outside the configured root
-before this limitation is removed.
+before this limitation is removed. To use the remaining macOS fences without
+filesystem-root isolation, set `filesystem.root = ""` explicitly; omitting the
+key restores the secure default root (`"."`) and therefore still refuses.
 
 ## Tamper-Evident Audit Log (v1)
 

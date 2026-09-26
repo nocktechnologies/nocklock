@@ -200,6 +200,9 @@ func TestFilesystemDoctorCheckDarwinRefusesRootIsolation(t *testing.T) {
 	if !strings.Contains(check.Message, "unsupported on macOS") || !strings.Contains(check.Message, "refuse filesystem.root") {
 		t.Fatalf("darwin filesystem message must name the fail-closed limitation, got %q", check.Message)
 	}
+	if !strings.Contains(check.Fix, "filesystem.root = \"\"") {
+		t.Fatalf("darwin filesystem fix must name the explicit disabled value, got %q", check.Fix)
+	}
 }
 
 func TestDoctorMissingConfigShowsInitHint(t *testing.T) {
