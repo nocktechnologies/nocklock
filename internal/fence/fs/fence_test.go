@@ -15,8 +15,9 @@ import (
 
 func TestIsSupported(t *testing.T) {
 	got := IsSupported()
-	// Linux (LD_PRELOAD) and darwin (Seatbelt) are both supported (N7938).
-	want := runtime.GOOS == "linux" || runtime.GOOS == "darwin"
+	// The shipped CLI's root-only contract is Linux-only. The macOS Seatbelt
+	// component has its own tests but must not be reported as equivalent support.
+	want := runtime.GOOS == "linux"
 	if got != want {
 		t.Errorf("IsSupported() = %v, want %v (GOOS=%s)", got, want, runtime.GOOS)
 	}
@@ -66,7 +67,7 @@ func TestFenceEvent_UnmarshalJSON(t *testing.T) {
 
 func TestNewFence_CreatesSocket(t *testing.T) {
 	if runtime.GOOS != "linux" {
-		t.Skip("LD_PRELOAD fence path is Linux-only; macOS uses Seatbelt (see seatbelt_darwin_test.go)")
+		t.Skip("LD_PRELOAD fence path is Linux-only; macOS Seatbelt component tests are separate")
 	}
 
 	cfg := &FenceConfig{
@@ -98,7 +99,7 @@ func TestNewFence_CreatesSocket(t *testing.T) {
 
 func TestFence_EnvVars(t *testing.T) {
 	if runtime.GOOS != "linux" {
-		t.Skip("LD_PRELOAD fence path is Linux-only; macOS uses Seatbelt (see seatbelt_darwin_test.go)")
+		t.Skip("LD_PRELOAD fence path is Linux-only; macOS Seatbelt component tests are separate")
 	}
 
 	cfg := &FenceConfig{
@@ -138,7 +139,7 @@ func TestFence_EnvVars(t *testing.T) {
 
 func TestFence_ListenReceivesEvents(t *testing.T) {
 	if runtime.GOOS != "linux" {
-		t.Skip("LD_PRELOAD fence path is Linux-only; macOS uses Seatbelt (see seatbelt_darwin_test.go)")
+		t.Skip("LD_PRELOAD fence path is Linux-only; macOS Seatbelt component tests are separate")
 	}
 
 	cfg := &FenceConfig{

@@ -12,12 +12,13 @@ import (
 	"sync"
 )
 
-// IsSupported returns true if the filesystem fence is supported on the current OS.
-// Linux uses LD_PRELOAD interposition; macOS (darwin) uses the Seatbelt sandbox
-// via sandbox-exec (see sbpl.go / seatbelt.go). The wrap command selects the
-// mechanism at launch.
+// IsSupported returns true when the shipped CLI can enforce its root-only
+// filesystem-fence contract on the current OS. Linux uses Landlock with
+// LD_PRELOAD event logging. The macOS Seatbelt component is a sensitive-path
+// denylist proof, not a root-only backend, so wrap deliberately refuses
+// filesystem.root on darwin.
 func IsSupported() bool {
-	return runtime.GOOS == "linux" || runtime.GOOS == "darwin"
+	return runtime.GOOS == "linux"
 }
 
 // CheckSupported returns an error if the filesystem fence is not supported
@@ -27,7 +28,7 @@ func CheckSupported() error {
 		return nil
 	}
 	return fmt.Errorf(
-		"filesystem fence is not supported on %s (supported: linux via LD_PRELOAD, darwin via Seatbelt)",
+		"filesystem fence is not supported on %s (supported: linux via Landlock and LD_PRELOAD)",
 		runtime.GOOS,
 	)
 }
