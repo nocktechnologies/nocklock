@@ -134,10 +134,22 @@ enforcement = "off"
 		t.Fatalf("nocklock wrap --net-fence=netns failed: %v\n%s", err, out)
 	}
 
-	// Open the event log and assert both signed rows are present, naming their
-	// hosts. Query by EventType + Detail substring — the wrap sessionID is a uuid
-	// generated inside wrap and not observable here.
-	dbPath := filepath.Join(nockDir, "events.db")
+	// Both decisions must land signed, and the chain must verify.
+	assertBothEgressDecisionsSigned(t, bin, projectDir)
+}
+
+// assertBothEgressDecisionsSigned opens the audit log a wrapped netns session
+// wrote under projectDir and asserts BOTH egress decisions landed signed: an
+// allow row naming example.com:443 and a deny row naming blocked.test:80. It
+// then runs `nocklock verify --audit`, which exits 0 only when the chain is
+// intact AND every signature verifies — the authoritative "signed, chained"
+// assertion. Query by EventType + Detail substring: the wrap sessionID is a uuid
+// generated inside wrap and not observable here. Shared by the egress-audit and
+// composed-default acceptance tests, which differ only in the fence config they
+// wrap with, not in this post-run verdict.
+func assertBothEgressDecisionsSigned(t *testing.T, bin, projectDir string) {
+	t.Helper()
+	dbPath := filepath.Join(projectDir, ".nock", "events.db")
 	logger, err := logging.NewLogger(dbPath, projectDir, signingLoggerOpts()...)
 	if err != nil {
 		t.Fatalf("open event log at %s: %v", dbPath, err)
@@ -162,9 +174,6 @@ enforcement = "off"
 		t.Errorf("no signed EventNetworkBlocked row naming blocked.test:80; got deny rows: %s", detailList(denyRows))
 	}
 
-	// The chain + signatures: `nocklock verify --audit` exits 0 only when the
-	// audit chain is intact AND every signature verifies (CONSISTENT). That is the
-	// authoritative "signed, chained" assertion for the two rows above.
 	verify := exec.Command(bin, "verify", "--audit")
 	verify.Dir = projectDir
 	verify.Env = os.Environ()

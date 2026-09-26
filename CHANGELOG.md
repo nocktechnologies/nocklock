@@ -6,6 +6,32 @@ All notable changes to NockLock will be documented in this file.
 
 ### Fixed
 
+- Default fence composition (`nocklock wrap --net-fence=netns` with Landlock and
+  seccomp on) no longer fails to run for a project in a normal working directory
+  (N10710):
+  - The per-session egress decision directory now lives under the audit state
+    root (`<state>/.nock/sessions/<id>/egress`) instead of the system temp dir.
+    The default filesystem preset GRANTs `/tmp`, and Landlock is allow-only, so
+    the old `os.MkdirTemp("", …)` location put the directory in an
+    always-granted tree — its child-deny then overlapped that grant and Landlock
+    rule generation was rejected for EVERY default netns wrap, whatever the
+    project's location. The new location is enforceable because
+    `rootPathRules` skips the `.nock` child of the filesystem root, so the deny
+    sits outside every granted tree. (A project physically under a granted
+    ancestor — e.g. rooted inside `/tmp` or `~/.claude` — still hits the same
+    grant/deny overlap for both this dir and the pre-existing audit-DB deny;
+    that broader grant/deny reconciliation is out of scope here.)
+  - `buildSyscallPolicy` now takes the active network-fence mode explicitly. In
+    netns mode the child keeps its configured `inet`/`inet6` socket families
+    (the kernel default-drop plus transparent proxy is the egress boundary);
+    only the userspace-proxy mode still narrows the child to `unix` sockets.
+    Previously any `allow_all=false` config forced `unix`-only, which blocked all
+    IP egress under the netns fence even for allowlisted hosts.
+  - `nocklock doctor`'s "network allowlist is inert under the syscall fence"
+    warning no longer misreports the netns posture: it now names the
+    `--net-fence=netns` escape (where the child keeps IP sockets and the kernel
+    egress floor enforces the allowlist) instead of unconditionally advising
+    `[syscall] enforcement = "off"`, which would have downgraded the fence.
 - The CLI now compiles on darwin again: the non-Linux `netns.EgressConfig` stub
   gained the `DecisionLogPath` field that `wrap.go` assigns cross-platform, which
   N10649 added only to the Linux struct (broke `GOOS=darwin go build ./...` at
@@ -13,6 +39,18 @@ All notable changes to NockLock will be documented in this file.
   run. CI now guards this: the ubuntu job cross-builds for darwin on every push,
   and the macOS job builds, vets and runs the non-root unit suite natively
   (seven darwin test-portability cases skipped by name pending N10714).
+
+### Added
+
+- Composed-default acceptance test (`TestWrapComposedDefaultEgressAudit`, root/CI
+  only) drives the full default stack — Landlock (required) + seccomp (required)
+  + netns egress + signed audit — through `nocklock wrap` with a real child:
+  one allowlisted fetch is permitted, one off-allowlist fetch is refused, both
+  decisions land signed in the audit chain, and `nocklock verify --audit`
+  confirms the chain and signatures. Runs in a new privileged Linux CI job
+  (`netns-composed-default`). An unprivileged unit test
+  (`TestEgressDecisionDirIsLandlockEnforceable`) pins the decision-dir fix and
+  fails on the old `/tmp` path.
 
 ### Changed
 

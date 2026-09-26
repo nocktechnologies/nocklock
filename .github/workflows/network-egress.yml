@@ -259,6 +259,60 @@ jobs:
           NOCKLOCK_AUDIT_REQUIRE=1 NOCKLOCK_TEST_BIN=/usr/local/bin/nocklock \
             go test ./internal/cli/ -run '^TestWrapNetnsEgressDecisionAudit$' -v -count=1
 
+  netns-composed-default:
+    name: netns composed default · Landlock+seccomp+netns+audit compose (root)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: provision iproute2 + nftables + curl + gcc
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y iproute2 nftables curl build-essential
+
+      # Same install shape as netns-egress-audit: build the binary the acceptance
+      # test drives and install the privileged helper the way the HOST INSTALLER
+      # would (fixed root-owned entry mapping the sudoers vectors onto the binary).
+      - name: build nocklock and install the privileged egress helper
+        run: |
+          go build -o nocklock ./cmd/nocklock
+          sudo install -m 0755 nocklock /usr/local/bin/nocklock
+          sudo mkdir -p /usr/libexec
+          sudo tee /usr/libexec/nocklock-egress-helper >/dev/null <<'EOF'
+          #!/bin/sh
+          exec /usr/local/bin/nocklock __netns-helper "$@"
+          EOF
+          sudo chmod 0755 /usr/libexec/nocklock-egress-helper
+          sudo -n /usr/libexec/nocklock-egress-helper check && echo "helper preflight OK"
+
+      # This test keeps the filesystem fence ON with Landlock ENFORCED (unlike
+      # netns-egress-audit, which sets linux_enforcement="off"), so wrap needs the
+      # trusted LD_PRELOAD interposer installed to a trusted search path.
+      - name: build and install the filesystem-fence interposer (libfence_fs.so)
+        run: |
+          make build-fence-fs
+          sudo mkdir -p /usr/local/lib/nocklock
+          sudo install -m 0755 internal/fence/fs/interposer/libfence_fs.so \
+            /usr/local/lib/nocklock/libfence_fs.so
+          ls -l /usr/local/lib/nocklock/libfence_fs.so
+
+      # Run AS THE RUNNER USER (not sudo): wrap sudo's the helper itself and the
+      # fenced child drops to the invoking uid. Reuses the NOCKLOCK_AUDIT_REQUIRE
+      # gate (shared with netns-egress-audit) so a helper/sudo-unreachable runner
+      # HARD-FAILS instead of green-skipping. The test bakes the composed default
+      # (Landlock required + seccomp required + netns + audit) into its own config.
+      - name: run composed-default acceptance test (runner user, skips forbidden)
+        run: |
+          NOCKLOCK_AUDIT_REQUIRE=1 NOCKLOCK_TEST_BIN=/usr/local/bin/nocklock \
+            go test ./internal/cli/ -run '^TestWrapComposedDefaultEgressAudit$' -v -count=1
+
   egress-helper-install-readme:
     name: egress helper install · shipped installer (README path)
     runs-on: ubuntu-latest
