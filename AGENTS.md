@@ -4,7 +4,7 @@
 NockLock is an AI agent security fence. Go CLI that wraps coding agents with filesystem, network, and secret isolation.
 
 ## Stack
-- Go 1.22+
+- Go 1.26 or newer
 - cobra (CLI framework)
 - BurntSushi/toml (config parser)
 - SQLite (event logging, PR #4)
