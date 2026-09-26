@@ -7,6 +7,7 @@ import (
 	"database/sql"
 	"encoding/binary"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -181,24 +182,76 @@ func validatePath(dbPath, projectRoot string) error {
 		return fmt.Errorf("path traversal detected in DB path: %q", dbPath)
 	}
 	if projectRoot != "" {
-		// Resolve symlinks to prevent symlink-based escapes.
-		resolvedPath, err := filepath.EvalSymlinks(filepath.Dir(cleaned))
-		if err == nil {
-			resolvedPath = filepath.Join(resolvedPath, filepath.Base(cleaned))
-		} else {
-			// Directory doesn't exist yet — use the cleaned path.
-			resolvedPath = cleaned
+		// Canonicalize both sides into the same symlink frame before the
+		// containment check: resolve the DB directory and the project root so an
+		// in-root path is not falsely rejected on macOS (where /tmp and
+		// /var/folders are /private/* symlinks). The final DB component is left
+		// unresolved so a symlink AT the DB path is still caught by the
+		// Lstat/O_NOFOLLOW guard below rather than followed here.
+		resolvedDir, err := resolveDeepestExisting(filepath.Dir(cleaned))
+		if err != nil {
+			return fmt.Errorf("cannot canonicalize DB path %q under project root %q: %w", dbPath, projectRoot, err)
 		}
+		resolvedPath := filepath.Join(resolvedDir, filepath.Base(cleaned))
 		resolvedRoot, err := filepath.EvalSymlinks(projectRoot)
 		if err != nil {
 			resolvedRoot = filepath.Clean(projectRoot)
 		}
+		// Compare at component boundaries: rel is ".." or "../…" only when
+		// resolvedPath is outside root. A bare strings.HasPrefix(rel, "..") would
+		// also reject an in-root child literally named "..evil".
 		rel, err := filepath.Rel(resolvedRoot, resolvedPath)
-		if err != nil || strings.HasPrefix(rel, "..") {
+		if err != nil || rel == ".." || strings.HasPrefix(rel, ".."+string(os.PathSeparator)) {
 			return fmt.Errorf("DB path %q resolves outside project root %q", dbPath, projectRoot)
 		}
 	}
 	return nil
+}
+
+// resolveDeepestExisting canonicalizes dir by resolving symlinks in its deepest
+// existing ancestor and rejoining the components that do not exist yet, so
+// validatePath's containment check compares both sides in the same symlink
+// frame even when the audit directory has not been created.
+//
+// The walk steps over a component ONLY when that component is genuinely absent
+// (its own Lstat reports "does not exist"); it then treats the raw name as a
+// not-yet-created child and continues upward. Any other state fails closed
+// rather than degrading to the raw frame — the raw frame is exactly where a
+// symlinked ancestor could escape the project root undetected. That includes:
+//   - an EvalSymlinks failure that is not "does not exist" (a symlink loop, a
+//     permission-blocked or non-directory ancestor); and
+//   - a DANGLING symlink: EvalSymlinks reports the missing target as "does not
+//     exist", but the symlink entry itself is present, so Lstat succeeds. Left
+//     unchecked this would carry the symlink's raw name up the walk as if it
+//     were a plain new directory and admit an out-of-root target.
+func resolveDeepestExisting(dir string) (string, error) {
+	dir = filepath.Clean(dir)
+	tail := ""
+	for {
+		resolved, err := filepath.EvalSymlinks(dir)
+		if err == nil {
+			return filepath.Join(resolved, tail), nil
+		}
+		if !errors.Is(err, os.ErrNotExist) {
+			return "", err
+		}
+		// EvalSymlinks reported a missing path. Lstat (which does not follow the
+		// final component) tells us whether THIS component is truly absent or is
+		// a present-but-unresolvable entry such as a dangling symlink.
+		if _, lerr := os.Lstat(dir); lerr == nil {
+			return "", fmt.Errorf("ancestor %q exists but cannot be resolved: %w", dir, err)
+		} else if !errors.Is(lerr, os.ErrNotExist) {
+			return "", lerr
+		}
+		parent := filepath.Dir(dir)
+		if parent == dir {
+			// No existing ancestor (e.g. reached the filesystem root); fall back
+			// to the cleaned path so containment is still checked, not skipped.
+			return filepath.Join(dir, tail), nil
+		}
+		tail = filepath.Join(filepath.Base(dir), tail)
+		dir = parent
+	}
 }
 
 // NewLogger opens or creates the SQLite database at dbPath.

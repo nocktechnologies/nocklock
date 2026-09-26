@@ -154,3 +154,99 @@ func TestSecurity_SymlinkSwapAfterCreateRejected(t *testing.T) {
 		t.Errorf("expected symlink error on reopen, got: %v", err)
 	}
 }
+
+// TestSecurity_SymlinkedAncestorWithMissingTailRejected is the negative control
+// for validatePath's deepest-existing-ancestor resolution: an intermediate
+// directory that is a symlink OUT of the project must be rejected even when the
+// components below it (and the DB file itself) do not exist yet — so the final
+// Lstat/O_NOFOLLOW guard never gets a path to inspect. Resolving only the
+// existing ancestor is what catches the escape; leaving the DB path unresolved
+// would let it through and then create the audit tree through the symlink.
+func TestSecurity_SymlinkedAncestorWithMissingTailRejected(t *testing.T) {
+	root := t.TempDir()
+	outside := t.TempDir()
+
+	// root/link -> outside (an existing symlinked ancestor); the DB lives at a
+	// path BELOW it whose intermediate dir and file do not exist yet.
+	if err := os.Symlink(outside, filepath.Join(root, "link")); err != nil {
+		t.Skipf("symlinks unsupported: %v", err)
+	}
+	dbPath := filepath.Join(root, "link", "sub", "events.db")
+
+	l, err := NewLogger(dbPath, root)
+	if err == nil {
+		if l != nil {
+			l.Close()
+		}
+		t.Fatal("expected NewLogger to reject a DB path reached through a symlinked ancestor")
+	}
+	if !strings.Contains(err.Error(), "resolves outside project root") {
+		t.Errorf("expected outside-root rejection, got: %v", err)
+	}
+
+	// The escape must not have been created through the symlink.
+	if _, serr := os.Stat(filepath.Join(outside, "sub")); serr == nil {
+		t.Error("audit tree was created through the symlinked ancestor — the escape was followed")
+	}
+}
+
+// TestSecurity_DanglingSymlinkAncestorRejected covers a symlinked ancestor whose
+// target does not exist yet: EvalSymlinks reports the missing target as "does not
+// exist", so a naive walk would step over the symlink as if it were a plain
+// not-yet-created directory and admit an out-of-root DB path. The Lstat check
+// must catch that the symlink entry itself is present and fail closed — before
+// MkdirAll/OpenFile ever run, closing the TOCTOU window where the target could
+// be created between the check and the write.
+func TestSecurity_DanglingSymlinkAncestorRejected(t *testing.T) {
+	root := t.TempDir()
+
+	// .nock is a symlink to a path OUTSIDE the project that does not exist.
+	target := filepath.Join(t.TempDir(), "not-created-yet")
+	if err := os.Symlink(target, filepath.Join(root, ".nock")); err != nil {
+		t.Skipf("symlinks unsupported: %v", err)
+	}
+	dbPath := filepath.Join(root, ".nock", "events.db")
+
+	l, err := NewLogger(dbPath, root)
+	if err == nil {
+		if l != nil {
+			l.Close()
+		}
+		t.Fatal("expected NewLogger to reject a DB path under a dangling symlinked ancestor")
+	}
+	if !strings.Contains(err.Error(), "cannot canonicalize DB path") {
+		t.Errorf("expected fail-closed canonicalization error, got: %v", err)
+	}
+
+	// The escape target must not have been created through the symlink.
+	if _, serr := os.Stat(target); serr == nil {
+		t.Error("escape target was created through the dangling symlink — the symlink was followed")
+	}
+}
+
+// TestSecurity_UnresolvableAncestorFailsClosed is the negative control for the
+// non-ENOENT branch of validatePath's ancestor resolution: an ancestor that
+// cannot be canonicalized (here a symlink loop → ELOOP, not "does not exist")
+// must fail closed rather than fall back to the raw path frame, which is where a
+// symlinked ancestor could otherwise escape the root undetected.
+func TestSecurity_UnresolvableAncestorFailsClosed(t *testing.T) {
+	root := t.TempDir()
+
+	// A self-referential symlink: EvalSymlinks(root/loop) returns ELOOP, which is
+	// not os.ErrNotExist, so the walk must refuse rather than treat it as absent.
+	if err := os.Symlink("loop", filepath.Join(root, "loop")); err != nil {
+		t.Skipf("symlinks unsupported: %v", err)
+	}
+	dbPath := filepath.Join(root, "loop", "events.db")
+
+	l, err := NewLogger(dbPath, root)
+	if err == nil {
+		if l != nil {
+			l.Close()
+		}
+		t.Fatal("expected NewLogger to reject a DB path under an unresolvable (looping) ancestor")
+	}
+	if !strings.Contains(err.Error(), "cannot canonicalize DB path") {
+		t.Errorf("expected fail-closed canonicalization error, got: %v", err)
+	}
+}

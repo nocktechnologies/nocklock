@@ -6,6 +6,32 @@ All notable changes to NockLock will be documented in this file.
 
 ### Fixed
 
+- The audit logger no longer refuses to start on first run when the project is
+  reached through a symlinked path (N10714). `validatePath` resolved the project
+  root's symlinks but left the not-yet-created DB path in its raw frame, so on
+  macOS — where `/tmp` and `/var/folders` are `/private/*` symlinks — an in-root
+  `.nock/events.db` was falsely reported as "resolves outside project root" and
+  `wrap` failed closed on logger open. It now resolves the deepest existing
+  ancestor of the DB directory and rejoins the missing tail, keeping both sides
+  of the containment check in the same frame; the final DB component is still
+  left unresolved so a symlink AT the DB path is caught by the `O_NOFOLLOW`
+  guard. A symlinked *intermediate* ancestor escaping the root is now rejected
+  even when the tail does not exist yet (previously admitted). An ancestor that
+  is present but cannot be canonicalized — a dangling symlink (its target
+  absent), a symlink loop, or a permission-blocked / non-directory component —
+  now fails closed instead of degrading to the raw path frame, closing the
+  TOCTOU window where a dangling symlink's target could be created between the
+  check and the write. All are covered by negative-control tests.
+- The macOS unit suite now runs in full on the `macos-enforce` CI job: the seven
+  darwin test-portability failures are fixed and the `-skip` name list is
+  removed (N10714). The landlock rule-comparison tests normalise the temp root
+  with `filepath.EvalSymlinks` (matching `RulesFromConfig`'s own
+  canonicalization), the `wrap --dry-run` embedded-profile test asserts the
+  documented macOS Seatbelt `filesystem.root` refusal per-platform, and
+  `verifySkipReason` keys its Linux-only backend checks off the stubbable
+  `caps.goos` instead of `runtime.GOOS` (a no-op in production) so verify's skip
+  accounting is platform-deterministic under test.
+
 - Default fence composition (`nocklock wrap --net-fence=netns` with Landlock and
   seccomp on) no longer fails to run for a project in a normal working directory
   (N10710):

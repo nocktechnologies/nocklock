@@ -448,6 +448,16 @@ func TestWrapDryRunProfileUsesEmbeddedBaseWithoutConfig(t *testing.T) {
 	stdout := captureStdout(t, func() {
 		runErr = wrapCmd.RunE(cmd, []string{"--profile", "codex", "--dry-run"})
 	})
+	if runtime.GOOS == "darwin" {
+		// The codex base profile sets filesystem.root, which macOS Seatbelt
+		// cannot enforce as a root-only sandbox: dry-run must fail closed with
+		// the documented refusal instead of printing a policy (the same posture
+		// TestWrapDryRunFailsClosedForMacOSFilesystemRoot proves from a config).
+		if runErr == nil || !strings.Contains(runErr.Error(), "filesystem.root cannot be enforced as a root-only sandbox on macOS") {
+			t.Fatalf("expected macOS Seatbelt root-only refusal, got err=%v out=%s", runErr, stdout)
+		}
+		return
+	}
 	if runErr != nil {
 		t.Fatalf("dry run profile should not require project config: %v", runErr)
 	}
