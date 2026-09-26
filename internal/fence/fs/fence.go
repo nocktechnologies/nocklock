@@ -12,13 +12,11 @@ import (
 	"sync"
 )
 
-// IsSupported returns true when the shipped CLI can enforce its root-only
-// filesystem-fence contract on the current OS. Linux uses Landlock with
-// LD_PRELOAD event logging. The macOS Seatbelt component is a sensitive-path
-// denylist proof, not a root-only backend, so wrap deliberately refuses
-// filesystem.root on darwin.
+// IsSupported returns true when the shipped CLI can enforce its filesystem
+// fence contract on the current OS. Linux uses Landlock with LD_PRELOAD event
+// logging. macOS uses a kernel-enforced Seatbelt sensitive-path denylist.
 func IsSupported() bool {
-	return runtime.GOOS == "linux"
+	return runtime.GOOS == "linux" || runtime.GOOS == "darwin"
 }
 
 // CheckSupported returns an error if the filesystem fence is not supported
@@ -28,7 +26,7 @@ func CheckSupported() error {
 		return nil
 	}
 	return fmt.Errorf(
-		"filesystem fence is not supported on %s (supported: linux via Landlock and LD_PRELOAD)",
+		"filesystem fence is not supported on %s (supported: linux via Landlock and LD_PRELOAD; macOS via Seatbelt)",
 		runtime.GOOS,
 	)
 }
@@ -65,12 +63,13 @@ type Fence struct {
 	listener   net.Listener
 }
 
-// NewFence creates a filesystem fence with a Unix domain socket.
-// Returns an error if the OS is not supported. The caller must call Close
-// when the fence is no longer needed to clean up the socket and temp directory.
+// NewFence creates the Linux LD_PRELOAD filesystem-event listener with a Unix
+// domain socket. macOS callers use the separate Seatbelt profile path instead.
+// The caller must call Close when the fence is no longer needed to clean up the
+// socket and temp directory.
 func NewFence(cfg *FenceConfig, libPath string) (*Fence, error) {
-	if err := CheckSupported(); err != nil {
-		return nil, err
+	if runtime.GOOS != "linux" {
+		return nil, fmt.Errorf("LD_PRELOAD filesystem event listener is only available on linux; macOS uses Seatbelt profiles")
 	}
 
 	tmpDir, err := os.MkdirTemp("", "nocklock-fs-*")

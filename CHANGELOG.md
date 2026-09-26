@@ -6,12 +6,15 @@ All notable changes to NockLock will be documented in this file.
 
 ### Changed
 
-- macOS filesystem-root support is now stated consistently across the product
-  documentation (N10712). The shipped CLI already refuses to launch when
-  `filesystem.root` is set on macOS, because the tested Seatbelt component is
-  an allow-default sensitive-path denylist rather than the root-only boundary
-  that the configuration promises. The architecture document now also reflects
-  the shipped network fence instead of describing it as planned.
+- macOS filesystem fencing is now active in `nocklock wrap` (N9222). NockLock
+  generates and preflights a canonical Seatbelt (`sandbox-exec`) profile before
+  launching the child, then records exactly one `ENGAGED`, `REFUSED-TO-START`,
+  or `DEGRADED` filesystem-fence state. The macOS boundary is an interim
+  sensitive-path denylist, not Linux-style root-only isolation; per-file deny
+  event logging remains a follow-up.
+- Added the temporary v0.5-only `filesystem.macos_allow_unfenced = true`
+  compatibility escape hatch. It is loud and audit-recorded, applies only when
+  Seatbelt cannot be enforced, defaults to false, and is removed in v0.6.
 
 ### Fixed
 
@@ -64,8 +67,8 @@ All notable changes to NockLock will be documented in this file.
   darwin test-portability failures are fixed and the `-skip` name list is
   removed (N10714). The landlock rule-comparison tests normalise the temp root
   with `filepath.EvalSymlinks` (matching `RulesFromConfig`'s own
-  canonicalization), the `wrap --dry-run` embedded-profile test asserts the
-  documented macOS Seatbelt `filesystem.root` refusal per-platform, and
+  canonicalization), the `wrap --dry-run` embedded-profile test accepts the
+  configured macOS Seatbelt denylist per-platform, and
   `verifySkipReason` keys its Linux-only backend checks off the stubbable
   `caps.goos` instead of `runtime.GOOS` (a no-op in production) so verify's skip
   accounting is platform-deterministic under test.
@@ -123,6 +126,13 @@ All notable changes to NockLock will be documented in this file.
 
 ### Added
 
+- Local `nocklock scan [path ...]` with `--env` and `--json`, bounded detection of
+  AWS access-key IDs, GitHub token formats and private-key headers, and reports
+  that contain locations rather than secret values. Optional `[secrets]`
+  `scan_env` / `scan_paths` preflight prevents `wrap` from launching on findings,
+  incomplete scans or audit-write failure. Existing configurations keep their
+  behavior, and profile overlays cannot weaken enabled checks. This is a
+  prelaunch check, not runtime redaction or complete secret detection.
 - `pkg/receipt` tail evidence: `VerifySession` now reads the signed chain head
   (the same reader `nocklock verify` uses, exported as
   `logging.ReadChainHead`) and reports `TailVerified` and `TailReason`. `INTACT`

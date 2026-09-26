@@ -27,6 +27,9 @@ func restrictOverlay(base, overlay Config, fields map[string]bool) Config {
 	if fields["filesystem.linux_enforcement"] {
 		cfg.Filesystem.LinuxEnforcement = restrictiveEnforcement(base.Filesystem.LinuxEnforcement, overlay.Filesystem.LinuxEnforcement)
 	}
+	// An overlay may turn the temporary macOS escape hatch OFF, but never ON:
+	// profile overlays can only tighten the base fence.
+	cfg.Filesystem.MacOSAllowUnfenced = base.Filesystem.MacOSAllowUnfenced && overlay.Filesystem.MacOSAllowUnfenced
 	cfg.Filesystem.Hardened = base.Filesystem.Hardened || overlay.Filesystem.Hardened
 
 	if fields["network.allow"] {
@@ -45,6 +48,9 @@ func restrictOverlay(base, overlay Config, fields map[string]bool) Config {
 	if fields["secrets.block"] {
 		cfg.Secrets.Block = unionStrings(base.Secrets.Block, overlay.Secrets.Block)
 	}
+	cfg.Secrets.ScanEnv = base.Secrets.ScanEnv || overlay.Secrets.ScanEnv
+	cfg.Secrets.ScanPaths = unionStrings(base.Secrets.ScanPaths, overlay.Secrets.ScanPaths)
+	cfg.Secrets.ScanEnvAllow = intersectStrings(base.Secrets.ScanEnvAllow, overlay.Secrets.ScanEnvAllow)
 
 	if fields["syscall.enforcement"] {
 		cfg.Syscall.Enforcement = restrictiveEnforcement(base.Syscall.Enforcement, overlay.Syscall.Enforcement)
@@ -92,6 +98,8 @@ func cloneConfig(cfg Config) Config {
 	cfg.Network.Allow = append([]string(nil), cfg.Network.Allow...)
 	cfg.Secrets.Pass = append([]string(nil), cfg.Secrets.Pass...)
 	cfg.Secrets.Block = append([]string(nil), cfg.Secrets.Block...)
+	cfg.Secrets.ScanPaths = append([]string(nil), cfg.Secrets.ScanPaths...)
+	cfg.Secrets.ScanEnvAllow = append([]string(nil), cfg.Secrets.ScanEnvAllow...)
 	cfg.Syscall.SocketFamilies = append([]string(nil), cfg.Syscall.SocketFamilies...)
 	cfg.Syscall.ExtraDeny = append([]string(nil), cfg.Syscall.ExtraDeny...)
 	return cfg
@@ -144,6 +152,8 @@ func addMetadataFields(fields map[string]bool, md toml.MetaData) {
 		"root":                 "root",
 		"linuxenforcement":     "linux_enforcement",
 		"linux_enforcement":    "linux_enforcement",
+		"macosallowunfenced":   "macos_allow_unfenced",
+		"macos_allow_unfenced": "macos_allow_unfenced",
 		"allowall":             "allow_all",
 		"allow_all":            "allow_all",
 		"allowprivateranges":   "allow_private_ranges",

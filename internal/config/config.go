@@ -48,6 +48,11 @@ type FilesystemConfig struct {
 	LinuxEnforcement string   `toml:"linux_enforcement"`
 	Allow            []string `toml:"allow"`
 	Deny             []string `toml:"deny"`
+	// MacOSAllowUnfenced is a temporary macOS-only escape hatch. When true,
+	// wrap records a DEGRADED fence state and starts the child only if Seatbelt
+	// cannot be applied. It is scheduled for removal in v0.6; false is the
+	// secure, fail-closed default.
+	MacOSAllowUnfenced bool `toml:"macos_allow_unfenced"`
 	// Hardened opts in to the stricter macOS Seatbelt rules (deny
 	// mach-priv-host-port, iokit-open, system-socket; tightened /dev). It is a
 	// no-op on Linux. Absent/false = no behaviour change.
@@ -80,10 +85,16 @@ type NetworkConfig struct {
 	AllowPrivateRanges bool     `toml:"allow_private_ranges"`
 }
 
-// SecretsConfig defines environment variable filtering rules.
+// SecretsConfig defines environment filtering and optional secret preflight checks.
 type SecretsConfig struct {
 	Pass  []string `toml:"pass"`
 	Block []string `toml:"block"`
+	// ScanEnv checks values remaining after filtering before the child starts.
+	ScanEnv bool `toml:"scan_env"`
+	// ScanPaths selects project-relative files/directories for required preflight.
+	ScanPaths []string `toml:"scan_paths"`
+	// ScanEnvAllow exempts exact environment names from value scanning, never filtering.
+	ScanEnvAllow []string `toml:"scan_env_allow"`
 }
 
 // LoggingConfig configures local event logging.

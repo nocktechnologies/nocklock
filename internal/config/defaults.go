@@ -35,6 +35,8 @@ func DefaultConfig() Config {
 			AllowAll: false,
 		},
 		Secrets: SecretsConfig{
+			ScanPaths:    []string{},
+			ScanEnvAllow: []string{},
 			Pass: []string{
 				"HOME",
 				"PATH",
@@ -81,6 +83,10 @@ root = "."
 root = "."
 mode = "read-write"
 linux_enforcement = "required"
+# TEMPORARY macOS v0.5 compatibility escape hatch. When true, a missing or
+# rejected Seatbelt profile is logged as DEGRADED and the child runs unfenced.
+# It is removed in v0.6; leave false for the fail-closed security default.
+macos_allow_unfenced = false
 allow = [
     "~/.claude/",
     "/tmp/",
@@ -105,6 +111,11 @@ allow = [
 allow_all = false
 
 [secrets]
+# Optional local preflight. A finding or incomplete scan prevents launch.
+# Paths are relative to the project containing this .nock directory.
+scan_env = false
+scan_paths = []
+scan_env_allow = []
 pass = [
     "HOME",
     "PATH",

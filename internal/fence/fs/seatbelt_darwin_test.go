@@ -86,3 +86,20 @@ func TestSeatbeltEnforcement_RealSandboxExec(t *testing.T) {
 		t.Errorf("FENCE LEAKED SECRET: output contained the secret: %q", out)
 	}
 }
+
+// TestValidateProfileRejectsMalformedProfile is the negative control for wrap's
+// preflight gate: a profile that sandbox-exec rejects must be caught before an
+// agent command is ever assembled or launched.
+func TestValidateProfileRejectsMalformedProfile(t *testing.T) {
+	requireSandboxExec(t)
+
+	pf, err := WriteProfile("(version 1")
+	if err != nil {
+		t.Fatalf("WriteProfile: %v", err)
+	}
+	defer os.Remove(pf)
+
+	if err := ValidateProfile(pf); err == nil {
+		t.Fatal("ValidateProfile accepted malformed SBPL; wrap could falsely report ENGAGED")
+	}
+}

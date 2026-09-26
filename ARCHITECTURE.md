@@ -13,13 +13,13 @@ DNS allowlist, set up by a root-owned helper over a constrained sudo grant).
 All fence events are logged to a tamper-evident SQLite audit log: a SHA-256
 hash chain (v1), Ed25519 signatures over the rows and the chain head (v1.1),
 and an external chain-head anchor that can be pushed off-box (v1.2). macOS
-supports secret and network fencing, but the shipped CLI deliberately refuses
-a configured `filesystem.root`: its Seatbelt component is an allow-default
-sensitive-path denylist, not a root-only filesystem boundary.
+has a kernel-enforced Seatbelt sensitive-path denylist (not a root-only
+boundary) and records its filesystem-fence state in SQLite; per-file deny
+events remain a follow-up.
 
-**Target state:** Preserve all three active fence categories while adding a
-macOS filesystem backend only when it can prove the same root-only boundary as
-the Linux path; optional NockCC cloud dashboard sync remains separate.
+**Target state:** Preserve all three active fence categories while adding an
+Endpoint Security macOS backend for strict root-only isolation and native
+per-file events; optional NockCC cloud dashboard sync remains separate.
 
 ## Package Structure
 
@@ -33,6 +33,7 @@ internal/
     config.go           Prints current config to stdout
     validate.go         Validates a config file and prints the effective policy
     doctor.go           Reports whether each fence can be enforced on this host
+    scan.go             `scan` command: secret preflight over selected paths and, with --env, the environment
     verify.go           Adversarial fence self-test; --audit verifies the audit chain and anchors
     anchor.go           `anchor emit` and `anchor push` for the external chain-head anchor
     anchor_push.go      Wrap-teardown off-box anchor push (5s, fail-open); strips NOCKLOCK_ANCHOR_URL/TOKEN from the child
@@ -52,7 +53,8 @@ internal/
 
   fence/                Fence implementations
     secrets/            Secret fence — environment variable filtering (pass/block lists)
-    fs/                 Filesystem fence — config processing, Linux enforcement, Seatbelt profile component
+                        scan.go: preflight credential-shape scanner (os.Root traversal, bounded, run before `wrap` launches the child)
+    fs/                 Filesystem fence — config processing, Linux enforcement, macOS Seatbelt enforcement
       interposer/       C shared library for LD_PRELOAD interception (Linux only)
       landlock/         Landlock ruleset generation (Linux only)
     syscallfence/       seccomp syscall fence: socket-family and syscall denylist policy
@@ -71,25 +73,36 @@ pkg/
 1. User runs `nocklock wrap -- claude --dangerously-skip-permissions`
 2. CLI parses args, loads `.nock/config.toml` (walks up directory tree)
 3. Initialize fence engines — if any fence fails to init, abort (fail closed)
-4. Secret fence filters environment variables (pass/block lists)
+4. Secret fence filters environment variables (pass/block lists). When `[secrets]` scan
+   settings are configured, the secret preflight then scans the selected paths
+   and the filtered environment, and a finding or incomplete scan refuses
+   launch and is written to the audit chain (README, "Secret preflight scanning")
 5. With `filesystem.root` configured on Linux, the filesystem fence applies
    Landlock and LD_PRELOAD with libfence_fs.so, then opens a Unix socket for events
-6. With `filesystem.root` configured on macOS, NockLock refuses before child
-   launch because Seatbelt cannot provide the requested root-only boundary
+6. With `filesystem.root` configured on macOS, NockLock builds a canonical
+   Seatbelt denylist profile of curated credential and sensitive paths,
+   validates it with `sandbox-exec`, and wraps the child with it. The root value
+   itself is not enforced as a boundary. Exactly one fence state is recorded
+   before launch: ENGAGED, REFUSED-TO-START (the default when the profile
+   cannot be applied) or DEGRADED (only via the explicit `filesystem.root = ""`
+   or the temporary `filesystem.macos_allow_unfenced` escape hatch)
 7. On Linux with `[syscall] enforcement` on, the seccomp fence is installed in
    the child. In the default proxy mode it narrows the child to Unix-domain
    sockets; under `--net-fence=netns` the child keeps its configured IP socket
    families because the kernel floor is the boundary
-8. The network fence starts its domain-allowlist proxy when configured. With
-   `--net-fence=netns` (Linux only) `wrap` instead hands the composed child to
-   the privileged helper over `sudo -n`; the request travels in a 0600
-   per-session file whose path rides argv, so the caller's stdin reaches the
-   child unchanged (ADR-004). The helper creates the namespace, installs the
-   default-drop nftables base, starts the tproxy and DNS sidecars, drops
-   `CAP_NET_ADMIN` and `CAP_SYS_ADMIN` from all five capability sets, drops to
-   the invoking user and execs the agent. If privilege cannot be acquired or a
-   sidecar dies, the fence fails closed
-9. Child process is spawned with the filtered environment and active fence wiring
+8. The network fence is configured. In the default proxy mode it starts the
+   domain-allowlist proxy when configured. With `--net-fence=netns` (Linux
+   only) `wrap` instead prepares the handoff to the privileged helper over
+   `sudo -n`; the request travels in a 0600 per-session file whose path rides
+   argv, so the caller's stdin reaches the child unchanged (ADR-004). The
+   helper creates the namespace, installs the default-drop nftables base,
+   starts the tproxy and DNS sidecars, drops `CAP_NET_ADMIN` and
+   `CAP_SYS_ADMIN` from all five capability sets, drops to the invoking user
+   and execs the agent, and that exec is the single spawn of the child. If
+   privilege cannot be acquired or a sidecar dies, the fence fails closed
+9. The child runs with the filtered environment and active fence wiring. It
+   is started directly by `wrap` in proxy mode, or by the helper's exec from
+   step 8 in netns mode; the child is spawned exactly once
 10. Filesystem, network and per-host egress decisions are logged to
     `.nock/events.db` as hash-chained, signed rows; on teardown `wrap` emits a
     chain-head anchor to `<db-dir>/chain-anchor.json` and, when
@@ -97,8 +110,9 @@ pkg/
 11. NockLock exits with the child's exit code
 
 ### Future
-- A macOS filesystem-root backend must prove out-of-root write refusal before
-  `filesystem.root` can be enabled there.
+- Root confinement on macOS (out-of-root write refusal for `filesystem.root`)
+  is not yet implemented; it is a follow-up (N9222 phase 2), alongside native
+  per-file deny events.
 - Optional: events batched and synced to NockCC cloud dashboard
 
 ## Network egress fence (Linux, opt-in)
