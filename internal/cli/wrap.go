@@ -490,14 +490,13 @@ var wrapCmd = &cobra.Command{
 			// The helper creates the namespace + default-drop base, drops the
 			// child's capabilities from all five sets, drops to this (invoking)
 			// user, and execve's the child inside the namespace. The request —
-			// argv, env, and the unprivileged credential — travels on stdin so it
-			// never rides the fixed sudoers argument vector.
-			//
-			// FOUNDATION LIMITATION (documented): the request consumes the child's
-			// stdin, so an interactive agent that needs terminal stdin is not yet
-			// supported under --net-fence=netns. A dedicated request fd is the
-			// later-increment fix; the kernel-enforced floor itself is unaffected.
-			nc, err := buildNetnsChild(childCtx, childArgv, childEnv, netnsEgress)
+			// argv, env, and the unprivileged credential — travels in a 0600
+			// request FILE (path on argv) so it never rides the fixed sudoers
+			// argument vector AND never consumes the child's stdin. The sudo command
+			// inherits the caller's real stdin, which the helper hands through to the
+			// child unchanged, so an interactive or piped agent under
+			// --net-fence=netns keeps its input stream (N10711).
+			nc, err := buildNetnsChild(childCtx, childArgv, childEnv, netnsEgress, decisionLogDir)
 			if err != nil {
 				return err
 			}

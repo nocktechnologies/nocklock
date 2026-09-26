@@ -232,10 +232,13 @@ nocklock version
 On Linux, the network-egress fence (netns transparent-redirect) needs a small
 root-owned helper plus a constrained NOPASSWD sudoers grant. `nocklock wrap`
 runs unprivileged and hands the composed child to that helper over passwordless
-sudo; the child's argv, env, and the credential to drop to travel on **stdin**,
-never on argv, so the fixed two-vector (`check`, `setup`) sudoers policy is a
-real privilege boundary rather than an argument-injection surface. Without the
-helper the egress fence fails closed at runtime.
+sudo; the child's argv, env, and the credential to drop to travel in a 0600
+per-session request **file** (only the file path rides argv), never on argv
+itself, so the fixed `check` / `setup --request-file <path>` sudoers policy is a
+real privilege boundary rather than an argument-injection surface. Keeping the
+request off stdin lets sudo pass the caller's real stdin (a TTY or a pipe)
+straight through to the fenced child, so interactive and piped agents keep their
+input stream. Without the helper the egress fence fails closed at runtime.
 
 Install the binary, then the helper:
 
@@ -253,7 +256,7 @@ behind). `<user>` is the unprivileged user that runs `nocklock wrap`:
 
 ```sudoers
 Cmnd_Alias NOCKLOCK_EGRESS = /usr/libexec/nocklock-egress-helper check, \
-                             /usr/libexec/nocklock-egress-helper setup
+                             /usr/libexec/nocklock-egress-helper setup --request-file *
 <user> ALL = (root) NOPASSWD: NOCKLOCK_EGRESS
 ```
 

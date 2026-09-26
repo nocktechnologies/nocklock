@@ -115,7 +115,7 @@ func SetupEgressAndSupervise(req Request) (resultErr error) {
 	}
 	cleanupTransferred = true
 
-	hostProxy, err := startSidecar("__netns-host-proxy", *req.Egress)
+	hostProxy, err := startSidecar("__netns-host-proxy", *req.Egress, nil)
 	if err != nil {
 		return fmt.Errorf("start host allowlist proxy: %w", err)
 	}
@@ -143,7 +143,7 @@ func SetupEgressAndSupervise(req Request) (resultErr error) {
 		return err
 	}
 
-	transparentProxy, err := startSidecar("__netns-proxy", *req.Egress)
+	transparentProxy, err := startSidecar("__netns-proxy", *req.Egress, nil)
 	if err != nil {
 		return fmt.Errorf("start transparent policy proxy: %w", err)
 	}
@@ -155,7 +155,11 @@ func SetupEgressAndSupervise(req Request) (resultErr error) {
 		return fmt.Errorf("transparent policy proxy readiness failed: %w", err)
 	}
 
-	child, err := startSidecar("__netns-child", req)
+	// The fenced child inherits the caller's real stdin (this helper process's
+	// stdin, which the CLI setup verb deliberately left untouched — the setup
+	// request arrived on a file, not stdin), so a piped or interactive agent keeps
+	// its input stream inside the namespace (N10711).
+	child, err := startSidecar("__netns-child", req, os.Stdin)
 	if err != nil {
 		return fmt.Errorf("start fenced netns child: %w", err)
 	}
@@ -501,7 +505,13 @@ func configureEgressNamespace(cfg EgressConfig) error {
 	return nil
 }
 
-func startSidecar(verb string, payload any) (*exec.Cmd, error) {
+// startSidecar spawns one of the helper's re-exec'd sidecars. The JSON payload
+// travels on a dedicated inherited descriptor (fd 3) rather than stdin, leaving
+// stdin free: the fenced child sidecar is handed the caller's REAL stdin
+// (childStdin == os.Stdin) so an interactive or piped agent keeps its input
+// stream (N10711), while the two policy proxies pass childStdin == nil and read
+// /dev/null.
+func startSidecar(verb string, payload any, childStdin io.Reader) (*exec.Cmd, error) {
 	encoded, err := json.Marshal(payload)
 	if err != nil {
 		return nil, fmt.Errorf("encode %s request: %w", verb, err)
@@ -510,14 +520,28 @@ func startSidecar(verb string, payload any) (*exec.Cmd, error) {
 	if err != nil {
 		return nil, fmt.Errorf("resolve helper executable for %s: %w", verb, err)
 	}
+	payloadR, payloadW, err := os.Pipe()
+	if err != nil {
+		return nil, fmt.Errorf("create %s payload pipe: %w", verb, err)
+	}
 	cmd := exec.Command(self, verb)
-	cmd.Stdin = bytes.NewReader(encoded)
+	cmd.Stdin = childStdin
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
+	cmd.ExtraFiles = []*os.File{payloadR} // payload arrives on fd 3
 	cmd.SysProcAttr = &syscall.SysProcAttr{Pdeathsig: syscall.SIGKILL, Setpgid: true}
 	if err := cmd.Start(); err != nil {
+		_ = payloadR.Close()
+		_ = payloadW.Close()
 		return nil, err
 	}
+	_ = payloadR.Close() // the sidecar holds its own copy now
+	// Stream the payload and close so the sidecar sees EOF. A goroutine avoids a
+	// deadlock if the payload ever exceeds the pipe buffer.
+	go func() {
+		_, _ = payloadW.Write(encoded)
+		_ = payloadW.Close()
+	}()
 	return cmd, nil
 }
 
