@@ -31,6 +31,16 @@ jobs:
       - name: build
         run: go build ./...
 
+      # Cheap cross-check that the CLI still compiles for darwin. The macOS
+      # enforcement job is PR-and-non-draft-only, so it does not guard pushes to
+      # main; this step runs on every push and PR and is what actually catches a
+      # non-Linux build break (the exact gap that let wrap.go:413 ship — N10709).
+      # `go vet` (not `go build`) because it compiles the non-test code AND
+      # type-checks _test.go files, so a darwin-only test-file break is caught
+      # here too rather than only in the PR-gated macOS job.
+      - name: cross-vet (darwin)
+        run: GOOS=darwin GOARCH=arm64 go vet ./...
+
       - name: vet
         run: go vet ./...
 
@@ -96,6 +106,17 @@ jobs:
           go-version-file: go.mod
           cache: true
 
+      # Prove the CLI actually builds and vets on native darwin. The ubuntu
+      # job's cross-vet catches most breaks, but only a real darwin toolchain
+      # exercises the darwin-tagged code paths and macOS-specific path/timezone
+      # behaviour. build+vet come first because nothing else can run until the
+      # tree compiles.
+      - name: build
+        run: go build ./...
+
+      - name: vet
+        run: go vet ./...
+
       # The enforcement tests are darwin build-tagged, so they compile and run
       # natively on this macOS runner (no cross-build flag needed). Running the
       # whole fs package auto-picks up any future sibling darwin-tagged proof.
@@ -110,3 +131,15 @@ jobs:
         env:
           NOCKLOCK_SANDBOX_REQUIRE: "1"
         run: go test ./internal/fence/fs/ -count=1 -v
+
+      # The non-root unit suite, natively on darwin. Seven tests carry Linux
+      # path/Seatbelt assumptions and are skipped by name until N10714 fixes
+      # them (Seatbelt refuses filesystem.root; /var/folders resolves to
+      # /private/var/folders; verify's supported-fence set differs on darwin).
+      # Everything else runs, so a darwin regression that compiles and vets
+      # but fails at runtime still turns this job red.
+      # Runs last so it cannot preempt the SBPL enforcement proof above.
+      - name: test (non-root unit suite, seven N10714 tests skipped)
+        run: >-
+          go test ./... -count=1
+          -skip '^(TestWrapDryRunProfileUsesEmbeddedBaseWithoutConfig|TestRulesFromConfigMapsReadOnlyAndReadWriteRights|TestRulesFromConfigEnumeratesRootButSkipsNockAuditDir|TestRulesFromConfigRejectsDenyPathInsideRoot|TestSecurity_NormalDBPathStillWorks|TestSecurity_SymlinkSwapAfterCreateRejected|TestRunVerifySkipsOffAndUnsupportedFences)$'
