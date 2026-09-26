@@ -129,6 +129,11 @@ func TestReadSetupRequestFailsClosed(t *testing.T) {
 		if err := os.WriteFile(path, mustMarshal(t, netnsRequestFixture()), 0o644); err != nil {
 			t.Fatalf("write 0644 request: %v", err)
 		}
+		// WriteFile's mode is subject to the process umask; pin the mode
+		// explicitly so this negative control holds under any umask (e.g. 0077).
+		if err := os.Chmod(path, 0o644); err != nil {
+			t.Fatalf("chmod 0644 request: %v", err)
+		}
 		if _, err := readSetupRequest(path); err == nil {
 			t.Fatal("expected error for 0644 request file")
 		}
