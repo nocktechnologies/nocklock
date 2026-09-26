@@ -508,6 +508,9 @@ func TestComposeChildArgvAddsPrefixesWithoutDroppingPriorShim(t *testing.T) {
 }
 
 func TestValidateWrapRuntimeConfigRejectsUnsupportedFilesystemFence(t *testing.T) {
+	if runtime.GOOS == "darwin" {
+		t.Skip("darwin has its own explicit filesystem.root fail-closed test")
+	}
 	if fsfence.IsSupported() {
 		t.Skip("filesystem fence is supported on this platform")
 	}
@@ -538,7 +541,8 @@ func TestWrapDryRunFailsClosedForMacOSFilesystemRoot(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected macOS filesystem.root dry run to fail closed")
 	}
-	if !strings.Contains(err.Error(), "filesystem.root cannot be enforced as a root-only sandbox on macOS") {
+	if !strings.Contains(err.Error(), "filesystem.root cannot be enforced as a root-only sandbox on macOS") ||
+		!strings.Contains(err.Error(), "filesystem.root = \"\"") {
 		t.Fatalf("expected macOS root-only fail-closed error, got: %v", err)
 	}
 }

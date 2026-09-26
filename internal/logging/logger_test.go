@@ -1116,6 +1116,29 @@ func TestChainIntact_MultipleEvents(t *testing.T) {
 	}
 }
 
+func TestVerifyChainMissingHeadWithEventsIsTampered(t *testing.T) {
+	l, _ := mustNewLogger(t)
+	defer l.Close()
+
+	if err := l.Log(sampleEvent(EventSecretBlocked, "secret", "TEST_VAR", true, "sess-missing-head")); err != nil {
+		t.Fatalf("Log failed: %v", err)
+	}
+	if _, err := l.db.Exec("DELETE FROM chain_head WHERE id = 1"); err != nil {
+		t.Fatalf("delete chain_head: %v", err)
+	}
+
+	result, err := l.verifyChain(nil, false)
+	if err != nil {
+		t.Fatalf("verifyChain failed: %v", err)
+	}
+	if result.Intact {
+		t.Fatalf("missing chain_head with retained events reported intact")
+	}
+	if !strings.Contains(result.BrokenReason, "chain_head missing") {
+		t.Fatalf("broken reason %q should name the missing chain_head", result.BrokenReason)
+	}
+}
+
 func TestMigrationUsesEventCountWhenLegacyIDsHaveGaps(t *testing.T) {
 	dbPath := tempDBPath(t)
 	db, err := sql.Open("sqlite", dbPath)

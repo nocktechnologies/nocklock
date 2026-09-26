@@ -4,8 +4,22 @@ All notable changes to NockLock will be documented in this file.
 
 ## [Unreleased]
 
+### Changed
+
+- macOS filesystem-root support is now stated consistently across the product
+  documentation (N10712). The shipped CLI already refuses to launch when
+  `filesystem.root` is set on macOS, because the tested Seatbelt component is
+  an allow-default sensitive-path denylist rather than the root-only boundary
+  that the configuration promises. The architecture document now also reflects
+  the shipped network fence instead of describing it as planned.
+
 ### Fixed
 
+- Audit DB validate-then-open window documented (N10717): a same-uid writer that
+  swaps a validated ancestor for a symlink can redirect the DB. That racer is out
+  of NockLock's threat model; see ARCHITECTURE.md. Removed the redundant
+  path-based `os.Chmod` (the descriptor-based chmod already covers it) and added
+  `TestResidual_AncestorSwapBetweenValidateAndOpen` with a no-swap control.
 - `scripts/install-egress-helper.sh` now arms its cleanup trap before creating
   either temp file, so an interrupt or error between the two `mktemp` calls no
   longer leaks a temp file (N10655). The INT and TERM handlers now terminate

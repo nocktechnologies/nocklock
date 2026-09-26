@@ -316,7 +316,7 @@ var wrapCmd = &cobra.Command{
 					logEvent(logging.EventFilePassed, "filesystem", fmt.Sprintf("root=%s mode=%s", fsCfg.Root, fsCfg.Mode), false)
 
 				case "darwin":
-					return fmt.Errorf("filesystem.root cannot be enforced as a root-only sandbox on macOS with Seatbelt; refusing to start rather than run an allow-default denylist. Run on Linux Landlock for filesystem-root isolation or disable [filesystem].root")
+					return fmt.Errorf("filesystem.root cannot be enforced as a root-only sandbox on macOS with Seatbelt; refusing to start rather than run an allow-default denylist. Run on Linux Landlock for filesystem-root isolation or set filesystem.root = \"\" to disable it")
 
 				default:
 					return fmt.Errorf("filesystem fence configured but not supported on %s", runtime.GOOS)
@@ -836,7 +836,7 @@ func validateWrapRuntimeConfig(cfg *config.Config) error {
 
 	if cfg.Filesystem.Root != "" {
 		if runtime.GOOS == "darwin" {
-			return fmt.Errorf("filesystem.root cannot be enforced as a root-only sandbox on macOS with Seatbelt; refusing to start rather than run an allow-default denylist. Run on Linux Landlock for filesystem-root isolation or disable [filesystem].root")
+			return fmt.Errorf("filesystem.root cannot be enforced as a root-only sandbox on macOS with Seatbelt; refusing to start rather than run an allow-default denylist. Run on Linux Landlock for filesystem-root isolation or set filesystem.root = \"\" to disable it")
 		}
 		if !fsfence.IsSupported() {
 			return fmt.Errorf("filesystem fence configured but not supported on %s", runtime.GOOS)
