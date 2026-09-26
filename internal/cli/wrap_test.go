@@ -508,6 +508,9 @@ func TestComposeChildArgvAddsPrefixesWithoutDroppingPriorShim(t *testing.T) {
 }
 
 func TestValidateWrapRuntimeConfigRejectsUnsupportedFilesystemFence(t *testing.T) {
+	if runtime.GOOS == "darwin" {
+		t.Skip("darwin has its own explicit filesystem.root fail-closed test")
+	}
 	if fsfence.IsSupported() {
 		t.Skip("filesystem fence is supported on this platform")
 	}

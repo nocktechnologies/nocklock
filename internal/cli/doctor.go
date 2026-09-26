@@ -179,12 +179,9 @@ func filesystemDoctorCheck(cfg *config.Config, caps doctorCapabilities) doctorCh
 
 	switch caps.goos {
 	case "darwin":
-		if err := caps.sandboxExec(); err != nil {
-			return doctorCriticalCheck("Fences", "filesystem", "configured-but-backend-missing",
-				fmt.Sprintf("Filesystem fence configured, but macOS Seatbelt backend is unavailable: %v", err),
-				"install or restore sandbox-exec support before wrapping agents")
-		}
-		return doctorOKCheck("Fences", "filesystem", "enforceable", "Filesystem fence enforceable with macOS Seatbelt.")
+		return doctorCriticalCheck("Fences", "filesystem", "configured-but-unsupported",
+			"Filesystem-root fencing is unsupported on macOS; nocklock wrap will refuse filesystem.root rather than run a weaker Seatbelt denylist.",
+			"run NockLock on Linux for filesystem-root isolation or remove filesystem.root")
 	case "linux":
 		if err := caps.fsBackend(); err != nil {
 			return doctorCriticalCheck("Fences", "filesystem", "configured-but-backend-missing",

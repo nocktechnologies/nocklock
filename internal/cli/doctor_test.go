@@ -182,6 +182,26 @@ func TestDoctorConfiguredFenceUnavailableFails(t *testing.T) {
 	}
 }
 
+func TestFilesystemDoctorCheckDarwinRefusesRootIsolation(t *testing.T) {
+	cfg := &config.Config{}
+	cfg.Filesystem.Root = t.TempDir()
+
+	check := filesystemDoctorCheck(cfg, doctorCapabilities{
+		goos: "darwin",
+		sandboxExec: func() error {
+			t.Fatal("doctor must not present the Seatbelt component as a filesystem.root backend")
+			return nil
+		},
+	})
+
+	if check.Severity != doctorCritical || check.Status != "configured-but-unsupported" {
+		t.Fatalf("darwin filesystem check = %+v, want explicit critical unsupported result", check)
+	}
+	if !strings.Contains(check.Message, "unsupported on macOS") || !strings.Contains(check.Message, "refuse filesystem.root") {
+		t.Fatalf("darwin filesystem message must name the fail-closed limitation, got %q", check.Message)
+	}
+}
+
 func TestDoctorMissingConfigShowsInitHint(t *testing.T) {
 	dir := t.TempDir()
 	withWorkingDir(t, dir)

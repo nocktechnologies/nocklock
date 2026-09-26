@@ -4,6 +4,15 @@ All notable changes to NockLock will be documented in this file.
 
 ## [Unreleased]
 
+### Changed
+
+- macOS filesystem-root support is now stated consistently across the product
+  documentation (N10712). The shipped CLI already refuses to launch when
+  `filesystem.root` is set on macOS, because the tested Seatbelt component is
+  an allow-default sensitive-path denylist rather than the root-only boundary
+  that the configuration promises. The architecture document now also reflects
+  the shipped network fence instead of describing it as planned.
+
 ### Fixed
 
 - The audit logger no longer refuses to start on first run when the project is
