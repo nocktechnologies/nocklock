@@ -132,13 +132,14 @@ jobs:
           NOCKLOCK_SANDBOX_REQUIRE: "1"
         run: go test ./internal/fence/fs/ -count=1 -v
 
-      # The non-root unit suite, natively on darwin. Six tests carry Linux
+      # The non-root unit suite, natively on darwin. Seven tests carry Linux
       # path/Seatbelt assumptions and are skipped by name until N10714 fixes
       # them (Seatbelt refuses filesystem.root; /var/folders resolves to
-      # /private/var/folders). Everything else runs, so a darwin regression
-      # that compiles and vets but fails at runtime still turns this job red.
+      # /private/var/folders; verify's supported-fence set differs on darwin).
+      # Everything else runs, so a darwin regression that compiles and vets
+      # but fails at runtime still turns this job red.
       # Runs last so it cannot preempt the SBPL enforcement proof above.
-      - name: test (non-root unit suite, six N10714 tests skipped)
+      - name: test (non-root unit suite, seven N10714 tests skipped)
         run: >-
           go test ./... -count=1
-          -skip 'TestWrapDryRunProfileUsesEmbeddedBaseWithoutConfig|TestRulesFromConfigMapsReadOnlyAndReadWriteRights|TestRulesFromConfigEnumeratesRootButSkipsNockAuditDir|TestRulesFromConfigRejectsDenyPathInsideRoot|TestSecurity_NormalDBPathStillWorks|TestSecurity_SymlinkSwapAfterCreateRejected'
+          -skip '^(TestWrapDryRunProfileUsesEmbeddedBaseWithoutConfig|TestRulesFromConfigMapsReadOnlyAndReadWriteRights|TestRulesFromConfigEnumeratesRootButSkipsNockAuditDir|TestRulesFromConfigRejectsDenyPathInsideRoot|TestSecurity_NormalDBPathStillWorks|TestSecurity_SymlinkSwapAfterCreateRejected|TestRunVerifySkipsOffAndUnsupportedFences)$'

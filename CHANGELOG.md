@@ -12,7 +12,7 @@ All notable changes to NockLock will be documented in this file.
   `wrap.go:413`). The darwin field is inert — its helper stub still refuses to
   run. CI now guards this: the ubuntu job cross-builds for darwin on every push,
   and the macOS job builds, vets and runs the non-root unit suite natively
-  (six darwin test-portability cases skipped by name pending N10714).
+  (seven darwin test-portability cases skipped by name pending N10714).
 
 ### Changed
 
