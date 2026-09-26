@@ -3,6 +3,7 @@
 package cli
 
 import (
+	"context"
 	"database/sql"
 	"os"
 	"path/filepath"
@@ -34,6 +35,7 @@ func TestWrapMacOSFilesystemFenceRecordsOneEngagedState(t *testing.T) {
 	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
 
 	cmd := &cobra.Command{}
+	cmd.SetContext(context.Background())
 	if err := wrapCmd.RunE(cmd, []string{"--", "/usr/bin/true"}); err != nil {
 		t.Fatalf("wrap should launch an allowed command under Seatbelt: %v", err)
 	}
