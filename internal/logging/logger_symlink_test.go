@@ -250,3 +250,61 @@ func TestSecurity_UnresolvableAncestorFailsClosed(t *testing.T) {
 		t.Errorf("expected fail-closed canonicalization error, got: %v", err)
 	}
 }
+
+// TestResidual_AncestorSwapBetweenValidateAndOpen pins the documented residual
+// of N10717 (ARCHITECTURE.md, "Audit database: threat model and the
+// validate-then-open window"): an ancestor swapped for an out-of-root symlink
+// AFTER validatePath is not detected, because the same-uid racer is out of
+// scope. If a change closes the window, the swap subtest fails: flip it to
+// require refusal and update the doc. The no-swap subtest is the negative
+// control.
+func TestResidual_AncestorSwapBetweenValidateAndOpen(t *testing.T) {
+	setup := func(t *testing.T) (root, dbPath, outside string) {
+		t.Helper()
+		base := t.TempDir()
+		root = filepath.Join(base, "proj")
+		outside = filepath.Join(base, "outside")
+		for _, d := range []string{filepath.Join(root, ".nock"), outside} {
+			if err := os.MkdirAll(d, 0o700); err != nil {
+				t.Fatalf("mkdir %s: %v", d, err)
+			}
+		}
+		return root, filepath.Join(root, ".nock", "events.db"), outside
+	}
+
+	t.Run("no swap stays inside the project", func(t *testing.T) {
+		root, dbPath, outside := setup(t)
+		l, err := NewLogger(dbPath, root)
+		if err != nil {
+			t.Fatalf("NewLogger: %v", err)
+		}
+		l.Close()
+		if _, err := os.Stat(dbPath); err != nil {
+			t.Fatalf("control: DB missing inside the project: %v", err)
+		}
+		if _, err := os.Stat(filepath.Join(outside, "events.db")); !os.IsNotExist(err) {
+			t.Fatalf("control: DB unexpectedly present outside the project (stat err=%v)", err)
+		}
+	})
+
+	t.Run("swap after validation escapes (documented residual)", func(t *testing.T) {
+		root, dbPath, outside := setup(t)
+		swap := func() {
+			nockDir := filepath.Join(root, ".nock")
+			if err := os.Remove(nockDir); err != nil {
+				t.Errorf("remove .nock: %v", err)
+			}
+			if err := os.Symlink(outside, nockDir); err != nil {
+				t.Errorf("symlink .nock: %v", err)
+			}
+		}
+
+		l, err := NewLogger(dbPath, root, withAfterValidate(swap))
+		if err == nil {
+			l.Close()
+		}
+		if _, statErr := os.Stat(filepath.Join(outside, "events.db")); statErr != nil {
+			t.Fatalf("the validate-then-open window is now closed (NewLogger err=%v): flip this test to require refusal and update ARCHITECTURE.md", err)
+		}
+	})
+}

@@ -91,6 +91,7 @@ type Option func(*loggerConfig)
 type loggerConfig struct {
 	signingEnabled bool
 	signingKeyPath string
+	afterValidate  func() // test seam, see withAfterValidate
 }
 
 // WithSigning enables Ed25519 signing of each row and the chain_head, using the
@@ -102,6 +103,12 @@ func WithSigning(keyPath string) Option {
 		c.signingEnabled = true
 		c.signingKeyPath = keyPath
 	}
+}
+
+// withAfterValidate lets a test act as a racing writer between validatePath and
+// the path-based open (N10717). Unexported: never set in production.
+func withAfterValidate(fn func()) Option {
+	return func(c *loggerConfig) { c.afterValidate = fn }
 }
 
 // ChainVerifyResult holds the outcome of a chain verification.
@@ -268,6 +275,9 @@ func NewLogger(dbPath string, projectRoot string, opts ...Option) (*Logger, erro
 		return nil, err
 	}
 
+	if lc.afterValidate != nil {
+		lc.afterValidate()
+	}
 	dir := filepath.Dir(dbPath)
 	if err := os.MkdirAll(dir, 0o700); err != nil {
 		return nil, fmt.Errorf("failed to create log directory %s: %w", dir, err)
@@ -352,12 +362,6 @@ func NewLogger(dbPath string, projectRoot string, opts ...Option) (*Logger, erro
 	if _, err := db.Exec(schema); err != nil {
 		db.Close()
 		return nil, fmt.Errorf("failed to create events table: %w", err)
-	}
-
-	// Set file permissions to 0600 (owner read/write only).
-	if err := os.Chmod(dbPath, 0o600); err != nil {
-		db.Close()
-		return nil, fmt.Errorf("failed to set DB file permissions: %w", err)
 	}
 
 	// Migrate existing DBs to add hash columns and initialize chain

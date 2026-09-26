@@ -60,6 +60,43 @@ internal/
 - MVP fences use userspace techniques — no root required (ADR-002)
 - TOML config with strict parsing — unknown keys are errors (ADR-003)
 
+## Audit database: threat model and the validate-then-open window
+
+`logging.NewLogger` (`internal/logging/logger.go`) validates the DB path
+(`validatePath`) and then creates and opens it **by pathname**: `MkdirAll`,
+`OpenFile(O_NOFOLLOW)` and `sql.Open("sqlite", dbPath)` each re-resolve the path
+after validation. Validation and use are therefore not atomic (N10717).
+
+**In scope (caught).** The static malicious-repo case: a checkout that commits
+`.nock/events.db`, or any ancestor of it, as a symlink. Rejected: a symlink at the
+final component (`lstat` plus `O_NOFOLLOW`, N8614), a swap of the final component
+after create (inode re-check), and an ancestor that escapes the project root,
+dangles, loops or cannot be canonicalized (`resolveDeepestExisting`, N10714).
+`nocklock wrap` opens the DB before the fence is applied, so the repository
+contents are the attacker-controlled input here.
+
+**Out of scope (residual).** A concurrent writer running as the **same uid** that
+swaps a validated ancestor, or the DB path, for a symlink between validation and
+use. `TestResidual_AncestorSwapBetweenValidateAndOpen` demonstrates that such a
+swap redirects the DB outside the project. We accept this because the racer must
+already run as the user, and that process already owns everything the swap could
+protect: it can read and write `.nock/events.db` directly, read the Ed25519
+signing key at `~/.config/nocklock/signing-ed25519.key`, replace the config or
+the binary, and ptrace NockLock. A different uid cannot swap a `0700` directory
+it does not own. The fenced child is not the racer: it starts after `NewLogger`
+returns, and for the default `.nock/events.db` location the filesystem fence denies
+it the audit directory.
+
+**Why not close it in code.** An `os.Root`/`openat` walk from the project root is
+not enough on its own: SQLite reopens the database, and its `-wal`/`-shm`
+siblings, by pathname. On Linux, keeping the validated directory descriptor open
+for the Logger's lifetime and opening `/proc/self/fd/<dirfd>/events.db` does work
+with WAL (verified with `modernc.org/sqlite`). macOS has no equivalent, and a
+symlink swapped in at the final component would still be followed. That is a
+Linux-only mitigation for a race we do not defend against, so it is not built. If
+the threat model ever includes a same-uid racer, start from that Linux path;
+macOS keeps a documented residual window.
+
 ## Diagrams
 - `.claude/diagrams/architecture.mermaid` — package dependencies
 - `.claude/diagrams/fence-flow.mermaid` — config → fences → child process
