@@ -132,10 +132,13 @@ jobs:
           NOCKLOCK_SANDBOX_REQUIRE: "1"
         run: go test ./internal/fence/fs/ -count=1 -v
 
-      # The broad `go test ./... -count=1` unit suite is not run here: it has
-      # six pre-existing darwin test-portability failures (Seatbelt root
-      # refusal in TestWrapDryRunProfileUsesEmbeddedBaseWithoutConfig;
-      # /private/var symlink resolution in the landlock rules_test and
-      # logging logger_symlink_test) tracked as a separate card, so enabling
-      # it would block the darwin build+vet guard above and the SBPL proof
-      # this job exists for.
+      # The non-root unit suite, natively on darwin. Six tests carry Linux
+      # path/Seatbelt assumptions and are skipped by name until N10714 fixes
+      # them (Seatbelt refuses filesystem.root; /var/folders resolves to
+      # /private/var/folders). Everything else runs, so a darwin regression
+      # that compiles and vets but fails at runtime still turns this job red.
+      # Runs last so it cannot preempt the SBPL enforcement proof above.
+      - name: test (non-root unit suite, six N10714 tests skipped)
+        run: >-
+          go test ./... -count=1
+          -skip 'TestWrapDryRunProfileUsesEmbeddedBaseWithoutConfig|TestRulesFromConfigMapsReadOnlyAndReadWriteRights|TestRulesFromConfigEnumeratesRootButSkipsNockAuditDir|TestRulesFromConfigRejectsDenyPathInsideRoot|TestSecurity_NormalDBPathStillWorks|TestSecurity_SymlinkSwapAfterCreateRejected'

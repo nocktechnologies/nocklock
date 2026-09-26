@@ -11,8 +11,8 @@ All notable changes to NockLock will be documented in this file.
   N10649 added only to the Linux struct (broke `GOOS=darwin go build ./...` at
   `wrap.go:413`). The darwin field is inert — its helper stub still refuses to
   run. CI now guards this: the ubuntu job cross-builds for darwin on every push,
-  and the macOS job builds and vets natively (the broad unit suite is not run
-  there yet; darwin test-portability is a separate card).
+  and the macOS job builds, vets and runs the non-root unit suite natively
+  (six darwin test-portability cases skipped by name pending N10714).
 
 ### Changed
 
