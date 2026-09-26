@@ -35,6 +35,15 @@ All notable changes to NockLock will be documented in this file.
   the helper and sidecar legs fail closed if their setup channel is missing,
   covered by negative-control tests. **Host installers must update the NOPASSWD
   sudoers grant to `setup --request-file *`.**
+- `scripts/install-egress-helper.sh` now arms its cleanup trap before creating
+  either temp file, so an interrupt or error between the two `mktemp` calls no
+  longer leaks a temp file (N10655). The INT and TERM handlers now terminate
+  (`exit 130` / `exit 143`, which runs the EXIT trap once) instead of only
+  cleaning up and returning: previously a signal delivered between `mktemp` and
+  the `install` step removed the temp files and then let the privileged install
+  continue, recreating the predictable path without `O_EXCL` (a symlink-plant /
+  root-owned overwrite window for another local user). Pinned by a sandboxed
+  signal-injection test with a negative control that reverts the handler.
 - The audit logger no longer refuses to start on first run when the project is
   reached through a symlinked path (N10714). `validatePath` resolved the project
   root's symlinks but left the not-yet-created DB path in its raw frame, so on
