@@ -15,9 +15,7 @@ import (
 
 func TestIsSupported(t *testing.T) {
 	got := IsSupported()
-	// The shipped CLI's root-only contract is Linux-only. The macOS Seatbelt
-	// component has its own tests but must not be reported as equivalent support.
-	want := runtime.GOOS == "linux"
+	want := runtime.GOOS == "linux" || runtime.GOOS == "darwin"
 	if got != want {
 		t.Errorf("IsSupported() = %v, want %v (GOOS=%s)", got, want, runtime.GOOS)
 	}
@@ -34,6 +32,15 @@ func TestUnsupportedError(t *testing.T) {
 	// Error should mention the current OS.
 	if got := err.Error(); !strings.Contains(got, runtime.GOOS) {
 		t.Errorf("error should mention %s, got: %s", runtime.GOOS, got)
+	}
+}
+
+func TestNewFenceRejectsNonLinuxEventListener(t *testing.T) {
+	if runtime.GOOS == "linux" {
+		t.Skip("the LD_PRELOAD event listener is available on Linux")
+	}
+	if _, err := NewFence(&FenceConfig{}, "/tmp/libfence_fs.so"); err == nil {
+		t.Fatal("expected non-Linux LD_PRELOAD event listener construction to fail")
 	}
 }
 

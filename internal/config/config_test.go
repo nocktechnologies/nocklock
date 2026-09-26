@@ -224,6 +224,7 @@ allow_private_ranges = true
 allow = ["/tmp/", "/"]
 deny = ["~/work/private/"]
 mode = "read-only"
+macos_allow_unfenced = true
 
 [secrets]
 pass = ["HOME", "OPENAI_API_KEY"]
@@ -259,6 +260,9 @@ socket_families = ["unix", "netlink"]
 	}
 	if cfg.Filesystem.Mode != "read-only" {
 		t.Fatalf("filesystem.mode = %q, want read-only", cfg.Filesystem.Mode)
+	}
+	if cfg.Filesystem.MacOSAllowUnfenced {
+		t.Fatal("overlay enabled macos_allow_unfenced despite the profile's fail-closed base")
 	}
 	// Base codex pass now includes OPENAI_API_KEY (the runtime's own key), so an
 	// overlay requesting [HOME, OPENAI_API_KEY] tightens to exactly those two.
@@ -347,6 +351,9 @@ func TestDefaultConfig(t *testing.T) {
 	}
 	if cfg.Filesystem.LinuxEnforcement != "required" {
 		t.Errorf("expected default linux_enforcement 'required', got %q", cfg.Filesystem.LinuxEnforcement)
+	}
+	if cfg.Filesystem.MacOSAllowUnfenced {
+		t.Error("expected macos_allow_unfenced to default false (fail-closed)")
 	}
 
 	// Verify sensitive dirs are denied by default

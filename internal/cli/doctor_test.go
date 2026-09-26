@@ -182,26 +182,43 @@ func TestDoctorConfiguredFenceUnavailableFails(t *testing.T) {
 	}
 }
 
-func TestFilesystemDoctorCheckDarwinRefusesRootIsolation(t *testing.T) {
+func TestFilesystemDoctorCheckDarwinReportsSeatbeltEnforceable(t *testing.T) {
 	cfg := &config.Config{}
 	cfg.Filesystem.Root = t.TempDir()
 
 	check := filesystemDoctorCheck(cfg, doctorCapabilities{
 		goos: "darwin",
 		sandboxExec: func() error {
-			t.Fatal("doctor must not present the Seatbelt component as a filesystem.root backend")
 			return nil
 		},
 	})
 
-	if check.Severity != doctorCritical || check.Status != "configured-but-unsupported" {
-		t.Fatalf("darwin filesystem check = %+v, want explicit critical unsupported result", check)
+	if check.Severity != doctorOK || check.Status != "enforceable" {
+		t.Fatalf("darwin filesystem check = %+v, want enforceable Seatbelt result", check)
 	}
-	if !strings.Contains(check.Message, "unsupported on macOS") || !strings.Contains(check.Message, "refuse filesystem.root") {
-		t.Fatalf("darwin filesystem message must name the fail-closed limitation, got %q", check.Message)
+	if !strings.Contains(check.Message, "Seatbelt") || !strings.Contains(check.Message, "denylist") {
+		t.Fatalf("darwin filesystem message must describe the Seatbelt denylist, got %q", check.Message)
 	}
-	if !strings.Contains(check.Fix, "filesystem.root = \"\"") {
-		t.Fatalf("darwin filesystem fix must name the explicit disabled value, got %q", check.Fix)
+	if check.Fix != "" {
+		t.Fatalf("enforceable Seatbelt check should not require a fix, got %q", check.Fix)
+	}
+}
+
+func TestFilesystemDoctorCheckDarwinMissingSeatbeltRespectsTemporaryOptOut(t *testing.T) {
+	cfg := &config.Config{}
+	cfg.Filesystem.Root = t.TempDir()
+	cfg.Filesystem.MacOSAllowUnfenced = true
+
+	check := filesystemDoctorCheck(cfg, doctorCapabilities{
+		goos:        "darwin",
+		sandboxExec: func() error { return errors.New("sandbox-exec not found") },
+	})
+
+	if check.Severity != doctorWarning || check.Status != "configured-with-unfenced-opt-out" {
+		t.Fatalf("darwin opt-out check = %+v, want explicit degraded warning", check)
+	}
+	if !strings.Contains(check.Message, "DEGRADED") || !strings.Contains(check.Fix, "v0.6") {
+		t.Fatalf("opt-out must state its logged degraded state and removal timeline, got %+v", check)
 	}
 }
 

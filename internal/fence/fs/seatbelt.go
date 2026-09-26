@@ -14,8 +14,9 @@ import (
 // Linux LD_PRELOAD path. This is the interim mechanism; see the design spec.
 
 // DefaultSensitivePaths returns the credential/secret directories the macOS
-// fence denies by default. This is a conservative, curated denylist (NOT the
-// broad ~/.config, which would break toolchains). User config can extend it.
+// fence denies by default. This is a curated denylist that includes ~/.config
+// because agent and cloud credentials frequently live there. User config can
+// extend it.
 // Paths that do not exist on a given machine are fine — GenerateProfile
 // canonicalizes their existing prefix so the rule still matches if created.
 func DefaultSensitivePaths() []string {
@@ -26,9 +27,9 @@ func DefaultSensitivePaths() []string {
 	rel := []string{
 		".ssh",
 		".aws",
+		".config",
 		".gnupg",
 		".kube",
-		".config/gcloud",
 		filepath.Join("Library", "Keychains"),
 		// Pure credential stores an autonomously-fenced agent never needs to
 		// READ — consistent with .ssh/.kube already being fenced (the agent
@@ -45,6 +46,19 @@ func DefaultSensitivePaths() []string {
 		out = append(out, filepath.Join(home, r))
 	}
 	return out
+}
+
+// ValidateProfile confirms sandbox-exec accepts profilePath before the agent
+// process is launched. This is the fail-closed profile-rejection gate: a bad
+// profile must never be recorded as engaged merely because argv was assembled.
+func ValidateProfile(profilePath string) error {
+	if profilePath == "" {
+		return fmt.Errorf("empty profile path")
+	}
+	if err := exec.Command(SandboxExecPath, "-f", profilePath, "--", "/usr/bin/true").Run(); err != nil {
+		return fmt.Errorf("sandbox-exec rejected the generated profile: %w", err)
+	}
+	return nil
 }
 
 // SandboxExecPath is the macOS Seatbelt CLI. Deprecated by Apple but present
@@ -88,7 +102,7 @@ func WriteProfile(profile string) (string, error) {
 }
 
 // WrapArgv returns the argv that runs childArgv under the Seatbelt profile at
-// profilePath: `sandbox-exec -f <profilePath> <childArgv...>`.
+// profilePath: `sandbox-exec -f <profilePath> -- <childArgv...>`.
 func WrapArgv(profilePath string, childArgv []string) ([]string, error) {
 	if profilePath == "" {
 		return nil, fmt.Errorf("empty profile path")
@@ -96,5 +110,5 @@ func WrapArgv(profilePath string, childArgv []string) ([]string, error) {
 	if len(childArgv) == 0 {
 		return nil, fmt.Errorf("empty child argv")
 	}
-	return append([]string{SandboxExecPath, "-f", profilePath}, childArgv...), nil
+	return append([]string{SandboxExecPath, "-f", profilePath, "--"}, childArgv...), nil
 }

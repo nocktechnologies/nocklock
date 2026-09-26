@@ -179,9 +179,22 @@ func filesystemDoctorCheck(cfg *config.Config, caps doctorCapabilities) doctorCh
 
 	switch caps.goos {
 	case "darwin":
-		return doctorCriticalCheck("Fences", "filesystem", "configured-but-unsupported",
-			"Filesystem-root fencing is unsupported on macOS; nocklock wrap will refuse filesystem.root rather than run a weaker Seatbelt denylist.",
-			"run NockLock on Linux for filesystem-root isolation or set filesystem.root = \"\" to disable it")
+		if err := caps.sandboxExec(); err != nil {
+			if cfg.Filesystem.MacOSAllowUnfenced {
+				return doctorCheck{
+					Group:    "Fences",
+					Name:     "filesystem",
+					Severity: doctorWarning,
+					Status:   "configured-with-unfenced-opt-out",
+					Message:  fmt.Sprintf("macOS Seatbelt filesystem fence is unavailable: %v. wrap will record DEGRADED and run unfenced because filesystem.macos_allow_unfenced = true.", err),
+					Fix:      "restore sandbox-exec and remove filesystem.macos_allow_unfenced before v0.6",
+				}
+			}
+			return doctorCriticalCheck("Fences", "filesystem", "configured-but-backend-missing",
+				fmt.Sprintf("Filesystem fence configured, but macOS Seatbelt is unavailable: %v", err),
+				"install or restore sandbox-exec; wrap will otherwise refuse to start")
+		}
+		return doctorOKCheck("Fences", "filesystem", "enforceable", "Filesystem fence enforceable with the macOS Seatbelt sensitive-path denylist.")
 	case "linux":
 		if err := caps.fsBackend(); err != nil {
 			return doctorCriticalCheck("Fences", "filesystem", "configured-but-backend-missing",
