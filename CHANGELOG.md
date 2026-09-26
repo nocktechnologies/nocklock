@@ -20,6 +20,20 @@ All notable changes to NockLock will be documented in this file.
   of NockLock's threat model; see ARCHITECTURE.md. Removed the redundant
   path-based `os.Chmod` (the descriptor-based chmod already covers it) and added
   `TestResidual_AncestorSwapBetweenValidateAndOpen` with a no-swap control.
+- `nocklock wrap --net-fence=netns` no longer consumes the child's stdin
+  (N10711). The privileged `setup` request previously rode the helper's stdin, so
+  the fenced child inherited a drained stream — `printf 'x' | nocklock wrap
+  --net-fence=netns -- cat` printed nothing and interactive/MCP agents lost input
+  entirely. The request now travels in a 0600 per-session file whose path rides
+  argv (`setup --request-file <path>`; validated regular/0600/owned-by-`SUDO_UID`,
+  opened `O_NOFOLLOW`, unlinked after read), and the sidecar payloads ride a
+  dedicated inherited descriptor (fd 3), so the caller's real stdin — a TTY or a
+  pipe — flows through to the child unchanged. This was forced by `sudo` closing
+  descriptors ≥ 3 (`closefrom`), which rules out passing the request itself on an
+  fd across the sudo boundary; see ADR-004. Fence semantics are unchanged; both
+  the helper and sidecar legs fail closed if their setup channel is missing,
+  covered by negative-control tests. **Host installers must update the NOPASSWD
+  sudoers grant to `setup --request-file *`.**
 - The audit logger no longer refuses to start on first run when the project is
   reached through a symlinked path (N10714). `validatePath` resolved the project
   root's symlinks but left the not-yet-created DB path in its raw frame, so on
