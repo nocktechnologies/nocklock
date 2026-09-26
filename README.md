@@ -23,7 +23,7 @@ nocklock wrap -- claude
 
 That's it. Four commands. Your agent is fenced.
 
-On macOS, `nocklock init` writes the same default `filesystem.root = "."`, and `nocklock wrap` enforces it as a kernel Seatbelt write boundary: writes outside the root, `.nock`, and essential per-user runtime paths are denied, and the curated credential and sensitive paths (`~/.ssh`, `~/.aws`, `~/.config`, `~/.gnupg`, `~/Library/Keychains`, plus your `filesystem.deny` paths) are denied for reads and writes. Reads outside the root are not confined, and `filesystem.allow` and `filesystem.mode` are not enforced on macOS. See "Filesystem platform boundary" below.
+On macOS, `nocklock init` writes the same default `filesystem.root = "."`, and `nocklock wrap` enforces it as a kernel Seatbelt write boundary: writes outside the root, `.nock`, and essential per-user runtime paths are denied, and the curated credential and sensitive paths (`~/.ssh`, `~/.aws`, `~/.config`, `~/.gnupg`, `~/Library/Keychains`, plus your `filesystem.deny` paths) are denied for reads and writes. Reads outside the root are not confined, and `filesystem.allow` is not enforced on macOS. `filesystem.mode = "read-only"` is enforced: it drops the write allow for the root. See "Filesystem platform boundary" below.
 
 For a runtime-specific first run, scaffold from a preset:
 
