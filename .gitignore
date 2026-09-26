@@ -20,6 +20,11 @@ coverage.*
 *.coverprofile
 profile.cov
 
+# Ephemeral repo the claude-code preset integration test creates under the
+# package dir (a root outside /tmp); normally removed by t.Cleanup, but a
+# crashed run must not leave a nested repo that a later `git add -A` commits.
+internal/cli/preset-e2e-*/
+
 # Dependency directories (remove the comment below to include it)
 # vendor/
 

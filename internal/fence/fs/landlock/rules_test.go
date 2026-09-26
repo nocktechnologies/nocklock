@@ -111,13 +111,21 @@ func TestRulesFromConfigGrantsBaselineDeviceWrites(t *testing.T) {
 		t.Fatalf("/dev/null must be read+write, got rights %#x", null.Rights)
 	}
 
-	if tty, ok := byPath["/dev/tty"]; ok {
-		if tty.Rights&RightWriteFile == 0 {
-			t.Fatalf("/dev/tty must be writable, got rights %#x", tty.Rights)
+	if _, err := os.Stat("/dev/tty"); err == nil {
+		tty, ok := byPath["/dev/tty"]
+		if !ok {
+			t.Fatalf("/dev/tty present on host but not granted; rules=%+v", spec.Paths)
+		}
+		if tty.Rights&RightWriteFile == 0 || tty.Rights&RightReadFile == 0 {
+			t.Fatalf("/dev/tty must be read+write, got rights %#x", tty.Rights)
 		}
 	}
 
-	if zero, ok := byPath["/dev/zero"]; ok {
+	if _, err := os.Stat("/dev/zero"); err == nil {
+		zero, ok := byPath["/dev/zero"]
+		if !ok {
+			t.Fatalf("/dev/zero present on host but not granted; rules=%+v", spec.Paths)
+		}
 		if zero.Rights&RightWriteFile != 0 {
 			t.Fatalf("/dev/zero must be read-only, got write bit in rights %#x", zero.Rights)
 		}
