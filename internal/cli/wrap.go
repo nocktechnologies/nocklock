@@ -159,10 +159,6 @@ var wrapCmd = &cobra.Command{
 		// The off-box anchor store's URL and bearer token are wrap's, never the
 		// fenced agent's: strip them before the child env is logged or launched.
 		childEnv = stripAnchorEnv(childEnv)
-		if err := runSecretPreflight(cmd.Context(), cfg, configPath, childEnv, sessionID, logger.LogBatch, cmd.ErrOrStderr()); err != nil {
-			cmd.SilenceUsage = true
-			return err
-		}
 
 		// Log all blocked env vars in a single transaction.
 		if len(blockedNames) > 0 {
@@ -190,6 +186,10 @@ var wrapCmd = &cobra.Command{
 		}
 		if len(passedNames) > 0 {
 			logEvent(logging.EventSecretPassed, "secret", strings.Join(passedNames, ", "), false)
+		}
+		if err := runSecretPreflight(cmd.Context(), cfg, configPath, childEnv, sessionID, logger.LogBatch, cmd.ErrOrStderr()); err != nil {
+			cmd.SilenceUsage = true
+			return err
 		}
 
 		if len(blockedNames) > 0 {

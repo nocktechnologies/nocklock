@@ -238,6 +238,7 @@ func (s *scanner) walk(root *os.Root, path string, depth int) {
 		s.issue(path, "input changed while opening; stop concurrent changes and retry")
 		return
 	}
+	var data []byte
 	if info.IsDir() {
 		for !s.stopped {
 			entries, err := f.ReadDir(128)
@@ -260,7 +261,7 @@ func (s *scanner) walk(root *os.Root, path string, depth int) {
 			return
 		}
 		limit := min(int64(MaxFileBytes), MaxScanBytes-s.report.BytesScanned)
-		data, err := io.ReadAll(io.LimitReader(f, limit+1))
+		data, err = io.ReadAll(io.LimitReader(f, limit+1))
 		if err != nil {
 			s.issue(path, "cannot finish reading file; check permissions and retry")
 			return
@@ -271,17 +272,26 @@ func (s *scanner) walk(root *os.Root, path string, depth int) {
 		s.inspect(data, "file", path)
 		s.report.FilesScanned++
 	}
-	if !scanInputUnchanged(root, path, f, info) {
+	if !scanInputUnchanged(root, path, f, info, data) {
 		s.issue(path, "input changed during scan; stop concurrent changes and retry")
 	}
 }
 
 // Recheck the selected path as well as the open file. An unchanged descriptor
-// alone would miss a rename that leaves different content at the selected path.
-func scanInputUnchanged(root *os.Root, path string, f *os.File, before os.FileInfo) bool {
+// alone would miss a rename or in-place write that leaves matching metadata.
+func scanInputUnchanged(root *os.Root, path string, f *os.File, before os.FileInfo, contents []byte) bool {
 	after, err := f.Stat()
 	if err != nil || before.Size() != after.Size() || !before.ModTime().Equal(after.ModTime()) {
 		return false
+	}
+	if before.Mode().IsRegular() {
+		if _, err := f.Seek(0, io.SeekStart); err != nil {
+			return false
+		}
+		reread, err := io.ReadAll(io.LimitReader(f, int64(len(contents))+1))
+		if err != nil || !bytes.Equal(contents, reread) {
+			return false
+		}
 	}
 	current, err := openScanFile(root, path)
 	if err != nil {
@@ -289,5 +299,12 @@ func scanInputUnchanged(root *os.Root, path string, f *os.File, before os.FileIn
 	}
 	defer current.Close()
 	info, err := current.Stat()
-	return err == nil && os.SameFile(before, info) && before.Size() == info.Size() && before.ModTime().Equal(info.ModTime())
+	if err != nil || !os.SameFile(before, info) || before.Size() != info.Size() || !before.ModTime().Equal(info.ModTime()) {
+		return false
+	}
+	if !before.Mode().IsRegular() {
+		return true
+	}
+	reread, err := io.ReadAll(io.LimitReader(current, int64(len(contents))+1))
+	return err == nil && bytes.Equal(contents, reread)
 }

@@ -117,24 +117,34 @@ func TestWrapSecretPreflightControlsChildLaunch(t *testing.T) {
 				t.Fatal(err)
 			}
 			defer logger.Close()
-			events, err := logger.Query(logging.QueryOptions{})
+			events, err := logger.Query(logging.QueryOptions{Limit: 10000})
 			if err != nil {
 				t.Fatal(err)
 			}
 			found := false
-			for _, event := range events {
+			fenceEvents := 0
+			lastFenceEventIndex := -1
+			preflightIndex := -1
+			for i, event := range events {
 				if strings.Contains(event.Detail, scanToken()) {
 					t.Fatal("audit retained a secret value")
 				}
 				if strings.HasPrefix(event.Detail, "preflight ") {
 					found = true
+					preflightIndex = i
 					if event.Blocked != blocked {
 						t.Fatal("wrong preflight audit outcome")
 					}
+				} else if event.Category == "secret" && (event.EventType == logging.EventSecretBlocked || event.EventType == logging.EventSecretPassed) {
+					fenceEvents++
+					lastFenceEventIndex = i
 				}
 			}
 			if found != (kind != "disabled") {
 				t.Fatal("preflight audit missing or unexpectedly enabled")
+			}
+			if blocked && (fenceEvents == 0 || preflightIndex <= lastFenceEventIndex) {
+				t.Fatal("refused preflight omitted or preceded secret-fence audit events")
 			}
 		})
 	}

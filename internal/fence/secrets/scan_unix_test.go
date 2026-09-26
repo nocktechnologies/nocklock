@@ -69,7 +69,8 @@ func TestOpenScanFileRejectsReplacedParent(t *testing.T) {
 func TestScanInputRecheckDetectsReplacement(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "file")
-	if err := os.WriteFile(path, []byte("clean"), 0600); err != nil {
+	contents := []byte("clean")
+	if err := os.WriteFile(path, contents, 0600); err != nil {
 		t.Fatal(err)
 	}
 	root, err := os.OpenRoot(dir)
@@ -86,19 +87,18 @@ func TestScanInputRecheckDetectsReplacement(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !scanInputUnchanged(root, "file", f, before) {
+	if !scanInputUnchanged(root, "file", f, before, contents) {
 		t.Fatal("unchanged file rejected")
 	}
-	if err := os.Rename(path, filepath.Join(dir, "moved")); err != nil {
-		t.Fatal(err)
-	}
+	// Rewrite the opened file in place, preserving the metadata checked by the
+	// prior implementation. The content snapshot must still make this unsafe.
 	if err := os.WriteFile(path, []byte("other"), 0600); err != nil {
 		t.Fatal(err)
 	}
 	if err := os.Chtimes(path, before.ModTime(), before.ModTime()); err != nil {
 		t.Fatal(err)
 	}
-	if scanInputUnchanged(root, "file", f, before) {
-		t.Fatal("replacement with the same size and timestamp accepted")
+	if scanInputUnchanged(root, "file", f, before, contents) {
+		t.Fatal("in-place rewrite with the same metadata accepted")
 	}
 }
