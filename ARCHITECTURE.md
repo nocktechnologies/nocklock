@@ -35,7 +35,7 @@ internal/
     doctor.go           Reports whether each fence can be enforced on this host
     verify.go           Adversarial fence self-test; --audit verifies the audit chain and anchors
     anchor.go           `anchor emit` and `anchor push` for the external chain-head anchor
-    anchor_push.go      Off-box anchor push client (NOCKLOCK_ANCHOR_URL, fail-open on teardown)
+    anchor_push.go      Wrap-teardown off-box anchor push (5s, fail-open); strips NOCKLOCK_ANCHOR_URL/TOKEN from the child
     egress_probe.go     Structured feasibility probe for the Linux netns egress fence
     netns_helper.go     Privileged `__netns-helper` and the `__netns-*` sidecar entry points
     decision_log.go     Per-session egress decision log consumed into the audit chain
@@ -48,6 +48,7 @@ internal/
     config_test.go      Parse, default, error, round-trip tests
   version/              Build info
     version.go          Version string, overridable via ldflags
+  anchorclient/         HTTP client that pushes chain-head anchors off-box and fetches the latest one back
 
   fence/                Fence implementations
     secrets/            Secret fence — environment variable filtering (pass/block lists)
