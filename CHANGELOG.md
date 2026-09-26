@@ -4,84 +4,212 @@ All notable changes to NockLock will be documented in this file.
 
 ## [Unreleased]
 
+## [0.5.0] - 2026-09-26
+
+### Added
+
+- Goose runtime preset: `nocklock init --runtime goose` scaffolds a default-deny
+  config for Block's Goose agent (N8860, `23ad362`). Filesystem allows the three
+  Goose XDG directories plus `/tmp` and denies `~/.ssh`, `~/.aws`, `~/.gnupg` and
+  `~/.nock`; network is default-deny over Goose's core provider APIs; secrets pass
+  the supported provider keys and `GOOSE_*` and block every other credential;
+  syscall enforcement is required.
+- `nocklock verify`: adversarial fence self-test that runs benign proof-of-block
+  probes under the live wrap fence path.
+- `nocklock doctor` now warns when a curated network allowlist is inert (#67). On Linux,
+  when the network fence is active (`allow_all = false`) and the syscall fence is
+  on, the child is restricted to unix-domain sockets, so the TCP proxy that
+  enforces `network.allow` is unreachable and the posture collapses to no IP
+  network — the allowlist reaches *none* of the configured domains, not a subset.
+  This is the intended hardened no-network posture, but it silently defeats a user
+  who curated `network.allow` expecting selective access, so doctor surfaces it
+  with the fix (set `[syscall] enforcement = "off"` for a working, userspace
+  boundary, or accept no-network by design).
+- `nocklock egress-probe` (#70): a repeatable, structured feasibility probe for the
+  Linux network-egress-enforcement track (Candidate B: netns + transparent
+  redirect). It codifies the Phase 0 VPS probe runs so every fleet kernel — CI
+  runners included — is measured the same way before Phase 1 locks the
+  privileged-helper design. Non-mutating: it attempts unprivileged
+  userns/userns+netns creation via throwaway `unshare` subprocesses (with the
+  receipted flags verbatim), reads the classic and AppArmor userns sysctls,
+  and detects `nft`/`nft_tproxy` and passwordless-sudo reachability, then emits
+  a versioned JSON result (`--json`) with an `observed`/`indicated`/`not-probed`
+  evidence field per check and a track verdict (`unprivileged-clean` /
+  `privileged-helper` / `blocked` / `undetermined` on Linux, `unsupported` on
+  non-Linux hosts). The root-only acceptance
+  tests (Q6 post-drop mutation, protocol-matrix egress, AppArmor toggle) are
+  enumerated follow-ups and are intentionally out of this increment. On the
+  dev VPS the probe reproduces the receipted root-mapping denial and
+  additionally records that bare unmapped userns+netns creation *succeeds* — a
+  narrower blocker than the one-off 2026-08-03 run captured.
+- `nocklock wrap --net-fence=netns` (Linux, opt-in; N9916): the Phase-1 FOUNDATION of
+  the network-egress fence (Candidate B). A privileged helper — acquired via
+  passwordless `sudo -n` under the DECIDED capability model (spec amendment
+  2026-08-24) — creates a fresh network namespace (`CLONE_NEWNET`), brings
+  loopback up, installs a default-drop `nftables` base across ALL transports and
+  both IPv4 and IPv6 (QUIC/UDP/SCTP/TCP all denied — no allowances yet), drops
+  `CAP_NET_ADMIN`+`CAP_SYS_ADMIN` from all five capability sets (reusing the
+  receipted Q6 cap-drop harness), drops to the invoking user, and execve's the
+  agent as a non-root child inside the namespace. Fail-closed: if privilege
+  cannot be acquired or the five-set drop cannot complete, NockLock refuses to
+  exec — no advisory/degraded fallback. Default `wrap` behavior is unchanged;
+  the flag is Linux-only and refuses on other platforms. This is the
+  kernel-enforced hardened (no-network) floor; the transparent HTTP(S)/DNS
+  allowlist on top of it is a later increment (gated on Q7). A new root-gated
+  acceptance test (`TestNetnsFoundation_DefaultDropDeniesEgress`) proves the
+  capped child is denied all egress and runs beside the Q6 bar in the
+  `network-egress` CI workflow.
+- CI (#82): a `macos-enforce` job in `.github/workflows/test.yml` that runs the SBPL
+  filesystem fence's runtime ENFORCEMENT proof on a GitHub-hosted `macos-latest`
+  runner. It exercises the existing
+  darwin-tagged `TestSeatbeltEnforcement_RealSandboxExec` and
+  `TestSeatbeltDeniesWriteToFencedAuditLog` under real `sandbox-exec` — a fenced
+  read/write is DENIED while an unfenced one SUCCEEDS — closing the final N9222
+  acceptance gap: enforcement had never run in CI (the ubuntu job is
+  generation-only, PR #80). The job runs beside — never before — the ubuntu
+  `test` job, and runs on an ephemeral, isolated GitHub-hosted runner so fork PRs
+  can execute code safely without trust gates. A new `NOCKLOCK_SANDBOX_REQUIRE=1`
+  gate on the two tests (mirroring the netns suite's `NOCKLOCK_NETNS_REQUIRE`)
+  turns their normally-green "sandbox-exec unavailable" skip into a hard failure
+  under CI, so
+  a runner that has lost `sandbox-exec` cannot silently re-open the gap.
+- `nocklock wrap --net-fence=netns` now layers the Phase-1b working egress (N10399, #84)
+  allowlist onto its kernel default-drop floor. A per-run link-local veth grants
+  the namespace no default route and reaches only a host-side allowlist proxy;
+  nftables `tproxy` intercepts child TCP/80 and TCP/443 into a separate,
+  unprivileged transparent proxy that gates TLS SNI or HTTP Host before opening a
+  CONNECT tunnel to that host proxy. The namespace also bind-mounts a fixed-answer
+  DNS resolver that maps every A/AAAA name to the intercept address, keeping
+  denied-domain decisions at the proxy while UDP/TCP queries to other resolvers,
+  UDP/443 (QUIC), SCTP, and other raw egress remain default-dropped. Both policy
+  proxies are health-checked by the helper, which terminates the fenced child on
+  proxy death. A root-required CI protocol matrix now exercises the positive
+  HTTP(S) paths, proxy denial paths, DNS stub and bypass attempts, denied
+  transports, and curl/Node/Python TCP fallback clients.
+- Tamper-evident audit log v1: a SHA-256 hash chain over every row of the SQLite
+  event store (#89). `nocklock verify --audit` reports CONSISTENT or TAMPERED. A
+  prune re-anchors the chain and is surfaced as a NOTE, never a silent
+  CONSISTENT. Migration normalizes legacy timestamps to the canonical 9-digit
+  form so query, prune and stats comparisons are uniform. The chain is unkeyed,
+  so it does not resist a writer with file access; the verify output and README
+  state that limit.
+- Audit-log v1.1: Ed25519 signing over the hash chain (#90). Every row is signed
+  over the same canonical bytes the chain already hashes, and the chain head is
+  signed over domain-separated bytes, so an attacker who recomputes hashes in
+  lockstep still needs the private key. The key is NockLock-managed, generated
+  0600 on first use outside `events.db` (default
+  `~/.config/nocklock/signing-ed25519.key`); a world- or group-readable,
+  non-regular or symlinked key file is rejected, and an adopted log opened
+  without its key refuses writes. `nocklock verify --audit` reports AUTHENTIC,
+  CONSISTENT (unsigned or unchecked), FORGED, or SUSPECT (signed verification was
+  required but every signature is gone). `nocklock verify --export-pubkey` prints
+  the public key for out-of-band verification. Pre-adoption rows stay unsigned
+  and signing goes forward.
+- Per-host network egress allow and deny decisions made by the netns transparent
+  proxy are now signed into the hash-chained audit trail with the host named
+  (N10649, `7c5a818`). The proxy appends to a per-session decision log that the
+  child is denied, and `wrap` streams it into the signed log, failing the
+  session closed if a decision cannot be recorded or signed.
+- Shipped egress-helper install path (#92): `scripts/install-egress-helper.sh` and
+  `make install-egress-helper` install a root-owned shim and a
+  `visudo`-validated, exactly-scoped NOPASSWD sudoers drop-in by atomic same-dir
+  rename, and `nocklock doctor` gained an `egress-helper` check (Lstat, root
+  ownership, no group/world write, passwordless-sudo reachability). A CI job
+  installs via the shipped script and asserts the drop-in is exactly scoped
+  (N10654).
+- Audit-log v1.2: an external, Ed25519-signed chain-head anchor (#93). `nocklock
+  anchor emit` writes it, `wrap` emits one on teardown, and `nocklock verify
+  --against-anchor` authenticates the anchor and recomputes the cumulative
+  hashes before trusting its counts. It detects tail truncation or rollback to an
+  older legitimately signed snapshot, which the signed chain head alone reads as
+  AUTHENTIC.
+- Off-box anchor delivery (#95): `nocklock anchor push` sends an anchor to the
+  store at `NOCKLOCK_ANCHOR_URL` (bearer token from `NOCKLOCK_ANCHOR_TOKEN`), and
+  `nocklock verify --against-remote-anchor` checks the local chain against the
+  latest anchor fetched back; an absent or unreachable anchor is reported as
+  `anchor_unavailable` with a non-zero exit. The `wrap` teardown push is fail-open
+  with a 5 second bound, and the anchor URL and token are stripped from the
+  child's environment.
+- `nocklock wrap` exports `NOCKLOCK_SESSION_ID` to the child (N10647, #96). The
+  value is the session id recorded in `events.db`, so a co-located tool can stamp
+  the same id; any inherited value is overwritten.
+- `pkg/receipt` (N10647, #97): a public, read-only `VerifySession(dbPath, pub, sessionID)`
+  that another module can import to verify one session's audit chain offline
+  with only the Ed25519 public key. It opens the log read only (never creates,
+  writes, or migrates it), walks the whole hash chain in id order because the
+  link spans sessions, checks every session row's signature, and returns exactly
+  one fail-closed verdict: `INTACT`, `TAMPERED`, `UNSIGNED`, `NO_ROWS`, or
+  `UNVERIFIABLE`. A row with a valid signature and a forged `prev_hash` is
+  `TAMPERED`. The chain primitives stay in `internal/logging` behind thin
+  exported wrappers (`chain_export.go`), so there is one implementation.
+- `pkg/receipt` tail evidence (N10647, #98): `VerifySession` now reads the signed chain head
+  (the same reader `nocklock verify` uses, exported as
+  `logging.ReadChainHead`) and reports `TailVerified` and `TailReason`. `INTACT`
+  now requires a head that verifies under the key and anchors exactly the
+  walked chain. A head whose row count or hash disagrees with the chain (rows
+  deleted from the tail, or a stale head) or whose signature fails is
+  `TAMPERED`, naming the anchored and found counts; a log with no signed head is
+  the new non-success verdict `UNANCHORED`. A head rolled back together with its
+  rows to an older genuine state still passes locally; only
+  `nocklock verify --against-remote-anchor` closes that.
+- Composed-default acceptance test (N10710, #100; `TestWrapComposedDefaultEgressAudit`, root/CI
+  only) drives the full default stack — Landlock (required) + seccomp (required)
+  + netns egress + signed audit — through `nocklock wrap` with a real child:
+  one allowlisted fetch is permitted, one off-allowlist fetch is refused, both
+  decisions land signed in the audit chain, and `nocklock verify --audit`
+  confirms the chain and signatures. Runs in a new privileged Linux CI job
+  (`netns-composed-default`). An unprivileged unit test
+  (`TestEgressDecisionDirIsLandlockEnforceable`) pins the decision-dir fix and
+  fails on the old `/tmp` path.
+- Local `nocklock scan [path ...]` with `--env` and `--json`, bounded detection of
+  AWS access-key IDs, GitHub token formats and private-key headers, and reports
+  that contain locations rather than secret values. Optional `[secrets]`
+  `scan_env` / `scan_paths` preflight prevents `wrap` from launching on findings,
+  incomplete scans or audit-write failure. Existing configurations keep their
+  behavior, and profile overlays cannot weaken enabled checks. The scanner walks
+  through `os.Root` with `O_NOFOLLOW` opens and pins recursive descent to the
+  enumerated parent directory handle, so a replaced intermediate directory cannot
+  redirect the walk, and it rechecks inode and content before reading. Scan
+  refusals are written to the audit chain. This is a prelaunch check, not runtime
+  redaction or complete secret detection (#101, N10715).
+
 ### Changed
 
-- macOS `filesystem.root` now enforces a kernel Seatbelt write boundary (N10722):
-  the canonical profile keeps `(allow default)`, denies all file writes, then
-  allows only the configured root in read-write mode, `.nock`, the invoking
-  user's required temp/cache locations, and required `/dev` pseudo-devices.
-  Phase 1 credential and configured sensitive paths remain denied for reads and
-  writes, including beneath the root. Read confinement outside the root is not
-  claimed.
-- macOS filesystem fencing is now active in `nocklock wrap` (N9222). NockLock
-  generates and preflights a canonical Seatbelt (`sandbox-exec`) profile before
-  launching the child, then records exactly one `ENGAGED`, `REFUSED-TO-START`,
-  or `DEGRADED` filesystem-fence state. Per-file deny event logging remains a
-  follow-up.
-- Added the temporary v0.5-only `filesystem.macos_allow_unfenced = true`
-  compatibility escape hatch. It is loud and audit-recorded, applies only when
-  Seatbelt cannot be enforced, defaults to false, and is removed in v0.6.
-
-### Fixed
-
-- Audit DB validate-then-open window documented (N10717): a same-uid writer that
-  swaps a validated ancestor for a symlink can redirect the DB. That racer is out
-  of NockLock's threat model; see ARCHITECTURE.md. Removed the redundant
-  path-based `os.Chmod` (the descriptor-based chmod already covers it) and added
-  `TestResidual_AncestorSwapBetweenValidateAndOpen` with a no-swap control.
-- `nocklock wrap --net-fence=netns` no longer consumes the child's stdin
-  (N10711). The privileged `setup` request previously rode the helper's stdin, so
-  the fenced child inherited a drained stream — `printf 'x' | nocklock wrap
-  --net-fence=netns -- cat` printed nothing and interactive/MCP agents lost input
-  entirely. The request now travels in a 0600 per-session file whose path rides
-  argv (`setup --request-file <path>`; validated regular/0600/owned-by-`SUDO_UID`,
-  opened `O_NOFOLLOW` and unlinked after read, both relative to a retained
-  directory fd so a swapped parent directory cannot redirect the root unlink),
-  and the sidecar payloads ride a dedicated inherited descriptor (fd 3), so the caller's real stdin — a TTY or a
-  pipe — flows through to the child unchanged. This was forced by `sudo` closing
-  descriptors ≥ 3 (`closefrom`), which rules out passing the request itself on an
-  fd across the sudo boundary; see ADR-004. Fence semantics are unchanged; both
-  the helper and sidecar legs fail closed if their setup channel is missing,
-  covered by negative-control tests. **Host installers must update the NOPASSWD
-  sudoers grant to `setup --request-file *`.**
-- `scripts/install-egress-helper.sh` now arms its cleanup trap before creating
-  either temp file, so an interrupt or error between the two `mktemp` calls no
-  longer leaks a temp file (N10655). The INT and TERM handlers now terminate
-  (`exit 130` / `exit 143`, which runs the EXIT trap once) instead of only
-  cleaning up and returning: previously a signal delivered between `mktemp` and
-  the `install` step removed the temp files and then let the privileged install
-  continue, recreating the predictable path without `O_EXCL` (a symlink-plant /
-  root-owned overwrite window for another local user). Pinned by a sandboxed
-  signal-injection test with a negative control that reverts the handler.
-- The audit logger no longer refuses to start on first run when the project is
-  reached through a symlinked path (N10714). `validatePath` resolved the project
-  root's symlinks but left the not-yet-created DB path in its raw frame, so on
-  macOS — where `/tmp` and `/var/folders` are `/private/*` symlinks — an in-root
-  `.nock/events.db` was falsely reported as "resolves outside project root" and
-  `wrap` failed closed on logger open. It now resolves the deepest existing
-  ancestor of the DB directory and rejoins the missing tail, keeping both sides
-  of the containment check in the same frame; the final DB component is still
-  left unresolved so a symlink AT the DB path is caught by the `O_NOFOLLOW`
-  guard. A symlinked *intermediate* ancestor escaping the root is now rejected
-  even when the tail does not exist yet (previously admitted). An ancestor that
-  is present but cannot be canonicalized — a dangling symlink (its target
-  absent), a symlink loop, or a permission-blocked / non-directory component —
-  now fails closed instead of degrading to the raw path frame, closing the
-  TOCTOU window where a dangling symlink's target could be created between the
-  check and the write. All are covered by negative-control tests.
-- The macOS unit suite now runs in full on the `macos-enforce` CI job: the seven
-  darwin test-portability failures are fixed and the `-skip` name list is
-  removed (N10714). The landlock rule-comparison tests normalise the temp root
-  with `filepath.EvalSymlinks` (matching `RulesFromConfig`'s own
-  canonicalization), the `wrap --dry-run` embedded-profile test accepts the
-  configured macOS Seatbelt denylist per-platform, and
-  `verifySkipReason` keys its Linux-only backend checks off the stubbable
-  `caps.goos` instead of `runtime.GOOS` (a no-op in production) so verify's skip
-  accounting is platform-deterministic under test.
-
+- The Anvil CI review now gates the shared Codex session behind a trust check
+  (N8715, #59): the PR head must be a branch in this repository, not a fork, and
+  the author must be OWNER, MEMBER or COLLABORATOR, so fork PRs and outside
+  contributors can never provision the shared credential. Reviewer output is
+  also redacted of any auth-file string before it is posted.
+- CI (#65) now runs `go build`, `go vet`, a `gofmt` cleanliness check, and the full
+  `go test ./...` suite on every push and pull request (`.github/workflows/test.yml`,
+  GitHub-hosted `ubuntu-latest`). Until now no workflow ran the Go test suite, so
+  the unit tests that guard the fence layers had never gated a merge.
+- New `network-egress` CI workflow (#76; `.github/workflows/network-egress.yml`) for the
+  Linux network-egress-enforcement track. It (1) runs the repeatable
+  `nocklock egress-probe` on `ubuntu-latest` — bare image and nftables-provisioned —
+  so the CI kernel's Q1 feasibility is measured identically to the dev VPS and kept
+  as an uploaded receipt (the bare run's `track=blocked` reflects only that the
+  runner image ships no `nft`, not a kernel that cannot host the fence); and (2)
+  **actually executes the Q6 post-drop mutation acceptance test** as root with
+  `NOCKLOCK_Q6_REQUIRE=1`. That test self-skips off the root path, so before this
+  it had never run anywhere — Candidate B's bypass-resistance bar (a capped child
+  cannot flush the `nftables`/routes/interfaces the fence depends on) is now a
+  receipted CI gate, not a green skip.
+- Added the TM symbol to the NockLock name and the Nock Technologies footer in the
+  README (#83).
+- Corrected the tamper-evident audit-log v1 specification to state the limits of
+  an unkeyed, in-database hash chain and fully define its canonical byte layout.
+- The CLI now compiles on darwin again (N10709, #99): the non-Linux `netns.EgressConfig` stub
+  gained the `DecisionLogPath` field that `wrap.go` assigns cross-platform, which
+  N10649 added only to the Linux struct (broke `GOOS=darwin go build ./...` at
+  `wrap.go:413`). The darwin field is inert — its helper stub still refuses to
+  run. CI now guards this: the ubuntu job cross-builds for darwin on every push,
+  and the macOS job builds, vets and runs the non-root unit suite natively
+  (seven darwin test-portability cases were skipped by name at that point; see
+  the N10714 fix below).
 - Default fence composition (`nocklock wrap --net-fence=netns` with Landlock and
   seccomp on) no longer fails to run for a project in a normal working directory
-  (N10710):
+  (N10710, #100):
   - The per-session egress decision directory now lives under the audit state
     root (`<state>/.nock/sessions/<id>/egress`) instead of the system temp dir.
     The default filesystem preset GRANTs `/tmp`, and Landlock is allow-only, so
@@ -105,158 +233,102 @@ All notable changes to NockLock will be documented in this file.
     `--net-fence=netns` escape (where the child keeps IP sockets and the kernel
     egress floor enforces the allowlist) instead of unconditionally advising
     `[syscall] enforcement = "off"`, which would have downgraded the fence.
-- The CLI now compiles on darwin again: the non-Linux `netns.EgressConfig` stub
-  gained the `DecisionLogPath` field that `wrap.go` assigns cross-platform, which
-  N10649 added only to the Linux struct (broke `GOOS=darwin go build ./...` at
-  `wrap.go:413`). The darwin field is inert — its helper stub still refuses to
-  run. CI now guards this: the ubuntu job cross-builds for darwin on every push,
-  and the macOS job builds, vets and runs the non-root unit suite natively
-  (seven darwin test-portability cases skipped by name pending N10714).
-
-### Added
-
-- Composed-default acceptance test (`TestWrapComposedDefaultEgressAudit`, root/CI
-  only) drives the full default stack — Landlock (required) + seccomp (required)
-  + netns egress + signed audit — through `nocklock wrap` with a real child:
-  one allowlisted fetch is permitted, one off-allowlist fetch is refused, both
-  decisions land signed in the audit chain, and `nocklock verify --audit`
-  confirms the chain and signatures. Runs in a new privileged Linux CI job
-  (`netns-composed-default`). An unprivileged unit test
-  (`TestEgressDecisionDirIsLandlockEnforceable`) pins the decision-dir fix and
-  fails on the old `/tmp` path.
-
-### Changed
-
-- Corrected the tamper-evident audit-log v1 specification to state the limits of
-  an unkeyed, in-database hash chain and fully define its canonical byte layout.
-
-### Added
-
-- Local `nocklock scan [path ...]` with `--env` and `--json`, bounded detection of
-  AWS access-key IDs, GitHub token formats and private-key headers, and reports
-  that contain locations rather than secret values. Optional `[secrets]`
-  `scan_env` / `scan_paths` preflight prevents `wrap` from launching on findings,
-  incomplete scans or audit-write failure. Existing configurations keep their
-  behavior, and profile overlays cannot weaken enabled checks. This is a
-  prelaunch check, not runtime redaction or complete secret detection.
-- `pkg/receipt` tail evidence: `VerifySession` now reads the signed chain head
-  (the same reader `nocklock verify` uses, exported as
-  `logging.ReadChainHead`) and reports `TailVerified` and `TailReason`. `INTACT`
-  now requires a head that verifies under the key and anchors exactly the
-  walked chain. A head whose row count or hash disagrees with the chain (rows
-  deleted from the tail, or a stale head) or whose signature fails is
-  `TAMPERED`, naming the anchored and found counts; a log with no signed head is
-  the new non-success verdict `UNANCHORED`. A head rolled back together with its
-  rows to an older genuine state still passes locally; only
-  `nocklock verify --against-remote-anchor` closes that.
-- `pkg/receipt`: a public, read-only `VerifySession(dbPath, pub, sessionID)`
-  that another module can import to verify one session's audit chain offline
-  with only the Ed25519 public key. It opens the log read only (never creates,
-  writes, or migrates it), walks the whole hash chain in id order because the
-  link spans sessions, checks every session row's signature, and returns exactly
-  one fail-closed verdict: `INTACT`, `TAMPERED`, `UNSIGNED`, `NO_ROWS`, or
-  `UNVERIFIABLE`. A row with a valid signature and a forged `prev_hash` is
-  `TAMPERED`. The chain primitives stay in `internal/logging` behind thin
-  exported wrappers (`chain_export.go`), so there is one implementation.
-- `nocklock wrap --net-fence=netns` now layers the Phase-1b working egress
-  allowlist onto its kernel default-drop floor. A per-run link-local veth grants
-  the namespace no default route and reaches only a host-side allowlist proxy;
-  nftables `tproxy` intercepts child TCP/80 and TCP/443 into a separate,
-  unprivileged transparent proxy that gates TLS SNI or HTTP Host before opening a
-  CONNECT tunnel to that host proxy. The namespace also bind-mounts a fixed-answer
-  DNS resolver that maps every A/AAAA name to the intercept address, keeping
-  denied-domain decisions at the proxy while UDP/TCP queries to other resolvers,
-  UDP/443 (QUIC), SCTP, and other raw egress remain default-dropped. Both policy
-  proxies are health-checked by the helper, which terminates the fenced child on
-  proxy death. A root-required CI protocol matrix now exercises the positive
-  HTTP(S) paths, proxy denial paths, DNS stub and bypass attempts, denied
-  transports, and curl/Node/Python TCP fallback clients.
-- CI: a `macos-enforce` job in `.github/workflows/test.yml` that runs the SBPL
-  filesystem fence's runtime ENFORCEMENT proof on a GitHub-hosted `macos-latest`
-  runner. It exercises the existing
-  darwin-tagged `TestSeatbeltEnforcement_RealSandboxExec` and
-  `TestSeatbeltDeniesWriteToFencedAuditLog` under real `sandbox-exec` — a fenced
-  read/write is DENIED while an unfenced one SUCCEEDS — closing the final N9222
-  acceptance gap: enforcement had never run in CI (the ubuntu job is
-  generation-only, PR #80). The job runs beside — never before — the ubuntu
-  `test` job, and runs on an ephemeral, isolated GitHub-hosted runner so fork PRs
-  can execute code safely without trust gates. A new `NOCKLOCK_SANDBOX_REQUIRE=1`
-  gate on the two tests (mirroring the netns suite's `NOCKLOCK_NETNS_REQUIRE`)
-  turns their normally-green "sandbox-exec unavailable" skip into a hard failure
-  under CI, so
-  a runner that has lost `sandbox-exec` cannot silently re-open the gap.
-- `nocklock wrap --net-fence=netns` (Linux, opt-in): the Phase-1 FOUNDATION of
-  the network-egress fence (Candidate B). A privileged helper — acquired via
-  passwordless `sudo -n` under the DECIDED capability model (spec amendment
-  2026-08-24) — creates a fresh network namespace (`CLONE_NEWNET`), brings
-  loopback up, installs a default-drop `nftables` base across ALL transports and
-  both IPv4 and IPv6 (QUIC/UDP/SCTP/TCP all denied — no allowances yet), drops
-  `CAP_NET_ADMIN`+`CAP_SYS_ADMIN` from all five capability sets (reusing the
-  receipted Q6 cap-drop harness), drops to the invoking user, and execve's the
-  agent as a non-root child inside the namespace. Fail-closed: if privilege
-  cannot be acquired or the five-set drop cannot complete, NockLock refuses to
-  exec — no advisory/degraded fallback. Default `wrap` behavior is unchanged;
-  the flag is Linux-only and refuses on other platforms. This is the
-  kernel-enforced hardened (no-network) floor; the transparent HTTP(S)/DNS
-  allowlist on top of it is a later increment (gated on Q7). A new root-gated
-  acceptance test (`TestNetnsFoundation_DefaultDropDeniesEgress`) proves the
-  capped child is denied all egress and runs beside the Q6 bar in the
-  `network-egress` CI workflow.
-- `nocklock egress-probe`: a repeatable, structured feasibility probe for the
-  Linux network-egress-enforcement track (Candidate B: netns + transparent
-  redirect). It codifies the Phase 0 VPS probe runs so every fleet kernel — CI
-  runners included — is measured the same way before Phase 1 locks the
-  privileged-helper design. Non-mutating: it attempts unprivileged
-  userns/userns+netns creation via throwaway `unshare` subprocesses (with the
-  receipted flags verbatim), reads the classic and AppArmor userns sysctls,
-  and detects `nft`/`nft_tproxy` and passwordless-sudo reachability, then emits
-  a versioned JSON result (`--json`) with an `observed`/`indicated`/`not-probed`
-  evidence field per check and a track verdict (`unprivileged-clean` /
-  `privileged-helper` / `blocked` / `undetermined` on Linux, `unsupported` on
-  non-Linux hosts). The root-only acceptance
-  tests (Q6 post-drop mutation, protocol-matrix egress, AppArmor toggle) are
-  enumerated follow-ups and are intentionally out of this increment. On the
-  dev VPS the probe reproduces the receipted root-mapping denial and
-  additionally records that bare unmapped userns+netns creation *succeeds* — a
-  narrower blocker than the one-off 2026-08-03 run captured.
-- `nocklock verify`: adversarial fence self-test that runs benign proof-of-block
-  probes under the live wrap fence path.
-- `nocklock doctor` now warns when a curated network allowlist is inert. On Linux,
-  when the network fence is active (`allow_all = false`) and the syscall fence is
-  on, the child is restricted to unix-domain sockets, so the TCP proxy that
-  enforces `network.allow` is unreachable and the posture collapses to no IP
-  network — the allowlist reaches *none* of the configured domains, not a subset.
-  This is the intended hardened no-network posture, but it silently defeats a user
-  who curated `network.allow` expecting selective access, so doctor surfaces it
-  with the fix (set `[syscall] enforcement = "off"` for a working, userspace
-  boundary, or accept no-network by design).
-
-### Changed
-
-- CI now runs `go build`, `go vet`, a `gofmt` cleanliness check, and the full
-  `go test ./...` suite on every push and pull request (`.github/workflows/test.yml`,
-  GitHub-hosted `ubuntu-latest`). Until now no workflow ran the Go test suite, so
-  the unit tests that guard the fence layers had never gated a merge.
-- New `network-egress` CI workflow (`.github/workflows/network-egress.yml`) for the
-  Linux network-egress-enforcement track. It (1) runs the repeatable
-  `nocklock egress-probe` on `ubuntu-latest` — bare image and nftables-provisioned —
-  so the CI kernel's Q1 feasibility is measured identically to the dev VPS and kept
-  as an uploaded receipt (the bare run's `track=blocked` reflects only that the
-  runner image ships no `nft`, not a kernel that cannot host the fence); and (2)
-  **actually executes the Q6 post-drop mutation acceptance test** as root with
-  `NOCKLOCK_Q6_REQUIRE=1`. That test self-skips off the root path, so before this
-  it had never run anywhere — Candidate B's bypass-resistance bar (a capped child
-  cannot flush the `nftables`/routes/interfaces the fence depends on) is now a
-  receipted CI gate, not a green skip.
+- macOS filesystem fence (N9222 phase 1, #108): `nocklock wrap` on macOS now
+  applies a kernel-enforced Seatbelt (`sandbox-exec`) profile inherited by every
+  child. The profile is a curated credential and sensitive-path DENYLIST
+  (`~/.ssh`, `~/.aws`, `~/.config`, `~/.gnupg`, `~/Library/Keychains`, plus
+  configured deny paths) written as `(allow default)` with explicit denies. It is
+  not the Linux root-only allowlist, and `filesystem.root` is not enforced as a
+  boundary on macOS. The profile is generated fail-closed with canonicalized
+  paths and validated with `sandbox-exec` before launch. Every wrap records
+  exactly one durable filesystem-fence state before the child runs: `ENGAGED`
+  (paths applied), `REFUSED-TO-START` (the default when the fence cannot be
+  applied), or `DEGRADED` (only through the explicit, logged
+  `filesystem.macos_allow_unfenced = true` escape hatch, which is temporary and
+  removed in v0.6, or an explicit `filesystem.root = ""`). Per-file deny events
+  are not emitted yet. Tests cover the three recorded states on darwin and run in
+  the existing `macos-enforce` CI job.
+- macOS filesystem-root documentation was made consistent across the product
+  docs (N10712, #106). At the time, the shipped CLI refused to launch when
+  `filesystem.root` was set on macOS, because the tested Seatbelt component is an
+  allow-default sensitive-path denylist rather than the root-only boundary that
+  the configuration promises; the docs were aligned to that refusal. The Seatbelt
+  fence above (#108) supersedes the refusal: `filesystem.root` is now accepted on
+  macOS but is not enforced as a boundary there. The architecture document also
+  now reflects the shipped network fence instead of describing it as planned.
+- macOS `filesystem.root` now enforces a kernel Seatbelt write boundary (N10722):
+  the canonical profile keeps `(allow default)`, denies all file writes, then
+  allows only the configured root in read-write mode, `.nock`, the invoking
+  user's required temp/cache locations, and required `/dev` pseudo-devices.
+  Phase 1 credential and configured sensitive paths remain denied for reads and
+  writes, including beneath the root. Read confinement outside the root is not
+  claimed. This supersedes the denylist-only boundary and the "`filesystem.root`
+  is not enforced" statements in the two macOS entries above.
 
 ### Fixed
 
 - Documented the previously-undocumented `nocklock doctor` and `nocklock verify`
-  commands in the README command table.
+  commands in the README command table (#65).
+- The audit logger no longer refuses to start on first run when the project is
+  reached through a symlinked path (N10714, #102). `validatePath` resolved the project
+  root's symlinks but left the not-yet-created DB path in its raw frame, so on
+  macOS — where `/tmp` and `/var/folders` are `/private/*` symlinks — an in-root
+  `.nock/events.db` was falsely reported as "resolves outside project root" and
+  `wrap` failed closed on logger open. It now resolves the deepest existing
+  ancestor of the DB directory and rejoins the missing tail, keeping both sides
+  of the containment check in the same frame; the final DB component is still
+  left unresolved so a symlink AT the DB path is caught by the `O_NOFOLLOW`
+  guard. A symlinked *intermediate* ancestor escaping the root is now rejected
+  even when the tail does not exist yet (previously admitted). An ancestor that
+  is present but cannot be canonicalized — a dangling symlink (its target
+  absent), a symlink loop, or a permission-blocked / non-directory component —
+  now fails closed instead of degrading to the raw path frame, closing the
+  TOCTOU window where a dangling symlink's target could be created between the
+  check and the write. All are covered by negative-control tests.
+- The macOS unit suite now runs in full on the `macos-enforce` CI job: the seven
+  darwin test-portability failures are fixed and the `-skip` name list is
+  removed (N10714, #102). The landlock rule-comparison tests normalise the temp root
+  with `filepath.EvalSymlinks` (matching `RulesFromConfig`'s own
+  canonicalization), the `wrap --dry-run` embedded-profile test accepts the
+  configured macOS Seatbelt denylist per-platform, and
+  `verifySkipReason` keys its Linux-only backend checks off the stubbable
+  `caps.goos` instead of `runtime.GOOS` (a no-op in production) so verify's skip
+  accounting is platform-deterministic under test.
+- `verifyChain` now reports tampered, instead of an intact empty chain, when the
+  `chain_head` row is missing but event rows remain (N10650, #103).
+- `scripts/install-egress-helper.sh` now arms its cleanup trap before creating
+  either temp file, so an interrupt or error between the two `mktemp` calls no
+  longer leaks a temp file (N10655, #104). The INT and TERM handlers now terminate
+  (`exit 130` / `exit 143`, which runs the EXIT trap once) instead of only
+  cleaning up and returning: previously a signal delivered between `mktemp` and
+  the `install` step removed the temp files and then let the privileged install
+  continue, recreating the predictable path without `O_EXCL` (a symlink-plant /
+  root-owned overwrite window for another local user). Pinned by a sandboxed
+  signal-injection test with a negative control that reverts the handler.
+- Audit DB validate-then-open window documented (N10717, #105): a same-uid writer that
+  swaps a validated ancestor for a symlink can redirect the DB. That racer is out
+  of NockLock's threat model; see ARCHITECTURE.md. Removed the redundant
+  path-based `os.Chmod` (the descriptor-based chmod already covers it) and added
+  `TestResidual_AncestorSwapBetweenValidateAndOpen` with a no-swap control.
+- `nocklock wrap --net-fence=netns` no longer consumes the child's stdin
+  (N10711, #107). The privileged `setup` request previously rode the helper's stdin, so
+  the fenced child inherited a drained stream — `printf 'x' | nocklock wrap
+  --net-fence=netns -- cat` printed nothing and interactive/MCP agents lost input
+  entirely. The request now travels in a 0600 per-session file whose path rides
+  argv (`setup --request-file <path>`; validated regular/0600/owned-by-`SUDO_UID`,
+  opened `O_NOFOLLOW` and unlinked after read, both relative to a retained
+  directory fd so a swapped parent directory cannot redirect the root unlink),
+  and the sidecar payloads ride a dedicated inherited descriptor (fd 3), so the caller's real stdin — a TTY or a
+  pipe — flows through to the child unchanged. This was forced by `sudo` closing
+  descriptors ≥ 3 (`closefrom`), which rules out passing the request itself on an
+  fd across the sudo boundary; see ADR-004. Fence semantics are unchanged; both
+  the helper and sidecar legs fail closed if their setup channel is missing,
+  covered by negative-control tests. **Host installers must update the NOPASSWD
+  sudoers grant to `setup --request-file *`.**
 
 ### Testing
 
-- **SBPL generator acceptance coverage (N10058)** — closed the residual test
+- **SBPL generator acceptance coverage (N10058, #80)** — closed the residual test
   gaps named by the macOS-fence Phase-1a acceptance criteria against the already
   shipped generator (`sbpl.go`, #27/#38): a table-driven test asserting a config
   of N sensitive paths yields exactly N canonical `(subpath …)` deny rules; a
@@ -264,7 +336,7 @@ All notable changes to NockLock will be documented in this file.
   first `(deny …)`, never `(deny default)`); and a fail-CLOSED negative control
   proving an unresolvable path makes `GenerateProfile` error and emit no profile
   (never a silent unfenced drop). No production code changed.
-- **Fuzz coverage over the fence decision surface** — the project's first fuzz
+- **Fuzz coverage over the fence decision surface** (#66) — the project's first fuzz
   targets, seeded from the v0.4.0 known-bypass regressions, hunt the next bypass
   class continuously in CI (bounded `-fuzztime`, one target per package). The
   seed corpus also runs as normal regression cases under `go test` (no `-fuzz`):
@@ -284,6 +356,13 @@ All notable changes to NockLock will be documented in this file.
     `RulesFromConfig` with adversarial root-child names. Asserts every emitted
     grant stays inside the resolved root (N8537) and no configured deny overlaps
     a granted tree (N8441) — the allow-only grant/deny decision fails closed.
+
+### Dependencies
+
+- `golang.org/x/sys` 0.46.0 → 0.48.0 (`477b9d1` #60, `1aea68a` #85)
+- `modernc.org/sqlite` 1.53.0 → 1.59.0 (`9532c7c` #64, `54dc9de` #75, `5bc127c` #78, `30e9316` #94)
+
+---
 
 ## [0.4.0] - 2026-07-09
 
