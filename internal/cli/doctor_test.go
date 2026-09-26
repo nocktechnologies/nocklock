@@ -196,8 +196,8 @@ func TestFilesystemDoctorCheckDarwinReportsSeatbeltEnforceable(t *testing.T) {
 	if check.Severity != doctorOK || check.Status != "enforceable" {
 		t.Fatalf("darwin filesystem check = %+v, want enforceable Seatbelt result", check)
 	}
-	if !strings.Contains(check.Message, "Seatbelt") || !strings.Contains(check.Message, "denylist") {
-		t.Fatalf("darwin filesystem message must describe the Seatbelt denylist, got %q", check.Message)
+	if !strings.Contains(check.Message, "Seatbelt") || !strings.Contains(check.Message, "root-write confinement") {
+		t.Fatalf("darwin filesystem message must describe Seatbelt write confinement, got %q", check.Message)
 	}
 	if check.Fix != "" {
 		t.Fatalf("enforceable Seatbelt check should not require a fix, got %q", check.Fix)

@@ -87,6 +87,87 @@ func TestSeatbeltEnforcement_RealSandboxExec(t *testing.T) {
 	}
 }
 
+// TestSeatbeltWriteConfinement_RealSandboxExec is the negative control for
+// Phase 2: a write inside filesystem.root succeeds while a sibling directory
+// in the invoking user's home is denied. The test deliberately avoids t.TempDir
+// for the target paths because the profile must allow the per-user temp area.
+func TestSeatbeltWriteConfinement_RealSandboxExec(t *testing.T) {
+	requireSandboxExec(t)
+
+	home, err := os.UserHomeDir()
+	if err != nil || home == "" {
+		t.Fatalf("UserHomeDir: %v", err)
+	}
+	base, err := os.MkdirTemp(home, ".nocklock-seatbelt-")
+	if err != nil {
+		t.Fatalf("create home test directory: %v", err)
+	}
+	defer os.RemoveAll(base)
+
+	root := filepath.Join(base, "project")
+	outside := filepath.Join(base, "outside")
+	stateDir := filepath.Join(root, ".nock")
+	for _, dir := range []string{root, outside, stateDir} {
+		if err := os.MkdirAll(dir, 0700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	sensitiveDir := filepath.Join(root, "sensitive")
+	if err := os.Mkdir(sensitiveDir, 0700); err != nil {
+		t.Fatal(err)
+	}
+	sensitiveFile := filepath.Join(sensitiveDir, "credential")
+	if err := os.WriteFile(sensitiveFile, []byte("SUPER-SECRET"), 0600); err != nil {
+		t.Fatal(err)
+	}
+
+	profile, _, err := GenerateWriteConfinementProfile(
+		[]string{sensitiveDir}, root, "read-write", stateDir, false,
+	)
+	if err != nil {
+		t.Fatalf("GenerateWriteConfinementProfile: %v", err)
+	}
+	pf, err := WriteProfile(profile)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer os.Remove(pf)
+
+	write := func(target string) error {
+		t.Helper()
+		argv, err := WrapArgv(pf, []string{"/bin/sh", "-c", `printf fenced > "$1"`, "sh", target})
+		if err != nil {
+			t.Fatal(err)
+		}
+		return exec.Command(argv[0], argv[1:]...).Run()
+	}
+
+	insideFile := filepath.Join(root, "inside.txt")
+	if err := write(insideFile); err != nil {
+		t.Fatalf("write inside root failed: %v", err)
+	}
+	if got, err := os.ReadFile(insideFile); err != nil || string(got) != "fenced" {
+		t.Fatalf("inside-root write = %q, %v; want fenced, nil", got, err)
+	}
+
+	outsideFile := filepath.Join(outside, "outside.txt")
+	if err := write(outsideFile); err == nil {
+		t.Fatal("FENCE FAILED OPEN: write outside filesystem.root succeeded")
+	}
+	if _, err := os.Stat(outsideFile); !os.IsNotExist(err) {
+		t.Fatalf("outside-root target exists after denied write: %v", err)
+	}
+
+	argv, err := WrapArgv(pf, []string{"/bin/cat", sensitiveFile})
+	if err != nil {
+		t.Fatal(err)
+	}
+	out, err := exec.Command(argv[0], argv[1:]...).CombinedOutput()
+	if err == nil || strings.Contains(string(out), "SUPER-SECRET") {
+		t.Fatalf("sensitive path below a write-allowed root was not read-denied: err=%v out=%q", err, out)
+	}
+}
+
 // TestValidateProfileRejectsMalformedProfile is the negative control for wrap's
 // preflight gate: a profile that sandbox-exec rejects must be caught before an
 // agent command is ever assembled or launched.

@@ -52,8 +52,60 @@ func TestWrapMacOSFilesystemFenceRecordsOneEngagedState(t *testing.T) {
 	if len(states) != 1 {
 		t.Fatalf("expected exactly one macOS filesystem fence state, got %d: %q", len(states), states)
 	}
-	if !strings.Contains(states[0], "ENGAGED") || !strings.Contains(states[0], "Seatbelt profile applied") {
+	if !strings.Contains(states[0], "ENGAGED") || !strings.Contains(states[0], "Seatbelt root-write confinement applied") {
 		t.Fatalf("expected an engaged Seatbelt state record, got %q", states[0])
+	}
+}
+
+// TestWrapMacOSFilesystemFenceConfinesWritesToRoot proves nocklock wrap wires
+// the root-write profile into the launched child, rather than merely generating
+// a valid SBPL string. The targets live under the home directory because the
+// profile intentionally permits the system temp directory used by t.TempDir.
+func TestWrapMacOSFilesystemFenceConfinesWritesToRoot(t *testing.T) {
+	if err := fsfence.EnsureSandboxExecAvailable(); err != nil {
+		if os.Getenv("NOCKLOCK_SANDBOX_REQUIRE") == "1" {
+			t.Fatalf("sandbox-exec unavailable: %v; NOCKLOCK_SANDBOX_REQUIRE=1 forbids skipping", err)
+		}
+		t.Skipf("sandbox-exec unavailable: %v", err)
+	}
+
+	home, err := os.UserHomeDir()
+	if err != nil || home == "" {
+		t.Fatalf("UserHomeDir: %v", err)
+	}
+	base, err := os.MkdirTemp(home, ".nocklock-wrap-")
+	if err != nil {
+		t.Fatalf("create home test directory: %v", err)
+	}
+	defer os.RemoveAll(base)
+	project := filepath.Join(base, "project")
+	outside := filepath.Join(base, "outside")
+	for _, dir := range []string{project, outside} {
+		if err := os.Mkdir(dir, 0700); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	policy := strings.Replace(config.DefaultTOML(), "allow_all = false", "allow_all = true", 1)
+	writeTestConfig(t, project, policy)
+	withWorkingDir(t, project)
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+
+	insideFile := filepath.Join(project, "inside.txt")
+	outsideFile := filepath.Join(outside, "outside.txt")
+	cmd := &cobra.Command{}
+	cmd.SetContext(context.Background())
+	err = wrapCmd.RunE(cmd, []string{
+		"--", "/bin/sh", "-c", `printf inside > "$1"; printf outside > "$2"`, "sh", insideFile, outsideFile,
+	})
+	if err == nil {
+		t.Fatal("FENCE FAILED OPEN: write outside filesystem.root succeeded")
+	}
+	if got, readErr := os.ReadFile(insideFile); readErr != nil || string(got) != "inside" {
+		t.Fatalf("inside-root write = %q, %v; want inside, nil", got, readErr)
+	}
+	if _, statErr := os.Stat(outsideFile); !os.IsNotExist(statErr) {
+		t.Fatalf("outside-root target exists after denied wrap write: %v", statErr)
 	}
 }
 

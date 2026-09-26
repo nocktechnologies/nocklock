@@ -13,13 +13,13 @@ DNS allowlist, set up by a root-owned helper over a constrained sudo grant).
 All fence events are logged to a tamper-evident SQLite audit log: a SHA-256
 hash chain (v1), Ed25519 signatures over the rows and the chain head (v1.1),
 and an external chain-head anchor that can be pushed off-box (v1.2). macOS
-has a kernel-enforced Seatbelt sensitive-path denylist (not a root-only
-boundary) and records its filesystem-fence state in SQLite; per-file deny
-events remain a follow-up.
+has a kernel-enforced Seatbelt write-confinement profile plus sensitive-path
+read/write denies (reads outside `filesystem.root` are not confined) and
+records its filesystem-fence state in SQLite; per-file deny events remain a
+follow-up.
 
 **Target state:** Preserve all three active fence categories while adding an
-Endpoint Security macOS backend for strict root-only isolation and native
-per-file events; optional NockCC cloud dashboard sync remains separate.
+Endpoint Security macOS backend for read confinement and native per-file events; optional NockCC cloud dashboard sync remains separate.
 
 ## Package Structure
 
@@ -80,9 +80,9 @@ pkg/
 5. With `filesystem.root` configured on Linux, the filesystem fence applies
    Landlock and LD_PRELOAD with libfence_fs.so, then opens a Unix socket for events
 6. With `filesystem.root` configured on macOS, NockLock builds a canonical
-   Seatbelt denylist profile of curated credential and sensitive paths,
-   validates it with `sandbox-exec`, and wraps the child with it. The root value
-   itself is not enforced as a boundary. Exactly one fence state is recorded
+   Seatbelt profile that denies writes outside the root and required runtime
+   paths, preserves sensitive-path read/write denies, validates it with
+   `sandbox-exec`, and wraps the child with it. Exactly one fence state is recorded
    before launch: ENGAGED, REFUSED-TO-START (the default when the profile
    cannot be applied) or DEGRADED (only via the explicit `filesystem.root = ""`
    or the temporary `filesystem.macos_allow_unfenced` escape hatch)
@@ -112,9 +112,8 @@ pkg/
 11. NockLock exits with the child's exit code
 
 ### Future
-- Root confinement on macOS (out-of-root write refusal for `filesystem.root`)
-  is not yet implemented; it is a follow-up (N9222 phase 2), alongside native
-  per-file deny events.
+- A macOS Endpoint Security backend can add read confinement and native per-file
+  deny events.
 - Optional: events batched and synced to NockCC cloud dashboard
 
 ## Network egress fence (Linux, opt-in)

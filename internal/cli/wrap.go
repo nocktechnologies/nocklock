@@ -340,9 +340,10 @@ var wrapCmd = &cobra.Command{
 					logEvent(logging.EventFilePassed, "filesystem", fmt.Sprintf("root=%s mode=%s", fsCfg.Root, fsCfg.Mode), false)
 
 				case "darwin":
-					// Seatbelt is a kernel-enforced sensitive-path DENYLIST, not the
-					// Linux root-only allowlist. It is the selected macOS v0.5 fence
-					// and is intentionally explicit in both output and audit state.
+					// Seatbelt keeps its allow-default base because deny-default aborts
+					// common macOS processes. The generated profile nevertheless
+					// confines WRITES to filesystem.root and essential runtime paths,
+					// while retaining the Phase 1 sensitive read/write denies.
 					degradeOrRefuse := func(stage string, setupErr error) error {
 						if cfg.Filesystem.MacOSAllowUnfenced {
 							if logErr := recordMacOSFilesystemFenceState("DEGRADED", stage+"; explicit filesystem.macos_allow_unfenced=true", false); logErr != nil {
@@ -372,7 +373,10 @@ var wrapCmd = &cobra.Command{
 						break
 					}
 					sensitive := append(defaultSensitive, fsCfg.DenyPaths...)
-					profile, pathCount, err := fsfence.GenerateProfileAndCount(sensitive, cfg.Filesystem.Hardened)
+					stateDir := filepath.Join(projectRoot, config.Dir)
+					profile, pathCount, err := fsfence.GenerateWriteConfinementProfile(
+						sensitive, fsCfg.Root, fsCfg.Mode, stateDir, cfg.Filesystem.Hardened,
+					)
 					if err != nil {
 						if setupErr := degradeOrRefuse("profile generation failed", err); setupErr != nil {
 							return setupErr
@@ -405,10 +409,10 @@ var wrapCmd = &cobra.Command{
 					}
 					fsSandboxPrefix = sandboxArgv[:len(sandboxArgv)-len(args)]
 
-					if err := recordMacOSFilesystemFenceState("ENGAGED", fmt.Sprintf("Seatbelt profile applied; paths=%d", pathCount), false); err != nil {
+					if err := recordMacOSFilesystemFenceState("ENGAGED", fmt.Sprintf("Seatbelt root-write confinement applied; root=%s mode=%s sensitive_paths=%d", fsCfg.Root, fsCfg.Mode, pathCount), false); err != nil {
 						return fmt.Errorf("cannot record macOS filesystem fence engagement; refusing to start: %w", err)
 					}
-					fmt.Fprintf(os.Stderr, "NockLock: macOS filesystem fence ENGAGED — Seatbelt profile applied to %d sensitive path(s)\n", pathCount)
+					fmt.Fprintf(os.Stderr, "NockLock: macOS filesystem fence ENGAGED — Seatbelt root-write confinement active for %s (%s); %d sensitive path(s) denied\n", fsCfg.Root, fsCfg.Mode, pathCount)
 
 				default:
 					return fmt.Errorf("filesystem fence configured but not supported on %s", runtime.GOOS)

@@ -256,6 +256,14 @@ All notable changes to NockLock will be documented in this file.
   fence above (#108) supersedes the refusal: `filesystem.root` is now accepted on
   macOS but is not enforced as a boundary there. The architecture document also
   now reflects the shipped network fence instead of describing it as planned.
+- macOS `filesystem.root` now enforces a kernel Seatbelt write boundary (N10722):
+  the canonical profile keeps `(allow default)`, denies all file writes, then
+  allows only the configured root in read-write mode, `.nock`, the invoking
+  user's required temp/cache locations, and required `/dev` pseudo-devices.
+  Phase 1 credential and configured sensitive paths remain denied for reads and
+  writes, including beneath the root. Read confinement outside the root is not
+  claimed. This supersedes the denylist-only boundary and the "`filesystem.root`
+  is not enforced" statements in the two macOS entries above.
 
 ### Fixed
 

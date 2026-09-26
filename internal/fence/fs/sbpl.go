@@ -2,7 +2,9 @@ package fs
 
 import (
 	"fmt"
+	"os"
 	"path/filepath"
+	"runtime"
 	"sort"
 	"strings"
 )
@@ -66,38 +68,66 @@ func GenerateHardenedProfile(sensitivePaths []string) (string, error) {
 // lets callers audit the exact applied policy without over-reporting duplicate
 // configuration entries.
 func GenerateProfileAndCount(sensitivePaths []string, hardened bool) (string, int, error) {
-	if len(sensitivePaths) == 0 {
-		return "", 0, fmt.Errorf("refusing to generate a fence profile with no sensitive paths (would be a no-op fence)")
+	return generateProfile(sensitivePaths, hardened, nil)
+}
+
+// GenerateWriteConfinementProfile builds the macOS Seatbelt profile used when
+// filesystem.root is configured. It denies every file write first, then grants
+// writes only to the canonical root (unless mode is read-only), the NockLock
+// state directory, and the per-user runtime paths needed to launch common
+// tools. Sensitive paths remain denied for both reads and writes after those
+// grants, so a sensitive path under root never becomes accessible.
+func GenerateWriteConfinementProfile(sensitivePaths []string, root, mode, stateDir string, hardened bool) (string, int, error) {
+	if strings.TrimSpace(root) == "" {
+		return "", 0, fmt.Errorf("refusing to generate write-confinement profile with an empty root")
+	}
+	if strings.TrimSpace(stateDir) == "" {
+		return "", 0, fmt.Errorf("refusing to generate write-confinement profile with an empty state directory")
+	}
+	if mode != "read-write" && mode != "read-only" {
+		return "", 0, fmt.Errorf("invalid filesystem mode %q: must be \"read-write\" or \"read-only\"", mode)
 	}
 
-	seen := make(map[string]struct{}, len(sensitivePaths))
-	canonical := make([]string, 0, len(sensitivePaths))
-	for _, p := range sensitivePaths {
-		if strings.TrimSpace(p) == "" {
-			continue
-		}
-		c, err := canonicalizeForProfile(p)
-		if err != nil {
-			// Fail closed: never emit a rule we cannot guarantee will match.
-			return "", 0, fmt.Errorf("cannot canonicalize sensitive path %q (refusing to emit a fence that may fail open): %w", p, err)
-		}
-		if _, dup := seen[c]; dup {
-			continue
-		}
-		seen[c] = struct{}{}
-		canonical = append(canonical, c)
+	writePaths, err := writeConfinementPaths(root, mode, stateDir)
+	if err != nil {
+		return "", 0, err
+	}
+	return generateProfile(sensitivePaths, hardened, writePaths)
+}
+
+func generateProfile(sensitivePaths []string, hardened bool, writePaths []string) (string, int, error) {
+	canonical, err := canonicalProfilePaths(sensitivePaths, "sensitive")
+	if err != nil {
+		return "", 0, err
 	}
 	if len(canonical) == 0 {
 		return "", 0, fmt.Errorf("refusing to generate a fence profile with no resolvable sensitive paths")
 	}
-	sort.Strings(canonical)
 
 	var b strings.Builder
 	b.WriteString("(version 1)\n")
 	b.WriteString(";; NockLock macOS filesystem fence (Seatbelt interim).\n")
-	b.WriteString(";; allow-default base; deny the sensitive paths below. Paths are\n")
-	b.WriteString(";; canonical realpaths — required, or the kernel match fails open.\n")
+	b.WriteString(";; allow-default base; paths are canonical realpaths — required,\n")
+	b.WriteString(";; or the kernel match fails open.\n")
 	b.WriteString("(allow default)\n")
+	if len(writePaths) > 0 {
+		b.WriteString(";; Root write confinement: deny all writes, then grant only\n")
+		b.WriteString(";; the canonical root/runtime paths below.\n")
+		b.WriteString("(deny file-write*)\n")
+		b.WriteString("(allow file-write*\n")
+		for _, p := range writePaths {
+			b.WriteString("    (subpath ")
+			b.WriteString(sbplString(p))
+			b.WriteString(")\n")
+		}
+		b.WriteString("    (literal \"/dev/null\")\n")
+		b.WriteString("    (literal \"/dev/tty\")\n")
+		b.WriteString("    (regex #\"^/dev/tty.*$\")\n")
+		b.WriteString("    (literal \"/dev/fd\")\n")
+		b.WriteString("    (regex #\"^/dev/fd/\"))\n")
+	}
+	b.WriteString(";; Sensitive paths remain denied for reads and writes, including\n")
+	b.WriteString(";; when they are nested below a write-allowed root.\n")
 	b.WriteString("(deny file-read* file-write*\n")
 	for _, c := range canonical {
 		b.WriteString("    (subpath ")
@@ -129,6 +159,77 @@ func GenerateProfileAndCount(sensitivePaths []string, hardened bool) (string, in
 	}
 
 	return b.String(), len(canonical), nil
+}
+
+// writeConfinementPaths returns the directories that are allowed to receive
+// writes under the macOS root-confinement profile. The Go standard library is
+// the source of the invoking user's temporary and cache locations. On macOS,
+// reject an arbitrary TMPDIR outside the system's per-user temp locations so a
+// caller cannot silently widen the boundary through its environment.
+func writeConfinementPaths(root, mode, stateDir string) ([]string, error) {
+	tempDir, err := canonicalizeForProfile(os.TempDir())
+	if err != nil {
+		return nil, fmt.Errorf("cannot canonicalize user temporary directory: %w", err)
+	}
+	if runtime.GOOS == "darwin" && tempDir != "/private/tmp" && !strings.HasPrefix(tempDir, "/private/var/folders/") {
+		return nil, fmt.Errorf("refusing to allow temporary directory outside /private/tmp or /private/var/folders: %s", tempDir)
+	}
+
+	cacheDir, err := os.UserCacheDir()
+	if err != nil {
+		return nil, fmt.Errorf("cannot determine user cache directory: %w", err)
+	}
+	if strings.TrimSpace(cacheDir) == "" {
+		return nil, fmt.Errorf("cannot determine user cache directory: empty result")
+	}
+
+	paths := []string{
+		"/private/tmp",
+		tempDir,
+		cacheDir,
+		stateDir,
+	}
+	// macOS gives each invoking user a paired T (temp) and C (cache) directory
+	// under /private/var/folders. os.TempDir identifies the T directory; add its
+	// sibling C directory without granting any other user's folder.
+	if strings.HasPrefix(tempDir, "/private/var/folders/") {
+		paths = append(paths, filepath.Join(filepath.Dir(tempDir), "C"))
+	}
+	if mode == "read-write" {
+		paths = append(paths, root)
+	}
+
+	canonical, err := canonicalProfilePaths(paths, "write-allowed")
+	if err != nil {
+		return nil, err
+	}
+	return canonical, nil
+}
+
+func canonicalProfilePaths(paths []string, purpose string) ([]string, error) {
+	if len(paths) == 0 {
+		return nil, fmt.Errorf("refusing to generate a fence profile with no %s paths", purpose)
+	}
+
+	seen := make(map[string]struct{}, len(paths))
+	canonical := make([]string, 0, len(paths))
+	for _, p := range paths {
+		if strings.TrimSpace(p) == "" {
+			continue
+		}
+		c, err := canonicalizeForProfile(p)
+		if err != nil {
+			// Fail closed: never emit a rule we cannot guarantee will match.
+			return nil, fmt.Errorf("cannot canonicalize %s path %q (refusing to emit a fence that may fail open): %w", purpose, p, err)
+		}
+		if _, dup := seen[c]; dup {
+			continue
+		}
+		seen[c] = struct{}{}
+		canonical = append(canonical, c)
+	}
+	sort.Strings(canonical)
+	return canonical, nil
 }
 
 // canonicalizeForProfile resolves path to an absolute, symlink-free form

@@ -9,7 +9,7 @@ NockLock puts a fence around your AI coding agent — controlling what secrets i
 Your AI agent runs with full shell access — your environment, your filesystem, your network. NockLock doesn't change how your agent works — it controls what it can reach.
 
 - **Secret Fence** — Filter environment variables. Your agent sees `PATH` and `HOME`. It never sees `AWS_SECRET_ACCESS_KEY`.
-- **Filesystem Fence** — Linux uses a kernel root allowlist (Landlock) with LD_PRELOAD event logging. macOS uses a kernel Seatbelt (`sandbox-exec`) denylist for credential and sensitive paths, including `~/.ssh`, `~/.aws`, `~/.config`, `~/.gnupg`, and `~/Library/Keychains`.
+- **Filesystem Fence** — Linux uses a kernel root allowlist (Landlock) with LD_PRELOAD event logging. macOS uses kernel Seatbelt (`sandbox-exec`) to confine writes to `filesystem.root` plus required runtime paths, while denying credential and sensitive paths such as `~/.ssh`, `~/.aws`, `~/.config`, `~/.gnupg`, and `~/Library/Keychains` for both reads and writes.
 - **Network Fence** — Local proxy with domain allowlist. Your agent can reach GitHub and `api.anthropic.com`. It can't phone home to anywhere else. On Linux, `nocklock wrap --net-fence=netns` opts into a kernel-enforced version: a network namespace with an nftables default-drop floor and a transparent HTTP(S) and DNS allowlist, so nothing outside `network.allow` leaves the namespace on any transport.
 
 ## Quick Start
@@ -23,7 +23,7 @@ nocklock wrap -- claude
 
 That's it. Four commands. Your agent is fenced.
 
-On macOS, `nocklock init` writes the same default `filesystem.root = "."`, and `nocklock wrap` accepts it, but the value does not confine writes there: the Seatbelt profile denies a curated list of credential and sensitive paths (`~/.ssh`, `~/.aws`, `~/.config`, `~/.gnupg`, `~/Library/Keychains`, plus your `filesystem.deny` paths) and allows everything else, so the agent can still write outside the project root. `filesystem.root` is only checked to be an existing directory, and `filesystem.allow` and `filesystem.mode` are not enforced on macOS. A root-confinement backend is a follow-up (N9222 phase 2). See "Filesystem platform boundary" below.
+On macOS, `nocklock init` writes the same default `filesystem.root = "."`, and `nocklock wrap` enforces it as a kernel Seatbelt write boundary: writes outside the root, `.nock`, and essential per-user runtime paths are denied, and the curated credential and sensitive paths (`~/.ssh`, `~/.aws`, `~/.config`, `~/.gnupg`, `~/Library/Keychains`, plus your `filesystem.deny` paths) are denied for reads and writes. Reads outside the root are not confined, and `filesystem.allow` is not enforced on macOS. `filesystem.mode = "read-only"` is enforced: it drops the write allow for the root. See "Filesystem platform boundary" below.
 
 For a runtime-specific first run, scaffold from a preset:
 
@@ -40,7 +40,7 @@ nocklock init --runtime goose
 `nocklock wrap` does three things before spawning your agent:
 
 1. **Filters environment variables** based on pass/block lists with glob patterns — Linux, macOS
-2. **Fences the filesystem** — Linux: Landlock applies a kernel allowlist and LD_PRELOAD records blocked-access events. macOS: Seatbelt applies a kernel-enforced sensitive-path denylist, inherited by every child process. Before launch, NockLock validates the generated profile; a requested macOS fence either engages or refuses to start, never silently degrades.
+2. **Fences the filesystem** — Linux: Landlock applies a kernel allowlist and LD_PRELOAD records blocked-access events. macOS: Seatbelt denies writes by default, then permits only `filesystem.root`, NockLock state, and essential per-user runtime paths; its sensitive-path denies also block reads. The profile is inherited by every child process. Before launch, NockLock validates the generated profile; a requested macOS fence either engages or refuses to start, never silently degrades.
 3. **Routes network traffic** through a local proxy that enforces a domain allowlist. On Linux, in the default proxy mode with the syscall fence enabled, IP socket creation is denied so native code cannot bypass the proxy; this is a fail-closed no-network posture. Disable `[syscall]` only if you accept the proxy as a userspace boundary. For HTTPS, only the hostname is inspected — no certificate injection, no payload decryption. If the proxy is not confirmed healthy, the agent does not start.
    On Linux you can instead pass `--net-fence=netns`: the child then runs in its own network namespace behind a kernel default-drop floor, keeps its configured IP socket families, and reaches only `network.allow` hosts through a transparent HTTP(S) proxy and a fixed-answer DNS stub that answers DNS over UDP and TCP port 53 inside the namespace; all other traffic leaving the namespace is dropped in the kernel, including direct DNS to other resolvers, non-DNS UDP, QUIC (UDP/443), SCTP and raw IP. This mode needs the privileged egress helper described under "Linux network-egress helper" and fails closed without it.
 
@@ -48,13 +48,16 @@ Linux blocked accesses are logged to `.nock/events.db`. The macOS Seatbelt path 
 
 ### Filesystem platform boundary
 
-Linux supplies root-only filesystem isolation. macOS supplies a different,
-kernel-enforced boundary: Seatbelt deliberately uses `(allow default)` plus
-explicit denies for the curated sensitive paths. It therefore does not claim
-Linux-style project-root isolation, but it does fence credentials and is
-inherited by every descendant. The profile is built from canonical realpaths;
-an unresolvable sensitive path or rejected profile fails closed before the
-agent starts.
+Linux supplies root-only filesystem isolation. macOS supplies a kernel-enforced
+**write** boundary: Seatbelt deliberately keeps `(allow default)` because a
+`(deny default)` profile aborts common processes, then applies `(deny
+file-write*)` with narrow write allows for the canonical `filesystem.root`,
+`.nock`, `/private/tmp`, the invoking user's temp/cache paths, and required
+`/dev` pseudo-devices. Curated sensitive paths remain denied for both reads and
+writes, even if nested under the configured root. Reads outside the root are
+not confined; NockLock does not claim macOS read isolation. Every emitted path
+is canonicalized, and an unresolvable path or rejected profile fails closed
+before the agent starts.
 
 Apple deprecates `sandbox-exec`, although it remains present and functional on
 macOS 26.5. NockLock tests it in macOS CI and will track its availability. Its
@@ -410,7 +413,7 @@ NockLock is a fence, not guardrails. The distinction matters.
 
 **Guardrails** tell the agent what not to do. The agent can ignore them, work around them, or hallucinate past them. Guardrails are prompts.
 
-**A fence** sits between the agent and the resource. How hard the boundary is depends on the fence. The **secret fence** is absolute — a blocked variable is gone from the environment before the agent starts. On **Linux the filesystem fence** is kernel-enforced with Landlock by default and composes with LD_PRELOAD logging; static binaries and children that clear `LD_PRELOAD` are still denied by the kernel. On **macOS the filesystem fence** is a kernel-enforced Seatbelt denylist for curated credential paths, not a root-only allowlist; its profile follows descendants even when they cross into protected system binaries. The **network fence** stops normal and prompt-injected attempts to reach unapproved domains and logs every try; on Linux with syscall fencing enabled, proxy-mode runs allow only Unix-domain sockets, so the bypass-resistant posture is no IP sockets rather than proxy-based allowlisting. With `--net-fence=netns` the child keeps IP sockets and the boundary is composed: the nftables default-drop floor and the network namespace prevent alternate transports and proxy bypass (direct DNS to other resolvers, non-DNS UDP, QUIC, SCTP and raw IP are dropped, and nothing but the transparent proxy and the in-namespace DNS stub is reachable), while the transparent HTTP(S) proxy and the DNS stub enforce the `network.allow` domain policy.
+**A fence** sits between the agent and the resource. How hard the boundary is depends on the fence. The **secret fence** is absolute — a blocked variable is gone from the environment before the agent starts. On **Linux the filesystem fence** is kernel-enforced with Landlock by default and composes with LD_PRELOAD logging; static binaries and children that clear `LD_PRELOAD` are still denied by the kernel. On **macOS the filesystem fence** is a kernel-enforced Seatbelt write confinement: writes outside the configured root and its essential runtime exceptions are denied, and curated credential paths are denied for reads and writes. It does not claim read confinement outside the root. The profile follows descendants even when they cross into protected system binaries. The **network fence** stops normal and prompt-injected attempts to reach unapproved domains and logs every try; on Linux with syscall fencing enabled, proxy-mode runs allow only Unix-domain sockets, so the bypass-resistant posture is no IP sockets rather than proxy-based allowlisting. With `--net-fence=netns` the child keeps IP sockets and the boundary is composed: the nftables default-drop floor and the network namespace prevent alternate transports and proxy bypass (direct DNS to other resolvers, non-DNS UDP, QUIC, SCTP and raw IP are dropped, and nothing but the transparent proxy and the in-namespace DNS stub is reachable), while the transparent HTTP(S) proxy and the DNS stub enforce the `network.allow` domain policy.
 
 NockLock doesn't restrict how your agent works. It restricts what your agent can reach. Your agent still has full permissions — inside the fence.
 
