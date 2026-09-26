@@ -137,7 +137,29 @@ func Scan(ctx context.Context, root string, paths, environ []string) ScanReport 
 
 func (s *scanner) issue(location, reason string) {
 	s.report.Complete = false
-	s.report.Issues = append(s.report.Issues, ScanIssue{location, reason})
+	s.report.Issues = append(s.report.Issues, ScanIssue{scanLocation(location), reason})
+}
+
+// Metadata can itself contain credential material (for example a token used as
+// a filename). Scrub recognized formats there as well as omitting matched values.
+func scanLocation(location string) string {
+	for _, detector := range scanDetectors {
+		var out strings.Builder
+		for len(location) > 0 {
+			match := detector.re.FindStringSubmatchIndex(location)
+			if match == nil {
+				out.WriteString(location)
+				break
+			}
+			out.WriteString(location[:match[2]])
+			out.WriteString("[redacted]")
+			// Leave the trailing delimiter for the next search, so adjacent
+			// credentials sharing a delimiter are both removed.
+			location = location[match[3]:]
+		}
+		location = out.String()
+	}
+	return location
 }
 
 func (s *scanner) next(location string) bool {
@@ -179,7 +201,7 @@ func (s *scanner) inspect(data []byte, source, location string) {
 			if source == "file" {
 				line = bytes.Count(data[:match[2]], []byte{'\n'}) + 1
 			}
-			s.report.Findings = append(s.report.Findings, Finding{detector.id, source, location, line})
+			s.report.Findings = append(s.report.Findings, Finding{detector.id, source, scanLocation(location), line})
 		}
 	}
 }

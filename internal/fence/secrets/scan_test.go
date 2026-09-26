@@ -140,3 +140,23 @@ func TestScanEmptyFileIsCleanAndDuplicatePathsAreNotRepeated(t *testing.T) {
 		t.Fatalf("unexpected report: %+v", r)
 	}
 }
+
+func TestScanRedactsRecognizedCredentialsInMetadata(t *testing.T) {
+	root := t.TempDir()
+	value := syntheticToken()
+	name := value + "," + value
+	if err := os.WriteFile(filepath.Join(root, name), []byte(value), 0600); err != nil {
+		t.Fatal(err)
+	}
+	r := Scan(context.Background(), root, []string{name, name + "-missing"}, []string{value + "=" + value})
+	raw, err := json.Marshal(r)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(raw), value) {
+		t.Fatal("metadata exposed a recognized credential")
+	}
+	if len(r.Findings) != 2 || len(r.Issues) != 1 {
+		t.Fatalf("unexpected report: %+v", r)
+	}
+}

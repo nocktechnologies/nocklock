@@ -114,6 +114,8 @@ omitting them scans `.`. Exit status is zero only when the scan completes with
 no findings. JSON reports distinguish `complete` from `findings`: a complete
 scan can still find a credential. Reports show detector IDs and locations, never
 matching values or source lines.
+Recognized credential formats in filenames or environment names are also
+replaced with `[redacted]` in report locations.
 
 The initial detectors recognize AWS access-key IDs (`AKIA`/`ASIA`), GitHub token
 formats (classic, OAuth, app, refresh and fine-grained), and PEM private-key
