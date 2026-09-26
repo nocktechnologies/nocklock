@@ -1,4 +1,4 @@
-# DESIGN: Nock CLI — Architecture & Product Strategy
+# DESIGN: Nock CLI, Architecture & Product Strategy
 
 ## Document Status
 Drafted by Mara, April 5, 2026 (overnight, Kevin sleeping)
@@ -161,9 +161,9 @@ A developer who runs `nock init && nock wrap -- claude` gets sensible protection
 **Approach A: LD_PRELOAD / DYLD_INSERT_LIBRARIES (Recommended for MVP)**
 - Intercept file system calls (open, openat, stat, access, readlink) via a shared library
 - Check paths against allow/deny lists before passing to real syscall
-- Blocked paths return ENOENT (file not found) — agent doesn't know the fence exists
+- Blocked paths return ENOENT (file not found), agent doesn't know the fence exists
 - Works on macOS and Linux. Doesn't work on statically-linked binaries.
-- Claude Code (Node.js) is dynamically linked — this works.
+- Claude Code (Node.js) is dynamically linked, this works.
 
 **Approach B: Mount Namespaces (Linux only)**
 - Create an isolated mount namespace for the agent process
@@ -205,7 +205,7 @@ A developer who runs `nock init && nock wrap -- claude` gets sensible protection
 - Start with an empty env
 - Add only variables matching the `pass` list
 - Remove any matching the `block` list (block takes precedence)
-- This is just Go's `os/exec.Cmd.Env` — trivially implemented
+- This is just Go's `os/exec.Cmd.Env`: trivially implemented
 
 No exotic techniques needed. The child process inherits only what we give it.
 
@@ -254,7 +254,7 @@ When `cloud.enabled = true` and `cloud.api_key` is set:
 - Fence events are batched and POSTed to NockCC every 60 seconds
 - POST /api/fence/events/ with JSON array of events
 - API key in X-API-Key header (same auth pattern as existing NockCC API)
-- NockCC stores events in PipelineEvent model (already built — PR #47)
+- NockCC stores events in PipelineEvent model (already built, PR #47)
 - Events appear in Nerve Center dashboard
 - Telegram alerts for high-severity blocks (filesystem escape attempts)
 
@@ -373,7 +373,7 @@ Your agent never knew the fence was there. You sleep better at night.
 Connect to [NockCC](https://nocktechnologies.io) for cloud monitoring:
 - See fence events across all your machines
 - Get Telegram/Slack alerts on blocked escape attempts
-- Team visibility — know what every developer's agents are doing
+- Team visibility: know what every developer's agents are doing
 - Compliance exports for security audits
 
 ## License

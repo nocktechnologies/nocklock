@@ -1,4 +1,4 @@
-# DESIGN.md — Nock Technologies (Dev Tools)
+# DESIGN.md: Nock Technologies (Dev Tools)
 
 ## Theme: Dark
 ## Neighborhood: Developer Tools

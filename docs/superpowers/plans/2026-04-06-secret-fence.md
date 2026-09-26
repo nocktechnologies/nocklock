@@ -10,10 +10,10 @@
 
 ---
 
-### Task 1: Create secret fence engine — tests first
+### Task 1: Create secret fence engine, tests first
 
 **Files:**
-- Create: `internal/fence/secrets/secrets.go` (stub only — enough to compile)
+- Create: `internal/fence/secrets/secrets.go` (stub only, enough to compile)
 - Create: `internal/fence/secrets/secrets_test.go` (full test suite)
 
 - [ ] **Step 1: Create package stub so tests compile**
@@ -810,7 +810,7 @@ Expected: Clean build
 
 - [ ] **Step 5: Manual smoke test**
 
-Run from the project root (which has `.nock/config.toml.example` — copy it first):
+Run from the project root (which has `.nock/config.toml.example`, copy it first):
 
 ```bash
 cp .nock/config.toml.example .nock/config.toml
@@ -835,4 +835,4 @@ rm .nock/config.toml
 git push -u origin feature/secret-fence
 ```
 
-Then open PR from `feature/secret-fence` → `main` with the description from the spec.
+Then open PR from `feature/secret-fence` to `main` with the description from the spec.

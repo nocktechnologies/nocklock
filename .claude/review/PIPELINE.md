@@ -1,4 +1,4 @@
-# Review Pipeline — Nock Technologies
+# Review Pipeline: Nock Technologies
 
 Every PR follows this 7-phase pipeline. No shortcuts.
 
@@ -19,7 +19,7 @@ Every PR follows this 7-phase pipeline. No shortcuts.
 - pr-review-toolkit plugin (structured PR description)
 
 ## Phase 4: Codex Gate
-- STOP — tell Kevin "Ready for Codex review"
+- STOP: tell Kevin "Ready for Codex review"
 - Run Codex plugin for adversarial audit
 - Address ALL findings
 - Re-run Phase 3 if findings were significant
@@ -36,7 +36,7 @@ Every PR follows this 7-phase pipeline. No shortcuts.
 - Mara reviews for architecture/strategy fit
 
 ## Phase 7: Merge + Docs
-- All reviews green → merge
+- All reviews green, then merge
 - Update CLAUDE.md if structure changed
 - Update CHANGELOG.md with what shipped
 - Update README.md if user-facing changes

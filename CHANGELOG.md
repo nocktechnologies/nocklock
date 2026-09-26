@@ -20,15 +20,15 @@ All notable changes to NockLock will be documented in this file.
   when the network fence is active (`allow_all = false`) and the syscall fence is
   on, the child is restricted to unix-domain sockets, so the TCP proxy that
   enforces `network.allow` is unreachable and the posture collapses to no IP
-  network — the allowlist reaches *none* of the configured domains, not a subset.
+  network: the allowlist reaches *none* of the configured domains, not a subset.
   This is the intended hardened no-network posture, but it silently defeats a user
   who curated `network.allow` expecting selective access, so doctor surfaces it
   with the fix (set `[syscall] enforcement = "off"` for a working, userspace
   boundary, or accept no-network by design).
 - `nocklock egress-probe` (#70): a repeatable, structured feasibility probe for the
   Linux network-egress-enforcement track (Candidate B: netns + transparent
-  redirect). It codifies the Phase 0 VPS probe runs so every fleet kernel — CI
-  runners included — is measured the same way before Phase 1 locks the
+  redirect). It codifies the Phase 0 VPS probe runs so every fleet kernel, CI
+  runners included, is measured the same way before Phase 1 locks the
   privileged-helper design. Non-mutating: it attempts unprivileged
   userns/userns+netns creation via throwaway `unshare` subprocesses (with the
   receipted flags verbatim), reads the classic and AppArmor userns sysctls,
@@ -40,19 +40,19 @@ All notable changes to NockLock will be documented in this file.
   tests (Q6 post-drop mutation, protocol-matrix egress, AppArmor toggle) are
   enumerated follow-ups and are intentionally out of this increment. On the
   dev VPS the probe reproduces the receipted root-mapping denial and
-  additionally records that bare unmapped userns+netns creation *succeeds* — a
+  additionally records that bare unmapped userns+netns creation *succeeds*, a
   narrower blocker than the one-off 2026-08-03 run captured.
 - `nocklock wrap --net-fence=netns` (Linux, opt-in; N9916): the Phase-1 FOUNDATION of
-  the network-egress fence (Candidate B). A privileged helper — acquired via
+  the network-egress fence (Candidate B). A privileged helper, acquired via
   passwordless `sudo -n` under the DECIDED capability model (spec amendment
-  2026-08-24) — creates a fresh network namespace (`CLONE_NEWNET`), brings
+  2026-08-24), creates a fresh network namespace (`CLONE_NEWNET`), brings
   loopback up, installs a default-drop `nftables` base across ALL transports and
-  both IPv4 and IPv6 (QUIC/UDP/SCTP/TCP all denied — no allowances yet), drops
+  both IPv4 and IPv6 (QUIC/UDP/SCTP/TCP all denied, no allowances yet), drops
   `CAP_NET_ADMIN`+`CAP_SYS_ADMIN` from all five capability sets (reusing the
   receipted Q6 cap-drop harness), drops to the invoking user, and execve's the
   agent as a non-root child inside the namespace. Fail-closed: if privilege
   cannot be acquired or the five-set drop cannot complete, NockLock refuses to
-  exec — no advisory/degraded fallback. Default `wrap` behavior is unchanged;
+  exec, with no advisory/degraded fallback. Default `wrap` behavior is unchanged;
   the flag is Linux-only and refuses on other platforms. This is the
   kernel-enforced hardened (no-network) floor; the transparent HTTP(S)/DNS
   allowlist on top of it is a later increment (gated on Q7). A new root-gated
@@ -63,10 +63,10 @@ All notable changes to NockLock will be documented in this file.
   filesystem fence's runtime ENFORCEMENT proof on a GitHub-hosted `macos-latest`
   runner. It exercises the existing
   darwin-tagged `TestSeatbeltEnforcement_RealSandboxExec` and
-  `TestSeatbeltDeniesWriteToFencedAuditLog` under real `sandbox-exec` — a fenced
-  read/write is DENIED while an unfenced one SUCCEEDS — closing the final N9222
+  `TestSeatbeltDeniesWriteToFencedAuditLog` under real `sandbox-exec` (a fenced
+  read/write is DENIED while an unfenced one SUCCEEDS), closing the final N9222
   acceptance gap: enforcement had never run in CI (the ubuntu job is
-  generation-only, PR #80). The job runs beside — never before — the ubuntu
+  generation-only, PR #80). The job runs beside, never before, the ubuntu
   `test` job, and runs on an ephemeral, isolated GitHub-hosted runner so fork PRs
   can execute code safely without trust gates. A new `NOCKLOCK_SANDBOX_REQUIRE=1`
   gate on the two tests (mirroring the netns suite's `NOCKLOCK_NETNS_REQUIRE`)
@@ -153,8 +153,8 @@ All notable changes to NockLock will be documented in this file.
   rows to an older genuine state still passes locally; only
   `nocklock verify --against-remote-anchor` closes that.
 - Composed-default acceptance test (N10710, #100; `TestWrapComposedDefaultEgressAudit`, root/CI
-  only) drives the full default stack — Landlock (required) + seccomp (required)
-  + netns egress + signed audit — through `nocklock wrap` with a real child:
+  only) drives the full default stack, Landlock (required) + seccomp (required)
+  + netns egress + signed audit, through `nocklock wrap` with a real child:
   one allowlisted fetch is permitted, one off-allowlist fetch is refused, both
   decisions land signed in the audit chain, and `nocklock verify --audit`
   confirms the chain and signatures. Runs in a new privileged Linux CI job
@@ -186,13 +186,13 @@ All notable changes to NockLock will be documented in this file.
   the unit tests that guard the fence layers had never gated a merge.
 - New `network-egress` CI workflow (#76; `.github/workflows/network-egress.yml`) for the
   Linux network-egress-enforcement track. It (1) runs the repeatable
-  `nocklock egress-probe` on `ubuntu-latest` — bare image and nftables-provisioned —
+  `nocklock egress-probe` on `ubuntu-latest`, bare image and nftables-provisioned,
   so the CI kernel's Q1 feasibility is measured identically to the dev VPS and kept
   as an uploaded receipt (the bare run's `track=blocked` reflects only that the
   runner image ships no `nft`, not a kernel that cannot host the fence); and (2)
   **actually executes the Q6 post-drop mutation acceptance test** as root with
   `NOCKLOCK_Q6_REQUIRE=1`. That test self-skips off the root path, so before this
-  it had never run anywhere — Candidate B's bypass-resistance bar (a capped child
+  it had never run anywhere; Candidate B's bypass-resistance bar (a capped child
   cannot flush the `nftables`/routes/interfaces the fence depends on) is now a
   receipted CI gate, not a green skip.
 - Added the TM symbol to the NockLock name and the Nock Technologies footer in the
@@ -202,7 +202,7 @@ All notable changes to NockLock will be documented in this file.
 - The CLI now compiles on darwin again (N10709, #99): the non-Linux `netns.EgressConfig` stub
   gained the `DecisionLogPath` field that `wrap.go` assigns cross-platform, which
   N10649 added only to the Linux struct (broke `GOOS=darwin go build ./...` at
-  `wrap.go:413`). The darwin field is inert — its helper stub still refuses to
+  `wrap.go:413`). The darwin field is inert; its helper stub still refuses to
   run. CI now guards this: the ubuntu job cross-builds for darwin on every push,
   and the macOS job builds, vets and runs the non-root unit suite natively
   (seven darwin test-portability cases were skipped by name at that point; see
@@ -214,12 +214,12 @@ All notable changes to NockLock will be documented in this file.
     root (`<state>/.nock/sessions/<id>/egress`) instead of the system temp dir.
     The default filesystem preset GRANTs `/tmp`, and Landlock is allow-only, so
     the old `os.MkdirTemp("", …)` location put the directory in an
-    always-granted tree — its child-deny then overlapped that grant and Landlock
+    always-granted tree; its child-deny then overlapped that grant and Landlock
     rule generation was rejected for EVERY default netns wrap, whatever the
     project's location. The new location is enforceable because
     `rootPathRules` skips the `.nock` child of the filesystem root, so the deny
     sits outside every granted tree. (A project physically under a granted
-    ancestor — e.g. rooted inside `/tmp` or `~/.claude` — still hits the same
+    ancestor, e.g. rooted inside `/tmp` or `~/.claude`, still hits the same
     grant/deny overlap for both this dir and the pre-existing audit-DB deny;
     that broader grant/deny reconciliation is out of scope here.)
   - `buildSyscallPolicy` now takes the active network-fence mode explicitly. In
@@ -235,13 +235,13 @@ All notable changes to NockLock will be documented in this file.
     `[syscall] enforcement = "off"`, which would have downgraded the fence.
 - macOS filesystem fence (N9222 phase 1, #108): `nocklock wrap` on macOS now
   applies a kernel-enforced Seatbelt (`sandbox-exec`) profile inherited by every
-  child. The initial profile was a curated credential and sensitive-path DENYLIST
+  child. The initial profile was a built-in credential and sensitive-path DENYLIST
   (`~/.ssh`, `~/.aws`, `~/.config`, `~/.gnupg`, `~/Library/Keychains`, plus
   configured deny paths) written as `(allow default)` with explicit denies. It was
-  not the Linux root-only allowlist, and `filesystem.root` was not enforced as a
-  boundary on macOS (write confinement outside the root followed in N10722, see
-  below). The profile is generated fail-closed with canonicalized
-  paths and validated with `sandbox-exec` before launch. Every wrap records
+  not the Linux root-only allowlist; `filesystem.root` write confinement was
+  added in N10722 (see below) and ships in this release. The profile is
+  generated fail-closed with canonicalized paths and validated with
+  `sandbox-exec` before launch. Every wrap records
   exactly one durable filesystem-fence state before the child runs: `ENGAGED`
   (paths applied), `REFUSED-TO-START` (the default when the fence cannot be
   applied), or `DEGRADED` (only through the explicit, logged
@@ -250,14 +250,11 @@ All notable changes to NockLock will be documented in this file.
   are not emitted yet. Tests cover the three recorded states on darwin and run in
   the existing `macos-enforce` CI job.
 - macOS filesystem-root documentation was made consistent across the product
-  docs (N10712, #106). At the time, the shipped CLI refused to launch when
-  `filesystem.root` was set on macOS, because the tested Seatbelt component is an
-  allow-default sensitive-path denylist rather than the root-only boundary that
-  the configuration promises; the docs were aligned to that refusal. The Seatbelt
-  fence above (#108) supersedes the refusal: `filesystem.root` is now accepted on
-  macOS (write confinement outside the root followed in N10722, see below). The
-  architecture document also
-  now reflects the shipped network fence instead of describing it as planned.
+  docs (N10712, #106), so every doc describes the same macOS `filesystem.root`
+  behavior. As of this release that behavior is the Seatbelt write boundary in
+  the N10722 entry below, and the 0.4.0 startup rejection of `filesystem.root`
+  on macOS (N8186) no longer applies. The architecture document also now
+  reflects the shipped network fence instead of describing it as planned.
 - macOS `filesystem.root` now enforces a kernel Seatbelt write boundary (N10722):
   the canonical profile keeps `(allow default)`, denies all file writes, then
   allows only the configured root in read-write mode, `.nock`, the invoking
@@ -274,7 +271,7 @@ All notable changes to NockLock will be documented in this file.
 - The audit logger no longer refuses to start on first run when the project is
   reached through a symlinked path (N10714, #102). `validatePath` resolved the project
   root's symlinks but left the not-yet-created DB path in its raw frame, so on
-  macOS — where `/tmp` and `/var/folders` are `/private/*` symlinks — an in-root
+  macOS, where `/tmp` and `/var/folders` are `/private/*` symlinks, an in-root
   `.nock/events.db` was falsely reported as "resolves outside project root" and
   `wrap` failed closed on logger open. It now resolves the deepest existing
   ancestor of the DB directory and rejoins the missing tail, keeping both sides
@@ -282,8 +279,8 @@ All notable changes to NockLock will be documented in this file.
   left unresolved so a symlink AT the DB path is caught by the `O_NOFOLLOW`
   guard. A symlinked *intermediate* ancestor escaping the root is now rejected
   even when the tail does not exist yet (previously admitted). An ancestor that
-  is present but cannot be canonicalized — a dangling symlink (its target
-  absent), a symlink loop, or a permission-blocked / non-directory component —
+  is present but cannot be canonicalized, whether a dangling symlink (its target
+  absent), a symlink loop, or a permission-blocked / non-directory component,
   now fails closed instead of degrading to the raw path frame, closing the
   TOCTOU window where a dangling symlink's target could be created between the
   check and the write. All are covered by negative-control tests.
@@ -314,14 +311,14 @@ All notable changes to NockLock will be documented in this file.
   `TestResidual_AncestorSwapBetweenValidateAndOpen` with a no-swap control.
 - `nocklock wrap --net-fence=netns` no longer consumes the child's stdin
   (N10711, #107). The privileged `setup` request previously rode the helper's stdin, so
-  the fenced child inherited a drained stream — `printf 'x' | nocklock wrap
+  the fenced child inherited a drained stream: `printf 'x' | nocklock wrap
   --net-fence=netns -- cat` printed nothing and interactive/MCP agents lost input
   entirely. The request now travels in a 0600 per-session file whose path rides
   argv (`setup --request-file <path>`; validated regular/0600/owned-by-`SUDO_UID`,
   opened `O_NOFOLLOW` and unlinked after read, both relative to a retained
   directory fd so a swapped parent directory cannot redirect the root unlink),
-  and the sidecar payloads ride a dedicated inherited descriptor (fd 3), so the caller's real stdin — a TTY or a
-  pipe — flows through to the child unchanged. This was forced by `sudo` closing
+  and the sidecar payloads ride a dedicated inherited descriptor (fd 3), so the caller's real stdin, a TTY or a
+  pipe, flows through to the child unchanged. This was forced by `sudo` closing
   descriptors ≥ 3 (`closefrom`), which rules out passing the request itself on an
   fd across the sudo boundary; see ADR-004. Fence semantics are unchanged; both
   the helper and sidecar legs fail closed if their setup channel is missing,
@@ -330,7 +327,7 @@ All notable changes to NockLock will be documented in this file.
 
 ### Testing
 
-- **SBPL generator acceptance coverage (N10058, #80)** — closed the residual test
+- SBPL generator acceptance coverage (N10058, #80): closed the residual test
   gaps named by the macOS-fence Phase-1a acceptance criteria against the already
   shipped generator (`sbpl.go`, #27/#38): a table-driven test asserting a config
   of N sensitive paths yields exactly N canonical `(subpath …)` deny rules; a
@@ -338,14 +335,14 @@ All notable changes to NockLock will be documented in this file.
   first `(deny …)`, never `(deny default)`); and a fail-CLOSED negative control
   proving an unresolvable path makes `GenerateProfile` error and emit no profile
   (never a silent unfenced drop). No production code changed.
-- **Fuzz coverage over the fence decision surface** (#66) — the project's first fuzz
+- Fuzz coverage over the fence decision surface (#66): the project's first fuzz
   targets, seeded from the v0.4.0 known-bypass regressions, hunt the next bypass
   class continuously in CI (bounded `-fuzztime`, one target per package). The
   seed corpus also runs as normal regression cases under `go test` (no `-fuzz`):
   - `FuzzConfigLoad` (`internal/config`) fuzzes `Load` and `LoadOverlay` with
     arbitrary bytes. Asserts untrusted-config parsing never panics, a rejected
     config is returned nil (never a partially-populated, possibly permissive
-    one), and — differentially against a restrictive profile base — that an
+    one), and, differentially against a restrictive profile base, that an
     overlay can only tighten the fence, never widen it (no boolean widener flips
     on, no allowlist grows, no inverted allowlist collapses to its permissive
     empty sentinel, the audit-log path stays immutable).
@@ -357,12 +354,12 @@ All notable changes to NockLock will be documented in this file.
   - `FuzzRulesFromConfigContainment` (`internal/fence/fs/landlock`) fuzzes
     `RulesFromConfig` with adversarial root-child names. Asserts every emitted
     grant stays inside the resolved root (N8537) and no configured deny overlaps
-    a granted tree (N8441) — the allow-only grant/deny decision fails closed.
+    a granted tree (N8441); the allow-only grant/deny decision fails closed.
 
 ### Dependencies
 
-- `golang.org/x/sys` 0.46.0 → 0.48.0 (`477b9d1` #60, `1aea68a` #85)
-- `modernc.org/sqlite` 1.53.0 → 1.59.0 (`9532c7c` #64, `54dc9de` #75, `5bc127c` #78, `30e9316` #94)
+- `golang.org/x/sys` 0.46.0 to 0.48.0 (`477b9d1` #60, `1aea68a` #85)
+- `modernc.org/sqlite` 1.53.0 to 1.59.0 (`9532c7c` #64, `54dc9de` #75, `5bc127c` #78, `30e9316` #94)
 
 ---
 
@@ -375,43 +372,43 @@ are also included.
 
 ### Security
 
-- **N8614** — Audit-log symlink attack closed (#57): the log-path resolver
+- N8614: Audit-log symlink attack closed (#57): the log-path resolver
   previously validated only the parent directory, so a symlink at `.nock/events.db`
   pointed outside the project was followed, chmod'd, and written before fences engaged.
   Now: `lstat`-reject a symlink at the final path, open with `O_NOFOLLOW`, post-open
   re-validate via `f.Stat` + `os.SameFile`, and `chmod` by fd rather than path.
-- **N8537** — Landlock root symlink escape closed (#56): root children are now
+- N8537: Landlock root symlink escape closed (#56): root children are now
   resolved to canonical paths before Landlock rule emission; any child whose canonical
   target falls outside the configured root is rejected, preventing a project symlink
   from granting access to host paths outside the fence.
-- **N8441** — Landlock deny/allow overlap fails closed (#53): a `deny` path that
+- N8441: Landlock deny/allow overlap fails closed (#53): a `deny` path that
   overlaps a Landlock-granted tree (root child or `allow` path) is rejected at startup
-  with a clear error. Previously the deny rule was silently ignored — Landlock is
+  with a clear error. Previously the deny rule was silently ignored; Landlock is
   allow-only at the kernel level and the LD_PRELOAD interposer cannot be relied upon
   for static binaries or children that clear `LD_PRELOAD`.
-- **N8431** — Reachable Go stdlib CVEs closed (#52): bumped `go` directive
-  1.26.1 → 1.26.4. Affected paths include the live network proxy and TLS stacks
+- N8431: Reachable Go stdlib CVEs closed (#52): bumped `go` directive
+  1.26.1 to 1.26.4. Affected paths include the live network proxy and TLS stacks
   (GO-2026-5039 `net/textproto`, GO-2026-4976 `net/http/httputil`,
   GO-2026-4918 `net/http` ReverseProxy, GO-2026-4866/4870 `crypto/x509` + `crypto/tls`).
-- **N8332** — seccomp x32 ABI bypass closed (#48): the BPF filter compared syscall
+- N8332: seccomp x32 ABI bypass closed (#48): the BPF filter compared syscall
   numbers against the amd64 denylist and defaulted to `ALLOW`. Linux multiplexes the
   x32 ABI onto `AUDIT_ARCH_X86_64` by OR-ing `__X32_SYSCALL_BIT` (0x40000000) into
   the syscall number, so any denied call could be re-issued with the bit set and
   bypass the filter. The filter now denies any nr carrying `__X32_SYSCALL_BIT` on
   amd64 via `BPF_JSET` before any number comparison. Arm64 is unaffected.
-- **N8291** — Metadata mutator fence bypass closed: `libfence_fs.c` mutator hooks
+- N8291: Metadata mutator fence bypass closed: `libfence_fs.c` mutator hooks
   did not guard null pathnames before `pathname[0]` dereferences and did not preserve
   `EBADF` for invalid-fd path resolution failures. A crafted `AT_EMPTY_PATH` call with
   a valid fd could slip through unrecorded. Now: null pathname guard, `EBADF` preserved,
   `AT_EMPTY_PATH` events reported with fd identifier, original arguments passed through
   after fence checks.
-- **N8186** — Medium hardening (#46): seccomp enforcement mode now defaults to
+- N8186: Medium hardening (#46): seccomp enforcement mode now defaults to
   `required` when absent from config (was `preferred`); Linux `filesystem` `preferred`
   mode is treated as fail-closed at runtime; `filesystem.root` on macOS is rejected at
-  startup (Seatbelt cannot enforce root-only isolation — a denylist is not a root
+  startup (Seatbelt cannot enforce root-only isolation; a denylist is not a root
   sandbox); network-fenced runs with syscall enforcement active restrict `socket()` to
   `AF_UNIX` only so IP sockets cannot bypass the network proxy.
-- **N8185** — Inherited `NOCKLOCK_FS_ALLOWED` stripped before fence append (#44):
+- N8185: Inherited `NOCKLOCK_FS_ALLOWED` stripped before fence append (#44):
   the LD_PRELOAD interposer reads its policy from the first `NOCKLOCK_FS_ALLOWED`
   entry in the child's environment. An attacker-controlled variable in the parent
   environment survived `secrets.Filter` and sat earlier than the fence's own appended
@@ -436,13 +433,13 @@ are also included.
   provider API key variable while blocking unrelated credentials.
 - `nocklock init --runtime <name>` (#55): scaffolds `.nock/config.toml` from an
   embedded preset. `aider`, `gemini-cli`, and `opencode` are supported. `cursor-agent`
-  and `continue` are intentionally absent — their default egress cannot be pinned
+  and `continue` are intentionally absent; their default egress cannot be pinned
   from first-party docs.
 
 ### Dependencies
 
-- `golang.org/x/sys` 0.44.0 → 0.46.0 (#54)
-- `modernc.org/sqlite` 1.52.0 → 1.53.0 (#49)
+- `golang.org/x/sys` 0.44.0 to 0.46.0 (#54)
+- `modernc.org/sqlite` 1.52.0 to 1.53.0 (#49)
 
 ---
 
@@ -478,7 +475,7 @@ are also included.
 
 ### Dependencies
 
-- `modernc.org/sqlite` 1.50.1 → 1.52.0 (#33)
+- `modernc.org/sqlite` 1.50.1 to 1.52.0 (#33)
 
 ---
 
@@ -489,31 +486,31 @@ filesystem, network, and audit-logging layers.
 
 ### Security
 
-- **CRITICAL** — Network proxy fails closed on start or runtime failure (#9, #15):
+- CRITICAL: Network proxy fails closed on start or runtime failure (#9, #15):
   proxy bind and health check gate child startup; a watchdog goroutine monitors proxy
   health throughout the session and kills the child process group on unexpected proxy
   death. `--allow-unfenced` is rejected; NockLock fails closed when the network fence
   is unavailable.
-- **CRITICAL** — Process group isolation (#9): wrapped child placed in its own process
+- CRITICAL: Process group isolation (#9): wrapped child placed in its own process
   group (`Setpgid: true`); context cancellation sends `SIGKILL` to the entire group;
   Linux additionally sets `Pdeathsig: SIGKILL` so descendants cannot escape the fence
   by forking before the wrapper process exits.
-- **CRITICAL** — stat-family TOCTOU closed (#9, #17, `43e558d`): all
+- CRITICAL: stat-family TOCTOU closed (#9, #17, `43e558d`): all
   stat/lstat/fstatat/faccessat/readlinkat/`__xstat`/`__lxstat`/`__fxstatat`/statx hooks
   now pass the resolved canonical path to the real syscall, closing the symlink-swap
   race between `check_path` and the actual operation. Non-path fds (`AT_EMPTY_PATH`,
   procfs magic fds) bypass path resolution safely.
-- **CRITICAL** — open/write-family TOCTOU closed (#32): all mutating/open hooks
+- CRITICAL: open/write-family TOCTOU closed (#32): all mutating/open hooks
   (open/openat, unlink, mkdir, rename, link, chmod, chown, truncate, symlink/symlinkat)
   pass the resolved canonical path to the real syscall. The symlink-swap window between
   the fence check and the kernel call is closed for the entire mutating surface.
-- **HIGH** — DNS rebinding prevention (#9): `DNSCache` pins the first resolved IP set
+- HIGH: DNS rebinding prevention (#9): `DNSCache` pins the first resolved IP set
   for each hostname; subsequent lookups return the cached result. Rebinding attempts are
   blocked and logged.
-- **HIGH** — DNS cache key normalization (#9): hostnames are lowercased and trailing
+- HIGH: DNS cache key normalization (#9): hostnames are lowercased and trailing
   dots stripped before lookup and store so mixed-case variants share one pinned cache
   entry and cannot produce divergent IP sets.
-- **HIGH** — Link-local / cloud-metadata blocked unconditionally (#28): `169.254.169.254`
+- HIGH: Link-local / cloud-metadata blocked unconditionally (#28): `169.254.169.254`
   and all link-local unicast addresses remain blocked even when `--allow-private-ranges`
   is set. RFC-1918, loopback, and CGNAT ranges remain permittable for local development.
 - Audit log fenced from fenced child (#31): the `.nock/` audit directory is injected
@@ -521,7 +518,7 @@ filesystem, network, and audit-logging layers.
   from tampering with or deleting `events.db`. Applies to both the Linux LD_PRELOAD
   interposer and the macOS Seatbelt SBPL deny list.
 - Fail closed when event log cannot open (#30): a session that cannot write the audit
-  log does not start. Matches the network fence posture — unrecorded operation is treated
+  log does not start. Matches the network fence posture: unrecorded operation is treated
   as unfenced operation; no opt-out.
 - Linux Landlock kernel-enforced fence (#36, N8027/N8067): Landlock LSM composites with
   the LD_PRELOAD interposer (Landlock enforces at the kernel level; interposer reports
@@ -537,7 +534,7 @@ filesystem, network, and audit-logging layers.
 ### Added
 
 - macOS filesystem fence via Seatbelt, Phase 1 (#27, N7938): SBPL denylist profile
-  enforced via `sandbox-exec`. Path canonicalization via `EvalSymlinks` is mandatory —
+  enforced via `sandbox-exec`. Path canonicalization via `EvalSymlinks` is mandatory:
   a non-canonical (subpath) rule silently fails open (`/tmp` vs `/private/tmp`), so
   unresolvable paths fail closed. Interim denylist posture; strict root-only allowlist
   enforcement gated on the Endpoint Security framework.
@@ -562,11 +559,11 @@ filesystem, network, and audit-logging layers.
 
 ### Dependencies
 
-- `modernc.org/sqlite` 1.48.1 → 1.50.1 (#24)
+- `modernc.org/sqlite` 1.48.1 to 1.50.1 (#24)
 
 ---
 
-## [0.1.0] — 2026-04-06
+## [0.1.0] - 2026-04-06
 
 ### Added
 - CLI skeleton: `wrap`, `init`, `config`, `log`, `status`, `version` commands (PR #1, #2)
