@@ -101,6 +101,29 @@ func TestInterposerSourceHandlesMetadataMutatorReviewRegressions(t *testing.T) {
 	}
 }
 
+// TestInterposerSourceAllowsBaselineDeviceNodes asserts the interposer's
+// check_path permits the standard character devices every program needs —
+// /dev/null and /dev/tty read+write, /dev/zero read-only — regardless of the
+// allow list, mirroring baselineDeviceRules in the Landlock ruleset. Without
+// this the interposer restricts allow-listed device nodes to reads and denies
+// the writes git and shells make to /dev/null constantly.
+func TestInterposerSourceAllowsBaselineDeviceNodes(t *testing.T) {
+	source, err := os.ReadFile("interposer/libfence_fs.c")
+	if err != nil {
+		t.Fatalf("read interposer source: %v", err)
+	}
+	text := string(source)
+
+	for _, pattern := range []string{
+		`(?s)strcmp\s*\(\s*resolved\s*,\s*"/dev/null"\s*\)\s*==\s*0\s*\|\|\s*strcmp\s*\(\s*resolved\s*,\s*"/dev/tty"\s*\)\s*==\s*0.*?return\s+0`,
+		`(?s)strcmp\s*\(\s*resolved\s*,\s*"/dev/zero"\s*\)\s*==\s*0\s*&&\s*!is_write.*?return\s+0`,
+	} {
+		if !regexp.MustCompile(pattern).MatchString(text) {
+			t.Fatalf("libfence_fs.c missing baseline device-node pattern %q", pattern)
+		}
+	}
+}
+
 func TestInterposerSourceHandlesStatAtNullAndATEmptyPathReporting(t *testing.T) {
 	source, err := os.ReadFile("interposer/libfence_fs.c")
 	if err != nil {

@@ -65,8 +65,11 @@ func TestRulesFromConfigMapsReadOnlyAndReadWriteRights(t *testing.T) {
 	if spec.HandledAccessFS&RightTruncate == 0 {
 		t.Fatalf("ABI v3 handled rights should include truncate: %#x", spec.HandledAccessFS)
 	}
-	if len(spec.Paths) != 3 {
-		t.Fatalf("expected enumerated root child + allow + extra paths, got %d: %+v", len(spec.Paths), spec.Paths)
+	// Root child, allow, and extra rules are appended first (baseline device
+	// grants follow), so indices 0-2 stay stable. The total is >= 3; the exact
+	// count depends on which /dev nodes exist on the host, so assert a floor.
+	if len(spec.Paths) < 3 {
+		t.Fatalf("expected at least root child + allow + extra paths, got %d: %+v", len(spec.Paths), spec.Paths)
 	}
 	if spec.Paths[0].Path != readOnly || spec.Paths[0].Access != AccessReadOnly {
 		t.Fatalf("root child rule = %+v, want read-only %s", spec.Paths[0], readOnly)
@@ -76,6 +79,74 @@ func TestRulesFromConfigMapsReadOnlyAndReadWriteRights(t *testing.T) {
 	}
 	if spec.Paths[2].Path != readWrite || spec.Paths[2].Access != AccessReadWrite {
 		t.Fatalf("extra rule = %+v, want read-write %s", spec.Paths[2], readWrite)
+	}
+}
+
+// TestRulesFromConfigGrantsBaselineDeviceWrites asserts on the RIGHTS BITMASK,
+// not path presence: /dev/null and /dev/tty must carry write, and /dev/zero must
+// be read-only. A path-presence check would pass under the pre-fix behavior
+// where these devices were reachable via an allow entry but only granted read —
+// the exact reason git and echo failed in the field.
+func TestRulesFromConfigGrantsBaselineDeviceWrites(t *testing.T) {
+	if _, err := os.Stat("/dev/null"); err != nil {
+		t.Skipf("/dev/null unavailable: %v", err)
+	}
+	root := t.TempDir()
+	// ABI 5 handles RightIOCTLDev, which the writable devices request.
+	spec, err := RulesFromConfig(&fsfence.FenceConfig{Root: root, Mode: "read-write"}, nil, 5)
+	if err != nil {
+		t.Fatalf("RulesFromConfig failed: %v", err)
+	}
+
+	byPath := make(map[string]PathRule)
+	for _, r := range spec.Paths {
+		byPath[r.Path] = r
+	}
+
+	null, ok := byPath["/dev/null"]
+	if !ok {
+		t.Fatalf("/dev/null not granted; rules=%+v", spec.Paths)
+	}
+	if null.Rights&RightWriteFile == 0 || null.Rights&RightReadFile == 0 {
+		t.Fatalf("/dev/null must be read+write, got rights %#x", null.Rights)
+	}
+
+	if tty, ok := byPath["/dev/tty"]; ok {
+		if tty.Rights&RightWriteFile == 0 {
+			t.Fatalf("/dev/tty must be writable, got rights %#x", tty.Rights)
+		}
+	}
+
+	if zero, ok := byPath["/dev/zero"]; ok {
+		if zero.Rights&RightWriteFile != 0 {
+			t.Fatalf("/dev/zero must be read-only, got write bit in rights %#x", zero.Rights)
+		}
+		if zero.Rights&RightReadFile == 0 {
+			t.Fatalf("/dev/zero must be readable, got rights %#x", zero.Rights)
+		}
+	}
+}
+
+// TestRulesFromConfigDenySuppressesBaselineDevice verifies an explicit deny of a
+// baseline device node wins: the node is not re-granted (which would also make
+// the ruleset unenforceable, since Landlock cannot carve a deny out of a grant).
+func TestRulesFromConfigDenySuppressesBaselineDevice(t *testing.T) {
+	if _, err := os.Stat("/dev/null"); err != nil {
+		t.Skipf("/dev/null unavailable: %v", err)
+	}
+	root := t.TempDir()
+	spec, err := RulesFromConfig(&fsfence.FenceConfig{
+		Root:      root,
+		Mode:      "read-write",
+		DenyPaths: []string{"/dev/null"},
+	}, nil, 5)
+	if err != nil {
+		t.Fatalf("RulesFromConfig failed: %v", err)
+	}
+	for _, r := range spec.Paths {
+		if r.Path == "/dev/null" {
+			t.Fatalf("/dev/null denied but still granted: %+v", r)
+		}
 	}
 }
 

@@ -4,6 +4,23 @@ All notable changes to NockLock will be documented in this file.
 
 ## [Unreleased]
 
+### Fixed
+
+- claude-code preset now runs real programs under the strongest non-root fence
+  (N10748, parts b+c). Two field-reported breakages are closed: (1) writes to
+  `/dev/null` and `/dev/tty` are permitted and `/dev/zero` is readable, so `git`
+  and shells work — the Landlock ruleset (`baselineDeviceRules`) and the
+  LD_PRELOAD interposer both grant these standard character devices as a
+  baseline, independent of the allow list, since the fence otherwise grants a
+  regular file read+execute only; and (2) the preset's filesystem allow list now
+  includes the standard system read paths (`/usr`, `/etc`, `/proc`, `/dev`,
+  `/sys`), without which the child could not resolve its dynamic loader or exec
+  `/bin/echo`. An explicit `deny` of a baseline device still wins. The network
+  half of N10748 — letting the wrapped agent reach the allowlisted proxy while
+  the syscall fence keeps direct-IP egress blocked — is tracked separately; no
+  standard client speaks a unix-socket HTTP proxy, so it needs an interposer
+  socket()/connect() translation that is a distinct design decision.
+
 ## [0.5.0] - 2026-09-26
 
 ### Added

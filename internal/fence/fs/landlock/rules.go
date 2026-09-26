@@ -144,10 +144,87 @@ func RulesFromConfig(cfg *fsfence.FenceConfig, extra []AllowPath, abi int) (Spec
 	for _, p := range extra {
 		spec.Paths = append(spec.Paths, pathRule(filepath.Clean(p.Path), p.Access, abi))
 	}
+	spec.Paths = append(spec.Paths, baselineDeviceRules(abi, cfg.DenyPaths)...)
 	if err := assertDenyPathsEnforceable(cfg.DenyPaths, spec.Paths); err != nil {
 		return Spec{}, err
 	}
 	return spec, nil
+}
+
+// baselineDeviceRules grants the standard character devices that ordinary
+// programs cannot run without: /dev/null and /dev/tty are writable and
+// /dev/zero is readable. The fence otherwise grants a non-directory file only
+// read+execute, so a program that writes to /dev/null (git, shells, echo) is
+// denied outright — the exact breakage reported in the field. These devices are
+// world read/write and carry no data worth fencing, so they are granted
+// unconditionally, independent of the configured allow list, and the LD_PRELOAD
+// interposer applies the identical baseline (see check_path in
+// internal/fence/fs/interposer/libfence_fs.c).
+//
+// An explicit deny still wins: a node covered by a configured deny path is
+// skipped rather than silently re-granted (which would also make the ruleset
+// unenforceable via assertDenyPathsEnforceable). Absent nodes are skipped so
+// the rules stay valid on minimal containers.
+//
+// These are the only grants RulesFromConfig emits OUTSIDE the configured root;
+// the containment invariant (FuzzRulesFromConfigContainment) exempts exactly
+// this set via IsBaselineDeviceNode.
+func baselineDeviceRules(abi int, denyPaths []string) []PathRule {
+	handled := RightsForABI(abi)
+	rules := make([]PathRule, 0, len(baselineDeviceNodes))
+	for _, n := range baselineDeviceNodes {
+		if _, err := os.Stat(n.path); err != nil {
+			continue
+		}
+		if deniedByConfig(n.path, denyPaths) {
+			continue
+		}
+		rules = append(rules, PathRule{Path: n.path, Access: n.access, Rights: n.rights & handled})
+	}
+	return rules
+}
+
+// baselineDeviceNode is a standard character device granted unconditionally.
+type baselineDeviceNode struct {
+	path   string
+	access string
+	rights uint64
+}
+
+// baselineDeviceNodes is the curated set of world-accessible character devices
+// every program needs: /dev/null and /dev/tty writable, /dev/zero readable.
+// The interposer (check_path in libfence_fs.c) applies the identical set.
+var baselineDeviceNodes = []baselineDeviceNode{
+	{"/dev/null", AccessReadWrite, RightReadFile | RightWriteFile | RightIOCTLDev},
+	{"/dev/tty", AccessReadWrite, RightReadFile | RightWriteFile | RightIOCTLDev},
+	{"/dev/zero", AccessReadOnly, RightReadFile},
+}
+
+// IsBaselineDeviceNode reports whether path is one of the curated device nodes
+// granted unconditionally outside the root. Used by the containment fuzz test to
+// exempt exactly these paths from the "every grant lies inside the root" check.
+func IsBaselineDeviceNode(path string) bool {
+	for _, n := range baselineDeviceNodes {
+		if n.path == path {
+			return true
+		}
+	}
+	return false
+}
+
+// deniedByConfig reports whether path is covered by any configured deny path
+// (the deny path is the node itself or an ancestor directory of it).
+func deniedByConfig(path string, denyPaths []string) bool {
+	for _, d := range denyPaths {
+		dc := filepath.Clean(d)
+		if dc == "" || dc == "." {
+			continue
+		}
+		if pathsOverlap(dc, path) {
+			return true
+		}
+	}
+	return false
 }
 
 // assertDenyPathsEnforceable fails closed when a configured deny path cannot be

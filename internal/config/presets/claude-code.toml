@@ -10,6 +10,16 @@ allow = [
     "~/.claude/",
     "~/.cache/",
     "/tmp/",
+    # Standard system read-only paths. Without these the child cannot even
+    # resolve its dynamic loader or exec /bin/echo — Landlock and the
+    # interposer deny every path outside the root and this allow list. Writable
+    # device nodes (/dev/null, /dev/tty) are granted as a baseline in the fence
+    # rules, not here (allow entries are read-only).
+    "/usr/",
+    "/etc/",
+    "/proc/",
+    "/dev/",
+    "/sys/",
 ]
 deny = [
     "~/.ssh/",
