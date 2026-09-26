@@ -90,12 +90,23 @@ fi
 # ignores any include filename containing a '.', so the staged file is inert even
 # if left behind, and the final move is an atomic same-directory rename (never a
 # truncated, host-breaking sudoers file).
+tmp_shim=""
+staged_sudoers=""
+cleanup() {
+	[ -z "$tmp_shim" ] || rm -f "$tmp_shim"
+	[ -z "$staged_sudoers" ] || rm -f "$staged_sudoers"
+}
+# Signal handlers must exit, not return: returning would resume the install with
+# the temp files already removed, recreating the predictable path without O_EXCL.
+# `exit` runs the EXIT trap, so cleanup fires once.
+trap cleanup EXIT
+trap 'exit 130' INT
+trap 'exit 143' TERM
+
 tmp_shim="$(mktemp)"
 # Ensure the sudoers.d directory exists before staging a temp file inside it.
 mkdir -p "$(dirname "$SUDOERS_PATH")"
 staged_sudoers="$(mktemp "${SUDOERS_PATH}.XXXXXXXX")"
-cleanup() { rm -f "$tmp_shim" "$staged_sudoers"; }
-trap cleanup EXIT INT TERM
 
 # --- write the shim (byte-exact, proven in CI) -----------------------------
 cat >"$tmp_shim" <<'SHIM'
