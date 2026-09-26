@@ -235,11 +235,12 @@ All notable changes to NockLock will be documented in this file.
     `[syscall] enforcement = "off"`, which would have downgraded the fence.
 - macOS filesystem fence (N9222 phase 1, #108): `nocklock wrap` on macOS now
   applies a kernel-enforced Seatbelt (`sandbox-exec`) profile inherited by every
-  child. The profile is a curated credential and sensitive-path DENYLIST
+  child. The initial profile was a curated credential and sensitive-path DENYLIST
   (`~/.ssh`, `~/.aws`, `~/.config`, `~/.gnupg`, `~/Library/Keychains`, plus
-  configured deny paths) written as `(allow default)` with explicit denies. It is
-  not the Linux root-only allowlist, and `filesystem.root` is not enforced as a
-  boundary on macOS. The profile is generated fail-closed with canonicalized
+  configured deny paths) written as `(allow default)` with explicit denies. It was
+  not the Linux root-only allowlist, and `filesystem.root` was not enforced as a
+  boundary on macOS (write confinement outside the root followed in N10722, see
+  below). The profile is generated fail-closed with canonicalized
   paths and validated with `sandbox-exec` before launch. Every wrap records
   exactly one durable filesystem-fence state before the child runs: `ENGAGED`
   (paths applied), `REFUSED-TO-START` (the default when the fence cannot be
@@ -254,7 +255,8 @@ All notable changes to NockLock will be documented in this file.
   allow-default sensitive-path denylist rather than the root-only boundary that
   the configuration promises; the docs were aligned to that refusal. The Seatbelt
   fence above (#108) supersedes the refusal: `filesystem.root` is now accepted on
-  macOS but is not enforced as a boundary there. The architecture document also
+  macOS (write confinement outside the root followed in N10722, see below). The
+  architecture document also
   now reflects the shipped network fence instead of describing it as planned.
 - macOS `filesystem.root` now enforces a kernel Seatbelt write boundary (N10722):
   the canonical profile keeps `(allow default)`, denies all file writes, then
@@ -262,8 +264,8 @@ All notable changes to NockLock will be documented in this file.
   user's required temp/cache locations, and required `/dev` pseudo-devices.
   Phase 1 credential and configured sensitive paths remain denied for reads and
   writes, including beneath the root. Read confinement outside the root is not
-  claimed. This supersedes the denylist-only boundary and the "`filesystem.root`
-  is not enforced" statements in the two macOS entries above.
+  claimed. This supersedes the denylist-only boundary described in the two macOS
+  entries above.
 
 ### Fixed
 
