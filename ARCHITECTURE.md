@@ -69,23 +69,27 @@ after validation. Validation and use are therefore not atomic (N10717).
 
 **In scope (caught).** The static malicious-repo case: a checkout that commits
 `.nock/events.db`, or any ancestor of it, as a symlink. Rejected: a symlink at the
-final component (`lstat` plus `O_NOFOLLOW`, N8614), a swap of the final component
-after create (inode re-check), and an ancestor that escapes the project root,
+final component (`lstat` plus `O_NOFOLLOW`, N8614, including a real DB replaced by
+a symlink between sessions), and an ancestor that escapes the project root,
 dangles, loops or cannot be canonicalized (`resolveDeepestExisting`, N10714).
 `nocklock wrap` opens the DB before the fence is applied, so the repository
 contents are the attacker-controlled input here.
 
 **Out of scope (residual).** A concurrent writer running as the **same uid** that
 swaps a validated ancestor, or the DB path, for a symlink between validation and
-use. `TestResidual_AncestorSwapBetweenValidateAndOpen` demonstrates that such a
+use (including after the inode re-check, before SQLite lazily opens the file). `TestResidual_AncestorSwapBetweenValidateAndOpen` demonstrates that such a
 swap redirects the DB outside the project. We accept this because the racer must
 already run as the user, and that process already owns everything the swap could
 protect: it can read and write `.nock/events.db` directly, read the Ed25519
 signing key at `~/.config/nocklock/signing-ed25519.key`, replace the config or
-the binary, and ptrace NockLock. A different uid cannot swap a `0700` directory
-it does not own. The fenced child is not the racer: it starts after `NewLogger`
-returns, and for the default `.nock/events.db` location the filesystem fence denies
-it the audit directory.
+the binary, and ptrace NockLock. A different uid can swap an entry only where it
+can write the parent directory, so this holds while the project root and its
+ancestors are not group- or world-writable (a shared checkout under `/tmp` or a
+shared group directory is outside that assumption). The fenced child of the
+current `wrap` is not the racer: it starts after `NewLogger` returns, and for the
+default `.nock/events.db` location the filesystem fence denies it the audit
+directory. A same-uid process that outlives an earlier session, or a child on a
+platform or mode where the fence is not enforced, is the residual case.
 
 **Why not close it in code.** An `os.Root`/`openat` walk from the project root is
 not enough on its own: SQLite reopens the database, and its `-wal`/`-shm`
