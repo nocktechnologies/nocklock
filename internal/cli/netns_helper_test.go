@@ -180,7 +180,7 @@ func TestReadSetupRequestFailsClosed(t *testing.T) {
 }
 
 // TestRemoveValidatedRequestBoundToDirectoryFD is the negative control for the
-// deferred-unlink race (review finding on #107): after the request's parent
+// deferred-unlink race: after the request's parent
 // directory is opened, renaming it away and planting a symlink to a victim
 // directory at the original path must not redirect the unlink — the victim's
 // same-named file (standing in for a root-owned /etc/sudoers.d entry) survives —
@@ -232,22 +232,21 @@ func TestRemoveValidatedRequestBoundToDirectoryFD(t *testing.T) {
 	// An entry replaced after validation (different inode) must not be removed.
 	// The validated file is kept alive under another name so its inode cannot be
 	// reused by the replacement.
-	dir := moved
-	if err := os.WriteFile(filepath.Join(dir, name), []byte("{}"), 0o600); err != nil {
+	if err := os.WriteFile(filepath.Join(moved, name), []byte("{}"), 0o600); err != nil {
 		t.Fatalf("write second request: %v", err)
 	}
 	fi2, err := root.Lstat(name)
 	if err != nil {
 		t.Fatalf("lstat second request: %v", err)
 	}
-	if err := os.Rename(filepath.Join(dir, name), filepath.Join(dir, name+".old")); err != nil {
+	if err := os.Rename(filepath.Join(moved, name), filepath.Join(moved, name+".old")); err != nil {
 		t.Fatalf("rename validated request aside: %v", err)
 	}
-	if err := os.WriteFile(filepath.Join(dir, name), []byte("{}"), 0o600); err != nil {
+	if err := os.WriteFile(filepath.Join(moved, name), []byte("{}"), 0o600); err != nil {
 		t.Fatalf("write replacement: %v", err)
 	}
 	removeValidatedRequest(root, name, fi2)
-	if _, err := os.Stat(filepath.Join(dir, name)); err != nil {
+	if _, err := os.Stat(filepath.Join(moved, name)); err != nil {
 		t.Fatalf("replaced entry must not be removed, stat err = %v", err)
 	}
 }

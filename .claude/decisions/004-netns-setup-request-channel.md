@@ -32,7 +32,7 @@ the fixed `check`/`setup` sudoers vectors.
   the child untouched (a real TTY stays a TTY). The helper opens the file
   `O_NOFOLLOW` relative to a retained directory fd (`os.OpenRoot`), requires a
   regular 0600 file owned by `SUDO_UID`, and unlinks it after read via `unlinkat`
-  on that same directory fd (only while the entry is still the validated inode),
+  on that same directory fd (skipped if the entry was replaced after validation),
   so a parent directory swapped for a symlink cannot redirect the root unlink.
   `validateChildCredential` remains the real credential boundary; the
   file checks are defense-in-depth and a fail-closed setup channel.

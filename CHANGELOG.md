@@ -13,8 +13,8 @@ All notable changes to NockLock will be documented in this file.
   entirely. The request now travels in a 0600 per-session file whose path rides
   argv (`setup --request-file <path>`; validated regular/0600/owned-by-`SUDO_UID`,
   opened `O_NOFOLLOW` and unlinked after read, both relative to a retained
-  directory fd so a swapped parent directory cannot redirect the root unlink), and the sidecar payloads ride a
-  dedicated inherited descriptor (fd 3), so the caller's real stdin — a TTY or a
+  directory fd so a swapped parent directory cannot redirect the root unlink),
+  and the sidecar payloads ride a dedicated inherited descriptor (fd 3), so the caller's real stdin — a TTY or a
   pipe — flows through to the child unchanged. This was forced by `sudo` closing
   descriptors ≥ 3 (`closefrom`), which rules out passing the request itself on an
   fd across the sudo boundary; see ADR-004. Fence semantics are unchanged; both
