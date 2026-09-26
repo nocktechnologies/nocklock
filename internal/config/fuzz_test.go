@@ -119,6 +119,9 @@ func assertOverlayNotWidened(t *testing.T, base, ov *Config) {
 	if ov.Network.AllowPrivateRanges && !base.Network.AllowPrivateRanges {
 		t.Fatalf("overlay turned network.allow_private_ranges ON (base off): fence WIDENED")
 	}
+	if ov.Filesystem.MacOSAllowUnfenced && !base.Filesystem.MacOSAllowUnfenced {
+		t.Fatalf("overlay turned filesystem.macos_allow_unfenced ON (base off): fence WIDENED")
+	}
 	if ov.Syscall.AllowNamespaces && !base.Syscall.AllowNamespaces {
 		t.Fatalf("overlay turned syscall.allow_namespaces ON (base off): fence WIDENED")
 	}

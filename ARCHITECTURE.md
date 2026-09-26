@@ -3,16 +3,14 @@
 ## Overview
 NockLock is a Go CLI that wraps AI coding agents with three security fences: filesystem, network, and secret isolation.
 
-**Current state:** The secret and network fences are active, and Linux has a
-kernel-enforced root filesystem fence (Landlock plus LD_PRELOAD event logging).
-All fence events are logged to SQLite. macOS supports secret and network
-fencing, but the shipped CLI deliberately refuses a configured
-`filesystem.root`: its Seatbelt component is an allow-default sensitive-path
-denylist, not a root-only filesystem boundary.
+**Current state:** The secret and network fences are active. Linux has a
+kernel-enforced root filesystem fence (Landlock plus LD_PRELOAD event logging),
+while macOS has a kernel-enforced Seatbelt sensitive-path denylist. macOS
+records fence state in SQLite; per-file deny events remain a follow-up.
 
-**Target state:** Preserve all three active fence categories while adding a
-macOS filesystem backend only when it can prove the same root-only boundary as
-the Linux path; optional NockCC cloud dashboard sync remains separate.
+**Target state:** Preserve all three active fence categories while adding an
+Endpoint Security macOS backend for strict root-only isolation and native
+per-file events; optional NockCC cloud dashboard sync remains separate.
 
 ## Package Structure
 
@@ -36,7 +34,7 @@ internal/
 
   fence/                Fence implementations
     secrets/            Secret fence — environment variable filtering (pass/block lists)
-    fs/                 Filesystem fence — config processing, Linux enforcement, Seatbelt profile component
+    fs/                 Filesystem fence — config processing, Linux enforcement, macOS Seatbelt enforcement
       interposer/       C shared library for LD_PRELOAD interception (Linux only)
     network/            Network fence — local proxy with domain allowlist
   logging/              Event logging
@@ -52,16 +50,16 @@ internal/
 4. Secret fence filters environment variables (pass/block lists)
 5. With `filesystem.root` configured on Linux, the filesystem fence applies
    Landlock and LD_PRELOAD with libfence_fs.so, then opens a Unix socket for events
-6. With `filesystem.root` configured on macOS, NockLock refuses before child
-   launch because Seatbelt cannot provide the requested root-only boundary
+6. With `filesystem.root` configured on macOS, NockLock builds a canonical
+   Seatbelt denylist profile, validates it, and wraps the child with sandbox-exec
 7. The network fence starts its domain-allowlist proxy when configured
 8. Child process is spawned with the filtered environment and active fence wiring
 9. Filesystem and network decisions are logged to `.nock/events.db`
 10. NockLock exits with the child's exit code
 
 ### Future
-- A macOS filesystem-root backend must prove out-of-root write refusal before
-  `filesystem.root` can be enabled there.
+- A macOS Endpoint Security backend can add strict root-only isolation and
+  native per-file deny events.
 - Optional: events batched and synced to NockCC cloud dashboard
 
 ## Key Design Decisions

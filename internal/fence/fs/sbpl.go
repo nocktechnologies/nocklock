@@ -35,7 +35,8 @@ import (
 // The profile is deterministic: paths are canonicalized, de-duplicated, and
 // sorted, so the same input always yields byte-identical output (testable).
 func GenerateProfile(sensitivePaths []string) (string, error) {
-	return generateProfile(sensitivePaths, false)
+	profile, _, err := GenerateProfileAndCount(sensitivePaths, false)
+	return profile, err
 }
 
 // GenerateHardenedProfile is the opt-in ([filesystem] hardened = true) variant.
@@ -56,12 +57,17 @@ func GenerateProfile(sensitivePaths []string) (string, error) {
 // additive on top of (allow default). No-op on non-macOS callers (they never set
 // hardened=true).
 func GenerateHardenedProfile(sensitivePaths []string) (string, error) {
-	return generateProfile(sensitivePaths, true)
+	profile, _, err := GenerateProfileAndCount(sensitivePaths, true)
+	return profile, err
 }
 
-func generateProfile(sensitivePaths []string, hardened bool) (string, error) {
+// GenerateProfileAndCount builds a baseline or hardened Seatbelt profile and
+// returns the number of distinct canonical sensitive paths it fences. The count
+// lets callers audit the exact applied policy without over-reporting duplicate
+// configuration entries.
+func GenerateProfileAndCount(sensitivePaths []string, hardened bool) (string, int, error) {
 	if len(sensitivePaths) == 0 {
-		return "", fmt.Errorf("refusing to generate a fence profile with no sensitive paths (would be a no-op fence)")
+		return "", 0, fmt.Errorf("refusing to generate a fence profile with no sensitive paths (would be a no-op fence)")
 	}
 
 	seen := make(map[string]struct{}, len(sensitivePaths))
@@ -73,7 +79,7 @@ func generateProfile(sensitivePaths []string, hardened bool) (string, error) {
 		c, err := canonicalizeForProfile(p)
 		if err != nil {
 			// Fail closed: never emit a rule we cannot guarantee will match.
-			return "", fmt.Errorf("cannot canonicalize sensitive path %q (refusing to emit a fence that may fail open): %w", p, err)
+			return "", 0, fmt.Errorf("cannot canonicalize sensitive path %q (refusing to emit a fence that may fail open): %w", p, err)
 		}
 		if _, dup := seen[c]; dup {
 			continue
@@ -82,7 +88,7 @@ func generateProfile(sensitivePaths []string, hardened bool) (string, error) {
 		canonical = append(canonical, c)
 	}
 	if len(canonical) == 0 {
-		return "", fmt.Errorf("refusing to generate a fence profile with no resolvable sensitive paths")
+		return "", 0, fmt.Errorf("refusing to generate a fence profile with no resolvable sensitive paths")
 	}
 	sort.Strings(canonical)
 
@@ -122,7 +128,7 @@ func generateProfile(sensitivePaths []string, hardened bool) (string, error) {
 		b.WriteString("    (regex #\"^/dev/fd/\"))\n")
 	}
 
-	return b.String(), nil
+	return b.String(), len(canonical), nil
 }
 
 // canonicalizeForProfile resolves path to an absolute, symlink-free form

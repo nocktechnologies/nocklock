@@ -233,12 +233,29 @@ All notable changes to NockLock will be documented in this file.
     `--net-fence=netns` escape (where the child keeps IP sockets and the kernel
     egress floor enforces the allowlist) instead of unconditionally advising
     `[syscall] enforcement = "off"`, which would have downgraded the fence.
-- macOS filesystem-root support is now stated consistently across the product
-  documentation (N10712). The shipped CLI already refuses to launch when
-  `filesystem.root` is set on macOS, because the tested Seatbelt component is
-  an allow-default sensitive-path denylist rather than the root-only boundary
-  that the configuration promises. The architecture document now also reflects
-  the shipped network fence instead of describing it as planned.
+- macOS filesystem fence (N9222 phase 1, #108): `nocklock wrap` on macOS now
+  applies a kernel-enforced Seatbelt (`sandbox-exec`) profile inherited by every
+  child. The profile is a curated credential and sensitive-path DENYLIST
+  (`~/.ssh`, `~/.aws`, `~/.config`, `~/.gnupg`, `~/Library/Keychains`, plus
+  configured deny paths) written as `(allow default)` with explicit denies. It is
+  not the Linux root-only allowlist, and `filesystem.root` is not enforced as a
+  boundary on macOS. The profile is generated fail-closed with canonicalized
+  paths and validated with `sandbox-exec` before launch. Every wrap records
+  exactly one durable filesystem-fence state before the child runs: `ENGAGED`
+  (paths applied), `REFUSED-TO-START` (the default when the fence cannot be
+  applied), or `DEGRADED` (only through the explicit, logged
+  `filesystem.macos_allow_unfenced = true` escape hatch, which is temporary and
+  removed in v0.6, or an explicit `filesystem.root = ""`). Per-file deny events
+  are not emitted yet. Tests cover the three recorded states on darwin and run in
+  the existing `macos-enforce` CI job.
+- macOS filesystem-root documentation was made consistent across the product
+  docs (N10712). At the time, the shipped CLI refused to launch when
+  `filesystem.root` was set on macOS, because the tested Seatbelt component is an
+  allow-default sensitive-path denylist rather than the root-only boundary that
+  the configuration promises; the docs were aligned to that refusal. The Seatbelt
+  fence above (#108) supersedes the refusal: `filesystem.root` is now accepted on
+  macOS but is not enforced as a boundary there. The architecture document also
+  now reflects the shipped network fence instead of describing it as planned.
 
 ### Fixed
 
@@ -264,8 +281,8 @@ All notable changes to NockLock will be documented in this file.
   darwin test-portability failures are fixed and the `-skip` name list is
   removed (N10714). The landlock rule-comparison tests normalise the temp root
   with `filepath.EvalSymlinks` (matching `RulesFromConfig`'s own
-  canonicalization), the `wrap --dry-run` embedded-profile test asserts the
-  documented macOS Seatbelt `filesystem.root` refusal per-platform, and
+  canonicalization), the `wrap --dry-run` embedded-profile test accepts the
+  configured macOS Seatbelt denylist per-platform, and
   `verifySkipReason` keys its Linux-only backend checks off the stubbable
   `caps.goos` instead of `runtime.GOOS` (a no-op in production) so verify's skip
   accounting is platform-deterministic under test.

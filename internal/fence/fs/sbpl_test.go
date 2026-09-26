@@ -107,6 +107,17 @@ func TestGenerateProfile_DeterministicAndDeduped(t *testing.T) {
 	}
 }
 
+func TestGenerateProfileAndCountReportsDistinctCanonicalPaths(t *testing.T) {
+	a, b := t.TempDir(), t.TempDir()
+	_, count, err := GenerateProfileAndCount([]string{a, b, a}, false)
+	if err != nil {
+		t.Fatalf("GenerateProfileAndCount: %v", err)
+	}
+	if count != 2 {
+		t.Fatalf("sensitive path count = %d, want 2 distinct canonical paths", count)
+	}
+}
+
 // TestCanonicalize_ResolvesSymlink is the FAIL-OPEN regression test. macOS
 // matches sandbox rules against the canonical path, so a rule built from a
 // symlinked path silently never matches and the fence fails open (this exact

@@ -83,6 +83,10 @@ root = "."
 root = "."
 mode = "read-write"
 linux_enforcement = "required"
+# TEMPORARY macOS v0.5 compatibility escape hatch. When true, a missing or
+# rejected Seatbelt profile is logged as DEGRADED and the child runs unfenced.
+# It is removed in v0.6; leave false for the fail-closed security default.
+macos_allow_unfenced = false
 allow = [
     "~/.claude/",
     "/tmp/",
