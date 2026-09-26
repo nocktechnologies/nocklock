@@ -6,6 +6,11 @@ All notable changes to NockLock will be documented in this file.
 
 ### Fixed
 
+- Audit DB validate-then-open window documented (N10717): a same-uid writer that
+  swaps a validated ancestor for a symlink can redirect the DB. That racer is out
+  of NockLock's threat model; see ARCHITECTURE.md. Removed the redundant
+  path-based `os.Chmod` (the descriptor-based chmod already covers it) and added
+  `TestResidual_AncestorSwapBetweenValidateAndOpen` with a no-swap control.
 - The audit logger no longer refuses to start on first run when the project is
   reached through a symlinked path (N10714). `validatePath` resolved the project
   root's symlinks but left the not-yet-created DB path in its raw frame, so on
