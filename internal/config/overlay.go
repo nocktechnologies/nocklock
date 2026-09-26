@@ -45,6 +45,9 @@ func restrictOverlay(base, overlay Config, fields map[string]bool) Config {
 	if fields["secrets.block"] {
 		cfg.Secrets.Block = unionStrings(base.Secrets.Block, overlay.Secrets.Block)
 	}
+	cfg.Secrets.ScanEnv = base.Secrets.ScanEnv || overlay.Secrets.ScanEnv
+	cfg.Secrets.ScanPaths = unionStrings(base.Secrets.ScanPaths, overlay.Secrets.ScanPaths)
+	cfg.Secrets.ScanEnvAllow = intersectStrings(base.Secrets.ScanEnvAllow, overlay.Secrets.ScanEnvAllow)
 
 	if fields["syscall.enforcement"] {
 		cfg.Syscall.Enforcement = restrictiveEnforcement(base.Syscall.Enforcement, overlay.Syscall.Enforcement)
@@ -92,6 +95,8 @@ func cloneConfig(cfg Config) Config {
 	cfg.Network.Allow = append([]string(nil), cfg.Network.Allow...)
 	cfg.Secrets.Pass = append([]string(nil), cfg.Secrets.Pass...)
 	cfg.Secrets.Block = append([]string(nil), cfg.Secrets.Block...)
+	cfg.Secrets.ScanPaths = append([]string(nil), cfg.Secrets.ScanPaths...)
+	cfg.Secrets.ScanEnvAllow = append([]string(nil), cfg.Secrets.ScanEnvAllow...)
 	cfg.Syscall.SocketFamilies = append([]string(nil), cfg.Syscall.SocketFamilies...)
 	cfg.Syscall.ExtraDeny = append([]string(nil), cfg.Syscall.ExtraDeny...)
 	return cfg

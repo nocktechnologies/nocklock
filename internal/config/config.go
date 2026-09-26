@@ -80,10 +80,16 @@ type NetworkConfig struct {
 	AllowPrivateRanges bool     `toml:"allow_private_ranges"`
 }
 
-// SecretsConfig defines environment variable filtering rules.
+// SecretsConfig defines environment filtering and optional secret preflight checks.
 type SecretsConfig struct {
 	Pass  []string `toml:"pass"`
 	Block []string `toml:"block"`
+	// ScanEnv checks values remaining after filtering before the child starts.
+	ScanEnv bool `toml:"scan_env"`
+	// ScanPaths selects project-relative files/directories for required preflight.
+	ScanPaths []string `toml:"scan_paths"`
+	// ScanEnvAllow exempts exact environment names from value scanning, never filtering.
+	ScanEnvAllow []string `toml:"scan_env_allow"`
 }
 
 // LoggingConfig configures local event logging.
