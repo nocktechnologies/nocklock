@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 
@@ -105,18 +106,35 @@ func paths(root string, n int, prefix string) []string {
 	return out
 }
 
+// requireLinuxCap skips cap-boundary tests on any OS other than Linux: the
+// caps only exist because FenceConfig gets serialized into the LD_PRELOAD
+// interposer's wire format (see the runtime.GOOS guard in ProcessConfig),
+// and only the Linux fence path ever does that. On macOS the same boundary
+// configs must NOT error, since ProcessConfig also feeds Seatbelt profile
+// generation there, which has no such field budget.
+func requireLinuxCap(t *testing.T) {
+	t.Helper()
+	if runtime.GOOS != "linux" {
+		t.Skipf("interposer wire-format cap only applies on linux, not %s", runtime.GOOS)
+	}
+}
+
 // TestProcessConfig_AllowPathCapBoundary is the boundary test for #10757's
 // thread 2: the interposer's libfence_fs.c fails closed (denies everything)
-// once its allow_count reaches MAX_PATHS (256), and the __landlock-exec shim
-// injects one allow entry per fsfence.SelfProcFiles() AFTER ProcessConfig
-// runs (see allowSelfProcFS in internal/cli/landlock_exec.go). A user config
-// with exactly 256 allow paths used to pass validation and then trip the
-// interposer's cap at runtime once the self-proc entries were appended — a
-// silent full deny-all, not a config error. ProcessConfig must now reserve
-// that headroom and reject at config time instead.
+// once its allow_count ALONE reaches MAX_PATHS (256), and the
+// __landlock-exec shim injects one allow entry per fsfence.SelfProcFiles()
+// AFTER ProcessConfig runs (see allowSelfProcFS in
+// internal/cli/landlock_exec.go). A user config with exactly 256 allow paths
+// used to pass validation and then trip the interposer's cap at runtime once
+// the self-proc entries were appended — a silent full deny-all, not a config
+// error. ProcessConfig must now reserve that headroom and reject at config
+// time instead. (This is the per-category check; see
+// TestProcessConfig_CombinedAllowDenyPathCapBoundary for the separate,
+// combined-budget failure mode a review pass on this fix found afterward.)
 func TestProcessConfig_AllowPathCapBoundary(t *testing.T) {
+	requireLinuxCap(t)
 	root := t.TempDir()
-	room := interposerMaxPathFields - interposerMetadataFields - len(SelfProcFiles())
+	room := maxAllowPaths - len(SelfProcFiles())
 
 	cfg := config.FilesystemConfig{Root: root, Allow: paths(root, room, "f")}
 	if _, err := ProcessConfig(cfg); err != nil {
@@ -134,10 +152,11 @@ func TestProcessConfig_AllowPathCapBoundary(t *testing.T) {
 // tokenizer (char *fields[MAX_PATHS + 4]) splits root+mode+socket plus every
 // "+allow"/"-deny" field out of ONE shared array; past that combined budget
 // it silently stops splitting and drops the tail — which can be deny paths —
-// before either category's own "too many" check ever sees them. A config
-// with many allow paths and a handful of deny paths, each individually well
-// under 256, can still overflow that shared budget.
+// before either category's own "too many" check ever sees them. Both allow
+// and deny counts here stay safely under the per-category cap above, so
+// only the combined check can catch this.
 func TestProcessConfig_CombinedAllowDenyPathCapBoundary(t *testing.T) {
+	requireLinuxCap(t)
 	root := t.TempDir()
 	room := interposerMaxPathFields - interposerMetadataFields - len(SelfProcFiles())
 

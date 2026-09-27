@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 
 	"github.com/nocktechnologies/nocklock/internal/config"
@@ -199,21 +200,45 @@ func ProcessConfig(cfg config.FilesystemConfig) (*FenceConfig, error) {
 		denyPaths = append(denyPaths, resolved)
 	}
 
-	// The interposer's wire-format tokenizer (see interposerMaxPathFields)
-	// shares ONE field budget between allow and deny paths combined: past
-	// that budget it silently drops whatever does not fit — including deny
-	// paths — before either category's own "too many, fail closed" check
-	// ever sees them. Reserve room for the metadata fields and for the
-	// self-proc files the shim injects into the allow list after this runs.
-	injected := len(SelfProcFiles())
-	room := interposerMaxPathFields - interposerMetadataFields - injected
-	if combined := len(allowPaths) + len(denyPaths); combined > room {
-		return nil, fmt.Errorf(
-			"too many combined filesystem allow (%d) and deny (%d) paths: the fence interposer's "+
-				"wire format supports at most %d combined, and %d are reserved for the wrapped "+
-				"process's own /proc/<pid> grants (see SelfProcFiles); remove entries from "+
-				"[filesystem].allow or [filesystem].deny",
-			len(allowPaths), len(denyPaths), room, injected)
+	// The two checks below only apply on Linux: they exist because
+	// FenceConfig gets serialized (FenceConfig.Serialize) into the wire
+	// format the LD_PRELOAD interposer parses (libfence_fs.c), and only the
+	// Linux fence path (NewFence in fence.go) ever does that serialization.
+	// macOS builds a Seatbelt profile straight from FenceConfig instead and
+	// has no such field budget, so applying either check there would reject
+	// otherwise-valid configs for a constraint that never applies to them.
+	if runtime.GOOS == "linux" {
+		// Per-category: the interposer fails closed once allow_count alone
+		// reaches maxAllowPaths (libfence_fs.c's "allow_count >= MAX_PATHS"
+		// check), and the shim injects one allow entry per self-proc file
+		// AFTER this validation runs (allowSelfProcFS in
+		// internal/cli/landlock_exec.go) — so the user's own allow paths must
+		// leave room for those before this function ever sees them appended.
+		injected := len(SelfProcFiles())
+		if room := maxAllowPaths - injected; len(allowPaths) > room {
+			return nil, fmt.Errorf(
+				"too many filesystem allow paths (%d): the fence interposer supports at most %d, "+
+					"and %d are reserved for the wrapped process's own /proc/<pid> grants (see "+
+					"SelfProcFiles); remove entries from [filesystem].allow", len(allowPaths), maxAllowPaths, injected)
+		}
+
+		// Combined: the interposer's wire-format tokenizer (see
+		// interposerMaxPathFields) shares ONE field budget between allow and
+		// deny paths combined — past that budget it silently drops whatever
+		// does not fit, including deny paths, before either category's own
+		// per-category check above ever sees them. This is a DIFFERENT
+		// failure mode than the per-category one (triggerable even when
+		// allow alone stays under the per-category cap, if deny is large
+		// enough), so both checks are needed.
+		room := interposerMaxPathFields - interposerMetadataFields - injected
+		if combined := len(allowPaths) + len(denyPaths); combined > room {
+			return nil, fmt.Errorf(
+				"too many combined filesystem allow (%d) and deny (%d) paths: the fence interposer's "+
+					"wire format supports at most %d combined, and %d are reserved for the wrapped "+
+					"process's own /proc/<pid> grants (see SelfProcFiles); remove entries from "+
+					"[filesystem].allow or [filesystem].deny",
+				len(allowPaths), len(denyPaths), room, injected)
+		}
 	}
 
 	// Validate that no resolved path contains the field separator character.
