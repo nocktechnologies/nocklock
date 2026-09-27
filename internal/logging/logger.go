@@ -387,16 +387,17 @@ func NewLogger(dbPath string, projectRoot string, opts ...Option) (*Logger, erro
 	// WAL mode allows external processes to read concurrently.
 	db.SetMaxOpenConns(1)
 
+	// Set the busy timeout before enabling WAL so concurrent first opens wait
+	// rather than failing while changing the journal mode.
+	if _, err := db.Exec("PRAGMA busy_timeout=5000"); err != nil {
+		db.Close()
+		return nil, fmt.Errorf("failed to set busy timeout: %w", err)
+	}
+
 	// Enable WAL mode for concurrent read/write.
 	if _, err := db.Exec("PRAGMA journal_mode=WAL"); err != nil {
 		db.Close()
 		return nil, fmt.Errorf("failed to enable WAL mode: %w", err)
-	}
-
-	// Set a busy timeout so concurrent operations wait rather than fail.
-	if _, err := db.Exec("PRAGMA busy_timeout=5000"); err != nil {
-		db.Close()
-		return nil, fmt.Errorf("failed to set busy timeout: %w", err)
 	}
 
 	// Zero freed pages so pruned event data is not forensically recoverable.

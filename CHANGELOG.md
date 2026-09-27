@@ -81,6 +81,10 @@ All notable changes to NockLock will be documented in this file.
   config loads, with an error naming the setting. `logging.db` is a setting a
   repository can ship, so an unrestricted absolute path would let a hostile
   checkout aim a SQLite write at any path the invoking user can reach.
+  Absolute paths below a symlinked audit state root are evaluated in both their
+  raw and resolved spellings, and every supplied intermediate component is
+  `Lstat`-checked before use. An error while inspecting the state root now also
+  stops resolution rather than making the root look unavailable.
   `nocklock doctor` warns when an absolute path lands back inside
   `filesystem.root`, where the agent can reach its own audit trail, and when the
   audit state directory falls inside a `filesystem.allow` grant.
@@ -123,7 +127,12 @@ All notable changes to NockLock will be documented in this file.
   silently abandoned when logging.db is reconfigured to an absolute path.
   An absolute path that resolves inside the audit state directory also passes
   the same state-root ownership and permission checks as a relative path to
-  that directory.
+  that directory, and every directory it nests deeper than `nocklock/<hash>`
+  is held to the same 0700/owner/symlink rule, so a writable directory
+  planted between the state directory and the log cannot be used. Those
+  components are checked as the path spells them, so a symlinked one is
+  refused by the same rule as `nocklock/<hash>` -- whether it points back
+  inside the audit directory or out of it (N10830).
 - The configured state root (`XDG_STATE_HOME`, or the `~/.local/state`
   fallback) is now itself checked before anything is created beneath it: it
   must be owned by the current user and not group- or world-writable, or
@@ -172,15 +181,26 @@ All notable changes to NockLock will be documented in this file.
 
 ### Fixed
 
-- Config discovery now resolves symlinks before `wrap` and `verify --audit`
-  derive audit state or signed config-digest paths. Digest verification also
-  keeps that association through teardown rows emitted after `session_end`, so
-  an untampered wrapped session verifies successfully.
+- Config discovery resolves the project directory before `wrap` and
+  `verify --audit` derive audit state or signed config-digest paths, while
+  preserving the `.nock/config.toml` leaf so projects sharing a symlink target
+  retain separate audit state. Digest verification also keeps that association
+  through teardown rows emitted after `session_end`, so an untampered wrapped
+  session verifies successfully.
 - `verify --audit` now treats sessions that started before the first
   `config.digest` row as legacy (and reports their count), while still
   rejecting a post-adoption session without a digest. The signed canonical
   policy now records the resolved network-fence mode, and each digest records
   its committed predecessor atomically.
+- `ResolveDBPath` now fails closed when the audit state root stats as an
+  existing directory but cannot be resolved (`EvalSymlinks` erroring on a
+  mid-call symlink swap or `ELOOP`), matching the sibling Stat-error branch
+  added by PR #128: previously that case silently left the state root
+  unavailable, dropping its candidates out of the scan and letting a legacy
+  in-project chain be adopted while a real state-dir chain sat behind the
+  unresolvable root (N10860).
+- Concurrent logger opens now set SQLite's busy timeout before enabling WAL,
+  avoiding lock failures during simultaneous first-time database setup.
 - `ResolveDBPath` now resolves the audit state root once and carries that
   canonical path through its candidate scan and final directory setup, so a
   retargeted state-root symlink cannot make it inspect one audit location and

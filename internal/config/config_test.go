@@ -512,6 +512,50 @@ func TestFindConfigWalksUp(t *testing.T) {
 	}
 }
 
+func TestFindConfigPreservesSymlinkedConfigLeaf(t *testing.T) {
+	root := t.TempDir()
+	sharedConfig := filepath.Join(root, "shared-config.toml")
+	if err := os.WriteFile(sharedConfig, []byte(DefaultTOML()), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	stateDirs := make([]string, 0, 2)
+	for _, name := range []string{"project-a", "project-b"} {
+		project := filepath.Join(root, name)
+		configDir := filepath.Join(project, Dir)
+		if err := os.MkdirAll(configDir, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Symlink(sharedConfig, filepath.Join(configDir, File)); err != nil {
+			t.Fatalf("create symlinked config for %s: %v", project, err)
+		}
+		t.Chdir(project)
+
+		found, err := FindConfig()
+		if err != nil {
+			t.Fatalf("FindConfig from %s: %v", project, err)
+		}
+		resolvedProject, err := filepath.EvalSymlinks(project)
+		if err != nil {
+			t.Fatalf("resolve project %s: %v", project, err)
+		}
+		expected := filepath.Join(resolvedProject, Dir, File)
+		if found != expected {
+			t.Fatalf("FindConfig from %s returned %q, want project-local path %q", project, found, expected)
+		}
+
+		dbPath, _, err := ResolveDBPath(&Config{}, found)
+		if err != nil {
+			t.Fatalf("ResolveDBPath for %s: %v", project, err)
+		}
+		stateDirs = append(stateDirs, filepath.Dir(dbPath))
+	}
+
+	if stateDirs[0] == stateDirs[1] {
+		t.Fatalf("ResolveDBPath returned one shared state directory: %q", stateDirs[0])
+	}
+}
+
 func TestFindConfigNotFound(t *testing.T) {
 	dir := t.TempDir()
 	origDir, _ := os.Getwd()
