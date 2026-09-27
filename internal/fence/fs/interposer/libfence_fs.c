@@ -67,6 +67,7 @@ typedef struct {
 static fence_config_t g_config;
 static pthread_once_t g_init_once = PTHREAD_ONCE_INIT;
 static unsigned char g_swapped_fd[MAX_TRACKED_FD];
+static pthread_mutex_t g_swapped_fd_lock = PTHREAD_MUTEX_INITIALIZER;
 
 /* ------------------------------------------------------------------ */
 /* Real function pointers                                              */
@@ -2663,7 +2664,14 @@ int statx(int dirfd, const char *pathname, int flags,
 
 static int bridge_fd_tracked(int fd)
 {
-    return fd >= 0 && fd < MAX_TRACKED_FD && g_swapped_fd[fd];
+    int tracked = 0;
+
+    if (fd >= 0 && fd < MAX_TRACKED_FD) {
+        pthread_mutex_lock(&g_swapped_fd_lock);
+        tracked = g_swapped_fd[fd];
+        pthread_mutex_unlock(&g_swapped_fd_lock);
+    }
+    return tracked;
 }
 
 static int bridge_expected_v4(const struct sockaddr_in *addr)
@@ -2751,17 +2759,24 @@ static int bridge_fake_name(struct sockaddr *addr, socklen_t *len)
 
 int socket(int domain, int type, int protocol)
 {
+    int swapped;
+    int fd;
+
     pthread_once(&g_init_once, fence_init);
 
-    if (g_config.proxy_bridge_enabled &&
-        (domain == AF_INET || domain == AF_INET6) &&
-        ((type & SOCK_TYPE_MASK) == SOCK_STREAM)) {
-        int fd = real_socket(AF_UNIX, type, 0);
-        if (fd >= 0 && fd < MAX_TRACKED_FD)
-            g_swapped_fd[fd] = 1;
-        return fd;
+    swapped = g_config.proxy_bridge_enabled &&
+              (domain == AF_INET || domain == AF_INET6) &&
+              ((type & SOCK_TYPE_MASK) == SOCK_STREAM);
+    if (swapped)
+        fd = real_socket(AF_UNIX, type, 0);
+    else
+        fd = real_socket(domain, type, protocol);
+    if (fd >= 0 && fd < MAX_TRACKED_FD) {
+        pthread_mutex_lock(&g_swapped_fd_lock);
+        g_swapped_fd[fd] = swapped;
+        pthread_mutex_unlock(&g_swapped_fd_lock);
     }
-    return real_socket(domain, type, protocol);
+    return fd;
 }
 
 int connect(int fd, const struct sockaddr *addr, socklen_t len)
@@ -2834,9 +2849,17 @@ int getpeername(int fd, struct sockaddr *addr, socklen_t *len)
 
 int close(int fd)
 {
+    int result;
+
     pthread_once(&g_init_once, fence_init);
 
-    if (fd >= 0 && fd < MAX_TRACKED_FD)
+    if (fd >= 0 && fd < MAX_TRACKED_FD) {
+        pthread_mutex_lock(&g_swapped_fd_lock);
+        /* Do not let a reused descriptor inherit the bridge state. */
+        result = real_close(fd);
         g_swapped_fd[fd] = 0;
+        pthread_mutex_unlock(&g_swapped_fd_lock);
+        return result;
+    }
     return real_close(fd);
 }

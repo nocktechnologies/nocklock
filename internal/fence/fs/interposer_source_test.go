@@ -195,6 +195,30 @@ func TestInterposerSourceCoversProxyBridgeHooks(t *testing.T) {
 	}
 }
 
+func TestInterposerSourceSynchronizesProxyBridgeDescriptors(t *testing.T) {
+	source, err := os.ReadFile("interposer/libfence_fs.c")
+	if err != nil {
+		t.Fatalf("read interposer source: %v", err)
+	}
+	text := string(source)
+
+	for _, pattern := range []string{
+		`static\s+pthread_mutex_t\s+g_swapped_fd_lock\s*=\s*PTHREAD_MUTEX_INITIALIZER\s*;`,
+		`(?s)static\s+int\s+bridge_fd_tracked\s*\(\s*int\s+fd\s*\).*?pthread_mutex_lock\s*\(\s*&g_swapped_fd_lock\s*\).*?g_swapped_fd\s*\[\s*fd\s*\].*?pthread_mutex_unlock\s*\(\s*&g_swapped_fd_lock\s*\)`,
+		`(?s)int\s+socket\s*\(.*?pthread_mutex_lock\s*\(\s*&g_swapped_fd_lock\s*\).*?g_swapped_fd\s*\[\s*fd\s*\]\s*=\s*swapped\s*;.*?pthread_mutex_unlock\s*\(\s*&g_swapped_fd_lock\s*\)`,
+		`(?s)int\s+connect\s*\(.*?bridge_fd_tracked\s*\(\s*fd\s*\)`,
+		`(?s)int\s+setsockopt\s*\(.*?bridge_fd_tracked\s*\(\s*fd\s*\)`,
+		`(?s)int\s+getsockopt\s*\(.*?bridge_fd_tracked\s*\(\s*fd\s*\)`,
+		`(?s)int\s+getsockname\s*\(.*?bridge_fd_tracked\s*\(\s*fd\s*\)`,
+		`(?s)int\s+getpeername\s*\(.*?bridge_fd_tracked\s*\(\s*fd\s*\)`,
+		`(?s)int\s+close\s*\(.*?pthread_mutex_lock\s*\(\s*&g_swapped_fd_lock\s*\).*?result\s*=\s*real_close\s*\(\s*fd\s*\)\s*;.*?g_swapped_fd\s*\[\s*fd\s*\]\s*=\s*0\s*;.*?pthread_mutex_unlock\s*\(\s*&g_swapped_fd_lock\s*\)`,
+	} {
+		if !regexp.MustCompile(pattern).MatchString(text) {
+			t.Fatalf("libfence_fs.c missing synchronized proxy bridge descriptor pattern %q", pattern)
+		}
+	}
+}
+
 func TestInterposerSourceBypassesATEmptyPathForNonPathFileDescriptors(t *testing.T) {
 	source, err := os.ReadFile("interposer/libfence_fs.c")
 	if err != nil {
