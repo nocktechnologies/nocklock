@@ -612,12 +612,15 @@ Total to a shippable Windows fence at Phase 1 parity: **~6–8 PR rounds**
    nothing. *Mitigation:* Probe 5 early, and budget the cache-directory ACL work
    into Phase 0 rather than discovering it in Phase 1.
 
-**4. The whole floor may be fail-open.** The AppContainer block filters are owned
-by the Windows Firewall service (`FWPM_PROVIDER_MPSSVC_WSH`). If a user disables
-the firewall, the isolation filters may go with it — a fail-open we would not
-detect. **UNVERIFIED.**
-[Probe 9](#probe-9-fail-open-with-the-firewall-off) settles it; if it fails open,
-NockLock must check firewall state at launch and refuse to start.
+4. **The whole floor may be fail-open.** The AppContainer block filters are owned
+   by the Windows Firewall service (`FWPM_PROVIDER_MPSSVC_WSH`). If a user
+   disables the firewall, the isolation filters may go with it — a fail-open we
+   would not detect (**UNVERIFIED**). The same shape applies to a project root on
+   exFAT/FAT32 or a network share with no ACL support: the file fence silently
+   enforces nothing. *Mitigation:* both want the same fix — check firewall state
+   and filesystem ACL support at launch, and refuse to start rather than fence
+   nothing. [Probe 9](#probe-9-fail-open-with-the-firewall-off) settles the
+   firewall half.
 
 ---
 
