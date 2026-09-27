@@ -591,12 +591,15 @@ func runProbeUnderWrap(ctx context.Context, cfg *config.Config, configPath, fenc
 	absolutizeConfigPaths(&cfgCopy, projectRoot)
 	cfgCopy.Logging.DB = filepath.Join(tmp, config.Dir, "events.db")
 	cfgCopy.Cloud.APIKey = ""
-	tmpConfig := filepath.Join(tmpNock, config.File)
-	if err := writeConfigTOML(tmpConfig, &cfgCopy); err != nil {
-		return probeResult{Fence: fence}, err
-	}
 	exe, err := os.Executable()
 	if err != nil {
+		return probeResult{Fence: fence}, err
+	}
+	// The temporary config lives outside every configured grant. Keep the
+	// probe executable itself readable/executable so Landlock can launch it.
+	cfgCopy.Filesystem.Allow = append(cfgCopy.Filesystem.Allow, exe)
+	tmpConfig := filepath.Join(tmpNock, config.File)
+	if err := writeConfigTOML(tmpConfig, &cfgCopy); err != nil {
 		return probeResult{Fence: fence}, err
 	}
 	childCtx, cancel := context.WithTimeout(ctx, 10*time.Second)

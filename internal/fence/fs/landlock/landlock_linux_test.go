@@ -14,6 +14,7 @@ import (
 )
 
 const landlockProbeEnv = "NOCKLOCK_LANDLOCK_PROBE"
+const landlockRootMutationProbeEnv = "NOCKLOCK_LANDLOCK_ROOT_MUTATION_PROBE"
 
 func TestLandlockAllowRWPaths(t *testing.T) {
 	if os.Getenv(landlockProbeEnv) != "" {
@@ -45,6 +46,59 @@ func TestLandlockAllowRWPaths(t *testing.T) {
 	)
 	if output, err := cmd.CombinedOutput(); err != nil {
 		t.Fatalf("Landlock child failed: %v\n%s", err, output)
+	}
+}
+
+func TestLandlockCreatesAndRemovesFileDirectlyInRoot(t *testing.T) {
+	if os.Getenv(landlockRootMutationProbeEnv) != "" {
+		runLandlockRootMutationProbe(t)
+		return
+	}
+
+	if abi, err := DetectABI(); err != nil {
+		t.Fatalf("detect Landlock ABI: %v", err)
+	} else if abi == 0 {
+		t.Skip("Landlock unavailable")
+	}
+
+	root := t.TempDir()
+	cmd := exec.Command(os.Args[0], "-test.run=^TestLandlockCreatesAndRemovesFileDirectlyInRoot$")
+	cmd.Env = append(os.Environ(),
+		landlockRootMutationProbeEnv+"=1",
+		"NOCKLOCK_LANDLOCK_ROOT="+root,
+	)
+	if output, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("Landlock root-mutation child failed: %v\n%s", err, output)
+	}
+}
+
+func runLandlockRootMutationProbe(t *testing.T) {
+	t.Helper()
+	root := os.Getenv("NOCKLOCK_LANDLOCK_ROOT")
+	if root == "" {
+		t.Fatal("Landlock root probe path is required")
+	}
+	abi, err := DetectABI()
+	if err != nil || abi == 0 {
+		t.Fatalf("detect Landlock ABI in child: abi=%d err=%v", abi, err)
+	}
+	spec, err := RulesFromConfig(&fsfence.FenceConfig{Root: root, Mode: "read-write"}, nil, abi)
+	if err != nil {
+		t.Fatalf("build Landlock rules: %v", err)
+	}
+	if err := Apply(spec); err != nil {
+		t.Fatalf("apply Landlock rules: %v", err)
+	}
+
+	target := filepath.Join(root, "direct-child")
+	if err := os.WriteFile(target, []byte("ok"), 0o600); err != nil {
+		t.Fatalf("create file directly in fence root: %v", err)
+	}
+	if err := os.Remove(target); err != nil {
+		t.Fatalf("remove file directly from fence root: %v", err)
+	}
+	if _, err := os.Stat(target); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("removed root file still exists: %v", err)
 	}
 }
 

@@ -170,7 +170,10 @@ func TestRulesFromConfigLimitsRegularFileRights(t *testing.T) {
 		t.Fatalf("RulesFromConfig failed: %v", err)
 	}
 
-	fileRule := spec.Paths[0]
+	fileRule, ok := findPathRule(spec.Paths, allowedPath)
+	if !ok {
+		t.Fatalf("missing regular-file rule %q in %+v", allowedPath, spec.Paths)
+	}
 	if fileRule.Rights&RightMakeDir != 0 || fileRule.Rights&RightRemoveDir != 0 || fileRule.Rights&RightRefer != 0 {
 		t.Fatalf("regular file rule should not include directory-only rights: %#x", fileRule.Rights)
 	}
@@ -204,15 +207,31 @@ func TestRulesFromConfigEnumeratesRootButSkipsNockAuditDir(t *testing.T) {
 	got := map[string]bool{}
 	for _, rule := range spec.Paths {
 		got[rule.Path] = true
-		if rule.Path == root || rule.Path == filepath.Join(root, ".nock") || strings.HasPrefix(rule.Path, filepath.Join(root, ".nock")+string(os.PathSeparator)) {
+		if rule.Path == filepath.Join(root, ".nock") || strings.HasPrefix(rule.Path, filepath.Join(root, ".nock")+string(os.PathSeparator)) {
 			t.Fatalf("ruleset granted audit path %q in %+v", rule.Path, spec.Paths)
 		}
+	}
+	rootRule, ok := findPathRule(spec.Paths, root)
+	if !ok {
+		t.Fatalf("missing structural root rule %q in %+v", root, spec.Paths)
+	}
+	if rootRule.Rights != rootMutationRights(5) {
+		t.Fatalf("root rights = %#x, want root-mutation rights %#x", rootRule.Rights, rootMutationRights(5))
 	}
 	for _, want := range []string{readme, src} {
 		if !got[want] {
 			t.Fatalf("missing root child rule %q in %+v", want, spec.Paths)
 		}
 	}
+}
+
+func findPathRule(rules []PathRule, path string) (PathRule, bool) {
+	for _, rule := range rules {
+		if rule.Path == path {
+			return rule, true
+		}
+	}
+	return PathRule{}, false
 }
 
 func TestRulesFromConfigRejectsRootChildSymlinkOutsideRoot(t *testing.T) {

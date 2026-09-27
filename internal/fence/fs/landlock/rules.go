@@ -127,7 +127,7 @@ func RulesFromConfig(cfg *fsfence.FenceConfig, extra []AllowPath, abi int) (Spec
 	spec := Spec{
 		ABI:             abi,
 		HandledAccessFS: handled,
-		Paths:           make([]PathRule, 0, len(cfg.AllowPaths)+len(cfg.AllowRWPaths)+len(extra)),
+		Paths:           make([]PathRule, 0, 1+len(cfg.AllowPaths)+len(cfg.AllowRWPaths)+len(extra)),
 	}
 	rootAccess := AccessReadWrite
 	if cfg.Mode == "read-only" {
@@ -147,10 +147,24 @@ func RulesFromConfig(cfg *fsfence.FenceConfig, extra []AllowPath, abi int) (Spec
 	for _, p := range extra {
 		spec.Paths = append(spec.Paths, pathRule(filepath.Clean(p.Path), p.Access, abi))
 	}
-	if err := assertDenyPathsEnforceable(cfg.DenyPaths, spec.Paths); err != nil {
+	if err := assertDenyPathsEnforceable(cfg.DenyPaths, contentGrantRules(spec.Paths)); err != nil {
 		return Spec{}, err
 	}
 	return spec, nil
+}
+
+// contentGrantRules excludes the root's create/remove rule. That rule lets the
+// child manage directory entries but does not grant read access to denied
+// content beneath the root.
+func contentGrantRules(rules []PathRule) []PathRule {
+	grants := make([]PathRule, 0, len(rules))
+	for _, rule := range rules {
+		if rule.Rights&readRights == 0 {
+			continue
+		}
+		grants = append(grants, rule)
+	}
+	return grants
 }
 
 // assertDenyPathsEnforceable fails closed when a configured deny path cannot be
@@ -233,11 +247,40 @@ func rootPathRules(root, access string, abi int) ([]PathRule, error) {
 	}
 	sort.Strings(paths)
 
-	rules := make([]PathRule, 0, len(paths))
+	rules := make([]PathRule, 0, len(paths)+1)
+	if access == AccessReadWrite {
+		rules = append(rules, PathRule{
+			Path:   cleanRoot,
+			Access: access,
+			Rights: rootMutationRights(abi),
+		})
+	}
 	for _, path := range paths {
 		rules = append(rules, pathRule(path, access, abi))
 	}
 	return rules, nil
+}
+
+// rootMutationRights permits adding, populating, and removing direct children
+// without granting read access to the root subtree itself.
+func rootMutationRights(abi int) uint64 {
+	rights := RightWriteFile |
+		RightRemoveDir |
+		RightRemoveFile |
+		RightMakeChar |
+		RightMakeDir |
+		RightMakeReg |
+		RightMakeSock |
+		RightMakeFifo |
+		RightMakeBlock |
+		RightMakeSym
+	if abi >= 2 {
+		rights |= RightRefer
+	}
+	if abi >= 3 {
+		rights |= RightTruncate
+	}
+	return rights & RightsForABI(abi)
 }
 
 func pathInsideRoot(root, path string) bool {
