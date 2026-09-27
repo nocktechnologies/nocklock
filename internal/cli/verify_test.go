@@ -282,3 +282,21 @@ func TestPathWithinAnyResolvesSymlinkedRoots(t *testing.T) {
 		t.Fatalf("%q must not be within an unrelated root", file)
 	}
 }
+
+func TestPathWithinAnyResolvesNotYetCreatedPathUnderSymlinkedRoot(t *testing.T) {
+	real := t.TempDir()
+	link := filepath.Join(t.TempDir(), "link")
+	if err := os.Symlink(real, link); err != nil {
+		t.Skipf("symlinks unavailable: %v", err)
+	}
+	// Neither the file nor its parent exists yet; the parent chain does
+	// resolve through the symlink, and the answer must not depend on which
+	// spelling (link or target) the caller used for the root or the path.
+	missing := filepath.Join(link, "sub", "canary.txt")
+	if !pathWithinAny(missing, []string{real}) {
+		t.Fatalf("%q should be within %q through the symlink", missing, real)
+	}
+	if !pathWithinAny(filepath.Join(real, "sub", "canary.txt"), []string{link}) {
+		t.Fatalf("path under %q should be within symlinked root %q", real, link)
+	}
+}

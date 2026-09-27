@@ -820,21 +820,41 @@ func filesystemRootOnly(cfg *config.Config, projectRoot string) []string {
 	return []string{filepath.Clean(root)}
 }
 
-func pathWithinAny(path string, roots []string) bool {
-	clean := filepath.Clean(path)
-	if resolved, err := filepath.EvalSymlinks(clean); err == nil {
-		clean = resolved
+// resolveExistingPrefix resolves symlinks in the longest existing prefix of p
+// and re-appends the part that does not exist yet, so a path that is about to
+// be created compares the same way as one that already exists (on macOS /tmp
+// and /var are symlinks into /private).
+func resolveExistingPrefix(p string) string {
+	clean := filepath.Clean(p)
+	rest := ""
+	for dir := clean; ; dir = filepath.Dir(dir) {
+		if resolved, err := filepath.EvalSymlinks(dir); err == nil {
+			if rest == "" {
+				return resolved
+			}
+			return filepath.Join(resolved, rest)
+		}
+		parent := filepath.Dir(dir)
+		if parent == dir {
+			return clean
+		}
+		if rest == "" {
+			rest = filepath.Base(dir)
+		} else {
+			rest = filepath.Join(filepath.Base(dir), rest)
+		}
 	}
+}
+
+func pathWithinAny(path string, roots []string) bool {
+	clean := resolveExistingPrefix(path)
 	for _, root := range roots {
 		if root == "" {
 			continue
 		}
-		// Resolve the root the same way as the path: on macOS /tmp and /var are
-		// symlinks into /private, so an unresolved root misses its own files.
-		root = filepath.Clean(root)
-		if resolved, err := filepath.EvalSymlinks(root); err == nil {
-			root = resolved
-		}
+		// Resolve the root the same way as the path, or a root spelled through a
+		// symlink misses its own files.
+		root = resolveExistingPrefix(root)
 		if clean == root {
 			return true
 		}
