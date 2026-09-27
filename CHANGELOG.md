@@ -29,9 +29,15 @@ All notable changes to NockLock will be documented in this file.
   `environ`. A sibling's `/proc/<pid>/environ` and `/cmdline` stay denied at the
   kernel layer too, proven by a `CGO_ENABLED=0` raw-syscall reader test that
   bypasses the userspace interposer. The Go-side filesystem config now also
-  reserves headroom below the interposer's 256-entry allow cap for these
-  injected self-proc grants and fails closed with a clear config error instead
-  of silently tripping the interposer's own cap at runtime.
+  reserves headroom below the interposer's combined allow+deny field budget
+  (`libfence_fs.c`'s `char *fields[MAX_PATHS + 4]` — allow and deny paths
+  share ONE 260-slot array, not independent 256-slot caps) for these injected
+  self-proc grants, and fails closed with a clear config error instead of
+  silently tripping the interposer's own cap — including the case where the
+  interposer's tokenizer would otherwise drop trailing deny paths — at
+  runtime. Verified empirically (LD_PRELOAD/strace diagnostic, no NockLock
+  fence involved) that Node tolerates the narrower grant: startup also
+  touches `/proc/self/{exe,maps,cgroup}`, but degrades gracefully when denied.
 - claude-code preset now runs real programs under the strongest non-root fence
   (N10748, parts b+c). Two field-reported breakages are closed: (1) writes to
   `/dev/null` and `/dev/tty` are permitted and `/dev/zero` is readable, so `git`
