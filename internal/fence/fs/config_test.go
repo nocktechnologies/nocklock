@@ -153,6 +153,25 @@ func TestCheckInterposerBudget_CombinedCapWithShim(t *testing.T) {
 	}
 }
 
+// TestCheckInterposerBudget_DenyPathCap verifies the per-category deny cap.
+// The C interposer's deny_count has the same MAX_PATHS ceiling as allow_count;
+// exceeding it triggers deny_all before the combined-budget check could catch it.
+func TestCheckInterposerBudget_DenyPathCap(t *testing.T) {
+	fc := &FenceConfig{
+		Root:      "/root",
+		Mode:      "read-write",
+		DenyPaths: paths("/p", maxAllowPaths, "d"),
+	}
+	if err := CheckInterposerBudget(fc, 0); err != nil {
+		t.Fatalf("CheckInterposerBudget with %d deny paths (exactly at cap) should succeed: %v", maxAllowPaths, err)
+	}
+
+	fc.DenyPaths = paths("/p", maxAllowPaths+1, "d")
+	if err := CheckInterposerBudget(fc, 0); err == nil {
+		t.Fatalf("CheckInterposerBudget with %d deny paths (one past cap) must fail closed", maxAllowPaths+1)
+	}
+}
+
 // TestCheckInterposerBudget_UserspaceOnly verifies the acceptance criterion
 // for N10815: when the __landlock-exec shim does NOT engage (pure userspace
 // interposer), no headroom is reserved and the user gets the full interposer

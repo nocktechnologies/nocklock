@@ -16,8 +16,9 @@ All notable changes to NockLock will be documented in this file.
   after both the Landlock ABI probe and the syscall-fence decision, so headroom
   is only reserved when the shim actually engages. A userspace-only config gets
   the interposer's real 256-path budget. --dry-run and validateWrapRuntimeConfig
-  no longer catch over-budget configs (that information is unavailable before
-  fence setup); this is an inherent trade-off documented below.
+  still catch configs that exceed the interposer's absolute ceiling (>256 per
+  category or >257 combined) via a floor check with reserve=0; the exact check
+  with the real shim reserve runs later in wrap, after the ABI probe.
 
 - claude-code preset: Node runtime introspection no longer breaks under the
   fence (#10757). With the broad `/proc/` grant removed in #115 (it exposed a

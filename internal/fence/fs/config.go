@@ -241,6 +241,11 @@ func CheckInterposerBudget(fc *FenceConfig, selfProcReserve int) error {
 				"and %d are reserved for the wrapped process's own /proc/<pid> grants (see "+
 				"SelfProcFiles); remove entries from [filesystem].allow", len(fc.AllowPaths), maxAllowPaths, selfProcReserve)
 	}
+	if len(fc.DenyPaths) > maxAllowPaths {
+		return fmt.Errorf(
+			"too many filesystem deny paths (%d): the fence interposer supports at most %d per category; "+
+				"remove entries from [filesystem].deny", len(fc.DenyPaths), maxAllowPaths)
+	}
 	room := interposerMaxPathFields - interposerMetadataFields - selfProcReserve
 	if combined := len(fc.AllowPaths) + len(fc.DenyPaths); combined > room {
 		return fmt.Errorf(
