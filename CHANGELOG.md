@@ -10,14 +10,16 @@ All notable changes to NockLock will be documented in this file.
   (N10748, parts b+c). Two field-reported breakages are closed: (1) writes to
   `/dev/null` and `/dev/tty` are permitted and `/dev/zero` is readable, so `git`
   and shells work — the Landlock ruleset (`baselineDeviceRules`) and the
-  LD_PRELOAD interposer both grant these standard character devices as a
-  baseline, independent of the allow list, since the fence otherwise grants a
-  regular file read+execute only (the baseline also grants `/dev/urandom` and
+  LD_PRELOAD interposer both grant five standard character devices as a
+  baseline for every Linux filesystem configuration, independent of the
+  claude-code preset's allow list, since the fence otherwise grants a regular
+  file read+execute only (the baseline also grants `/dev/urandom` and
   `/dev/random` readable, the entropy sources musl and older TLS stacks read
   directly); and (2) the preset's filesystem allow list now includes the
-  standard system read paths (`/usr`, `/lib`, `/lib64`, `/bin`, `/sbin`, `/etc`,
-  `/proc`, `/dev`, `/sys`), without which the child could not resolve its
-  dynamic loader or exec `/bin/echo` — `/lib*`, `/bin` and `/sbin` cover
+  required system read paths (`/usr`, `/lib`, `/lib64`, `/bin`, `/sbin`, `/etc`,
+  `/sys`) without broad `/proc` or `/dev` access, which would expose same-user
+  process environments and terminal input. These paths let the child resolve
+  its dynamic loader or exec `/bin/echo`; `/lib*`, `/bin` and `/sbin` cover
   non-usr-merged distros (musl/Alpine) where the loader lives outside `/usr`.
   An explicit `deny` of a baseline device still wins. The network
   half of N10748 — letting the wrapped agent reach the allowlisted proxy while

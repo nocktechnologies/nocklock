@@ -24,8 +24,6 @@ allow = [
     "/bin/",
     "/sbin/",
     "/etc/",
-    "/proc/",
-    "/dev/",
     "/sys/",
 ]
 deny = [

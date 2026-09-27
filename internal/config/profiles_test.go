@@ -19,9 +19,14 @@ func TestClaudeCodePresetIncludesSystemReadPaths(t *testing.T) {
 		have[p] = true
 	}
 
-	for _, want := range []string{"/usr/", "/etc/", "/proc/", "/dev/", "/sys/"} {
+	for _, want := range []string{"/usr/", "/etc/", "/sys/"} {
 		if !have[want] {
 			t.Errorf("claude-code preset filesystem.allow missing system read path %q; have %v", want, cfg.Filesystem.Allow)
+		}
+	}
+	for _, forbidden := range []string{"/proc/", "/dev/"} {
+		if have[forbidden] {
+			t.Errorf("claude-code preset must not broadly grant %q; have %v", forbidden, cfg.Filesystem.Allow)
 		}
 	}
 }

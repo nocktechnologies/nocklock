@@ -3,10 +3,13 @@
 package cli
 
 import (
+	"bytes"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"testing"
+	"time"
 )
 
 // TestWrapClaudeCodePresetDeviceAndSystemPaths is the non-root acceptance bar
@@ -74,6 +77,66 @@ func TestWrapClaudeCodePresetDeviceAndSystemPaths(t *testing.T) {
 	out, err := cmd.CombinedOutput()
 	if err != nil {
 		t.Fatalf("wrapped child failed (device write or git status denied under the preset): %v\n%s", err, out)
+	}
+}
+
+// TestWrapClaudeCodePresetBlocksSiblingProcEnviron proves the claude-code
+// preset does not let a wrapped process read environment variables from another
+// process owned by the same user. Linux's usual ptrace policy does not block
+// those reads, so a broad /proc grant would expose unrelated API keys.
+func TestWrapClaudeCodePresetBlocksSiblingProcEnviron(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("claude-code preset procfs test must run as an unprivileged user")
+	}
+	bin := nocklockBinary(t)
+	requireInterposerBeside(t, bin)
+
+	const siblingEnvironment = "NOCKLOCK_PROC_SIBLING_TEST_SECRET=present"
+	sibling := exec.Command("/bin/sleep", "60")
+	sibling.Env = append(os.Environ(), siblingEnvironment)
+	if err := sibling.Start(); err != nil {
+		t.Fatalf("start same-UID sibling: %v", err)
+	}
+	t.Cleanup(func() {
+		_ = sibling.Process.Kill()
+		_ = sibling.Wait()
+	})
+
+	siblingEnviron := filepath.Join("/proc", strconv.Itoa(sibling.Process.Pid), "environ")
+	var (
+		unenclosed []byte
+		err        error
+	)
+	for deadline := time.Now().Add(time.Second); ; {
+		unenclosed, err = os.ReadFile(siblingEnviron)
+		if err == nil && bytes.Contains(unenclosed, []byte(siblingEnvironment)) {
+			break
+		}
+		if time.Now().After(deadline) {
+			if err != nil {
+				t.Skipf("host already blocks same-UID sibling procfs reads at %s: %v", siblingEnviron, err)
+			}
+			t.Skipf("host did not expose same-UID sibling environment at %s", siblingEnviron)
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+
+	cwd, err := os.Getwd()
+	if err != nil {
+		t.Fatalf("getwd: %v", err)
+	}
+	root, err := os.MkdirTemp(cwd, "preset-e2e-")
+	if err != nil {
+		t.Fatalf("mkdir project root: %v", err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(root) })
+
+	cmd := exec.Command(bin, "wrap", "--profile", "claude-code", "--",
+		"/bin/sh", "-c", `test ! -r "$1" && ! /bin/cat "$1" >/dev/null 2>&1`, "sh", siblingEnviron)
+	cmd.Dir = root
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("wrapped child read same-UID sibling environment %s: %v\n%s", siblingEnviron, err, out)
 	}
 }
 
