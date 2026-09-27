@@ -273,18 +273,32 @@ func ensureTrustedAuditDBDir(projectRoot, dbDir string) error {
 	if err != nil {
 		return err
 	}
-	rel, err := filepath.Rel(stateDir, resolveExisting(dbDir))
-	if err != nil {
-		return fmt.Errorf("cannot check the audit state directory %s: %w", dbDir, err)
+	// Take the components from the spelling the operator wrote, not from the
+	// canonical path: canonicalizing replaces a symlinked component with its
+	// target, so walking the canonical form would check the target and never
+	// Lstat the symlink -- exempting nested components from the symlink
+	// refusal ensureTrustedDir applies to nocklock/<hash>, and leaving a
+	// re-targeting window between this check and the database open. The
+	// component NAMES are what matter; they get joined onto the canonical,
+	// already-validated stateDir either way.
+	rel, err := filepath.Rel(auditDir, dbDir)
+	if err != nil || rel == ".." || strings.HasPrefix(rel, ".."+string(os.PathSeparator)) {
+		// dbDir reaches the audit directory by some other spelling than
+		// auditDir's own -- a symlinked XDG_STATE_HOME, say. Fall back to the
+		// canonical pair, which withinDir already agreed on.
+		rel, err = filepath.Rel(stateDir, resolveExisting(dbDir))
+		if err != nil {
+			return fmt.Errorf("cannot check the audit state directory %s: %w", dbDir, err)
+		}
 	}
 	if rel == "." {
 		// EnsureAuditStateDir just validated this directory itself.
 		return nil
 	}
-	// withinDir said dbDir is inside auditDir, so a rel that climbs out means
-	// the two spellings of the state directory disagreed. Fences fail closed:
-	// walking `..` components would create and "trust" directories outside the
-	// audit state directory entirely.
+	// withinDir said dbDir is inside auditDir, so a rel that still climbs out
+	// after the fallback means the two spellings of the state directory
+	// disagreed. Block instead: walking `..` components would create and
+	// "trust" directories outside the audit state directory entirely.
 	if rel == ".." || strings.HasPrefix(rel, ".."+string(os.PathSeparator)) {
 		return fmt.Errorf("refusing to use the audit state directory %s: it resolves outside %s", dbDir, stateDir)
 	}

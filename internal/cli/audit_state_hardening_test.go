@@ -737,12 +737,13 @@ func TestResolveDBPathAbsoluteInStateDirRejectsEscapingSymlinkedComponent(t *tes
 	}
 }
 
-// TestResolveDBPathAbsoluteInStateDirAllowsSymlinkedComponentStayingInside is
-// the negative control for the refusal above: the escape check keys on leaving
-// the audit state directory, not on a symlink being present, so a component
-// that resolves to another path still inside it is checked rather than refused.
-// Without this, the refusal above would pass on any symlink at all.
-func TestResolveDBPathAbsoluteInStateDirAllowsSymlinkedComponentStayingInside(t *testing.T) {
+// TestResolveDBPathAbsoluteInStateDirRejectsSymlinkedComponentStayingInside
+// pins that nested components get the SAME symlink refusal ensureTrustedDir
+// applies to nocklock/<hash>, including when the symlink stays inside the audit
+// state directory. Walking the canonical path would check the target and never
+// Lstat the link, exempting nested components from the rule and leaving a
+// window to re-target the link between this check and the database open.
+func TestResolveDBPathAbsoluteInStateDirRejectsSymlinkedComponentStayingInside(t *testing.T) {
 	projectRoot, configPath := writeProjectConfig(t, `db = "events.db"`)
 	stateDir, err := config.EnsureAuditStateDir(projectRoot)
 	if err != nil {
@@ -760,14 +761,13 @@ func TestResolveDBPathAbsoluteInStateDirAllowsSymlinkedComponentStayingInside(t 
 	if err != nil {
 		t.Fatalf("load config: %v", err)
 	}
-	absDB := filepath.Join(stateDir, "sub", "events.db")
-	cfg.Logging.DB = absDB
+	cfg.Logging.DB = filepath.Join(stateDir, "sub", "events.db")
 
 	dbPath, _, err := config.ResolveDBPath(cfg, configPath)
-	if err != nil {
-		t.Fatalf("ResolveDBPath with a symlinked component staying inside the state dir: %v", err)
+	if err == nil {
+		t.Fatalf("expected a symlinked component inside the audit state dir to be refused, got %q", dbPath)
 	}
-	if dbPath != absDB {
-		t.Fatalf("event log = %q, want the configured absolute path %q", dbPath, absDB)
+	if !strings.Contains(err.Error(), "symlink") {
+		t.Fatalf("expected a symlink refusal, got: %v", err)
 	}
 }
