@@ -66,15 +66,37 @@ func EnsureAuditStateDir(projectRoot string) (string, error) {
 // the side effect of creating a directory. Use EnsureAuditStateDir to obtain a
 // directory that is ready to write to.
 func AuditStateDir(projectRoot string) (string, error) {
-	base := os.Getenv("XDG_STATE_HOME")
-	if base == "" {
-		home, err := os.UserHomeDir()
-		if err != nil {
-			return "", fmt.Errorf("cannot resolve the home directory for the audit state directory: %w", err)
-		}
-		base = filepath.Join(home, ".local", "state")
+	base, err := auditStateBase()
+	if err != nil {
+		return "", err
 	}
 	return filepath.Join(base, "nocklock", projectStateKey(projectRoot)), nil
+}
+
+// auditStateBase picks the directory that holds every project's audit state:
+// $XDG_STATE_HOME, else ~/.local/state, else a per-uid directory under
+// os.TempDir()'s durable sibling /var/tmp.
+//
+// The last fallback exists because wrap REFUSES TO START when the event log
+// cannot be opened, and a home directory is not guaranteed: containers with no
+// passwd entry for the uid, and CI steps that run with HOME unset, both reach
+// it. Before the audit state moved out of the project, those environments
+// worked without a home directory at all, so erroring here would break them.
+//
+// It is /var/tmp rather than /tmp deliberately: /tmp is granted read-only by
+// the shipped presets, and an audit state directory inside a Landlock-granted
+// tree makes its own deny unenforceable and aborts rule generation. /var/tmp
+// also survives a reboot on most systems, which /tmp does not. Both are
+// world-writable, which is why EnsureAuditStateDir checks the mode and the
+// owner of the directory it gets back.
+func auditStateBase() (string, error) {
+	if x := os.Getenv("XDG_STATE_HOME"); x != "" {
+		return x, nil
+	}
+	if home, err := os.UserHomeDir(); err == nil && home != "" {
+		return filepath.Join(home, ".local", "state"), nil
+	}
+	return filepath.Join("/var/tmp", fmt.Sprintf("nocklock-state-%d", os.Geteuid())), nil
 }
 
 // projectStateKey names a project's audit state directory: a SHA-256 prefix of

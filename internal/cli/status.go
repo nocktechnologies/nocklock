@@ -4,7 +4,6 @@ import (
 	"errors"
 	"fmt"
 	"os"
-	"path/filepath"
 
 	"github.com/nocktechnologies/nocklock/internal/config"
 	"github.com/nocktechnologies/nocklock/internal/logging"
@@ -63,16 +62,11 @@ var statusCmd = &cobra.Command{
 			cmd.SilenceUsage = true
 			return err
 		}
-		relDB := cfg.Logging.DB
-		if relDB == "" {
-			// Show the default path when config doesn't specify one.
-			rel, relErr := filepath.Rel(projectRoot, dbPath)
-			if relErr == nil {
-				relDB = rel
-			} else {
-				relDB = dbPath
-			}
-		}
+		// Show the RESOLVED path, not what the config says. A relative
+		// logging.db no longer describes where the log is — it resolves into
+		// the audit state directory outside the project — so echoing the config
+		// value would point the operator at a file that is not there.
+		relDB := dbPath
 
 		if _, statErr := os.Stat(dbPath); statErr != nil {
 			if errors.Is(statErr, os.ErrNotExist) {

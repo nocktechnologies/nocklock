@@ -17,33 +17,29 @@ import (
 // the fenced child and a Landlock rule cannot carve a protected hole out of a
 // granted tree.
 //
-// legacyCandidates are checked in order and the first one that exists wins. If
-// both a legacy log and a relocated log exist, this refuses to run rather than
-// pick one: silently choosing between two audit chains would let a tampered log
-// shadow the real one.
-func migrateLegacyAuditState(newDB string, legacyCandidates []string) error {
-	for _, legacyDB := range legacyCandidates {
-		info, err := os.Lstat(legacyDB)
-		if err != nil {
-			continue
-		}
-		if info.Mode()&os.ModeSymlink != 0 {
-			return fmt.Errorf("refusing to migrate the event log at %s: path is a symlink", legacyDB)
-		}
-		if _, err := os.Lstat(newDB); err == nil {
-			// Name a recovery step the operator can actually take. Every audit
-			// command resolves through here, so telling them to run one of those
-			// commands would just reproduce this error.
-			return fmt.Errorf(
-				"two event logs found: %s (legacy, inside the project) and %s (current). "+
-					"NockLock will not guess which audit chain is authoritative. "+
-					"Move one aside (its -wal/-shm sidecars and chain-anchor.json travel with it), "+
-					"then rerun: with a single log in place the usual commands work again",
-				legacyDB, newDB)
-		}
-		return moveAuditArtifacts(legacyDB, newDB)
+// If both a legacy log and a relocated log exist, this refuses to run rather
+// than pick one: silently choosing between two audit chains would let a tampered
+// log shadow the real one.
+func migrateLegacyAuditState(newDB, legacyDB string) error {
+	info, err := os.Lstat(legacyDB)
+	if err != nil {
+		return nil
 	}
-	return nil
+	if info.Mode()&os.ModeSymlink != 0 {
+		return fmt.Errorf("refusing to migrate the event log at %s: path is a symlink", legacyDB)
+	}
+	if _, err := os.Lstat(newDB); err == nil {
+		// Name a recovery step the operator can actually take. Every audit
+		// command resolves through here, so telling them to run one of those
+		// commands would just reproduce this error.
+		return fmt.Errorf(
+			"two event logs found: %s (legacy, inside the project) and %s (current). "+
+				"NockLock will not guess which audit chain is authoritative. "+
+				"Move one aside (its -wal/-shm sidecars and chain-anchor.json travel with it), "+
+				"then rerun: with a single log in place the usual commands work again",
+			legacyDB, newDB)
+	}
+	return moveAuditArtifacts(legacyDB, newDB)
 }
 
 // moveAuditArtifacts moves the event log, its SQLite sidecars and the chain
@@ -53,7 +49,15 @@ func moveAuditArtifacts(legacyDB, newDB string) error {
 	// The logger runs in WAL mode (PRAGMA journal_mode=WAL), so committed rows
 	// can still live in events.db-wal: moving the main file without its SQLite
 	// sidecars silently drops the tail of the hash chain.
-	for _, suffix := range []string{"", "-wal", "-shm", "-journal"} {
+	//
+	// Order matters. The sidecars and the anchor move FIRST and the main file
+	// LAST, so the main file's presence is the marker for "not migrated yet".
+	// If a move fails part way (a cross-device copy running out of space, say),
+	// the legacy main file is still there, the next run retries, and the
+	// already-moved pieces are simply skipped. Moving the main file first would
+	// make the next run see nothing to migrate and silently adopt a chain
+	// truncated to its last checkpoint.
+	for _, suffix := range []string{"-wal", "-shm", "-journal"} {
 		if err := moveIfPresent(legacyDB+suffix, newDB+suffix); err != nil {
 			return err
 		}
@@ -64,10 +68,13 @@ func moveAuditArtifacts(legacyDB, newDB string) error {
 	// other way. Renaming the anchor there without changing it here would still
 	// compile and would silently stop migrating anchors.
 	const anchorName = "chain-anchor.json"
-	return moveIfPresent(
+	if err := moveIfPresent(
 		filepath.Join(filepath.Dir(legacyDB), anchorName),
 		filepath.Join(filepath.Dir(newDB), anchorName),
-	)
+	); err != nil {
+		return err
+	}
+	return moveIfPresent(legacyDB, newDB)
 }
 
 // moveIfPresent moves src to dst when src exists, leaving a missing src alone.

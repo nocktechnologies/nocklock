@@ -56,14 +56,15 @@ func ResolveDBPath(cfg *Config, configPath string) (dbPath string, projectRoot s
 	}
 	dbPath = filepath.Join(stateDir, filepath.Base(configured))
 
-	// Look for a legacy log both where this config points and at the
-	// conventional .nock location, so a config that never set logging.db still
-	// finds the chain an older NockLock wrote to <root>/.nock/events.db.
-	legacy := []string{
-		filepath.Join(projectRoot, configured),
-		filepath.Join(projectRoot, Dir, filepath.Base(configured)),
-	}
-	if err := migrateLegacyAuditState(dbPath, legacy); err != nil {
+	// Migrate ONLY from the conventional <root>/.nock location. Every config
+	// NockLock has ever written put the log there, and restricting the search to
+	// that directory is what stops migration from swallowing an unrelated
+	// project file: the default logging.db is now the bare name "events.db", so
+	// honoring the configured relative path here would make <root>/events.db --
+	// plausibly a file the project owns -- a migration candidate and move it out
+	// of the repository. A log kept somewhere else by hand stays where it is.
+	legacyDB := filepath.Join(projectRoot, Dir, filepath.Base(configured))
+	if err := migrateLegacyAuditState(dbPath, legacyDB); err != nil {
 		return "", projectRoot, err
 	}
 	return dbPath, projectRoot, nil

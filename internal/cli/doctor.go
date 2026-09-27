@@ -156,7 +156,7 @@ func runDoctor(caps doctorCapabilities) doctorReport {
 	checks = append(checks, networkDoctorCheck(cfg, caps))
 	checks = append(checks, secretDoctorCheck(cfg))
 	checks = append(checks, egressHelperDoctorCheck(caps))
-	checks = append(checks, sanityDoctorChecks(cfg, caps)...)
+	checks = append(checks, sanityDoctorChecks(cfg, configPath, caps)...)
 
 	activity := doctorActivityCheck(cfg, configPath, caps.now())
 	checks = append(checks, doctorCheck{
@@ -387,9 +387,12 @@ func secretDoctorCheck(cfg *config.Config) doctorCheck {
 	return doctorOKCheck("Fences", "secrets", "enforceable", fmt.Sprintf("Secret fence enforceable with %d blocked pattern(s).", len(cfg.Secrets.Block)))
 }
 
-func sanityDoctorChecks(cfg *config.Config, caps doctorCapabilities) []doctorCheck {
+func sanityDoctorChecks(cfg *config.Config, configPath string, caps doctorCapabilities) []doctorCheck {
 	var checks []doctorCheck
 	if check, ok := auditLogInsideFenceRootCheck(cfg); ok {
+		checks = append(checks, check)
+	}
+	if check, ok := auditStateInsideGrantCheck(cfg, configPath); ok {
 		checks = append(checks, check)
 	}
 	if cfg.Network.AllowAll {
@@ -543,6 +546,60 @@ func doctorSymbol(severity doctorSeverity) string {
 	default:
 		return "ℹ"
 	}
+}
+
+// auditStateInsideGrantCheck warns when the audit state directory
+// falls inside a path the fence GRANTS. Landlock is allow-only, so the deny
+// that protects the audit trail cannot be enforced inside a granted tree, and
+// RulesFromConfig aborts the whole wrap with an overlap error that names the
+// offending grant but explains neither the audit log nor $XDG_STATE_HOME.
+//
+// It happens for real: every shipped preset grants /tmp read-only, so a
+// container or CI step whose HOME or XDG_STATE_HOME sits under /tmp lands the
+// audit state inside a grant and wrap refuses to start. Naming the cause here
+// turns an opaque abort into a fixable one.
+func auditStateInsideGrantCheck(cfg *config.Config, configPath string) (doctorCheck, bool) {
+	// Same derivation ResolveDBPath uses: the project root is the parent of the
+	// .nock directory holding the config.
+	stateDir, err := config.AuditStateDir(filepath.Dir(filepath.Dir(configPath)))
+	if err != nil {
+		return doctorCheck{}, false
+	}
+	grants := append([]string{cfg.Filesystem.Root}, cfg.Filesystem.Allow...)
+	grants = append(grants, cfg.Filesystem.AllowRW...)
+	for _, grant := range grants {
+		if strings.TrimSpace(grant) == "" {
+			continue
+		}
+		expanded, err := fsfence.ExpandTilde(grant)
+		if err != nil {
+			continue
+		}
+		abs, err := filepath.Abs(expanded)
+		if err != nil {
+			continue
+		}
+		if !pathIsWithinDir(stateDir, abs) {
+			continue
+		}
+		// A WARNING, not a CRITICAL. The condition is real and wrap will refuse
+		// to start on it, but it comes from the environment ($XDG_STATE_HOME or
+		// $HOME landing under a granted path) rather than from a mistake in the
+		// config being audited, and wrap reports it precisely at the moment it
+		// matters. Flipping doctor's whole verdict would turn every run inside a
+		// sandbox whose state directory sits under a granted /tmp red.
+		return doctorCheck{
+			Group:    "Sanity",
+			Name:     "audit-state-granted",
+			Severity: doctorWarning,
+			Status:   "warning",
+			Message: fmt.Sprintf(
+				"The audit state directory (%s) is inside the granted path %q, so the fenced agent could reach its own audit trail. 'nocklock wrap' fails closed rather than allow it.",
+				stateDir, grant),
+			Fix: "set XDG_STATE_HOME to a directory outside every filesystem.allow/allow_rw entry and outside filesystem.root",
+		}, true
+	}
+	return doctorCheck{}, false
 }
 
 // auditStateUnavailableCheck reports a CRITICAL when the event log's location
