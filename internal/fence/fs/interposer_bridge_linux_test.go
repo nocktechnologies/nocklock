@@ -98,8 +98,10 @@ func TestInterposerProxyBridgeExecutable(t *testing.T) {
 }
 
 const proxyBridgeChildSource = `
+#define _GNU_SOURCE
 #include <arpa/inet.h>
 #include <errno.h>
+#include <fcntl.h>
 #include <netinet/in.h>
 #include <netinet/tcp.h>
 #include <stdio.h>
@@ -127,16 +129,65 @@ static int connect_v4(int port) {
 }
 
 int main(void) {
+    int non_tcp = socket(AF_INET, SOCK_STREAM, IPPROTO_SCTP);
+    if (non_tcp >= 0) {
+        struct sockaddr_storage actual;
+        socklen_t actual_len = sizeof(actual);
+        if (getsockname(non_tcp, (struct sockaddr *)&actual, &actual_len) != 0) return 1;
+        if (actual.ss_family != AF_INET) return 2;
+        close(non_tcp);
+    } else if (errno != EPROTONOSUPPORT && errno != EAFNOSUPPORT) {
+        fprintf(stderr, "non-TCP socket errno=%d\n", errno);
+        return 3;
+    }
+
     int fd = connect_v4(32123);
     if (fd < 0) {
         fprintf(stderr, "proxy connect failed rc=%d errno=%d\n", fd, errno);
         return 10;
     }
+    int socket_error = -1;
+    socklen_t socket_error_len = sizeof(socket_error);
+    if (getsockopt(fd, SOL_SOCKET, SO_ERROR, &socket_error, &socket_error_len) != 0) return 14;
+    if (socket_error != 0) {
+        fprintf(stderr, "SO_ERROR=%d want 0\n", socket_error);
+        return 15;
+    }
+
+    int duplicated[4];
+    duplicated[0] = dup(fd);
+    duplicated[1] = dup2(fd, 100);
+    duplicated[2] = dup3(fd, 101, O_CLOEXEC);
+    duplicated[3] = fcntl(fd, F_DUPFD_CLOEXEC, 102);
+    for (int i = 0; i < 4; i++) {
+        if (duplicated[i] < 0) return 16;
+        struct sockaddr_storage name;
+        socklen_t name_len = sizeof(name);
+        if (getsockname(duplicated[i], (struct sockaddr *)&name, &name_len) != 0) return 17;
+        if (name.ss_family != AF_INET) return 18;
+    }
+    close(fd);
+    fd = duplicated[0];
+    close(duplicated[1]);
+    close(duplicated[2]);
+    close(duplicated[3]);
+
     if (write(fd, "ping", 4) != 4) return 11;
     char buf[2];
     if (read(fd, buf, sizeof(buf)) != 2) return 12;
     if (memcmp(buf, "ok", 2) != 0) return 13;
     close(fd);
+
+    int tracked = socket(AF_INET, SOCK_STREAM, 0);
+    int plain = socket(AF_UNIX, SOCK_STREAM, 0);
+    if (tracked < 0 || plain < 0) return 19;
+    if (dup2(plain, tracked) != tracked) return 22;
+    struct sockaddr_storage overwritten;
+    socklen_t overwritten_len = sizeof(overwritten);
+    if (getsockname(tracked, (struct sockaddr *)&overwritten, &overwritten_len) != 0) return 23;
+    if (overwritten.ss_family != AF_UNIX) return 24;
+    close(plain);
+    close(tracked);
 
     fd = connect_v4(32124);
     if (fd >= 0) {

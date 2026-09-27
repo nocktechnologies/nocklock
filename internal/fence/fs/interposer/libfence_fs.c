@@ -89,6 +89,10 @@ typedef int    (*real_setsockopt_t)(int, int, int, const void *, socklen_t);
 typedef int    (*real_getsockopt_t)(int, int, int, void *, socklen_t *);
 typedef int    (*real_getsockname_t)(int, struct sockaddr *, socklen_t *);
 typedef int    (*real_getpeername_t)(int, struct sockaddr *, socklen_t *);
+typedef int    (*real_dup_t)(int);
+typedef int    (*real_dup2_t)(int, int);
+typedef int    (*real_dup3_t)(int, int, int);
+typedef int    (*real_fcntl_t)(int, int, ...);
 typedef int    (*real_close_t)(int);
 
 /* 64-bit variants */
@@ -138,6 +142,10 @@ static real_setsockopt_t real_setsockopt;
 static real_getsockopt_t real_getsockopt;
 static real_getsockname_t real_getsockname;
 static real_getpeername_t real_getpeername;
+static real_dup_t real_dup;
+static real_dup2_t real_dup2;
+static real_dup3_t real_dup3;
+static real_fcntl_t real_fcntl;
 static real_close_t real_close;
 
 /* 64-bit variants */
@@ -539,6 +547,10 @@ static void fence_init(void)
     real_getsockopt = (real_getsockopt_t)dlsym(RTLD_NEXT, "getsockopt");
     real_getsockname = (real_getsockname_t)dlsym(RTLD_NEXT, "getsockname");
     real_getpeername = (real_getpeername_t)dlsym(RTLD_NEXT, "getpeername");
+    real_dup = (real_dup_t)dlsym(RTLD_NEXT, "dup");
+    real_dup2 = (real_dup2_t)dlsym(RTLD_NEXT, "dup2");
+    real_dup3 = (real_dup3_t)dlsym(RTLD_NEXT, "dup3");
+    real_fcntl = (real_fcntl_t)dlsym(RTLD_NEXT, "fcntl");
     real_close = (real_close_t)dlsym(RTLD_NEXT, "close");
 
     /* 64-bit variants (may be NULL on platforms that don't have them). */
@@ -2766,11 +2778,17 @@ int socket(int domain, int type, int protocol)
 
     swapped = g_config.proxy_bridge_enabled &&
               (domain == AF_INET || domain == AF_INET6) &&
-              ((type & SOCK_TYPE_MASK) == SOCK_STREAM);
+              ((type & SOCK_TYPE_MASK) == SOCK_STREAM) &&
+              (protocol == 0 || protocol == IPPROTO_TCP);
     if (swapped)
         fd = real_socket(AF_UNIX, type, 0);
     else
         fd = real_socket(domain, type, protocol);
+    if (swapped && fd >= MAX_TRACKED_FD) {
+        real_close(fd);
+        errno = EMFILE;
+        return -1;
+    }
     if (fd >= 0 && fd < MAX_TRACKED_FD) {
         pthread_mutex_lock(&g_swapped_fd_lock);
         g_swapped_fd[fd] = swapped;
@@ -2818,6 +2836,8 @@ int getsockopt(int fd, int level, int optname, void *optval, socklen_t *optlen)
 {
     pthread_once(&g_init_once, fence_init);
 
+    if (bridge_fd_tracked(fd) && level == SOL_SOCKET && optname == SO_ERROR)
+        return real_getsockopt(fd, level, optname, optval, optlen);
     if (bridge_fd_tracked(fd) && level == IPPROTO_TCP) {
         if (optval && optlen && *optlen >= (socklen_t)sizeof(int)) {
             *(int *)optval = 1;
@@ -2845,6 +2865,112 @@ int getpeername(int fd, struct sockaddr *addr, socklen_t *len)
     if (bridge_fd_tracked(fd))
         return bridge_fake_name(addr, len);
     return real_getpeername(fd, addr, len);
+}
+
+static int bridge_dup_result_locked(int oldfd, int newfd)
+{
+    if (newfd >= MAX_TRACKED_FD && oldfd >= 0 && oldfd < MAX_TRACKED_FD &&
+        g_swapped_fd[oldfd]) {
+        real_close(newfd);
+        errno = EMFILE;
+        return -1;
+    }
+    if (newfd >= 0 && newfd < MAX_TRACKED_FD)
+        g_swapped_fd[newfd] = oldfd >= 0 && oldfd < MAX_TRACKED_FD &&
+                              g_swapped_fd[oldfd];
+    return newfd;
+}
+
+int dup(int oldfd)
+{
+    int result;
+
+    pthread_once(&g_init_once, fence_init);
+    pthread_mutex_lock(&g_swapped_fd_lock);
+    result = bridge_dup_result_locked(oldfd, real_dup(oldfd));
+    pthread_mutex_unlock(&g_swapped_fd_lock);
+    return result;
+}
+
+int dup2(int oldfd, int newfd)
+{
+    int result;
+
+    pthread_once(&g_init_once, fence_init);
+    pthread_mutex_lock(&g_swapped_fd_lock);
+    if (newfd >= MAX_TRACKED_FD && oldfd >= 0 && oldfd < MAX_TRACKED_FD &&
+        g_swapped_fd[oldfd]) {
+        pthread_mutex_unlock(&g_swapped_fd_lock);
+        errno = EMFILE;
+        return -1;
+    }
+    result = bridge_dup_result_locked(oldfd, real_dup2(oldfd, newfd));
+    pthread_mutex_unlock(&g_swapped_fd_lock);
+    return result;
+}
+
+int dup3(int oldfd, int newfd, int flags)
+{
+    int result;
+
+    pthread_once(&g_init_once, fence_init);
+    pthread_mutex_lock(&g_swapped_fd_lock);
+    if (newfd >= MAX_TRACKED_FD && oldfd >= 0 && oldfd < MAX_TRACKED_FD &&
+        g_swapped_fd[oldfd]) {
+        pthread_mutex_unlock(&g_swapped_fd_lock);
+        errno = EMFILE;
+        return -1;
+    }
+    result = bridge_dup_result_locked(oldfd, real_dup3(oldfd, newfd, flags));
+    pthread_mutex_unlock(&g_swapped_fd_lock);
+    return result;
+}
+
+int fcntl(int fd, int cmd, ...)
+{
+    long arg = 0;
+    int has_arg = 1;
+    int result;
+    va_list ap;
+
+    pthread_once(&g_init_once, fence_init);
+    switch (cmd) {
+    case F_GETFD:
+    case F_GETFL:
+    case F_GETOWN:
+#ifdef F_GETSIG
+    case F_GETSIG:
+#endif
+#ifdef F_GETLEASE
+    case F_GETLEASE:
+#endif
+#ifdef F_GETPIPE_SZ
+    case F_GETPIPE_SZ:
+#endif
+#ifdef F_GET_SEALS
+    case F_GET_SEALS:
+#endif
+        has_arg = 0;
+        break;
+    default:
+        break;
+    }
+    if (has_arg) {
+        va_start(ap, cmd);
+        arg = va_arg(ap, long);
+        va_end(ap);
+    }
+
+    if (cmd != F_DUPFD && cmd != F_DUPFD_CLOEXEC) {
+        if (has_arg)
+            return real_fcntl(fd, cmd, arg);
+        return real_fcntl(fd, cmd);
+    }
+
+    pthread_mutex_lock(&g_swapped_fd_lock);
+    result = bridge_dup_result_locked(fd, real_fcntl(fd, cmd, arg));
+    pthread_mutex_unlock(&g_swapped_fd_lock);
+    return result;
 }
 
 int close(int fd)

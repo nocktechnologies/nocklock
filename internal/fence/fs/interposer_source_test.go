@@ -181,11 +181,13 @@ func TestInterposerSourceCoversProxyBridgeHooks(t *testing.T) {
 		`getenv\s*\(\s*"NOCKLOCK_PROXY_UNIX_SOCKET"\s*\)`,
 		`getenv\s*\(\s*"NOCKLOCK_PROXY_TCP_ADDR"\s*\)`,
 		`int\s+socket\s*\(\s*int\s+domain\s*,\s*int\s+type\s*,\s*int\s+protocol\s*\)`,
+		`protocol\s*==\s*0\s*\|\|\s*protocol\s*==\s*IPPROTO_TCP`,
 		`real_socket\s*\(\s*AF_UNIX\s*,\s*type\s*,\s*0\s*\)`,
 		`int\s+connect\s*\(\s*int\s+fd\s*,\s*const\s+struct\s+sockaddr\s+\*\s*addr\s*,\s*socklen_t\s+len\s*\)`,
 		`report_blocked\s*\(\s*"\(network\)"\s*,\s*"connect"\s*,\s*"unexpected AF_INET/AF_INET6 proxy bridge target"\s*\)`,
 		`int\s+setsockopt\s*\(\s*int\s+fd\s*,\s*int\s+level\s*,\s*int\s+optname\s*,\s*const\s+void\s+\*\s*optval\s*,\s*socklen_t\s+optlen\s*\)`,
 		`bridge_fd_tracked\s*\(\s*fd\s*\)\s*&&\s*level\s*==\s*IPPROTO_TCP`,
+		`bridge_fd_tracked\s*\(\s*fd\s*\)\s*&&\s*level\s*==\s*SOL_SOCKET\s*&&\s*optname\s*==\s*SO_ERROR`,
 		`int\s+getsockname\s*\(\s*int\s+fd\s*,\s*struct\s+sockaddr\s+\*\s*addr\s*,\s*socklen_t\s+\*\s*len\s*\)`,
 		`int\s+getpeername\s*\(\s*int\s+fd\s*,\s*struct\s+sockaddr\s+\*\s*addr\s*,\s*socklen_t\s+\*\s*len\s*\)`,
 	} {
@@ -211,6 +213,10 @@ func TestInterposerSourceSynchronizesProxyBridgeDescriptors(t *testing.T) {
 		`(?s)int\s+getsockopt\s*\(.*?bridge_fd_tracked\s*\(\s*fd\s*\)`,
 		`(?s)int\s+getsockname\s*\(.*?bridge_fd_tracked\s*\(\s*fd\s*\)`,
 		`(?s)int\s+getpeername\s*\(.*?bridge_fd_tracked\s*\(\s*fd\s*\)`,
+		`(?s)int\s+dup\s*\(.*?bridge_dup_result_locked\s*\(\s*oldfd\s*,\s*real_dup\s*\(\s*oldfd\s*\)\s*\)`,
+		`(?s)int\s+dup2\s*\(.*?bridge_dup_result_locked\s*\(\s*oldfd\s*,\s*real_dup2\s*\(\s*oldfd\s*,\s*newfd\s*\)\s*\)`,
+		`(?s)int\s+dup3\s*\(.*?bridge_dup_result_locked\s*\(\s*oldfd\s*,\s*real_dup3\s*\(\s*oldfd\s*,\s*newfd\s*,\s*flags\s*\)\s*\)`,
+		`(?s)int\s+fcntl\s*\(.*?cmd\s*!=\s*F_DUPFD\s*&&\s*cmd\s*!=\s*F_DUPFD_CLOEXEC.*?bridge_dup_result_locked`,
 		`(?s)int\s+close\s*\(.*?pthread_mutex_lock\s*\(\s*&g_swapped_fd_lock\s*\).*?result\s*=\s*real_close\s*\(\s*fd\s*\)\s*;.*?g_swapped_fd\s*\[\s*fd\s*\]\s*=\s*0\s*;.*?pthread_mutex_unlock\s*\(\s*&g_swapped_fd_lock\s*\)`,
 	} {
 		if !regexp.MustCompile(pattern).MatchString(text) {
