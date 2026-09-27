@@ -49,9 +49,11 @@ PY
     echo "proxy_advertised_tcp=127.0.0.1:${PORT}"
     echo
 
+    failures=0
     run_case() {
         local name="$1"
-        shift
+        local expected_status="$2"
+        shift 2
         local case_log="${WORK}/${name}.log"
         echo "## case: ${name}"
         set +e
@@ -69,13 +71,20 @@ PY
         set -e
         echo "exit=${status}"
         sed 's/^/  /' "${case_log}"
+        if [[ "${status}" -eq "${expected_status}" ]]; then
+            echo "result=PASS"
+        else
+            echo "result=FAIL expected_exit=${expected_status}"
+            failures=$((failures + 1))
+        fi
         echo
     }
 
-    run_case "control-no-preload" env
-    run_case "preload-no-fakes" env LD_PRELOAD="${WORK}/inet_to_unix_probe.so"
-    run_case "preload-fake-tcp-and-names" env LD_PRELOAD="${WORK}/inet_to_unix_probe.so" NOCKLOCK_PROBE_FAKE_TCP=1 NOCKLOCK_PROBE_FAKE_NAMES=1
+    run_case "control-no-preload" 1 env
+    run_case "preload-no-fakes" 1 env LD_PRELOAD="${WORK}/inet_to_unix_probe.so"
+    run_case "preload-fake-tcp-and-names" 0 env LD_PRELOAD="${WORK}/inet_to_unix_probe.so" NOCKLOCK_PROBE_FAKE_TCP=1 NOCKLOCK_PROBE_FAKE_NAMES=1
 
     echo "## proxy log"
     sed 's/^/  /' "${PROXY_LOG}"
+    exit "${failures}"
 } | tee "${OUT}"

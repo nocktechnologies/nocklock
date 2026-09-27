@@ -57,6 +57,7 @@ func TestInterposerProxyBridgeExecutable(t *testing.T) {
 		if err != nil {
 			return
 		}
+		_ = proxyLn.Close()
 		defer conn.Close()
 		buf := make([]byte, 4)
 		if _, err := io.ReadFull(conn, buf); err != nil {
@@ -109,7 +110,7 @@ const proxyBridgeChildSource = `
 #include <sys/socket.h>
 #include <unistd.h>
 
-static int connect_v4(int port) {
+static int open_v4_socket(void) {
     int fd = socket(AF_INET, SOCK_STREAM | SOCK_CLOEXEC, 0);
     if (fd < 0) return -1;
     int one = 1;
@@ -118,6 +119,12 @@ static int connect_v4(int port) {
     if (setsockopt(fd, IPPROTO_TCP, TCP_CONGESTION, "reno", 4) == 0) return -5;
     if (errno != ENOPROTOOPT) return -6;
 #endif
+    return fd;
+}
+
+static int connect_v4(int port) {
+    int fd = open_v4_socket();
+    if (fd < 0) return fd;
     struct sockaddr_in addr;
     memset(&addr, 0, sizeof(addr));
     addr.sin_family = AF_INET;
@@ -130,6 +137,35 @@ static int connect_v4(int port) {
         return -4;
     }
     return fd;
+}
+
+static int connect_v4_raw(int fd, int port) {
+    struct sockaddr_in addr;
+    memset(&addr, 0, sizeof(addr));
+    addr.sin_family = AF_INET;
+    addr.sin_port = htons((unsigned short)port);
+    if (inet_pton(AF_INET, "127.0.0.1", &addr.sin_addr) != 1) return -1;
+    return connect(fd, (struct sockaddr *)&addr, sizeof(addr));
+}
+
+static int assert_fake_proxy_peer(int fd) {
+    struct sockaddr_in peer;
+    socklen_t peer_len = sizeof(peer);
+    char addr[INET_ADDRSTRLEN];
+    if (getpeername(fd, (struct sockaddr *)&peer, &peer_len) != 0) return -1;
+    if (peer.sin_family != AF_INET) return -2;
+    if (ntohs(peer.sin_port) != 32123) return -3;
+    if (!inet_ntop(AF_INET, &peer.sin_addr, addr, sizeof(addr))) return -4;
+    if (strcmp(addr, "127.0.0.1") != 0) return -5;
+    return 0;
+}
+
+static int assert_peer_enotconn(int fd) {
+    struct sockaddr_storage peer;
+    socklen_t peer_len = sizeof(peer);
+    if (getpeername(fd, (struct sockaddr *)&peer, &peer_len) == 0) return -1;
+    if (errno != ENOTCONN) return -2;
+    return 0;
 }
 
 int main(void) {
@@ -145,10 +181,39 @@ int main(void) {
         return 3;
     }
 
+    int tagged = open_v4_socket();
+    if (tagged < 0) {
+        fprintf(stderr, "pre-connect socket failed rc=%d errno=%d\n", tagged, errno);
+        return 35;
+    }
+    if (assert_peer_enotconn(tagged) != 0) {
+        fprintf(stderr, "pre-connect getpeername errno=%d want ENOTCONN=%d\n", errno, ENOTCONN);
+        return 36;
+    }
+    struct sockaddr_storage local;
+    socklen_t local_len = sizeof(local);
+    if (getsockname(tagged, (struct sockaddr *)&local, &local_len) != 0) return 37;
+    if (local.ss_family != AF_INET) return 38;
+    close(tagged);
+
+    int pair[2];
+    if (socketpair(AF_UNIX, SOCK_STREAM | SOCK_CLOEXEC, 0, pair) != 0) return 39;
+    struct sockaddr_storage untagged_peer;
+    socklen_t untagged_peer_len = sizeof(untagged_peer);
+    if (getpeername(pair[0], (struct sockaddr *)&untagged_peer, &untagged_peer_len) != 0) return 40;
+    if (untagged_peer.ss_family != AF_UNIX) return 41;
+    close(pair[0]);
+    close(pair[1]);
+
     int fd = connect_v4(32123);
     if (fd < 0) {
         fprintf(stderr, "proxy connect failed rc=%d errno=%d\n", fd, errno);
         return 10;
+    }
+    int peer_rc = assert_fake_proxy_peer(fd);
+    if (peer_rc != 0) {
+        fprintf(stderr, "connected getpeername failed rc=%d errno=%d\n", peer_rc, errno);
+        return 42;
     }
     int fd_flags = fcntl(fd, F_GETFD);
     if (fd_flags < 0) return 33;
@@ -197,6 +262,20 @@ int main(void) {
     if (read(fd, buf, sizeof(buf)) != 2) return 12;
     if (memcmp(buf, "ok", 2) != 0) return 13;
     close(fd);
+
+    int failed = open_v4_socket();
+    if (failed < 0) return 43;
+    if (connect_v4_raw(failed, 32123) == 0) {
+        fprintf(stderr, "unexpected second proxy connect success\n");
+        close(failed);
+        return 44;
+    }
+    if (assert_peer_enotconn(failed) != 0) {
+        fprintf(stderr, "failed-connect getpeername errno=%d want ENOTCONN=%d\n", errno, ENOTCONN);
+        close(failed);
+        return 45;
+    }
+    close(failed);
 
     int tracked = socket(AF_INET, SOCK_STREAM, 0);
     int plain = socket(AF_UNIX, SOCK_STREAM, 0);

@@ -3007,12 +3007,22 @@ int getsockname(int fd, struct sockaddr *addr, socklen_t *len)
 int getpeername(int fd, struct sockaddr *addr, socklen_t *len)
 {
     int bridge_fd;
+    struct sockaddr_storage peer;
+    socklen_t peer_len = sizeof(peer);
+    int result;
+    int saved;
 
     pthread_once(&g_init_once, fence_init);
 
     bridge_fd = bridge_dup_tagged_fd(fd);
     if (bridge_fd >= 0) {
+        result = real_getpeername(bridge_fd, (struct sockaddr *)&peer, &peer_len);
+        saved = errno;
         real_close(bridge_fd);
+        if (result != 0) {
+            errno = saved;
+            return -1;
+        }
         return bridge_fake_name(addr, len);
     }
     return real_getpeername(fd, addr, len);
