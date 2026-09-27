@@ -820,15 +820,13 @@ if (Get-Module -ListAvailable NtObjectManager) {
 
 # Denial helper used by every "MUST fail" step. It discriminates the HResult:
 # only E_ACCESSDENIED (0x80070005) is a pass; not-found (0x80070002/3) is a
-# FAILED probe — that is the exact bug this round fixes. Set-Content/Get-Content
-# raise NON-terminating errors on access-denied by default, so `& $Action` would
-# return normally and this helper would misreport a genuine denial as
-# FAIL(no-error) without the caller passing -ErrorAction Stop on the action
-# itself — a scriptblock invoked with `&` resolves $ErrorActionPreference
-# through its own defining scope, not this function's, so setting it here
-# would not reach the action. Every call site below passes -ErrorAction Stop.
+# FAILED probe — that is the exact bug this round fixes.
 function Assert-AccessDenied {
   param([scriptblock]$Action, [string]$Label)
+  # Access-denied from Set-Content/Get-Content is NON-terminating, so it must be
+  # forced to terminate or the catch never runs and the helper prints FAIL(no-error)
+  # on a real denial. Set here AND passed as -ErrorAction Stop at each call site.
+  $ErrorActionPreference = 'Stop'
   try { & $Action | Out-Null; "FAIL(no-error): $Label" }
   catch [System.UnauthorizedAccessException] { "PASS(denied): $Label" }
   catch {
@@ -848,14 +846,15 @@ function Write-ProcessIdentity {
 function Stop-VerifiedProcess {
   param([string]$IdentityFile)
   $raw = Get-Content $IdentityFile -ErrorAction SilentlyContinue
-  # Only a full "pid|starttime|path" record is safe to act on. Anything else —
-  # missing, 'EXITED:*', or a transient 'PID:*'-only record (Probe 10(b) writes
-  # this before the outer session resolves the full identity; teardown can see
-  # it if the probe aborts in between) — means there is nothing verified to
-  # stop, so skip it rather than let the [datetime] cast below throw and abort
-  # the rest of this teardown loop.
-  if (-not $raw -or $raw -notmatch '^\d+\|.*\|') { return }
+  if (-not $raw -or $raw -like 'EXITED:*') { return }
   $parts = $raw -split '\|',3
+  # A record without all three fields (a partial write, or a bare PID) cannot be
+  # verified. Skip it with a line rather than let [datetime]$null throw and abort the
+  # teardown loop before $probeRoot is removed — leftover state is the worse failure.
+  if ($parts.Count -lt 3) {
+    "TEARDOWN: $IdentityFile holds no verifiable identity — process not stopped"
+    return
+  }
   $probePid = [int]$parts[0]; $startTime = [datetime]$parts[1]; $path = $parts[2]
   $proc = Get-Process -Id $probePid -ErrorAction SilentlyContinue
   if ($proc -and $proc.StartTime.ToString('o') -eq $startTime.ToString('o') -and $proc.Path -eq $path) {
@@ -867,14 +866,10 @@ function Stop-VerifiedProcess {
 **Two things the probe root cannot contain** — both unavoidable, both covered
 only by the global teardown, never left behind:
 
-- `New-AppContainerProfile` (the module's wrapper over `CreateAppContainerProfile`)
-  materialises `%LOCALAPPDATA%\Packages\<moniker>\`, outside the root, triggering
-  the redirection described above ([What breaks](#what-breaks)).
-  `Get-NtSid -PackageName` alone only *derives* the SID a profile of that name
-  *would* have; it never registers the profile, so that redirection never
-  happens unless the scaffold calls `New-AppContainerProfile` explicitly
-  (below). The run-unique (GUID) moniker keeps reruns from colliding; teardown
-  removes the profile.
+- `CreateAppContainerProfile` (the scaffold's explicit `New-AppContainerProfile`
+  call below) materialises `%LOCALAPPDATA%\Packages\<moniker>\`, outside the root;
+  `Get-NtSid -PackageName` only derives the SID and creates nothing. The run-unique
+  (GUID) moniker keeps reruns from colliding; teardown removes the profile.
 - The loopback exemption list is machine-wide; teardown clears the entry.
 
 **Getting the scaffold *into* the container.** `New-Win32Process` launches a
@@ -893,12 +888,16 @@ $out       = Get-Item (Join-Path $probeRoot 'out')
 ```
 
 Probes that need additional paths (e.g. Probe 4's `$project`, `$sentinel`) derive
-them from `$probeRoot` the same way. Each inside-container step runs as
-`New-Win32Process -CommandLine "powershell -NoProfile -ExecutionPolicy Bypass
--File `"$probeRoot\_inside.ps1`" -Phase <name>"` (the embedded quotes matter: an
-unquoted `$probeRoot` breaks every inside-container launch the moment
-`$env:TEMP` resolves through a profile path with a space, e.g.
-`C:\Users\John Doe\...`). The `-Phase` argument selects which
+them from `$probeRoot` the same way. Each inside-container step runs as:
+
+```powershell
+# Quote the script path: $probeRoot can contain a space (C:\Users\John Doe\...),
+# which would otherwise split the command line and break every inside launch.
+New-Win32Process -CommandLine ('powershell -NoProfile -ExecutionPolicy Bypass -File "' +
+  (Join-Path $probeRoot '_inside.ps1') + '" -Phase <name>')
+```
+
+The `-Phase` argument selects which
 body to run, so a probe that needs two container launches (Probe 4, `4a`/`4b`)
 picks its half unambiguously. Read the inside-container snippets as the *body* of
 that bootstrap, not as commands typed into the outer shell.
@@ -956,9 +955,14 @@ be pre-installed; on a disposable box `Save-Module` fetches it into the probe
 root):
 
 ```powershell
-# Fail-if-exists (no -Force): a GUID moniker makes a name collision a bug, not
-# a profile to adopt and inherit stale ACEs from — same convention as $probeRoot.
-$sid = (New-AppContainerProfile -Name $moniker -ErrorAction Stop).Sid   # reused by Probes 4 and 11; persists for the run
+# Register the profile explicitly: deriving the SID does NOT create it, and the
+# %LOCALAPPDATA%\Packages\<moniker>\ redirection the probes rely on — plus anything
+# for teardown's Remove-AppContainerProfile to remove — only exists once the profile
+# is registered. Wraps CreateAppContainerProfile; the GUID moniker guarantees it does
+# not already exist. Resolve the exact cmdlet spelling on the box if the name differs
+# (the NtObjectManager verb may be New-NtAppContainerProfile).
+New-AppContainerProfile -Name $moniker -DisplayName $moniker -Description $moniker | Out-Null
+$sid = Get-NtSid -PackageName $moniker   # reused by Probes 4 and 11; persists for the run
 $sid.ToString()                          # record this SID string; the icacls probes need it
 # One SID-writable drop dir, created and ACL'd from the OUTER shell (which holds
 # WRITE_DAC; the Low-IL container does not). Inside-container steps hand their verdict
@@ -1477,20 +1481,15 @@ if (Get-Module -ListAvailable NtObjectManager) {
   "SETUP-FAULT: NtObjectManager absent inside container — Probe 10 not scored"
   return
 }
-# (a) re-container escape: this whole probe runs INSIDE the zero-capability
-# container, so unlike the shared scaffold's own (Medium-IL, unelevated-user)
-# profile creation, this call can legitimately return E_ACCESSDENIED — the
-# same denial the "What breaks" section documents for CreateAppContainerProfile
-# in a restricted context. A denial here IS containment holding for (a); it is
-# not a probe crash, so it gets its own verdict rather than an unhandled throw:
+# (a) re-container escape:
 $escMoniker = "agent-escape-$runId"
-try {
-  $s2 = (New-AppContainerProfile -Name $escMoniker -ErrorAction Stop).Sid  # registers the profile; teardown removes it by name
-  New-Win32Process -CommandLine 'curl.exe -sS -m 5 https://example.com/' `
-    -AppContainerSid $s2 -Capabilities (Get-NtSid -KnownSid CapabilityInternetClient)
-} catch {
-  "VERDICT(a): could not create the escape AppContainer profile from inside the container -> $($_.Exception.GetType().FullName): $($_.Exception.Message) — contained, unless a later run from a different context succeeds"
-}
+# Register this profile too (same reason and cmdlet-spelling caveat as the shared
+# scaffold): teardown removes it by name, so setup must create it or the redirection
+# never happens and teardown removes nothing.
+New-AppContainerProfile -Name $escMoniker -DisplayName $escMoniker -Description $escMoniker | Out-Null
+$s2 = Get-NtSid -PackageName $escMoniker
+New-Win32Process -CommandLine 'curl.exe -sS -m 5 https://example.com/' `
+  -AppContainerSid $s2 -Capabilities (Get-NtSid -KnownSid CapabilityInternetClient)
 
 # (b) WMI broker escape — the out-of-process spawn from (c). Inspect the child's
 # TOKEN, not just whether it ran: a WMI child may be spawned by the broker under the
@@ -1499,63 +1498,70 @@ try {
 # INSIDE the container ($probeRoot and $out are re-established by the _inside.ps1
 # bootstrap — see the "Inside-variable bootstrap" note above):
 #
-# Spawn the child and hand its PID OUT through the granted drop dir — only the
-# PID, not StartTime/Path. If the child fully escaped to Medium IL, this Low-IL
-# process cannot query those properties on it (querying THROWS), and that throw
-# is exactly the full-escape case Probe 10(b) exists to detect; reading them
-# here would misreport a real escape as INDETERMINATE. The Medium-IL outer
-# session below re-derives StartTime/Path once it has the PID — it can read
-# them regardless of which IL the child ended up at. Do NOT call Get-NtToken
-# here either — same reasoning, a throw read as "contained" is the
-# wrong-reason verdict this round removes. Keep the child alive long enough
-# for the outer session to inspect it across the manual two-shell handoff
-# (Start-Sleep, not `cmd /c timeout`, which needs a console and dies
-# immediately when spawned via Win32_Process.Create with no stdin). 180s
-# leaves ample room for the shell switch.
+# Spawn the child and hand its PID + StartTime + Path OUT through the granted
+# drop dir. Do NOT call Get-NtToken here — if the child escaped to Medium IL,
+# this Low-IL process cannot open it, so Get-NtToken would THROW; a throw read
+# as "contained" is the wrong-reason verdict this round removes. Keep the child
+# alive long enough for the outer session to inspect it across the manual
+# two-shell handoff (Start-Sleep, not `cmd /c timeout`, which needs a console
+# and dies immediately when spawned via Win32_Process.Create with no stdin).
+# 180s leaves ample room for the shell switch.
 #
-# Invoke-CimMethod returns only a ProcessId — the Process object is not
-# available across the WMI broker boundary:
+# Invoke-CimMethod returns only a ProcessId — the Process object is not available
+# across the WMI broker boundary. Record PID + StartTime + Path from Get-Process
+# so the outer teardown can verify identity before stopping (bare PID reuse can
+# kill an unrelated process):
 $p = Invoke-CimMethod -ClassName Win32_Process -MethodName Create `
   -Arguments @{CommandLine='powershell -NoProfile -Command "Start-Sleep 180"'}
-Set-Content -Path (Join-Path $out.FullName 'wmi-child.txt') -Value "PID:$($p.ProcessId)"
+$wmiChild = Get-Process -Id $p.ProcessId -ErrorAction SilentlyContinue
+if ($wmiChild) {
+  # Write ONLY the ProcessId from inside, to a DISTINCT file. Reading
+  # $wmiChild.StartTime/.Path here THROWS if the child escaped to Medium IL (a Low-IL
+  # process cannot open a higher-IL one) — exactly the full-escape case 10(b) is
+  # trying to catch — so a throw would be misread as INDETERMINATE. The Medium-IL
+  # outer session below reads this and writes the canonical PID+StartTime+Path
+  # 'wmi-child.txt' that teardown consumes.
+  Set-Content -Path (Join-Path $out.FullName 'wmi-child-pid.txt') -Value $p.ProcessId
+} else {
+  Set-Content -Path (Join-Path $out.FullName 'wmi-child-pid.txt') -Value "EXITED:$($p.ProcessId)"
+}
 
-# OUTER SESSION (plain user, Medium IL): resolve the PID to a full identity —
-# this session can read StartTime/Path whether the child stayed Low IL or
-# escaped to Medium IL — then inspect the child's token. Recording the
-# identity here, at the moment this session first observes the live process,
-# closes the reuse window instead of re-deriving it against a stale record.
-$raw = Get-Content (Join-Path $out.FullName 'wmi-child.txt')
-if ($raw -notmatch '^PID:(\d+)$') {
-  "VERDICT(b): malformed identity record — INDETERMINATE"
+# OUTER SESSION (plain user, Medium IL): read the PID the inside session recorded,
+# then capture StartTime/Path and inspect the token from HERE — a Medium-IL child IS
+# openable from the outer session (see the inside note above), so this discriminates
+# the three cases.
+$raw = Get-Content (Join-Path $out.FullName 'wmi-child-pid.txt')
+if ($raw -like 'EXITED:*') {
+  "VERDICT(b): child exited before identity capture — INDETERMINATE"
   return
 }
-$childPid = [int]$Matches[1]
-$wmiChild = Get-Process -Id $childPid -ErrorAction SilentlyContinue
-if (-not $wmiChild) {
-  Set-Content -Path (Join-Path $out.FullName 'wmi-child.txt') -Value "EXITED:$childPid"
-  "VERDICT(b): child $childPid exited before identity capture — INDETERMINATE, re-run with a longer keepalive"
-  return
-}
-# Record PID + StartTime + Path now so the global teardown can verify identity
-# before stopping it (bare PID reuse can kill an unrelated process):
-Write-ProcessIdentity -Proc $wmiChild -FilePath (Join-Path $out.FullName 'wmi-child.txt')
-try {
-  $tok = Get-NtToken -ProcessId $childPid
-  "AppContainer=$($tok.AppContainer)  IntegrityLevel=$($tok.IntegrityLevel)  Package=$($tok.PackageName)"
-  # VERDICT: AppContainer=$false => WMI child ran under the plain user token
-  #          => FULL escape of the file AND network fence, and Phase 0 does not hold.
-  #          AppContainer=$true  => token inherited; only the job accounting leaked.
-} catch {
-  # Even the outer Medium-IL session could not open it (e.g. it elevated further).
-  # This is its OWN verdict — never scored as "contained".
-  "VERDICT(b): could not open child token from OUTER session -> INDETERMINATE, treat as possible escape ($($_.Exception.Message))"
+$childPid = [int]$raw
+$proc = Get-Process -Id $childPid -ErrorAction SilentlyContinue
+if (-not $proc) {
+  "VERDICT(b): child $childPid gone before capture — INDETERMINATE, re-run with a longer keepalive"
+} else {
+  try {
+    # Record full identity (PID+StartTime+Path) from the outer session so teardown's
+    # Stop-VerifiedProcess can verify it before killing. The PID-reuse guard now lives
+    # at teardown (identity captured here vs. the live process there), not at capture —
+    # the inside Low-IL session could not read these fields, so there is no earlier
+    # baseline to compare against; the 180s keepalive keeps the window small.
+    Write-ProcessIdentity -Proc $proc -FilePath (Join-Path $out.FullName 'wmi-child.txt')
+    $tok = Get-NtToken -ProcessId $childPid
+    "AppContainer=$($tok.AppContainer)  IntegrityLevel=$($tok.IntegrityLevel)  Package=$($tok.PackageName)"
+    # VERDICT: AppContainer=$false => WMI child ran under the plain user token
+    #          => FULL escape of the file AND network fence, and Phase 0 does not hold.
+    #          AppContainer=$true  => token inherited; only the job accounting leaked.
+  } catch {
+    # Even the outer Medium-IL session could not open it (e.g. it elevated further).
+    # This is its OWN verdict — never scored as "contained".
+    "VERDICT(b): could not open child token from OUTER session -> INDETERMINATE, treat as possible escape ($($_.Exception.Message))"
+  }
 }
 ```
 
-If (a)'s profile creation is denied, that denial is its own verdict — contained
-for (a) — and (b) still runs. If (a) spawns a process that reaches the internet,
-the network fence is escapable by construction and Phase 1 does not hold. If
-(b)'s WMI child carries a
+If (a) spawns a process that reaches the internet, the network fence is escapable
+by construction and Phase 1 does not hold. If (b)'s WMI child carries a
 non-AppContainer token, that is the more serious result: **Phase 0** does not hold
 and WMI must be blocked with the child-process policy. If (b) is INDETERMINATE
 (child exited early, or even the outer session cannot open it), it is reported as
@@ -1571,7 +1577,7 @@ timeout (`-m 5`) and self-terminates; it is not tracked by an identity file.
 
 | State touched | Detail |
 |---|---|
-| Creates | escape container profile (`agent-escape-$runId`); WMI keepalive child process; `wmi-child.txt` in `$out` |
+| Creates | escape container profile (`agent-escape-$runId`); WMI keepalive child process; `wmi-child-pid.txt` (inside PID handoff) and `wmi-child.txt` (outer canonical identity) in `$out` |
 | Removes | keepalive child (by verified PID+StartTime+Path); escape profile (global teardown) |
 | Must never touch | other running processes; the primary container profile |
 
@@ -1615,8 +1621,10 @@ Test-Path $probeRoot
 
 # --- TEARDOWN (desktop run — no package uninstalls) ---
 CheckNetIsolation.exe LoopbackExempt -d -n=$moniker           # machine-wide exemption (Probes 1-2)
-Remove-AppContainerProfile -Name $moniker 2>$null            # removes exactly the profile New-AppContainerProfile registered above (%LOCALAPPDATA%\Packages\<moniker>)
-Remove-AppContainerProfile -Name "agent-escape-$runId" 2>$null  # ditto, for the escape-moniker profile created in Probe 10(a), if any
+Remove-AppContainerProfile -Name $moniker 2>$null            # %LOCALAPPDATA%\Packages\<moniker>
+Remove-AppContainerProfile -Name "agent-escape-$runId" 2>$null  # Probe 10, if created
+# (Remove-AppContainerProfile wraps the DeleteAppContainerProfile API; resolve the
+#  exact cmdlet spelling on the box if the name differs.)
 if ($etwCreated) { logman stop $etwSession -ets 2>$null }  # only if THIS run created it
 # Reap spawned processes BEFORE deleting $probeRoot (identity files live there).
 foreach ($idFile in (Get-ChildItem -Path $probeRoot -Filter '*.txt' -Recurse -ErrorAction SilentlyContinue |
