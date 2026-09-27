@@ -4,6 +4,7 @@ package integration_test
 
 import (
 	"database/sql"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -976,6 +977,69 @@ endpoint = "https://cc.nocktechnologies.io/api/fence/events/"
 			})
 		}
 	})
+}
+
+func TestFilesystemFenceReadOnlyRootHonorsAllowRWPrecedence(t *testing.T) {
+	if runtime.GOOS != "linux" {
+		t.Skip("filesystem fence is Linux-only")
+	}
+
+	config := `[project]
+name = "integration-test-read-only-root-allow-rw"
+root = "."
+
+[filesystem]
+root = "."
+mode = "read-only"
+linux_enforcement = "off"
+allow = []
+allow_rw = ["state"]
+deny = ["state/protected"]
+
+[network]
+allow = []
+allow_all = true
+
+[secrets]
+pass = ["HOME", "PATH", "SHELL", "USER", "LANG", "TERM"]
+block = []
+
+[logging]
+db = ".nock/events.db"
+level = "info"
+
+[cloud]
+enabled = false
+api_key = ""
+endpoint = "https://cc.nocktechnologies.io/api/fence/events/"
+`
+	dir := setupTestDirWithConfig(t, config)
+	writable := filepath.Join(dir, "state")
+	denied := filepath.Join(writable, "protected")
+	if err := os.MkdirAll(denied, 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	allowedFile := filepath.Join(writable, "allowed.txt")
+	_, stderr, exitCode := runNocklock(t, dir, nil, "wrap", "--", "/bin/sh", "-c", "printf ok > \"$1\"", "sh", allowedFile)
+	if exitCode != 0 {
+		t.Fatalf("allow_rw descendant of read-only root was not writable: exit=%d stderr=%q", exitCode, stderr)
+	}
+
+	for name, target := range map[string]string{
+		"read_only_sibling": filepath.Join(dir, "blocked.txt"),
+		"deny_wins":         filepath.Join(denied, "blocked.txt"),
+	} {
+		t.Run(name, func(t *testing.T) {
+			_, _, code := runNocklock(t, dir, nil, "wrap", "--", "/bin/sh", "-c", "printf blocked > \"$1\"", "sh", target)
+			if code == 0 {
+				t.Fatalf("write to %q unexpectedly succeeded", target)
+			}
+			if _, err := os.Stat(target); !errors.Is(err, os.ErrNotExist) {
+				t.Fatalf("blocked write left %q behind: %v", target, err)
+			}
+		})
+	}
 }
 
 func TestLandlockBlocksWriteAfterChildClearsLDPreload(t *testing.T) {

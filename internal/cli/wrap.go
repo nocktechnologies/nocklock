@@ -94,7 +94,10 @@ var wrapCmd = &cobra.Command{
 		// posture as the network fence (cf. the removed --allow-unfenced flag):
 		// running unrecorded would silently break the "every decision is recorded"
 		// promise, which is worse than not running at all.
-		dbPath, projectRoot := config.ResolveDBPath(cfg, configPath)
+		dbPath, projectRoot, dbErr := config.ResolveDBPath(cfg, configPath)
+		if dbErr != nil {
+			return fmt.Errorf("could not resolve the event log location: %w\nThe audit trail is required — refusing to run unrecorded", dbErr)
+		}
 		// Sign the audit trail with the NockLock-managed Ed25519 key so each
 		// recorded decision is authentic, not merely internally consistent. The
 		// key is generated 0600 on first use. If its path cannot be resolved we
@@ -278,6 +281,20 @@ var wrapCmd = &cobra.Command{
 				return fmt.Errorf("invalid filesystem fence config: %w", err)
 			}
 			if fsCfg != nil {
+				// An audit directory inside the fence root has to stay
+				// unwritable, which costs the root-mutation grant (see
+				// fs.FenceConfig.ProtectedRootSubdir). The question is only
+				// where the audit directory actually is -- not whether the log
+				// is "legacy" -- because filesystem.root and the project root
+				// can differ, and an audit dir outside filesystem.root needs no
+				// protection and must not cost the grant.
+				if auditDir := filepath.Dir(dbPath); pathIsWithinDir(auditDir, fsCfg.Root) {
+					fsCfg.ProtectedRootSubdir = auditDir
+					fmt.Fprintf(os.Stderr,
+						"NockLock: the audit trail is inside the fence root (%s), so the agent cannot create or remove entries directly in %s.\n"+
+							"NockLock: work inside existing subdirectories is unaffected. To lift the restriction, move %s (events.db, its -wal/-shm sidecars and chain-anchor.json together) outside the fence root while no session is running; 'nocklock state migrate' will do it for you in a later release.\n",
+						auditDir, fsCfg.Root, auditDir)
+				}
 				switch runtime.GOOS {
 				case "linux":
 					// Look for the shared library next to the nocklock binary or in standard paths.
@@ -374,7 +391,14 @@ var wrapCmd = &cobra.Command{
 						break
 					}
 					sensitive := append(defaultSensitive, fsCfg.DenyPaths...)
-					stateDir := filepath.Join(projectRoot, config.Dir)
+					// The Seatbelt profile grants WRITE to the audit state
+					// directory, so it has to be the directory the log is
+					// actually in. Hardcoding <project>/.nock granted the child
+					// write access to the project's .nock even in read-only
+					// mode -- where the root itself is NOT granted -- which,
+					// once the log moved out, bought nothing but the ability to
+					// rewrite the fence's own config.toml.
+					stateDir := filepath.Dir(dbPath)
 					profile, pathCount, err := fsfence.GenerateWriteConfinementProfile(
 						sensitive, fsCfg.Root, fsCfg.Mode, stateDir, cfg.Filesystem.Hardened,
 					)
@@ -1016,6 +1040,12 @@ func linuxEnforcementMode(raw string) linuxEnforcement {
 // log sits directly in the project root — in which case it denies only the db
 // file, so the root itself is never accidentally denied.
 //
+// With a default (relative) logging.db the audit directory is outside the
+// project (config.AuditStateDir) and Landlock already denies it by default, so
+// this deny is what carries the protection into the LD_PRELOAD interposer,
+// which is allow/deny-list driven rather than default-deny. It still matters:
+// the two enforcement paths must agree.
+//
 // The root comparison resolves symlinks (matching the fence's own path
 // canonicalization): on macOS /tmp and /var are symlinks to /private/*, so a
 // string-only compare could see the audit dir and a symlinked root as different
@@ -1052,14 +1082,14 @@ func egressChildDenyPaths(dbPath, projectRoot, decisionLogDir string) []string {
 //
 // Why the state root and not /tmp (N10710): the default filesystem preset GRANTs
 // /tmp, and Landlock is allow-only, so a deny path under a granted tree fails
-// rule generation (assertDenyPathsEnforceable). Placing the dir under the audit
-// root keeps its deny enforceable — but ONLY because landlock.rootPathRules
-// skips the literal ".nock" child of the filesystem root when it grants the
-// tree, so a decision dir under .nock sits outside every granted tree. That
-// coupling is to the ".nock" name specifically (narrower than "the audit dir"):
-// a logging.db relocated out of .nock would reintroduce the overlap, exactly as
-// it already does for the audit DB's own deny (auditDenyPath). Factored out so
-// the path is unit-testable without root.
+// rule generation (assertDenyPathsEnforceable). The audit state root now lives
+// outside the project entirely (config.AuditStateDir), so this directory sits
+// outside every granted tree by construction — it no longer depends on the
+// Landlock ruleset skipping a ".nock" child of the fence root, which is how this
+// held before the audit state moved out. A logging.db pointed back inside a
+// granted tree by an absolute path reintroduces the overlap, exactly as it does
+// for the audit DB's own deny (auditDenyPath). Factored out so the path is
+// unit-testable without root.
 func egressDecisionDir(dbPath, sessionID string) string {
 	return filepath.Join(filepath.Dir(dbPath), "sessions", sessionID, "egress")
 }
@@ -1072,15 +1102,6 @@ func resolvePathBestEffort(p string) string {
 		return resolved
 	}
 	return filepath.Clean(p)
-}
-
-func landlockAuditAllowPaths(dbPath string) []landlock.AllowPath {
-	return []landlock.AllowPath{
-		{Path: dbPath, Access: landlock.AccessReadWrite},
-		{Path: dbPath + "-wal", Access: landlock.AccessReadWrite},
-		{Path: dbPath + "-shm", Access: landlock.AccessReadWrite},
-		{Path: dbPath + "-journal", Access: landlock.AccessReadWrite},
-	}
 }
 
 // findLibFenceFS searches only trusted locations for the filesystem fence shared

@@ -180,7 +180,7 @@ func TestSecurity_SymlinkedAncestorWithMissingTailRejected(t *testing.T) {
 		}
 		t.Fatal("expected NewLogger to reject a DB path reached through a symlinked ancestor")
 	}
-	if !strings.Contains(err.Error(), "resolves outside project root") {
+	if !strings.Contains(err.Error(), "resolves outside both project root") {
 		t.Errorf("expected outside-root rejection, got: %v", err)
 	}
 

@@ -433,7 +433,10 @@ func TestWrapTeardownPushFailOpenAndChildEnvStripped(t *testing.T) {
 		t.Fatal("the wrapped child can see NOCKLOCK_ANCHOR_URL")
 	}
 	// The local anchor is still written before the (failed) push.
-	if _, err := logging.ReadAnchor(filepath.Join(nockDir, "chain-anchor.json")); err != nil {
+	// The anchor is written next to the event log, which now lives in the audit
+	// state directory outside the project (config.AuditStateDir).
+	anchorPath := logging.DefaultAnchorPath(resolvedAuditDB(t, project))
+	if _, err := logging.ReadAnchor(anchorPath); err != nil {
 		t.Fatalf("teardown anchor file: %v", err)
 	}
 }

@@ -127,11 +127,14 @@ func setupAnchorProject(t *testing.T) (dbPath, keyPath string) {
 	}
 	t.Chdir(project)
 	t.Setenv("XDG_CONFIG_HOME", filepath.Join(t.TempDir(), "xdg"))
+	t.Setenv("XDG_STATE_HOME", filepath.Join(t.TempDir(), "state"))
 	kp, err := logging.DefaultSigningKeyPath()
 	if err != nil {
 		t.Fatalf("resolve key path: %v", err)
 	}
-	return filepath.Join(project, config.Dir, "events.db"), kp
+	// The event log lives in the audit state directory outside the project
+	// (config.AuditStateDir), so resolve it rather than joining .nock.
+	return resolvedAuditDB(t, project), kp
 }
 
 func TestAnchorEmitVerify_EndToEnd(t *testing.T) {

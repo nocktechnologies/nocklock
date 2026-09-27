@@ -132,6 +132,23 @@ func TestValidateAllowPathTraversal(t *testing.T) {
 	}
 }
 
+func TestValidateAllowRWPathTraversal(t *testing.T) {
+	cfg := DefaultConfig()
+	cfg.Filesystem.AllowRW = []string{"../../state"}
+	errs := Validate(&cfg)
+	if !hasError(errs, "filesystem.allow_rw") {
+		t.Error("expected validation error for path traversal in allow_rw list")
+	}
+}
+
+func TestValidateRejectsEmptyAllowRW(t *testing.T) {
+	cfg := DefaultConfig()
+	cfg.Filesystem.AllowRW = []string{""}
+	if errs := Validate(&cfg); !hasError(errs, "filesystem.allow_rw") {
+		t.Fatal("expected validation error for empty allow_rw entry")
+	}
+}
+
 func TestEffectivePolicySummary(t *testing.T) {
 	cfg := DefaultConfig()
 	cfg.Network.Allow = []string{"github.com", "api.anthropic.com"}

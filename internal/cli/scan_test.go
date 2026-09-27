@@ -112,7 +112,7 @@ func TestWrapSecretPreflightControlsChildLaunch(t *testing.T) {
 			if strings.Contains(out.String(), scanToken()) {
 				t.Fatal("preflight exposed a value")
 			}
-			logger, err := logging.NewLogger(filepath.Join(dir, ".nock", "events.db"), dir)
+			logger, err := logging.NewLogger(resolvedAuditDB(t, dir), dir)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -188,7 +188,7 @@ func TestSecretPreflightDryRunDoesNotScanOrCreateAuditLog(t *testing.T) {
 	if err := wrapCmd.RunE(cmd, []string{"--dry-run"}); err != nil {
 		t.Fatalf("dry run executed preflight: %v", err)
 	}
-	if _, err := os.Stat(filepath.Join(dir, ".nock", "events.db")); !errors.Is(err, os.ErrNotExist) {
+	if _, err := os.Stat(resolvedAuditDB(t, dir)); !errors.Is(err, os.ErrNotExist) {
 		t.Fatal("dry run created audit DB")
 	}
 }

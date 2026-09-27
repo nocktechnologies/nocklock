@@ -6,6 +6,114 @@ All notable changes to NockLock will be documented in this file.
 
 ### Added
 
+- Linux `filesystem.allow_rw` entries grant explicit read-write access while
+  existing `filesystem.allow` entries remain read-only. `nocklock verify` keeps
+  its temporary probe files outside granted paths, including `/tmp`.
+- Source builds now embed `git describe --tags --always --dirty` in
+  `nocklock version`.
+
+### Changed
+
+- New projects keep their audit trail outside the project, so the fenced agent
+  can finally use its own project root (N10749). Two requirements had been in
+  direct conflict: the agent must be able to create and remove files directly in
+  `filesystem.root`, and it must not be able to touch the log that records what
+  it did. Landlock checks `MAKE_REG`/`MAKE_DIR`/`REMOVE_FILE`/`REMOVE_DIR`
+  against the directory holding the entry, so `touch <root>/newfile` was denied
+  even in read-write mode: the ruleset granted the root's existing children but
+  never the root itself, precisely so `<root>/.nock` could be skipped. No ruleset
+  resolves both — the kernel walks upward from the accessed file and allows as
+  soon as an ancestor rule grants the access, so a narrower rule on `.nock`
+  cannot revoke the root's grant, and stacking layers does not help because
+  every layer would need `MAKE_REG` on the root. They collided only because the
+  audit trail sat inside the writable root.
+  - The event log, its SQLite sidecars, the chain anchor and the per-session
+    egress decision logs live in `$XDG_STATE_HOME/nocklock/<project-key>/` (or
+    `~/.local/state/nocklock/<project-key>/`). `<project-key>` is a SHA-256
+    prefix of the project root's real path, so projects never share a chain.
+    This matches where the Ed25519 signing key already lived.
+  - Every directory NockLock creates there is 0700, and each one is checked —
+    not just the last — for being a real directory, owned by the current user,
+    and not group- or world-writable. A trusted directory reached through a
+    writable parent is not trusted: whoever can write the parent can rename the
+    leaf away and substitute their own. The configured state root itself is
+    resolved once with `EvalSymlinks` and symlinks above it are allowed, because
+    `/tmp`, `/var` and the macOS default `TMPDIR` are system links into
+    `/private`.
+  - With no home directory available — a container with no passwd entry for the
+    uid, or `HOME` unset in CI — the state root falls back to a per-uid
+    directory under `/var/tmp`. Deliberately not `/tmp`, which the shipped
+    presets grant.
+  - A relative `logging.db` — the default, and what every `nocklock init` config
+    carries — resolves there, keeping only its filename.
+- **An existing `<root>/.nock/events.db` is left exactly where it is** and keeps
+  being used. NockLock will not relocate an audit chain: moving a live SQLite
+  database, its WAL sidecars and its chain anchor is one operation that must
+  either fully succeed or not start, and a half-finished move leaves a chain that
+  still verifies while missing its most recent rows. While the log sits inside
+  the fence root, the fence withholds the root grant and falls back to granting
+  each existing child, so work inside existing subdirectories is unaffected but
+  creates directly in the root stay denied. `nocklock wrap` says so on stderr
+  and names the manual move that lifts it; `nocklock state migrate` will
+  automate that in a later release. Two logs for one root is still refused
+  rather than silently reconciled.
+- `logging.db` now has one contract for absolute paths instead of two: a path
+  outside both the project and the audit state directory is rejected when the
+  config loads, with an error naming the setting. `logging.db` is a setting a
+  repository can ship, so an unrestricted absolute path would let a hostile
+  checkout aim a SQLite write at any path the invoking user can reach.
+  `nocklock doctor` warns when an absolute path lands back inside
+  `filesystem.root`, where the agent can reach its own audit trail, and when the
+  audit state directory falls inside a `filesystem.allow` grant.
+- Two consequences of granting the fence root on a project with no in-project
+  audit trail, both deliberate:
+  - `<root>/.nock/config.toml` is inside the root grant, so a fenced agent can
+    edit the fence's own config. It cannot widen the fence it is already
+    running under — the config is read by the unfenced parent before the child
+    starts — so a rewrite takes effect only on the next `wrap`, and it is a
+    tracked file, so the edit shows up in `git status`.
+  - A `filesystem.deny` path INSIDE `filesystem.root` can no longer be enforced
+    by Landlock, and rule generation is refused rather than shipping a fence
+    that ignores the deny. Deny paths outside the root — including every entry
+    in the shipped defaults and presets — are unaffected.
+- `ResolveDBPath` now refuses to guess between two coexisting legacy audit
+  chains inside a project: previously, if both the conventional
+  `<root>/.nock/<name>` log and a hand-written relative `logging.db` path
+  existed, the scan stopped at the first one it found and silently adopted it.
+  It now collects every existing, deduplicated candidate and refuses to start,
+  naming all of them, unless exactly one exists.
+- A relative `logging.db` containing a separator (for example
+  `../audit/events.db`) is now rejected at load if it would resolve outside
+  the project root, instead of silently being joined to the project root and
+  adopted as the authoritative legacy log wherever it landed.
+- `ResolveDBPath` now canonicalizes every candidate (resolving symlinks on
+  each one's existing parent) before de-duplicating them and before naming
+  them in a refusal. The state-dir candidate previously was not canonicalized
+  while the in-project candidates were, so on platforms where a temp root
+  reaches its real location through a symlink, the same file could be named
+  with a different spelling than the other candidates, or fail to collapse
+  with one that reached it another way. The existence and symlink checks
+  still run against each candidate's original, uncanonicalized path first —
+  de-duplicating by canonical form before that check would let a symlink
+  planted at one candidate hide behind another candidate's real file whenever
+  the two happened to resolve to the same target.
+- An absolute `logging.db` now joins the same candidate scan as the
+  conventional `.nock` path, the hand-written relative path and the state-dir
+  path, instead of being returned before any of them were even looked at. A
+  legacy chain already sitting in the state dir is refused rather than
+  silently abandoned when logging.db is reconfigured to an absolute path.
+  An absolute path that resolves inside the audit state directory also passes
+  the same state-root ownership and permission checks as a relative path to
+  that directory.
+- The configured state root (`XDG_STATE_HOME`, or the `~/.local/state`
+  fallback) is now itself checked before anything is created beneath it: it
+  must be owned by the current user and not group- or world-writable, or
+  `nocklock` refuses to start and names the path and the fix (`chmod` for a
+  permissive mode, `chown` for a foreign owner — the message no longer
+  suggests one for the other's problem). The `/var/tmp` per-uid fallback used
+  when no home directory is available is unaffected — it is a shared system
+  directory by design, and only the per-uid component NockLock creates under
+  it is held to this rule.
 - CI acceptance tests that run the three July-2026 DNS-based egress-escape tricks
   (from the Hugging Face sandbox-escape writeup) against NockLock's egress fence
   on both platforms (N10813). On Linux, `TestNetnsDNSEscape` drives the real netns

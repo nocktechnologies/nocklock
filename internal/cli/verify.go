@@ -211,10 +211,12 @@ func resolveAuditDBPath() (dbPath, projectRoot string, err error) {
 		return "", "", fmt.Errorf("no logging DB configured")
 	}
 
-	dbPath = cfg.Logging.DB
-	projectRoot = filepath.Dir(filepath.Dir(configPath))
-	if !filepath.IsAbs(dbPath) {
-		dbPath = filepath.Join(projectRoot, dbPath)
+	// Share the resolver with every other command rather than repeating it:
+	// an audit command that looked in a different place from the one wrap
+	// writes to would report a missing or stale chain.
+	dbPath, projectRoot, err = config.ResolveDBPath(cfg, configPath)
+	if err != nil {
+		return "", "", err
 	}
 
 	if _, err := os.Stat(dbPath); err != nil {
@@ -466,6 +468,7 @@ func verifySkipReason(fence string, cfg *config.Config, caps doctorCapabilities)
 func cloneVerifyConfig(cfg *config.Config) config.Config {
 	out := *cfg
 	out.Filesystem.Allow = append([]string(nil), cfg.Filesystem.Allow...)
+	out.Filesystem.AllowRW = append([]string(nil), cfg.Filesystem.AllowRW...)
 	out.Filesystem.Deny = append([]string(nil), cfg.Filesystem.Deny...)
 	out.Network.Allow = append([]string(nil), cfg.Network.Allow...)
 	out.Secrets.Pass = append([]string(nil), cfg.Secrets.Pass...)
@@ -576,32 +579,82 @@ func verifyCheckFromProbe(fence string, result probeResult, err error) verifyChe
 }
 
 func runProbeUnderWrap(ctx context.Context, cfg *config.Config, configPath, fence string, extraEnv map[string]string) (probeResult, error) {
-	tmp, err := os.MkdirTemp("", "nocklock-verify-config-*")
-	if err != nil {
-		return probeResult{Fence: fence}, err
+	projectRoot := filepath.Dir(filepath.Dir(configPath))
+	forbidden := filesystemAllowedRoots(cfg, projectRoot)
+	for _, deny := range cfg.Filesystem.Deny {
+		forbidden = append(forbidden, absConfigPath(projectRoot, deny))
 	}
-	defer os.RemoveAll(tmp)
-	tmpNock := filepath.Join(tmp, config.Dir)
+	tmp, cleanup, ok := createScratchOutside(forbidden)
+	if !ok {
+		return probeResult{Fence: fence}, fmt.Errorf("could not create verification scratch directory outside configured filesystem grants")
+	}
+	defer cleanup()
+	tmpWork := filepath.Join(tmp, "work")
+	tmpNock := filepath.Join(tmpWork, config.Dir)
 	if err := os.MkdirAll(tmpNock, 0o755); err != nil {
 		return probeResult{Fence: fence}, err
 	}
 	cfgCopy := *cfg
-	absolutizeConfigPaths(&cfgCopy, filepath.Dir(filepath.Dir(configPath)))
-	cfgCopy.Logging.DB = filepath.Join(tmp, config.Dir, "events.db")
+	absolutizeConfigPaths(&cfgCopy, projectRoot)
+	cfgCopy.Logging.DB = filepath.Join(tmpNock, "events.db")
 	cfgCopy.Cloud.APIKey = ""
-	tmpConfig := filepath.Join(tmpNock, config.File)
-	if err := writeConfigTOML(tmpConfig, &cfgCopy); err != nil {
+	// Keep the probe's audit state inside the scratch tree, which
+	// createScratchOutside already placed outside every configured grant.
+	//
+	// Belt and braces: the probe config above pins logging.db to an ABSOLUTE
+	// path in the scratch, and config.ResolveDBPath returns absolute paths
+	// verbatim, so today nothing here consults $XDG_STATE_HOME. This keeps the
+	// isolation from depending on that one line staying absolute — a relative
+	// logging.db resolves into $XDG_STATE_HOME, and inheriting the caller's
+	// would scatter throwaway probe logs through the developer's real audit
+	// state and leave them behind when the scratch is cleaned up.
+	probeStateHome := filepath.Join(tmp, "state")
+	if err := os.MkdirAll(probeStateHome, 0o700); err != nil {
 		return probeResult{Fence: fence}, err
 	}
 	exe, err := os.Executable()
 	if err != nil {
 		return probeResult{Fence: fence}, err
 	}
+	// Run a private copy from the invocation scratch directory. Granting the
+	// installed executable would conflict with a deny that contains it and can
+	// also widen the policy being verified.
+	probeBin := filepath.Join(tmp, "bin")
+	if err := os.Mkdir(probeBin, 0o755); err != nil {
+		return probeResult{Fence: fence}, err
+	}
+	probeExe := filepath.Join(probeBin, "nocklock-probe")
+	exeData, err := os.ReadFile(exe)
+	if err != nil {
+		return probeResult{Fence: fence}, fmt.Errorf("read verification executable: %w", err)
+	}
+	if err := os.WriteFile(probeExe, exeData, 0o700); err != nil {
+		return probeResult{Fence: fence}, fmt.Errorf("copy verification executable: %w", err)
+	}
+	cfgCopy.Filesystem.Allow = append(cfgCopy.Filesystem.Allow, probeBin)
+	if cfgCopy.Filesystem.Root != "" {
+		libPath, err := verifyFilesystemBackend()
+		if err != nil {
+			return probeResult{Fence: fence}, err
+		}
+		libData, err := os.ReadFile(libPath)
+		if err != nil {
+			return probeResult{Fence: fence}, fmt.Errorf("read filesystem fence library: %w", err)
+		}
+		if err := os.WriteFile(filepath.Join(probeBin, "libfence_fs.so"), libData, 0o700); err != nil {
+			return probeResult{Fence: fence}, fmt.Errorf("copy filesystem fence library: %w", err)
+		}
+	}
+	tmpConfig := filepath.Join(tmpNock, config.File)
+	if err := writeConfigTOML(tmpConfig, &cfgCopy); err != nil {
+		return probeResult{Fence: fence}, err
+	}
 	childCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
 	defer cancel()
-	cmd := exec.CommandContext(childCtx, exe, "wrap", "--", exe, "__probe", fence)
-	cmd.Dir = tmp
+	cmd := exec.CommandContext(childCtx, probeExe, "wrap", "--", probeExe, "__probe", fence)
+	cmd.Dir = tmpWork
 	cmd.Env = envWithOverrides(os.Environ(), extraEnv)
+	cmd.Env = envWithOverrides(cmd.Env, map[string]string{"XDG_STATE_HOME": probeStateHome})
 	var stdout, stderr bytes.Buffer
 	cmd.Stdout = &stdout
 	cmd.Stderr = &stderr
@@ -631,6 +684,7 @@ func absolutizeConfigPaths(cfg *config.Config, projectRoot string) {
 	cfg.Project.Root = absConfigPath(projectRoot, cfg.Project.Root)
 	cfg.Filesystem.Root = absConfigPath(projectRoot, cfg.Filesystem.Root)
 	cfg.Filesystem.Allow = absConfigPathList(projectRoot, cfg.Filesystem.Allow)
+	cfg.Filesystem.AllowRW = absConfigPathList(projectRoot, cfg.Filesystem.AllowRW)
 	cfg.Filesystem.Deny = absConfigPathList(projectRoot, cfg.Filesystem.Deny)
 	cfg.Logging.DB = absConfigPath(projectRoot, cfg.Logging.DB)
 }
@@ -671,7 +725,7 @@ func createFilesystemCanary(cfg *config.Config, projectRoot string) (string, str
 }
 
 func createCanaryOutside(roots []string) (string, string, func(), bool) {
-	for _, base := range []string{"/var/tmp", "/dev/shm", os.TempDir()} {
+	for _, base := range verifyScratchBases {
 		if base == "" || pathWithinAny(base, roots) {
 			continue
 		}
@@ -679,19 +733,45 @@ func createCanaryOutside(roots []string) (string, string, func(), bool) {
 		if err != nil {
 			continue
 		}
+		cleanup := func() { os.RemoveAll(dir) }
+		if pathWithinAny(dir, roots) {
+			cleanup()
+			continue
+		}
 		path := filepath.Join(dir, "canary.txt")
 		token := randomHex(16)
-		if err := os.WriteFile(path, []byte(token+"\n"), 0o600); err != nil {
-			os.RemoveAll(dir)
+		if err := verifyWriteFile(path, []byte(token+"\n"), 0o600); err != nil {
+			cleanup()
 			continue
 		}
 		if data, err := os.ReadFile(path); err != nil || strings.TrimSpace(string(data)) != token {
+			cleanup()
+			continue
+		}
+		return path, token, cleanup, true
+	}
+	return "", "", nil, false
+}
+
+var verifyScratchBases = []string{"/var/tmp", "/dev/shm", os.TempDir()}
+var verifyWriteFile = os.WriteFile
+
+func createScratchOutside(roots []string) (string, func(), bool) {
+	for _, base := range verifyScratchBases {
+		if base == "" || pathWithinAny(base, roots) {
+			continue
+		}
+		dir, err := os.MkdirTemp(base, "nocklock-verify-*")
+		if err != nil {
+			continue
+		}
+		if pathWithinAny(dir, roots) {
 			os.RemoveAll(dir)
 			continue
 		}
-		return path, token, func() { os.RemoveAll(dir) }, true
+		return dir, func() { os.RemoveAll(dir) }, true
 	}
-	return "", "", nil, false
+	return "", nil, false
 }
 
 func selectOffAllowlistNetworkTarget(cfg *config.Config) (string, error) {
@@ -737,6 +817,7 @@ func networkHostAllowed(hostname string, allowlist []string) bool {
 
 func filesystemAllowedRoots(cfg *config.Config, projectRoot string) []string {
 	paths := append([]string{cfg.Filesystem.Root}, cfg.Filesystem.Allow...)
+	paths = append(paths, cfg.Filesystem.AllowRW...)
 	out := make([]string, 0, len(paths))
 	for _, p := range paths {
 		p = absConfigPath(projectRoot, p)
@@ -756,15 +837,41 @@ func filesystemRootOnly(cfg *config.Config, projectRoot string) []string {
 	return []string{filepath.Clean(root)}
 }
 
-func pathWithinAny(path string, roots []string) bool {
-	clean := filepath.Clean(path)
-	if resolved, err := filepath.EvalSymlinks(clean); err == nil {
-		clean = resolved
+// resolveExistingPrefix resolves symlinks in the longest existing prefix of p
+// and re-appends the part that does not exist yet, so a path that is about to
+// be created compares the same way as one that already exists (on macOS /tmp
+// and /var are symlinks into /private).
+func resolveExistingPrefix(p string) string {
+	clean := filepath.Clean(p)
+	rest := ""
+	for dir := clean; ; dir = filepath.Dir(dir) {
+		if resolved, err := filepath.EvalSymlinks(dir); err == nil {
+			if rest == "" {
+				return resolved
+			}
+			return filepath.Join(resolved, rest)
+		}
+		parent := filepath.Dir(dir)
+		if parent == dir {
+			return clean
+		}
+		if rest == "" {
+			rest = filepath.Base(dir)
+		} else {
+			rest = filepath.Join(filepath.Base(dir), rest)
+		}
 	}
+}
+
+func pathWithinAny(path string, roots []string) bool {
+	clean := resolveExistingPrefix(path)
 	for _, root := range roots {
 		if root == "" {
 			continue
 		}
+		// Resolve the root the same way as the path, or a root spelled through a
+		// symlink misses its own files.
+		root = resolveExistingPrefix(root)
 		if clean == root {
 			return true
 		}
