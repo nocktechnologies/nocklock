@@ -25,7 +25,7 @@ nocklock wrap -- claude
 
 Four commands and your agent is fenced.
 
-On macOS, `nocklock init` writes the same default `filesystem.root = "."`, and `nocklock wrap` enforces it as a kernel Seatbelt write boundary. Writes outside the root, `.nock`, and essential per-user runtime paths are denied. The built-in credential and sensitive paths (`~/.ssh`, `~/.aws`, `~/.config`, `~/.gnupg`, `~/Library/Keychains`, plus your `filesystem.deny` paths) are denied for reads and writes. Reads outside the root are not confined, and `filesystem.allow` is not enforced on macOS. `filesystem.mode = "read-only"` is enforced: it drops the write allow for the root. See "Filesystem platform boundary" below.
+On macOS, `nocklock init` writes the same default `filesystem.root = "."`, and `nocklock wrap` enforces it as a kernel Seatbelt write boundary. Writes outside the root, `.nock`, and essential per-user runtime paths are denied. The built-in credential and sensitive paths (`~/.ssh`, `~/.aws`, `~/.config`, `~/.gnupg`, `~/Library/Keychains`, plus your `filesystem.deny` paths) are denied for reads and writes. Reads outside the root are not confined, and `filesystem.allow` and `filesystem.allow_rw` are not enforced on macOS. `filesystem.mode = "read-only"` is enforced: it drops the write allow for the root. See "Filesystem platform boundary" below.
 
 To start from a preset for a specific runtime:
 
@@ -221,6 +221,8 @@ allow = [
     "~/.claude/",
     "/tmp/",
 ]
+# Linux only: these paths are explicitly read-write; allow stays read-only.
+allow_rw = []
 deny = [
     "~/.ssh/",
     "~/.aws/",
@@ -280,6 +282,11 @@ endpoint = "https://cc.nocktechnologies.io/api/fence/events/"
 ```
 
 The defaults are deliberately safe. Adjust them per project.
+
+On Linux, `filesystem.allow` grants read-only access. Use
+`filesystem.allow_rw` only for paths a tool must modify, such as a runtime's
+state directory. Both lists are ignored on macOS, whose Seatbelt backend uses
+the configured root as its write boundary instead.
 
 Runtime presets exist for `claude-code`, `codex`, `aider`, `gemini-cli`, `opencode`, and `goose`. Each preset keeps the network default-deny, blocks private ranges, keeps Linux filesystem and syscall enforcement required, and passes only the runtime's documented first-party provider key or keys. `gemini-cli` targets the API-key path; OAuth and Vertex AI setups need explicit operator review before widening the filesystem or egress. `opencode` targets OpenCode Zen/Go through `opencode.ai`; direct third-party providers should use a reviewed custom config. `goose` is a multi-provider preset covering Anthropic, OpenAI, Gemini, Groq, and OpenRouter; only the provider key the user has set is live, and the rest are unset and harmless. MCP extensions that reach additional hosts need an operator overlay.
 

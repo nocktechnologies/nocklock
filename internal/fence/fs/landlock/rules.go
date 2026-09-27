@@ -127,7 +127,7 @@ func RulesFromConfig(cfg *fsfence.FenceConfig, extra []AllowPath, abi int) (Spec
 	spec := Spec{
 		ABI:             abi,
 		HandledAccessFS: handled,
-		Paths:           make([]PathRule, 0, len(cfg.AllowPaths)+len(extra)),
+		Paths:           make([]PathRule, 0, len(cfg.AllowPaths)+len(cfg.AllowRWPaths)+len(extra)),
 	}
 	rootAccess := AccessReadWrite
 	if cfg.Mode == "read-only" {
@@ -140,6 +140,9 @@ func RulesFromConfig(cfg *fsfence.FenceConfig, extra []AllowPath, abi int) (Spec
 	spec.Paths = append(spec.Paths, rootRules...)
 	for _, p := range cfg.AllowPaths {
 		spec.Paths = append(spec.Paths, pathRule(p, AccessReadOnly, abi))
+	}
+	for _, p := range cfg.AllowRWPaths {
+		spec.Paths = append(spec.Paths, pathRule(p, AccessReadWrite, abi))
 	}
 	for _, p := range extra {
 		spec.Paths = append(spec.Paths, pathRule(filepath.Clean(p.Path), p.Access, abi))

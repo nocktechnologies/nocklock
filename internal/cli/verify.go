@@ -466,6 +466,7 @@ func verifySkipReason(fence string, cfg *config.Config, caps doctorCapabilities)
 func cloneVerifyConfig(cfg *config.Config) config.Config {
 	out := *cfg
 	out.Filesystem.Allow = append([]string(nil), cfg.Filesystem.Allow...)
+	out.Filesystem.AllowRW = append([]string(nil), cfg.Filesystem.AllowRW...)
 	out.Filesystem.Deny = append([]string(nil), cfg.Filesystem.Deny...)
 	out.Network.Allow = append([]string(nil), cfg.Network.Allow...)
 	out.Secrets.Pass = append([]string(nil), cfg.Secrets.Pass...)
@@ -576,25 +577,29 @@ func verifyCheckFromProbe(fence string, result probeResult, err error) verifyChe
 }
 
 func runProbeUnderWrap(ctx context.Context, cfg *config.Config, configPath, fence string, extraEnv map[string]string) (probeResult, error) {
-	tmp, err := os.MkdirTemp("", "nocklock-verify-config-*")
-	if err != nil {
-		return probeResult{Fence: fence}, err
+	projectRoot := filepath.Dir(filepath.Dir(configPath))
+	tmp, cleanup, ok := createScratchOutside(filesystemAllowedRoots(cfg, projectRoot))
+	if !ok {
+		return probeResult{Fence: fence}, fmt.Errorf("could not create verification scratch directory outside configured filesystem grants")
 	}
-	defer os.RemoveAll(tmp)
+	defer cleanup()
 	tmpNock := filepath.Join(tmp, config.Dir)
 	if err := os.MkdirAll(tmpNock, 0o755); err != nil {
 		return probeResult{Fence: fence}, err
 	}
 	cfgCopy := *cfg
-	absolutizeConfigPaths(&cfgCopy, filepath.Dir(filepath.Dir(configPath)))
+	absolutizeConfigPaths(&cfgCopy, projectRoot)
 	cfgCopy.Logging.DB = filepath.Join(tmp, config.Dir, "events.db")
 	cfgCopy.Cloud.APIKey = ""
-	tmpConfig := filepath.Join(tmpNock, config.File)
-	if err := writeConfigTOML(tmpConfig, &cfgCopy); err != nil {
-		return probeResult{Fence: fence}, err
-	}
 	exe, err := os.Executable()
 	if err != nil {
+		return probeResult{Fence: fence}, err
+	}
+	// The temporary config lives outside every configured grant. Keep the
+	// probe executable itself readable/executable so Landlock can launch it.
+	cfgCopy.Filesystem.Allow = append(cfgCopy.Filesystem.Allow, exe)
+	tmpConfig := filepath.Join(tmpNock, config.File)
+	if err := writeConfigTOML(tmpConfig, &cfgCopy); err != nil {
 		return probeResult{Fence: fence}, err
 	}
 	childCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
@@ -631,6 +636,7 @@ func absolutizeConfigPaths(cfg *config.Config, projectRoot string) {
 	cfg.Project.Root = absConfigPath(projectRoot, cfg.Project.Root)
 	cfg.Filesystem.Root = absConfigPath(projectRoot, cfg.Filesystem.Root)
 	cfg.Filesystem.Allow = absConfigPathList(projectRoot, cfg.Filesystem.Allow)
+	cfg.Filesystem.AllowRW = absConfigPathList(projectRoot, cfg.Filesystem.AllowRW)
 	cfg.Filesystem.Deny = absConfigPathList(projectRoot, cfg.Filesystem.Deny)
 	cfg.Logging.DB = absConfigPath(projectRoot, cfg.Logging.DB)
 }
@@ -671,6 +677,24 @@ func createFilesystemCanary(cfg *config.Config, projectRoot string) (string, str
 }
 
 func createCanaryOutside(roots []string) (string, string, func(), bool) {
+	dir, cleanup, ok := createScratchOutside(roots)
+	if !ok {
+		return "", "", nil, false
+	}
+	path := filepath.Join(dir, "canary.txt")
+	token := randomHex(16)
+	if err := os.WriteFile(path, []byte(token+"\n"), 0o600); err != nil {
+		cleanup()
+		return "", "", nil, false
+	}
+	if data, err := os.ReadFile(path); err != nil || strings.TrimSpace(string(data)) != token {
+		cleanup()
+		return "", "", nil, false
+	}
+	return path, token, cleanup, true
+}
+
+func createScratchOutside(roots []string) (string, func(), bool) {
 	for _, base := range []string{"/var/tmp", "/dev/shm", os.TempDir()} {
 		if base == "" || pathWithinAny(base, roots) {
 			continue
@@ -679,19 +703,9 @@ func createCanaryOutside(roots []string) (string, string, func(), bool) {
 		if err != nil {
 			continue
 		}
-		path := filepath.Join(dir, "canary.txt")
-		token := randomHex(16)
-		if err := os.WriteFile(path, []byte(token+"\n"), 0o600); err != nil {
-			os.RemoveAll(dir)
-			continue
-		}
-		if data, err := os.ReadFile(path); err != nil || strings.TrimSpace(string(data)) != token {
-			os.RemoveAll(dir)
-			continue
-		}
-		return path, token, func() { os.RemoveAll(dir) }, true
+		return dir, func() { os.RemoveAll(dir) }, true
 	}
-	return "", "", nil, false
+	return "", nil, false
 }
 
 func selectOffAllowlistNetworkTarget(cfg *config.Config) (string, error) {
@@ -737,6 +751,7 @@ func networkHostAllowed(hostname string, allowlist []string) bool {
 
 func filesystemAllowedRoots(cfg *config.Config, projectRoot string) []string {
 	paths := append([]string{cfg.Filesystem.Root}, cfg.Filesystem.Allow...)
+	paths = append(paths, cfg.Filesystem.AllowRW...)
 	out := make([]string, 0, len(paths))
 	for _, p := range paths {
 		p = absConfigPath(projectRoot, p)

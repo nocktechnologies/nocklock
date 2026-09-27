@@ -132,6 +132,15 @@ func TestValidateAllowPathTraversal(t *testing.T) {
 	}
 }
 
+func TestValidateAllowRWPathTraversal(t *testing.T) {
+	cfg := DefaultConfig()
+	cfg.Filesystem.AllowRW = []string{"../../state"}
+	errs := Validate(&cfg)
+	if !hasError(errs, "filesystem.allow_rw") {
+		t.Error("expected validation error for path traversal in allow_rw list")
+	}
+}
+
 func TestEffectivePolicySummary(t *testing.T) {
 	cfg := DefaultConfig()
 	cfg.Network.Allow = []string{"github.com", "api.anthropic.com"}

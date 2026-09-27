@@ -175,6 +175,34 @@ func TestCreateFilesystemCanaryFallsBackForBroadAllow(t *testing.T) {
 	}
 }
 
+func TestCreateScratchOutsideAvoidsGrantedTmp(t *testing.T) {
+	root := t.TempDir()
+	cfg := config.DefaultConfig()
+	cfg.Filesystem.Root = root
+	cfg.Filesystem.Allow = []string{"/tmp"}
+
+	scratch, cleanup, ok := createScratchOutside(filesystemAllowedRoots(&cfg, root))
+	if !ok {
+		t.Fatal("could not create scratch directory outside granted paths")
+	}
+	defer cleanup()
+	if pathWithinAny(scratch, filesystemAllowedRoots(&cfg, root)) {
+		t.Fatalf("scratch directory %q is inside a granted filesystem path", scratch)
+	}
+}
+
+func TestCloneVerifyConfigCopiesAllowRW(t *testing.T) {
+	cfg := config.DefaultConfig()
+	cfg.Filesystem.AllowRW = []string{"/var/lib/tool-state"}
+
+	clone := cloneVerifyConfig(&cfg)
+	clone.Filesystem.AllowRW[0] = "/var/lib/other-state"
+
+	if cfg.Filesystem.AllowRW[0] != "/var/lib/tool-state" {
+		t.Fatalf("clone mutated source allow_rw: %v", cfg.Filesystem.AllowRW)
+	}
+}
+
 func TestVerifyReportSucceededRequiresAtLeastOnePass(t *testing.T) {
 	report := verifyReport{Summary: verifySummary{Skipped: 4}}
 	if verifyReportSucceeded(report) {

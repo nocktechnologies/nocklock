@@ -17,6 +17,7 @@ root = "."
 
 [filesystem]
 allow = ["."]
+allow_rw = ["~/.claude/"]
 deny = ["~/.ssh/"]
 
 [network]
@@ -59,6 +60,9 @@ endpoint = "https://cc.nocktechnologies.io/api/fence/events/"
 	}
 	if len(cfg.Filesystem.Allow) != 1 || cfg.Filesystem.Allow[0] != "." {
 		t.Errorf("unexpected filesystem allow: %v", cfg.Filesystem.Allow)
+	}
+	if len(cfg.Filesystem.AllowRW) != 1 || cfg.Filesystem.AllowRW[0] != "~/.claude/" {
+		t.Errorf("unexpected filesystem allow_rw: %v", cfg.Filesystem.AllowRW)
 	}
 	if len(cfg.Secrets.Block) != 1 || cfg.Secrets.Block[0] != "AWS_*" {
 		t.Errorf("unexpected secrets block: %v", cfg.Secrets.Block)
@@ -222,6 +226,7 @@ allow_private_ranges = true
 
 [filesystem]
 allow = ["/tmp/", "/"]
+allow_rw = ["/tmp/", "/"]
 deny = ["~/work/private/"]
 mode = "read-only"
 macos_allow_unfenced = true
@@ -254,6 +259,9 @@ socket_families = ["unix", "netlink"]
 	}
 	if !reflect.DeepEqual(cfg.Filesystem.Allow, []string{"/tmp/"}) {
 		t.Fatalf("filesystem.allow = %v, want only /tmp/", cfg.Filesystem.Allow)
+	}
+	if len(cfg.Filesystem.AllowRW) != 0 {
+		t.Fatalf("filesystem.allow_rw widened profile: %v", cfg.Filesystem.AllowRW)
 	}
 	if !containsString(cfg.Filesystem.Deny, "~/work/private/") {
 		t.Fatalf("filesystem.deny did not add overlay deny: %v", cfg.Filesystem.Deny)

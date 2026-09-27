@@ -119,8 +119,40 @@ func TestRulesFromConfigKeepsAllowPathsReadOnlyWhenRootIsReadWrite(t *testing.T)
 	}
 }
 
-func TestRulesFromConfigLimitsRegularFileRights(t *testing.T) {
+func TestRulesFromConfigMapsAllowRWPathsReadWrite(t *testing.T) {
 	root := t.TempDir()
+	readOnly := filepath.Join(t.TempDir(), "readonly")
+	readWrite := filepath.Join(t.TempDir(), "readwrite")
+	for _, path := range []string{readOnly, readWrite} {
+		if err := os.Mkdir(path, 0o755); err != nil {
+			t.Fatalf("mkdir %q: %v", path, err)
+		}
+	}
+
+	spec, err := RulesFromConfig(&fsfence.FenceConfig{
+		Root:         root,
+		Mode:         "read-only",
+		AllowPaths:   []string{readOnly},
+		AllowRWPaths: []string{readWrite},
+	}, nil, 5)
+	if err != nil {
+		t.Fatalf("RulesFromConfig failed: %v", err)
+	}
+
+	rules := make(map[string]PathRule, len(spec.Paths))
+	for _, rule := range spec.Paths {
+		rules[rule.Path] = rule
+	}
+	if rule := rules[readOnly]; rule.Access != AccessReadOnly || rule.Rights&writeRights != 0 {
+		t.Fatalf("read-only allow rule = %+v, want no write rights", rule)
+	}
+	if rule := rules[readWrite]; rule.Access != AccessReadWrite || rule.Rights&writeRights == 0 {
+		t.Fatalf("read-write allow rule = %+v, want write rights", rule)
+	}
+}
+
+func TestRulesFromConfigLimitsRegularFileRights(t *testing.T) {
+	root := resolvedTempDir(t)
 	allowedPath := filepath.Join(root, "allowed.txt")
 	if err := os.WriteFile(allowedPath, []byte("allowed"), 0o600); err != nil {
 		t.Fatalf("write allowed placeholder: %v", err)
@@ -138,7 +170,10 @@ func TestRulesFromConfigLimitsRegularFileRights(t *testing.T) {
 		t.Fatalf("RulesFromConfig failed: %v", err)
 	}
 
-	fileRule := spec.Paths[0]
+	fileRule, ok := findPathRule(spec.Paths, allowedPath)
+	if !ok {
+		t.Fatalf("missing regular-file rule %q in %+v", allowedPath, spec.Paths)
+	}
 	if fileRule.Rights&RightMakeDir != 0 || fileRule.Rights&RightRemoveDir != 0 || fileRule.Rights&RightRefer != 0 {
 		t.Fatalf("regular file rule should not include directory-only rights: %#x", fileRule.Rights)
 	}
@@ -172,15 +207,27 @@ func TestRulesFromConfigEnumeratesRootButSkipsNockAuditDir(t *testing.T) {
 	got := map[string]bool{}
 	for _, rule := range spec.Paths {
 		got[rule.Path] = true
-		if rule.Path == root || rule.Path == filepath.Join(root, ".nock") || strings.HasPrefix(rule.Path, filepath.Join(root, ".nock")+string(os.PathSeparator)) {
+		if rule.Path == filepath.Join(root, ".nock") || strings.HasPrefix(rule.Path, filepath.Join(root, ".nock")+string(os.PathSeparator)) {
 			t.Fatalf("ruleset granted audit path %q in %+v", rule.Path, spec.Paths)
 		}
+	}
+	if rootRule, ok := findPathRule(spec.Paths, root); ok {
+		t.Fatalf("ruleset unexpectedly granted read-write root %q: %+v", root, rootRule)
 	}
 	for _, want := range []string{readme, src} {
 		if !got[want] {
 			t.Fatalf("missing root child rule %q in %+v", want, spec.Paths)
 		}
 	}
+}
+
+func findPathRule(rules []PathRule, path string) (PathRule, bool) {
+	for _, rule := range rules {
+		if rule.Path == path {
+			return rule, true
+		}
+	}
+	return PathRule{}, false
 }
 
 func TestRulesFromConfigRejectsRootChildSymlinkOutsideRoot(t *testing.T) {

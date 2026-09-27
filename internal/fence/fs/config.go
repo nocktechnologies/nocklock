@@ -20,20 +20,22 @@ const fieldSep = "\x1f"
 // for enforcement. All paths have been cleaned, expanded, and (for Root)
 // symlink-resolved.
 type FenceConfig struct {
-	Root       string
-	Mode       string
-	AllowPaths []string
-	DenyPaths  []string
+	Root         string
+	Mode         string
+	AllowPaths   []string
+	AllowRWPaths []string
+	DenyPaths    []string
 }
 
 // SerializedConfig is the parsed representation of a serialized fence
 // rule string, as consumed by the interposer shared library.
 type SerializedConfig struct {
-	Root       string
-	Mode       string // "rw" or "ro"
-	SocketPath string
-	AllowPaths []string
-	DenyPaths  []string
+	Root         string
+	Mode         string // "rw" or "ro"
+	SocketPath   string
+	AllowPaths   []string
+	AllowRWPaths []string
+	DenyPaths    []string
 }
 
 // ExpandTilde replaces a leading ~ in path with the user's home directory.
@@ -143,6 +145,14 @@ func ProcessConfig(cfg config.FilesystemConfig) (*FenceConfig, error) {
 		}
 		allowPaths = append(allowPaths, resolved)
 	}
+	allowRWPaths := make([]string, 0, len(cfg.AllowRW))
+	for _, p := range cfg.AllowRW {
+		resolved, err := resolvePath(p)
+		if err != nil {
+			return nil, fmt.Errorf("cannot resolve read-write allow path %q: %w", p, err)
+		}
+		allowRWPaths = append(allowRWPaths, resolved)
+	}
 
 	// Resolve deny paths.
 	denyPaths := make([]string, 0, len(cfg.Deny))
@@ -163,6 +173,11 @@ func ProcessConfig(cfg config.FilesystemConfig) (*FenceConfig, error) {
 			return nil, err
 		}
 	}
+	for _, p := range allowRWPaths {
+		if err := validateNoSeparator(p, "allow_rw"); err != nil {
+			return nil, err
+		}
+	}
 	for _, p := range denyPaths {
 		if err := validateNoSeparator(p, "deny"); err != nil {
 			return nil, err
@@ -170,10 +185,11 @@ func ProcessConfig(cfg config.FilesystemConfig) (*FenceConfig, error) {
 	}
 
 	return &FenceConfig{
-		Root:       rootPath,
-		Mode:       mode,
-		AllowPaths: allowPaths,
-		DenyPaths:  denyPaths,
+		Root:         rootPath,
+		Mode:         mode,
+		AllowPaths:   allowPaths,
+		AllowRWPaths: allowRWPaths,
+		DenyPaths:    denyPaths,
 	}, nil
 }
 
@@ -190,7 +206,7 @@ func validateNoSeparator(path, label string) error {
 // passing to the LD_PRELOAD interposer via an environment variable.
 // The format uses the Unit Separator (\x1f) as delimiter:
 //
-//	root\x1fmode\x1fsocket\x1f+allow1\x1f+allow2\x1f-deny1\x1f-deny2
+//	root\x1fmode\x1fsocket\x1f+allow1\x1f*allowRW1\x1f-deny1
 //
 // Mode is abbreviated: "read-write" becomes "rw", "read-only" becomes "ro".
 func (fc *FenceConfig) Serialize(socketPath string) string {
@@ -202,6 +218,9 @@ func (fc *FenceConfig) Serialize(socketPath string) string {
 	parts := []string{fc.Root, modeShort, socketPath}
 	for _, p := range fc.AllowPaths {
 		parts = append(parts, "+"+p)
+	}
+	for _, p := range fc.AllowRWPaths {
+		parts = append(parts, "*"+p)
 	}
 	for _, p := range fc.DenyPaths {
 		parts = append(parts, "-"+p)
@@ -226,6 +245,8 @@ func ParseSerialized(s string) (*SerializedConfig, error) {
 	for _, f := range fields[3:] {
 		if strings.HasPrefix(f, "+") {
 			sc.AllowPaths = append(sc.AllowPaths, f[1:])
+		} else if strings.HasPrefix(f, "*") {
+			sc.AllowRWPaths = append(sc.AllowRWPaths, f[1:])
 		} else if strings.HasPrefix(f, "-") {
 			sc.DenyPaths = append(sc.DenyPaths, f[1:])
 		}

@@ -15,6 +15,7 @@ func DefaultConfig() Config {
 				"~/.claude/",
 				"/tmp/",
 			},
+			AllowRW: []string{},
 			Deny: []string{
 				"~/.ssh/",
 				"~/.aws/",
@@ -91,6 +92,8 @@ allow = [
     "~/.claude/",
     "/tmp/",
 ]
+# Linux only: paths explicitly granted read-write access. allow stays read-only.
+allow_rw = []
 deny = [
     "~/.ssh/",
     "~/.aws/",
