@@ -6,6 +6,35 @@ All notable changes to NockLock will be documented in this file.
 
 ### Added
 
+- CI acceptance tests that run the three July-2026 DNS-based egress-escape tricks
+  (from the Hugging Face sandbox-escape writeup) against NockLock's egress fence
+  on both platforms (N10813). On Linux, `TestNetnsDNSEscape` drives the real netns
+  tproxy floor and, from inside the namespace, attempts each trick: (T1) an
+  in-process resolver override — a getaddrinfo-style connect to a disallowed IP
+  carrying the allowlisted SNI, a raw-IP connect to that same disallowed IP with
+  no SNI, and the child's own UDP+TCP/53 query to an off-namespace resolver;
+  (T2) a `resolv.conf` rewrite to 8.8.8.8; and (T3) an `/etc/hosts` pin of the
+  allowed name to a disallowed IP. The centerpiece (T1a) dials the attacker IP
+  while presenting the allowlisted SNI and must still read back the **real
+  allowed upstream's 200** — a race-free, synchronous receipt that the tproxy
+  floor redirected by port and re-resolved the SNI itself, so the trick changed
+  only what the child thought an address is, never where the proxy connected.
+  The raw-IP no-SNI attempt's connection is terminated at the proxy (checked by
+  the child), and the parent separately asserts the run's deny log carries a
+  matching tls/empty-host receipt after the child exits; the direct
+  off-namespace resolver query gets no answer (default-drop). The
+  `resolv.conf`/`hosts` writes are **asserted** to fail closed — the test fails
+  the run with a distinct exit code unless the write returns EACCES/EPERM/EROFS
+  — and only then connects by the allowed NAME and requires it still lands on
+  the allowed upstream. The test log carries a per-trick outcome line (e.g.
+  "T1a: redirected to allowed upstream, 200 read", "T2/T3: write_denied
+  (<errno>)") as evidence, not just `--- PASS`. On macOS,
+  `TestWrapMacOSDNSEscapeRecordsProxyEnforcement` records the proxy-only model:
+  it asserts a proxied disallowed host is denied and signed, the allowed host
+  works and is signed, and `verify --audit` is clean, while logging that direct-IP
+  egress and hosts-pinning are not kernel-blocked (macOS has no netns floor). Both
+  run in new `network-egress.yml` jobs — the Linux job as root, the macOS job on a
+  hosted runner — each emitting a per-trick verdict table to the step summary.
 - Linux userspace proxy mode now bridges syscall-fenced children to the
   allowlist proxy without granting IP sockets (N10753). When the syscall fence
   narrows proxy-mode children to Unix sockets, `wrap` serves the HTTP(S) proxy on

@@ -162,6 +162,9 @@ func TestMain(m *testing.M) {
 	if os.Getenv("NOCKLOCK_PROTOCOL_CLIENT") == "1" {
 		os.Exit(runProtocolMatrixClient())
 	}
+	if os.Getenv(dnsEscapeClientEnv) == "1" {
+		os.Exit(runDNSEscapeClient())
+	}
 	if scenario := os.Getenv(scenarioEnv); scenario != "" {
 		os.Exit(runChild(scenario))
 	}
@@ -260,15 +263,24 @@ func mutationArgv(scenario string) []string {
 // --- Parent side: gates, namespace setup, and the two assertions. ---
 
 // strictlyRequired reports whether the caller demands the test actually run.
-// A privileged CI job sets NOCKLOCK_Q6_REQUIRE=1 (Q6 mutation bar) or
-// NOCKLOCK_NETNS_REQUIRE=1 (Phase-1 foundation egress bar) so the normally-green
-// skips (non-root, or missing ip/nft) become HARD FAILURES — a misconfigured
-// runner must not report green by silently skipping. Both vars feed the same
-// shared requireRoot/requireTool gates, so the foundation test skips-are-failures
-// under its own job without duplicating those helpers. Mirrors the seccomp
-// suite's "a skip is not a pass" discipline.
+// A privileged CI job sets one of the per-suite gate vars — NOCKLOCK_Q6_REQUIRE=1
+// (Q6 mutation bar), NOCKLOCK_NETNS_REQUIRE=1 (Phase-1 foundation egress bar),
+// NOCKLOCK_PROTOCOL_REQUIRE=1 (Phase-1b protocol matrix), NOCKLOCK_DNS_ESCAPE_REQUIRE=1
+// (DNS-escape acceptance) — so the normally-green skips (non-root, or missing
+// ip/nft) become HARD FAILURES: a misconfigured runner must not report green by
+// silently skipping. Rather than accrete one OR term per suite, this matches the
+// shared naming convention: any NOCKLOCK_*_REQUIRE var set to "1" arms the gate,
+// so a new acceptance suite needs no edit here. All vars feed the same shared
+// requireRoot/requireTool gates. Mirrors the seccomp suite's "a skip is not a
+// pass" discipline.
 func strictlyRequired() bool {
-	return os.Getenv("NOCKLOCK_Q6_REQUIRE") == "1" || os.Getenv("NOCKLOCK_NETNS_REQUIRE") == "1" || os.Getenv("NOCKLOCK_PROTOCOL_REQUIRE") == "1"
+	for _, kv := range os.Environ() {
+		name, value, ok := strings.Cut(kv, "=")
+		if ok && value == "1" && strings.HasPrefix(name, "NOCKLOCK_") && strings.HasSuffix(name, "_REQUIRE") {
+			return true
+		}
+	}
+	return false
 }
 
 // requireRoot skips (or, under NOCKLOCK_Q6_REQUIRE=1, fails) unless running as
