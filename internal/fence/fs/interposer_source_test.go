@@ -29,6 +29,17 @@ func TestInterposerSourceCoversStatFamily(t *testing.T) {
 	}
 }
 
+func TestInterposerSourceFailsClosedOnEmptyAllowRWPayload(t *testing.T) {
+	source, err := os.ReadFile("interposer/libfence_fs.c")
+	if err != nil {
+		t.Fatal(err)
+	}
+	pattern := `(?s)else if \(f\[0\] == '\*'\).*?if \(f\[1\] == '\\0'\).*?g_config\.deny_all = 1`
+	if !regexp.MustCompile(pattern).Match(source) {
+		t.Fatal("empty read-write allow payload must fail closed")
+	}
+}
+
 func TestInterposerSourceCoversMetadataMutatorFamily(t *testing.T) {
 	source, err := os.ReadFile("interposer/libfence_fs.c")
 	if err != nil {

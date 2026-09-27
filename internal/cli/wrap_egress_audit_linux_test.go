@@ -16,7 +16,7 @@ import (
 // N10649 egress-decision audit path. Unlike the protocol matrix — which starts
 // the sidecars directly and never runs `wrap`, so it does NOT exercise the
 // signed-write path — this test drives the WHOLE `nocklock wrap --net-fence=netns`
-// pipeline end to end and proves the signed rows land in .nock/events.db.
+// pipeline end to end and proves the signed rows land in the event log.
 //
 // It deliberately does NOT use requireRoot: the test invokes wrap AS THE RUNNER
 // USER (wrap sudo's the privileged helper internally, and the fenced child drops
@@ -77,7 +77,7 @@ func nocklockBinary(t *testing.T) string {
 
 // TestWrapNetnsEgressDecisionAudit runs one wrapped session that makes one
 // allowlisted (example.com:443) and one denied (blocked.test:80) egress attempt,
-// then asserts both decisions were signed into .nock/events.db as network events
+// then asserts both decisions were signed into the event log as network events
 // naming their hosts, and that `nocklock verify --audit` reports the chain intact
 // and signatures valid.
 func TestWrapNetnsEgressDecisionAudit(t *testing.T) {
@@ -149,7 +149,9 @@ enforcement = "off"
 // wrap with, not in this post-run verdict.
 func assertBothEgressDecisionsSigned(t *testing.T, bin, projectDir string) {
 	t.Helper()
-	dbPath := filepath.Join(projectDir, ".nock", "events.db")
+	// The event log lives in the audit state directory outside the project
+	// (config.AuditStateDir), so resolve it the way the CLI does.
+	dbPath := resolvedAuditDB(t, projectDir)
 	logger, err := logging.NewLogger(dbPath, projectDir, signingLoggerOpts()...)
 	if err != nil {
 		t.Fatalf("open event log at %s: %v", dbPath, err)
@@ -180,35 +182,4 @@ func assertBothEgressDecisionsSigned(t *testing.T, bin, projectDir string) {
 	if out, err := verify.CombinedOutput(); err != nil {
 		t.Fatalf("nocklock verify --audit did not pass (chain/signature failure): %v\n%s", err, out)
 	}
-}
-
-func hasDecisionRow(rows []logging.Event, needles ...string) bool {
-	for _, e := range rows {
-		if e.Category != "network" {
-			continue
-		}
-		match := true
-		for _, n := range needles {
-			if !strings.Contains(e.Detail, n) {
-				match = false
-				break
-			}
-		}
-		if match {
-			return true
-		}
-	}
-	return false
-}
-
-func detailList(rows []logging.Event) string {
-	var b strings.Builder
-	for _, e := range rows {
-		b.WriteString("\n  - ")
-		b.WriteString(e.Detail)
-	}
-	if b.Len() == 0 {
-		return "(none)"
-	}
-	return b.String()
 }

@@ -79,17 +79,22 @@ func FuzzFsFencePathDecision(f *testing.F) {
 			assertSymlinkFree(t, "resolvePath", pathInput, out)
 		}
 
-		// --- Layer 2: ProcessConfig with the adversarial path as allow AND deny
+		// --- Layer 2: ProcessConfig with the adversarial path as every allow
+		// and deny entry
 		// under a real root. Every resolved path must be symlink-free. ---
 		root := t.TempDir()
 		if fc, err := ProcessConfig(config.FilesystemConfig{
-			Root:  root,
-			Mode:  "read-write",
-			Allow: []string{pathInput},
-			Deny:  []string{pathInput},
+			Root:    root,
+			Mode:    "read-write",
+			Allow:   []string{pathInput},
+			AllowRW: []string{pathInput},
+			Deny:    []string{pathInput},
 		}); err == nil && fc != nil {
 			for _, p := range fc.AllowPaths {
 				assertSymlinkFree(t, "ProcessConfig.Allow", pathInput, p)
+			}
+			for _, p := range fc.AllowRWPaths {
+				assertSymlinkFree(t, "ProcessConfig.AllowRW", pathInput, p)
 			}
 			for _, p := range fc.DenyPaths {
 				assertSymlinkFree(t, "ProcessConfig.Deny", pathInput, p)

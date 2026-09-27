@@ -20,20 +20,46 @@ const fieldSep = "\x1f"
 // for enforcement. All paths have been cleaned, expanded, and (for Root)
 // symlink-resolved.
 type FenceConfig struct {
-	Root       string
-	Mode       string
-	AllowPaths []string
-	DenyPaths  []string
+	Root         string
+	Mode         string
+	AllowPaths   []string
+	AllowRWPaths []string
+	DenyPaths    []string
+
+	// ProtectedRootSubdir, when set, is a directory INSIDE Root that must not
+	// become writable — in practice a legacy in-project audit directory. It
+	// changes how the root is granted: instead of one rule on Root, the fence
+	// grants each of Root's existing children and skips this one, so the child
+	// keeps its existing access but cannot create or remove entries directly in
+	// Root itself.
+	//
+	// That trade is forced, not chosen. Landlock resolves an access by walking
+	// UPWARD from the accessed file and allowing as soon as any ancestor rule
+	// grants it, so a rule on Root cannot be narrowed by a rule underneath it:
+	// granting Root would grant this directory too. Leave it empty whenever the
+	// audit state lives outside Root, which is the default, and the root is
+	// granted as one hierarchy.
+	//
+	// It must be a DIRECT child of Root: skipping one entry protects only that
+	// entry, so a directory further down would be reached through the grant on
+	// the child above it. Rule generation refuses rather than pretend otherwise.
+	//
+	// Landlock-only. It shapes the kernel ruleset and is deliberately absent
+	// from Serialize, because the LD_PRELOAD interposer and the macOS Seatbelt
+	// profile express the same protection through DenyPaths, which they can
+	// enforce directly.
+	ProtectedRootSubdir string
 }
 
 // SerializedConfig is the parsed representation of a serialized fence
 // rule string, as consumed by the interposer shared library.
 type SerializedConfig struct {
-	Root       string
-	Mode       string // "rw" or "ro"
-	SocketPath string
-	AllowPaths []string
-	DenyPaths  []string
+	Root         string
+	Mode         string // "rw" or "ro"
+	SocketPath   string
+	AllowPaths   []string
+	AllowRWPaths []string
+	DenyPaths    []string
 }
 
 // ExpandTilde replaces a leading ~ in path with the user's home directory.
@@ -143,6 +169,17 @@ func ProcessConfig(cfg config.FilesystemConfig) (*FenceConfig, error) {
 		}
 		allowPaths = append(allowPaths, resolved)
 	}
+	allowRWPaths := make([]string, 0, len(cfg.AllowRW))
+	for _, p := range cfg.AllowRW {
+		if strings.TrimSpace(p) == "" {
+			return nil, fmt.Errorf("read-write allow path must not be empty")
+		}
+		resolved, err := resolvePath(p)
+		if err != nil {
+			return nil, fmt.Errorf("cannot resolve read-write allow path %q: %w", p, err)
+		}
+		allowRWPaths = append(allowRWPaths, resolved)
+	}
 
 	// Resolve deny paths.
 	denyPaths := make([]string, 0, len(cfg.Deny))
@@ -163,6 +200,11 @@ func ProcessConfig(cfg config.FilesystemConfig) (*FenceConfig, error) {
 			return nil, err
 		}
 	}
+	for _, p := range allowRWPaths {
+		if err := validateNoSeparator(p, "allow_rw"); err != nil {
+			return nil, err
+		}
+	}
 	for _, p := range denyPaths {
 		if err := validateNoSeparator(p, "deny"); err != nil {
 			return nil, err
@@ -170,10 +212,11 @@ func ProcessConfig(cfg config.FilesystemConfig) (*FenceConfig, error) {
 	}
 
 	return &FenceConfig{
-		Root:       rootPath,
-		Mode:       mode,
-		AllowPaths: allowPaths,
-		DenyPaths:  denyPaths,
+		Root:         rootPath,
+		Mode:         mode,
+		AllowPaths:   allowPaths,
+		AllowRWPaths: allowRWPaths,
+		DenyPaths:    denyPaths,
 	}, nil
 }
 
@@ -190,7 +233,7 @@ func validateNoSeparator(path, label string) error {
 // passing to the LD_PRELOAD interposer via an environment variable.
 // The format uses the Unit Separator (\x1f) as delimiter:
 //
-//	root\x1fmode\x1fsocket\x1f+allow1\x1f+allow2\x1f-deny1\x1f-deny2
+//	root\x1fmode\x1fsocket\x1f+allow1\x1f*allowRW1\x1f-deny1
 //
 // Mode is abbreviated: "read-write" becomes "rw", "read-only" becomes "ro".
 func (fc *FenceConfig) Serialize(socketPath string) string {
@@ -202,6 +245,9 @@ func (fc *FenceConfig) Serialize(socketPath string) string {
 	parts := []string{fc.Root, modeShort, socketPath}
 	for _, p := range fc.AllowPaths {
 		parts = append(parts, "+"+p)
+	}
+	for _, p := range fc.AllowRWPaths {
+		parts = append(parts, "*"+p)
 	}
 	for _, p := range fc.DenyPaths {
 		parts = append(parts, "-"+p)
@@ -226,6 +272,8 @@ func ParseSerialized(s string) (*SerializedConfig, error) {
 	for _, f := range fields[3:] {
 		if strings.HasPrefix(f, "+") {
 			sc.AllowPaths = append(sc.AllowPaths, f[1:])
+		} else if strings.HasPrefix(f, "*") {
+			sc.AllowRWPaths = append(sc.AllowRWPaths, f[1:])
 		} else if strings.HasPrefix(f, "-") {
 			sc.DenyPaths = append(sc.DenyPaths, f[1:])
 		}

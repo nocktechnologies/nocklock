@@ -38,9 +38,16 @@ var logCmd = &cobra.Command{
 			return fmt.Errorf("failed to load config: %w", err)
 		}
 
-		dbPath, projectRoot := config.ResolveDBPath(cfg, configPath)
+		dbPath, projectRoot, err := config.ResolveDBPath(cfg, configPath)
+		if err != nil {
+			cmd.SilenceUsage = true
+			return err
+		}
 
-		// Don't create the DB file for a read-only operation.
+		// Report an absent log instead of creating one: this is a read-only
+		// command. (Resolving the path does create the audit state DIRECTORY so
+		// that every command agrees on where the chain is, but the database
+		// itself is only ever created by wrap.)
 		if _, statErr := os.Stat(dbPath); statErr != nil {
 			if errors.Is(statErr, os.ErrNotExist) {
 				fmt.Println("No fence events recorded. Events will appear here once fences are active.")
