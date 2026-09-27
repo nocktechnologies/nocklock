@@ -4,6 +4,33 @@ All notable changes to NockLock will be documented in this file.
 
 ## [Unreleased]
 
+### Added
+
+- CI acceptance tests that run the three July-2026 DNS-based egress-escape tricks
+  (from the Hugging Face sandbox-escape writeup) against NockLock's egress fence
+  on both platforms (N10813). On Linux, `TestNetnsDNSEscape` drives the real netns
+  tproxy floor and, from inside the namespace, attempts each trick: (T1) an
+  in-process resolver override — a getaddrinfo-style connect to a disallowed IP
+  carrying the allowlisted SNI, a raw-IP connect with no SNI, and the child's own
+  UDP+TCP/53 query to an off-namespace resolver; (T2) a `resolv.conf` rewrite to
+  8.8.8.8; and (T3) an `/etc/hosts` pin of the allowed name to a disallowed IP.
+  The centerpiece (T1a) dials the attacker IP while presenting the allowlisted
+  SNI and must still read back the **real allowed upstream's 200** — a race-free,
+  synchronous receipt that the tproxy floor redirected by port and re-resolved the
+  SNI itself, so the trick changed only what the child thought an address is,
+  never where the proxy connected. The raw-IP no-SNI attempt is terminated at the
+  proxy and recorded as a deny; the direct off-namespace resolver query gets no
+  answer (default-drop). The `resolv.conf`/`hosts` writes fail closed (EACCES: the
+  child drops to a non-root uid and both files are root-owned), and the test
+  records that outcome, then connects by the allowed NAME and requires it still
+  lands on the allowed upstream. On macOS,
+  `TestWrapMacOSDNSEscapeRecordsProxyEnforcement` records the proxy-only model:
+  it asserts a proxied disallowed host is denied and signed, the allowed host
+  works and is signed, and `verify --audit` is clean, while logging that direct-IP
+  egress and hosts-pinning are not kernel-blocked (macOS has no netns floor). Both
+  run in new `network-egress.yml` jobs — the Linux job as root, the macOS job on a
+  hosted runner — each emitting a per-trick verdict table to the step summary.
+
 ### Fixed
 
 - claude-code preset now runs real programs under the strongest non-root fence

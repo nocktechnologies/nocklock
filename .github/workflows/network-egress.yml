@@ -394,3 +394,102 @@ jobs:
           nocklock doctor --json > doctor.json || true
           cat doctor.json
           jq -e '.checks[] | select(.name=="egress-helper") | .severity == "ok"' doctor.json
+
+  dns-escape-netns:
+    name: netns DNS-escape · three July tricks vs egress floor (root)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: provision iproute2 + nftables
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y iproute2 nftables
+
+      # Compile AS THE RUNNER USER so root never writes into the Go build/module
+      # cache (setup-go persists it; root-owned files there break the cache save).
+      # The compiled binary re-execs itself as the in-namespace DNS-escape client,
+      # so a standalone binary is exactly what the test needs — same idiom as the
+      # protocol-matrix job.
+      - name: compile DNS-escape acceptance test
+        run: go test -c -o netns.test ./internal/fence/network/netns/
+
+      # Run as root with NOCKLOCK_DNS_ESCAPE_REQUIRE=1 so a non-root or tool-missing
+      # runner HARD-FAILS instead of green-skipping. The test drives the real netns
+      # tproxy floor and, from inside the namespace, runs the three July-2026 tricks
+      # (getaddrinfo override to a disallowed IP, raw-IP connect, own resolver
+      # query, resolv.conf rewrite, /etc/hosts pin). It asserts a host-side witness
+      # at the attacker IP receives ZERO bytes, the allowlisted upstream still
+      # works, and the proxy recorded the deny.
+      - name: run DNS-escape acceptance test as root (skips forbidden)
+        run: sudo env NOCKLOCK_DNS_ESCAPE_REQUIRE=1 ./netns.test -test.run '^TestNetnsDNSEscape$' -test.v -test.count=1
+
+      # No `if: always()`: the verdict narrative asserts every row held, so it must
+      # render only when the acceptance test above actually passed.
+      - name: record the Linux per-trick verdict
+        run: |
+          {
+            echo "### DNS-escape — Linux netns egress floor"
+            echo ""
+            echo "| trick | vector | expected NockLock behavior |"
+            echo "|---|---|---|"
+            echo "| T1a in-process resolver | getaddrinfo override: connect to a disallowed IP with the allowed SNI | tproxy redirects by port; proxy re-resolves the SNI itself and the request lands on the real allowed host (reads back its 200) |"
+            echo "| T1b in-process resolver | raw disallowed IP, no SNI | proxy has no allowlisted name to honor and terminates the connection (deny recorded) |"
+            echo "| T1c in-process resolver | own UDP+TCP/53 query to an off-namespace resolver | external resolvers unreachable (default-drop): no answer |"
+            echo "| T2 resolv.conf rewrite | write nameserver 8.8.8.8 into the resolver the child sees | root-owned bind-mount → write denied (EACCES); connecting by the allowed name still lands on the allowed upstream |"
+            echo "| T3 /etc/hosts pin | map the allowed name to a disallowed IP | root-owned shared file → write denied (EACCES); connecting by the allowed name still lands on the allowed upstream |"
+            echo ""
+            echo "Green means every row held: the SNI-spoofed request re-resolved to the real allowed host, the raw-IP attempt was denied and recorded, and the write tricks failed closed. See the test log for per-trick outcomes."
+          } >> "$GITHUB_STEP_SUMMARY"
+
+  dns-escape-macos:
+    name: macOS DNS-escape · proxy enforcement recorded (hosted macOS)
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      # The proxy resolves the allowlisted name itself; curl 7.86+ auto-bypasses
+      # the proxy for a literal "localhost", so the test uses a real name mapped to
+      # loopback here and binds its allowed upstream there.
+      - name: map the allowlisted test host to loopback
+        run: echo "127.0.0.1 nocklock-allowed.test" | sudo tee -a /etc/hosts
+
+      # NOCKLOCK_DNS_ESCAPE_REQUIRE=1 turns a would-be skip (sandbox-exec missing,
+      # or the test host not provisioned) into a HARD FAILURE so a misconfigured
+      # runner is loud, not green. macOS has no kernel egress floor, so this job
+      # RECORDS what the proxy-only fence does: a proxied disallowed host is denied
+      # and signed; the allowed host still works and is signed; direct-IP and
+      # hosts-pin are logged as not-kernel-blocked (see the test log).
+      - name: run macOS DNS-escape recording test (skips forbidden)
+        run: NOCKLOCK_DNS_ESCAPE_REQUIRE=1 go test ./internal/cli/ -run '^TestWrapMacOSDNSEscapeRecordsProxyEnforcement$' -v -count=1
+
+      # No `if: always()`: this verdict records the asserted + recorded outcomes,
+      # so it must render only when the recording test above actually passed.
+      - name: record the macOS per-trick verdict
+        run: |
+          {
+            echo "### DNS-escape — macOS proxy-only fence (no kernel egress floor)"
+            echo ""
+            echo "| trick | macOS outcome |"
+            echo "|---|---|"
+            echo "| proxied disallowed host | ASSERTED denied at the proxy and signed as a deny row; verify --audit clean |"
+            echo "| proxied allowed host | ASSERTED permitted, reaches the upstream, signed as an allow row |"
+            echo "| T1 direct-IP / raw-socket egress | RECORDED not kernel-blocked — a client ignoring HTTP_PROXY reaches any address (Seatbelt has no network rules); the Linux netns floor closes this |"
+            echo "| T3 /etc/hosts pin | RECORDED shared, root-owned file: a non-root child cannot pin it, and the proxy re-resolves the allowed name itself |"
+            echo ""
+            echo "macOS egress enforcement is the local HTTP(S) proxy plus HTTP_PROXY injection, which a cooperating client honors. See the test log for the recorded limitations."
+          } >> "$GITHUB_STEP_SUMMARY"

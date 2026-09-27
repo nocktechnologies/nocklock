@@ -181,34 +181,3 @@ func assertBothEgressDecisionsSigned(t *testing.T, bin, projectDir string) {
 		t.Fatalf("nocklock verify --audit did not pass (chain/signature failure): %v\n%s", err, out)
 	}
 }
-
-func hasDecisionRow(rows []logging.Event, needles ...string) bool {
-	for _, e := range rows {
-		if e.Category != "network" {
-			continue
-		}
-		match := true
-		for _, n := range needles {
-			if !strings.Contains(e.Detail, n) {
-				match = false
-				break
-			}
-		}
-		if match {
-			return true
-		}
-	}
-	return false
-}
-
-func detailList(rows []logging.Event) string {
-	var b strings.Builder
-	for _, e := range rows {
-		b.WriteString("\n  - ")
-		b.WriteString(e.Detail)
-	}
-	if b.Len() == 0 {
-		return "(none)"
-	}
-	return b.String()
-}

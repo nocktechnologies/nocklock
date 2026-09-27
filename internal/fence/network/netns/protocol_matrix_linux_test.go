@@ -114,7 +114,7 @@ func protocolChildCredential(t *testing.T) (int, int, []int) {
 // runProtocolMatrixClient is invoked by TestMain only after the helper has
 // dropped the real child credential and bound its private resolver mount.
 func runProtocolMatrixClient() int {
-	if !protocolHTTPSRequest("localhost") {
+	if !protocolHTTPSRequest("127.0.0.1:443", "localhost") {
 		return 41 // allowed HTTPS must make a positive end-to-end request
 	}
 	if !protocolHTTPRequest("localhost") {
@@ -145,8 +145,14 @@ func runProtocolMatrixClient() int {
 	return 0
 }
 
-func protocolHTTPSRequest(serverName string) bool {
-	conn, err := tls.Dial("tcp", "127.0.0.1:443", &tls.Config{ServerName: serverName, InsecureSkipVerify: true}) //nolint:gosec // local root-test endpoint
+// protocolHTTPSRequest dials dialAddr over TLS presenting serverName as the SNI,
+// then issues a GET and reports whether it received a 200 OK. Callers vary the
+// dial target independently of the SNI: the protocol matrix dials the intercepted
+// 127.0.0.1:443, while the DNS-escape test dials a disallowed IP (or the allowed
+// name) with the allowlisted SNI to prove the proxy re-resolves by SNI rather
+// than honoring the dialed address.
+func protocolHTTPSRequest(dialAddr, serverName string) bool {
+	conn, err := tls.Dial("tcp", dialAddr, &tls.Config{ServerName: serverName, InsecureSkipVerify: true}) //nolint:gosec // local root-test endpoint
 	if err != nil {
 		return false
 	}
