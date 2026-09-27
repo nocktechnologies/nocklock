@@ -128,7 +128,15 @@ enforcement = "off"
 
 func assertMacOSEgressDecisionsSigned(t *testing.T, project string) {
 	t.Helper()
-	dbPath := filepath.Join(project, config.Dir, "events.db")
+	configPath := filepath.Join(project, config.Dir, config.File)
+	cfg, err := config.Load(configPath)
+	if err != nil {
+		t.Fatalf("load config: %v", err)
+	}
+	dbPath, _, err := config.ResolveDBPath(cfg, configPath)
+	if err != nil {
+		t.Fatalf("resolve event log: %v", err)
+	}
 	logger, err := logging.NewLogger(dbPath, project, signingLoggerOpts()...)
 	if err != nil {
 		t.Fatalf("open event log at %s: %v", dbPath, err)
