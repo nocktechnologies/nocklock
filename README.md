@@ -49,7 +49,7 @@ It routes network traffic through a local proxy that enforces a domain allowlist
 
 On Linux you can instead pass `--net-fence=netns`. The child then runs in its own network namespace behind a kernel default-drop floor, keeps its configured IP socket families, and reaches only `network.allow` hosts through a transparent HTTP(S) proxy and a fixed-answer DNS stub that answers DNS over UDP and TCP port 53 inside the namespace. All other traffic leaving the namespace is dropped in the kernel, including direct DNS to other resolvers, non-DNS UDP, QUIC (UDP/443), SCTP and raw IP. This mode needs the privileged egress helper described under "Linux network-egress helper" and fails closed without it.
 
-Linux blocked accesses are logged to `.nock/events.db`. The macOS Seatbelt path records its fence state but does not yet emit one audit event per denied file; Seatbelt returns its native permission error. Blocked domains get a 403.
+Linux blocked accesses are logged to the event log (see "Event log" for where it lives). The macOS Seatbelt path records its fence state but does not yet emit one audit event per denied file; Seatbelt returns its native permission error. Blocked domains get a 403.
 
 ### Filesystem platform boundary
 
@@ -67,7 +67,7 @@ fails closed before the agent starts.
 Apple deprecates `sandbox-exec`, but it is still present and working on
 macOS 26.5. NockLock tests it in macOS CI and will track its availability. Its
 per-file deny events are not available yet; instead, every macOS wrap records
-exactly one filesystem-fence state in `.nock/events.db`: `ENGAGED`,
+exactly one filesystem-fence state in the event log: `ENGAGED`,
 `REFUSED-TO-START`, or `DEGRADED`.
 
 `filesystem.macos_allow_unfenced = true` is a temporary v0.5 compatibility
@@ -77,7 +77,7 @@ in v0.6. The default is fail-closed and should stay that way.
 
 ## Tamper-evident audit log (v1)
 
-`nocklock verify --audit` walks the SHA-256 hash chain in `.nock/events.db` and reports whether it is intact. Each row carries a SHA-256 hash of its contents, linked to the previous row's hash. A verification run looks like this:
+`nocklock verify --audit` walks the SHA-256 hash chain in the event log and reports whether it is intact. Each row carries a SHA-256 hash of its contents, linked to the previous row's hash. A verification run looks like this:
 
 ```
 $ nocklock verify --audit
@@ -91,7 +91,7 @@ v1 is a tamper-evident log, not an unforgeable receipt. The hash chain alone can
 
 ## Signed audit log (v1.1: Ed25519)
 
-v1.1 layers an Ed25519 signature over the same canonical bytes the hash chain already covers. Signing adds authenticity: it proves that NockLock, as holder of the private key, wrote each row. The unkeyed hash chain cannot prove that. Because the chain algorithm is public and keyless, an active writer with access to `.nock/events.db` can recompute every hash and rewrite `chain_head` in lockstep, and v1 verification still passes. A signature the attacker cannot produce without the key defeats exactly that writer.
+v1.1 layers an Ed25519 signature over the same canonical bytes the hash chain already covers. Signing adds authenticity: it proves that NockLock, as holder of the private key, wrote each row. The unkeyed hash chain cannot prove that. Because the chain algorithm is public and keyless, an active writer with access to the event log can recompute every hash and rewrite `chain_head` in lockstep, and v1 verification still passes. A signature the attacker cannot produce without the key defeats exactly that writer.
 
 The key is a NockLock-managed file at `~/.config/nocklock/signing-ed25519.key` (mode `0600`, generated on first use, and kept outside the database so a db-only attacker cannot sign). The key directory is resolved canonically and must end at a directory owned by the current user and not group- or world-accessible. A benign user-owned symlink in the path is accepted, since macOS temp dirs and a symlinked `~/.config` are normal on every platform. A symlink whose target is owned by another user, or is group- or world-accessible, is rejected. The versioned `chain_head` signature binds the head, the prune boundary, the signing-adoption boundary, and the public-key fingerprint. An adopted log refuses writes unless its managed key matches that fingerprint and verifies the existing head.
 
@@ -108,8 +108,8 @@ An anchor is a small signed record of the audit chain's head, `{version, agent_i
 The anchor is signed with the same NockLock-managed Ed25519 key that signs the audit rows and the head; `agent_id` is that key's fingerprint, the same identity recorded in `chain_head`. Its signed bytes lead with a `0x05` domain-separation byte (rows use `0x01`, the head `0x03`), so a row or head signature can never be replayed as an anchor. The exact layout is pinned by a byte-literal test.
 
 ```
-$ nocklock anchor emit --out .nock/chain-anchor.json   # or to stdout without --out
-$ nocklock verify --against-anchor .nock/chain-anchor.json
+$ nocklock anchor emit --out anchor.json   # or to stdout without --out
+$ nocklock verify --against-anchor anchor.json
 ANCHOR: OK — local chain reproduces the anchored head at 247 rows (anchor attests 247 rows, local has 247)
 ```
 
@@ -272,7 +272,9 @@ block = [
 ]
 
 [logging]
-db = ".nock/events.db"
+# A relative db goes to NockLock's audit state directory outside the project;
+# an absolute path is used verbatim. See "Event log".
+db = "events.db"
 level = "info"
 
 [cloud]
@@ -402,7 +404,26 @@ nocklock wrap -- your-custom-agent               # Anything
 
 ## Event log
 
-Every fence decision is recorded in `.nock/events.db`. Query it with `nocklock log`:
+Every fence decision is recorded in an SQLite event log.
+
+The log does **not** live in your project. It lives in NockLock's audit state
+directory, `$XDG_STATE_HOME/nocklock/<project-key>/` (or
+`~/.local/state/nocklock/<project-key>/`), where `<project-key>` is derived from
+the project's path. The chain anchor sits beside it.
+
+That is a security boundary, not a preference. The fence grants your project
+root to the agent so it can create and delete files there, and Landlock cannot
+exclude a path underneath a granted directory — an event log stored in the
+project would be editable by the very agent it records. A `logging.db` you set
+to a relative path keeps only its filename and goes here; an absolute path is
+used verbatim, and `nocklock doctor` warns if it lands back inside
+`filesystem.root`.
+
+A log written by an earlier NockLock at `.nock/events.db` is moved here the
+first time a command runs, together with its chain anchor, so an existing audit
+chain keeps verifying.
+
+Query it with `nocklock log`:
 
 ```text
 $ nocklock log --blocked

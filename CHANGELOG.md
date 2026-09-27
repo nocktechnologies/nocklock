@@ -12,6 +12,50 @@ All notable changes to NockLock will be documented in this file.
 - Source builds now embed `git describe --tags --always --dirty` in
   `nocklock version`.
 
+### Changed
+
+- The audit trail moved OUT of the project so the fenced agent can finally use
+  its own project root (N10749). Two requirements had been in direct conflict:
+  the agent must be able to create and remove files directly in
+  `filesystem.root`, and it must not be able to touch the log that records what
+  it did. Landlock checks `MAKE_REG`/`MAKE_DIR`/`REMOVE_FILE`/`REMOVE_DIR`
+  against the directory holding the entry, so `touch <root>/newfile` was denied
+  in read-write mode: the ruleset granted the root's existing children but never
+  the root itself, precisely so `<root>/.nock` could be skipped. No ruleset
+  resolves both — the kernel walks upward from the accessed file and allows as
+  soon as an ancestor rule grants the access, so a narrower rule on `.nock`
+  cannot revoke the root's grant, and stacking layers does not help because
+  every layer would need `MAKE_REG` on the root. They collided only because the
+  audit trail sat inside the writable root, so it moved:
+  - The event log, its SQLite sidecars, the chain anchor and the per-session
+    egress decision logs now live in `$XDG_STATE_HOME/nocklock/<project-key>/`
+    (or `~/.local/state/nocklock/<project-key>/`), created 0700 and refused if
+    group- or world-accessible. `<project-key>` is a SHA-256 prefix of the
+    project root's real path, so projects never share a chain. This matches
+    where the Ed25519 signing key already lived.
+  - A relative `logging.db` — the default, and what every `nocklock init` config
+    carries — resolves there, keeping only its filename. An absolute
+    `logging.db` is still honored verbatim as the operator escape hatch;
+    `nocklock doctor` now warns when one points back inside `filesystem.root`,
+    where the agent can reach its own audit trail.
+  - An event log left at `<root>/.nock/events.db` by an earlier version is MOVED
+    on first use, with its WAL/SHM sidecars and chain anchor, so an existing
+    chain keeps verifying with an unchanged head hash. Copying it would have
+    defeated the purpose by leaving the log inside the granted root. If a legacy
+    log and a relocated log both exist, NockLock refuses to guess which chain is
+    authoritative rather than silently picking one.
+  - `.nock/config.toml` stays in the project and is unaffected.
+- Two consequences of granting the fence root, both deliberate:
+  - `<root>/.nock/config.toml` is now inside the root grant, so a fenced agent
+    can edit the fence's own config. It cannot widen the fence it is already
+    running under — the config is read by the unfenced parent before the child
+    starts — so a rewrite takes effect only on the next `wrap`, and it is a
+    tracked file, so the edit shows up in `git status`.
+  - A `filesystem.deny` path INSIDE `filesystem.root` can no longer be enforced
+    by Landlock, and rule generation fails closed rather than shipping a fence
+    that ignores the deny. Deny paths outside the root — including every entry
+    in the shipped defaults and presets — are unaffected.
+
 ### Fixed
 
 - claude-code preset now runs real programs under the strongest non-root fence

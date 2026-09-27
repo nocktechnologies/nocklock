@@ -113,8 +113,12 @@ pkg/
 9. The child runs with the filtered environment and the active fence wiring.
    It is started directly by `wrap` in proxy mode, or by the helper's exec from
    step 8 in netns mode. The child is spawned exactly once.
-10. Filesystem, network and per-host egress decisions are logged to
-    `.nock/events.db` as hash-chained, signed rows. On teardown, `wrap` emits a
+10. Filesystem, network and per-host egress decisions are logged to the event
+    log as hash-chained, signed rows. The log lives in the project's audit
+    state directory OUTSIDE the project
+    (`$XDG_STATE_HOME/nocklock/<project-key>/`), because the fence grants the
+    project root to the child and Landlock cannot exclude a path beneath a
+    granted directory. On teardown, `wrap` emits a
     chain-head anchor to `<db-dir>/chain-anchor.json` and, when
     `NOCKLOCK_ANCHOR_URL` is set, pushes it off-box.
 11. NockLock exits with the child's exit code.
@@ -177,11 +181,13 @@ after validation. Validation and use are therefore not atomic (N10717).
 
 ### In scope (caught)
 
-The static malicious-repo case: a checkout that commits
-`.nock/events.db`, or any ancestor of it, as a symlink. Rejected: a symlink at the
-final component (`lstat` plus `O_NOFOLLOW`, N8614, including a real DB replaced by
-a symlink between sessions), and an ancestor that escapes the project root,
-dangles, loops or cannot be canonicalized (`resolveDeepestExisting`, N10714).
+The static malicious-repo case: a checkout that commits an event log, or any
+ancestor of it, as a symlink. This still matters after the log moved out of the
+project, because an absolute `logging.db` can point back into the checkout and
+a committed `<root>/.nock/events.db` is migrated out of it on first use.
+Rejected: a symlink at the final component (`lstat` plus `O_NOFOLLOW`, N8614, including a real DB replaced by
+a symlink between sessions), and an ancestor that escapes both the project root and its audit
+state directory, dangles, loops or cannot be canonicalized (`resolveDeepestExisting`, N10714).
 `nocklock wrap` opens the DB before the fence is applied, so the repository
 contents are the attacker-controlled input here.
 
@@ -193,15 +199,15 @@ inode re-check, before SQLite lazily opens the file).
 `TestResidual_AncestorSwapBetweenValidateAndOpen` demonstrates that such a
 swap redirects the DB outside the project. We accept this because the racer must
 already run as the user, and that process already owns everything the swap could
-protect: it can read and write `.nock/events.db` directly, read the Ed25519
+protect: it can read and write the event log directly, read the Ed25519
 signing key at `~/.config/nocklock/signing-ed25519.key`, replace the config or
 the binary, and ptrace NockLock. A different uid can swap an entry only where it
 can write the parent directory, so this holds while the project root and its
 ancestors are not group- or world-writable (a shared checkout under `/tmp` or a
 shared group directory is outside that assumption). The fenced child of the
-current `wrap` is not the racer: it starts after `NewLogger` returns, and for the
-default `.nock/events.db` location the filesystem fence denies it the audit
-directory. A same-uid process that outlives an earlier session, or a child on a
+current `wrap` is not the racer: it starts after `NewLogger` returns, and at the
+default location the log is outside the fence root entirely, so no grant reaches
+it. A same-uid process that outlives an earlier session, or a child on a
 platform or mode where the fence is not enforced, is the residual case.
 
 ### Why not close it in code
