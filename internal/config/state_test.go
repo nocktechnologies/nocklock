@@ -123,6 +123,67 @@ func TestEnsureAuditStateDirAcceptsSymlinkedStateRoot(t *testing.T) {
 	}
 }
 
+// TestResolveDBPathKeepsUsingItsFirstResolvedStateRoot proves that resolving a
+// symlinked state root cannot race the candidate scan against the final audit
+// directory construction. A second resolution after this seam retargets the
+// link would return a path under stateRootB instead of the existing chain under
+// stateRootA.
+func TestResolveDBPathKeepsUsingItsFirstResolvedStateRoot(t *testing.T) {
+	projectRoot := resolvedTempDir(t)
+	configPath := filepath.Join(projectRoot, Dir, File)
+	stateRootA := trustedStateRoot(t)
+	stateRootB := trustedStateRoot(t)
+	stateLink := filepath.Join(resolvedTempDir(t), "state-link")
+	if err := os.Symlink(stateRootA, stateLink); err != nil {
+		t.Skipf("symlinks unsupported: %v", err)
+	}
+	t.Setenv("XDG_STATE_HOME", stateLink)
+
+	stateDirA := filepath.Join(stateRootA, "nocklock", projectStateKey(projectRoot))
+	if err := os.MkdirAll(stateDirA, 0o700); err != nil {
+		t.Fatalf("mkdir state directory: %v", err)
+	}
+	for _, dir := range []string{filepath.Join(stateRootA, "nocklock"), stateDirA} {
+		if err := os.Chmod(dir, 0o700); err != nil {
+			t.Fatalf("chmod state directory %s: %v", dir, err)
+		}
+	}
+	want := filepath.Join(stateDirA, DefaultConfig().Logging.DB)
+	if err := os.WriteFile(want, []byte("existing chain"), 0o600); err != nil {
+		t.Fatalf("write existing chain: %v", err)
+	}
+
+	originalEval := evalAuditStateRoot
+	calls := 0
+	evalAuditStateRoot = func(base string) (string, error) {
+		calls++
+		resolved, err := originalEval(base)
+		if err != nil || calls != 1 {
+			return resolved, err
+		}
+		if err := os.Remove(stateLink); err != nil {
+			return "", err
+		}
+		if err := os.Symlink(stateRootB, stateLink); err != nil {
+			return "", err
+		}
+		return resolved, nil
+	}
+	t.Cleanup(func() { evalAuditStateRoot = originalEval })
+
+	cfg := DefaultConfig()
+	got, _, err := ResolveDBPath(&cfg, configPath)
+	if err != nil {
+		t.Fatalf("ResolveDBPath: %v", err)
+	}
+	if got != want {
+		t.Fatalf("event log = %q, want existing chain under first resolved state root %q", got, want)
+	}
+	if calls != 1 {
+		t.Fatalf("state root resolved %d times, want once", calls)
+	}
+}
+
 // TestEnsureAuditStateDirRejectsGroupWritableStateRoot: the configured state
 // root itself (XDG_STATE_HOME, or the ~/.local/state fallback) must be
 // trusted before NockLock creates anything beneath it, same as any other

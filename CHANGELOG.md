@@ -153,6 +153,10 @@ All notable changes to NockLock will be documented in this file.
 
 ### Fixed
 
+- `ResolveDBPath` now resolves the audit state root once and carries that
+  canonical path through its candidate scan and final directory setup, so a
+  retargeted state-root symlink cannot make it inspect one audit location and
+  return another.
 - claude-code preset now runs real programs under the strongest non-root fence
   (N10748, parts b+c). Two field-reported breakages are closed: (1) writes to
   `/dev/null` and `/dev/tty` are permitted and `/dev/zero` is readable, so `git`
