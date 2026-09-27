@@ -42,11 +42,16 @@ The fence decomposes cleanly by what elevation it costs:
 
 | Phase | Needs admin? | What it buys |
 |---|---|---|
-| **0 (MVP)** | No | Files (AppContainer + per-user ACLs), process tree (job object), `network.allow = []` as a real all-or-nothing floor, audit chain the agent cannot touch |
+| **0 (MVP)** | No | Files (AppContainer + per-user ACLs), process tree (job object), `network.allow = []` as a real all-or-nothing floor, audit chain the agent cannot touch — **all gated on [Probe 10](#probe-10-container-escape--can-the-agent-re-container-itself)(b)**, the WMI-token check (see below) |
 | **1** | One-time at install, *if [Probe 2](#probe-2-does-the-exemption-need-elevation) says so* | Loopback exemption for a fixed container moniker → proxy reachable (opens *all* host loopback; sole-socket egress is Phase 2), DNS-trick resistance |
 | **2** (deferred; mandatory if Probe 1 fails) | One-time, service | WFP provider with persistent filters scoped by package SID → egress floor independent of the proxy, **port-scoped so the proxy is the sole loopback peer**; ETW file-event stream |
 
-Phase 0 ships standalone and is honest on its own. Crucially, the loopback
+Phase 0 ships standalone and is honest on its own — **provided
+[Probe 10](#probe-10-container-escape--can-the-agent-re-container-itself)(b)
+clears the WMI-token half**. If a `Win32_Process.Create` child runs under the
+plain user token instead of the AppContainer token, it is outside the file *and*
+network fence entirely (summary row 14), and Phase 0 does not hold; committing to
+Phase 0 is gated on that result. Crucially, the loopback
 exemption in Phase 1 is keyed to a **container moniker**, and NockLock can pick a
 fixed one (`nocklock-fence`) — so even if it turns out to need elevation, it is
 genuinely one-time at `nocklock init`, never per-session. That is what lets this
@@ -523,18 +528,36 @@ tamperer is *not* path rules: the signing key lives outside the database at
 `~/.config/nocklock/signing-ed25519.key` "so a db-only attacker cannot sign," and
 off-box anchoring makes truncation observable.
 
-Windows adds a further, independent layer for free. The AppContainer intersection
-rule means the child **cannot write `.nock/` unless we add an ACE for its package
-SID** — and we simply won't. On Linux the filesystem fence already denies the
-audit directory for the default `.nock/events.db` location; on Windows the denial
-is a token property the agent cannot shed, and it holds without configuring a
-path rule at all. An additional barrier on an already-signed chain, not a fix for
-a gap.
+Windows converges with the audit-state layout Linux and macOS adopted in
+#120/#131: **the audit DB lives outside the project, in the per-user state dir**
+(`%LOCALAPPDATA%\nocklock`, the Windows analog of `$XDG_STATE_HOME/nocklock` /
+`~/.local/state/nocklock`), written by the unfenced parent. `.nock/` inside the
+project holds nothing security-relevant.
 
-Concretely: ACL `.nock/` to the user only, grant the package SID nothing, and the
-child's writes fail at the kernel. **UNVERIFIED** in the trivial sense that it
-follows from the intersection rule rather than a dedicated doc —
-[Probe 4](#probe-4-acl-grant-and-the-deny-default) covers it.
+This is a correction, not a bonus layer. An earlier draft kept the DB at `.nock/`
+in the project and argued the intersection rule alone protected it — the child
+holds no package-SID ACE on `.nock/`, so its writes fail. That covers writes
+*inside* `.nock/` but not the directory entry itself. Phase 0 grants the package
+SID recursive Modify on `filesystem.root` (sizing step 2), and Modify credibly
+carries `FILE_DELETE_CHILD` on the granted root — which would let the child
+**rename, delete, or replace `.nock/` from the parent** even though `.nock/` has
+no writable ACE of its own. Writing into a directory and deleting that directory
+via its parent are distinct rights. This delete-via-parent hole is **UNVERIFIED**
+and is a new step in [Probe 4](#probe-4-acl-grant-and-the-deny-default); the DB
+moves out *either way*, because staking the audit trail on a same-directory ACL
+subtlety is the wrong bet whatever the probe returns.
+
+With the DB outside `filesystem.root` the child has **no package-SID ACE on the
+audit path and no granted ancestor of it**, so no `FILE_DELETE_CHILD` is
+reachable — the same lesson Linux learned in #120, where Landlock checks
+`MAKE_REG`/`REMOVE_FILE` against the directory holding the entry, granting the
+root's existing children but never the root entry itself. The child's redirected
+`LOCALAPPDATA` (section (a)) is a secondary barrier, not the load-bearing one, and
+is itself UNVERIFIED when an explicit environment block is passed (summary
+row 12). Concretely: keep the audit DB in the per-user state dir, grant the
+package SID nothing there, and the child has no path to it — write, rename, or
+delete. [Probe 4](#probe-4-acl-grant-and-the-deny-default) settles the
+delete-via-parent question.
 
 ### Event listener: named pipes, and a gap
 
@@ -612,18 +635,30 @@ elevated install); Phase 0 differences are noted.
 | **Network egress floor** | **Opt-in** netns + nftables default-drop; needs the privileged egress helper | **None** — proxy is an env var, bypassable | WFP default-block on a zero-capability AppContainer; off-box egress dropped, loopback proxy reachable (Phase 1 opens *all* loopback — a port-scoped WFP filter to make the proxy the sole peer is Phase 2). *Phase 0: all-or-nothing deny* |
 | **DNS-trick resistance** | Yes, in netns mode — no direct socket; `resolv.conf`/`hosts` root-owned and the child is non-root | **No** — all three tricks work | Yes *pending [Probe 6](#probe-6-brokered-egress--which-services-answer-for-us)* — no direct socket; hosts file needs admin. *Phase 0: n/a (no network at all)* |
 | **Syscall limits** | seccomp allowlist | Opt-in `filesystem.hardened` bundle — approximation, not an allowlist | **—** — win32k/FSCTL lockdown + child-process policy only; same category as the macOS bundle |
-| **Audit** | SHA-256 chain + Ed25519 signatures + anchor; interposer file events | Same chain, no file events | Same chain, plus **tamper-resistance by token** (agent cannot write `.nock/` at all); **no file-event stream** (ETW is Phase 2) |
+| **Audit** | SHA-256 chain + Ed25519 signatures + anchor; interposer file events | Same chain, no file events | Same chain; **audit DB in the per-user state dir outside `filesystem.root`** (no package-SID ACE, no granted ancestor — matches Linux/macOS after #120/#131); **no file-event stream** (ETW is Phase 2) |
 | **Process tree** | `Setpgid` + `Pdeathsig: SIGKILL` | process group | Job object, kill-on-close across the hierarchy, no breakaway (WMI-spawned children escape the job; whether they also escape the AppContainer token is **UNVERIFIED** — see Probe 10) |
 
 ---
 
 ## Phased plan and sizing
 
-**Phase 0 — MVP, zero admin (~4–5 PR rounds)**
+**Phase 0 — MVP, zero admin (~4–5 PR rounds), gated on [Probe 10](#probe-10-container-escape--can-the-agent-re-container-itself)(b)**
+
+Do not commit to Phase 0 until Probe 10's WMI-token half returns an AppContainer
+token for the `Win32_Process.Create` child. If that child runs under the plain
+user token, it is outside both the file and the network fence (see
+[(c)](#c-processsyscall-ish-limits) and summary row 14) and Phase 0 does not
+hold — WMI must be blocked with the child-process policy first, or the design
+reconsidered.
+
 1. `internal/fence/windows/appcontainer`: profile create/derive, capability
     construction, `STARTUPINFOEX` launch. (1–2 rounds)
 2. ACL application: package-SID ACEs for `filesystem.root`, `filesystem.allow`,
-    and the toolchain cache dirs; `.nock/` deliberately ungranted. (1 round)
+    and the toolchain cache dirs. The audit DB lives in the per-user state dir
+    outside `filesystem.root`, never in-project (see
+    [(d)](#d-secret-fence-and-the-audit-chain)): granting the root recursive
+    Modify would otherwise expose an in-project `.nock/` to delete-via-parent.
+    (1 round)
 3. Job object: kill-on-close, no breakaway, active-process cap. (1 round)
 4. `network.allow = []` wired to "launch with zero capabilities"; secret fence
     env plumbing; `nocklock status` reports the Windows backend honestly. (1 round)
@@ -641,7 +676,10 @@ elevated install); Phase 0 differences are noted.
 7. WFP provider + persistent filters scoped by package SID; ETW file events.
 
 Total to a shippable Windows fence at Phase 1 parity: **~6–8 PR rounds**
-(Phase 0's 4–5 plus Phase 1's 2–3), gated on Probe 1 as noted above.
+(Phase 0's 4–5 plus Phase 1's 2–3). Phase 0 is gated on
+[Probe 10](#probe-10-container-escape--can-the-agent-re-container-itself)(b) (the
+WMI-token escape) and Phase 1 on
+[Probe 1](#probe-1-the-pivot--zero-capability-loopback), as noted above.
 
 ---
 
@@ -723,17 +761,20 @@ Do not use PS 7-only constructs: trailing `&`, `&&`, `||`, ternary `? :`,
 null-coalescing `??`, `-Parallel`, `Split-Path -LeafBase`, or `Clean` blocks.
 
 **Shared scaffold — set once at the top of the run.** Everything a probe creates
-lives under a fresh, unique, timestamped root, and the AppContainer moniker
+lives under a fresh, run-unique root (a GUID), and the AppContainer moniker
 carries the same suffix so a rerun never inherits a previous run's package-SID
 ACEs (the stale-ACE hazard of a fixed moniker in
 [the recommendation](#recommendation) applies to the probes too — inherited ACEs
 are exactly how a "MUST fail" assertion passes for the wrong reason):
 
 ```powershell
-$stamp     = Get-Date -Format 'yyyyMMdd-HHmmss'
-$probeRoot = Join-Path $env:TEMP "nocklock-probe-$stamp"
-$moniker   = "nocklock-probe-$stamp"
-New-Item -ItemType Directory -Force -Path $probeRoot | Out-Null
+$runId     = (New-Guid).ToString('N')   # run-unique; a 1-second timestamp collides on a fast rerun
+$probeRoot = Join-Path $env:TEMP "nocklock-probe-$runId"
+$moniker   = "nocklock-probe-$runId"
+# Fail-if-exists (no -Force, -ErrorAction Stop): never adopt a pre-existing root.
+# With a GUID a collision is effectively impossible, which is the point — if it
+# happens it is a bug, not a directory to reuse and inherit stale ACEs from.
+New-Item -ItemType Directory -Path $probeRoot -ErrorAction Stop | Out-Null
 
 # --- Run mode (-Mode Desktop|DisposableBox, default Desktop) ---
 # Desktop: NOTHING is downloaded or installed; absent prerequisites = SETUP-FAULT.
@@ -815,12 +856,12 @@ function Stop-VerifiedProcess {
 only by the global teardown, never left behind:
 
 - `CreateAppContainerProfile` / `Get-NtSid -PackageName` materialises
-  `%LOCALAPPDATA%\Packages\<moniker>\`, outside the root. The timestamped moniker
-  keeps reruns from colliding; teardown removes the profile.
+  `%LOCALAPPDATA%\Packages\<moniker>\`, outside the root. The run-unique (GUID)
+  moniker keeps reruns from colliding; teardown removes the profile.
 - The loopback exemption list is machine-wide; teardown clears the entry.
 
 **Getting the scaffold *into* the container.** `New-Win32Process` launches a
-*fresh* process, so none of `$probeRoot`, `$moniker`, `$sid`, `$stamp`, `$out`,
+*fresh* process, so none of `$probeRoot`, `$moniker`, `$sid`, `$runId`, `$out`,
 or `Assert-AccessDenied` crosses into it — every "from INSIDE the container"
 snippet below assumes they have been re-established there. The launcher does this
 by writing a bootstrap `_inside.ps1` into `$probeRoot` (which it ACLs to the
@@ -829,8 +870,8 @@ package SID, like any other granted path) that re-derives all paths from
 
 ```powershell
 $probeRoot = $PSScriptRoot
-$stamp     = (Split-Path -Leaf $probeRoot) -replace '^nocklock-probe-',''
-$moniker   = "nocklock-probe-$stamp"
+$runId     = (Split-Path -Leaf $probeRoot) -replace '^nocklock-probe-',''
+$moniker   = "nocklock-probe-$runId"
 $out       = Get-Item (Join-Path $probeRoot 'out')
 ```
 
@@ -1028,7 +1069,7 @@ Report the non-elevated exit code from Probe 1 and whether `-s` listed the entry
 inside the single `try/finally` that wraps the probe run, and this run does **not**
 reboot Kevin's desktop. Verifying that the exemption (and the AppContainer profile)
 survive a reboot would be a **separate, optional script, not part of this run**: it
-would first write a recovery manifest recording `$stamp`/`$moniker`/`$probeRoot` so
+would first write a recovery manifest recording `$runId`/`$moniker`/`$probeRoot` so
 a fresh post-reboot session can find and clean the pre-reboot state, then reboot,
 then re-check `LoopbackExempt -s`, then run its own post-reboot cleanup. Until that
 script is run, reboot survival (and "survives a Windows Update") stays an open item
@@ -1066,7 +1107,11 @@ removed globally.
 ### Probe 4: ACL grant and the deny-default
 
 Covers the plain grant/deny, the ALL APPLICATION PACKAGES read hole, the explicit
-DENY that closes it, and ACE inheritance leaking into the audit directory. **The
+DENY that closes it, ACE inheritance leaking into the audit directory, and — new
+this round — whether a package SID granted recursive Modify on the project root
+can **rename, delete, or replace an in-project `.nock/` via the parent** despite
+`.nock/` carrying no writable ACE (the delete-via-parent hole that moves the audit
+DB out of the project, [(d)](#d-secret-fence-and-the-audit-chain)). **The
 deny-target sentinel is a *fake* home inside the probe root — never the real
 `$env:USERPROFILE`** — so no probe can touch a real key, and its "MUST fail" read
 cannot pass merely because the file is absent.
@@ -1104,9 +1149,21 @@ tested here:
 
 ```powershell
 Set-Content (Join-Path $project.FullName 'write-test.txt') 'ok'        # MUST succeed
-Assert-AccessDenied { Set-Content (Join-Path $nock.FullName 'tamper.txt') 'bad' } 'audit tamper-resistance'
+Assert-AccessDenied { Set-Content (Join-Path $nock.FullName 'tamper.txt') 'bad' } 'write INSIDE .nock denied (no package-SID ACE)'
 Assert-AccessDenied { Set-Content (Join-Path $other.FullName 'leak.txt') 'bad' }  'cross-project isolation'
 Get-Content $sentinel   # EXPECTED TO SUCCEED — the ALL APPLICATION PACKAGES read hole is open
+
+# delete-via-parent: .nock/ carries no writable ACE, but the project root was
+# granted recursive Modify, which credibly carries FILE_DELETE_CHILD on the root —
+# so the child may rename, delete or replace .nock/ THROUGH the parent even though
+# it cannot write a file INSIDE it. Writing into a dir and deleting that dir via
+# its parent are distinct rights. EXPECTED TO SUCCEED, which is exactly why the
+# audit DB lives in the per-user state dir, not in-project (see (d)). Record the
+# verbatim result of each; do NOT assert denial here.
+Rename-Item $nock.FullName -NewName '.nock-moved' 2>&1                     # rename via parent
+Remove-Item -Recurse -Force (Join-Path $project.FullName '.nock-moved') 2>&1  # delete via parent
+New-Item -ItemType Directory -Force -Path $nock.FullName 2>&1              # replace via parent
+"delete-via-parent: record whether rename/delete/replace of .nock via the project root succeeded"
 ```
 
 **Step 3 — OUTER SHELL** (has WRITE_DAC): apply the explicit DENY ACE, then gate
@@ -1139,15 +1196,23 @@ closes it (Phase 4b). `Assert-AccessDenied` makes each "MUST fail" a *specific*
 access-denied assertion (E_ACCESSDENIED `0x80070005`) — a not-found result is
 scored `FAIL`, which is exactly the wrong-reason pass this round removes.
 
+The delete-via-parent steps in Phase 4a are the opposite polarity: they are
+*expected to succeed*, so they are recorded verbatim rather than asserted denied.
+A success confirms the hole that moves the audit DB out of the project
+([(d)](#d-secret-fence-and-the-audit-chain)); a denial would be the surprising
+result worth flagging. This distinguishes "cannot write inside `.nock/`" (true,
+via the intersection rule) from "cannot delete `.nock/` via the parent" (the open
+question), which is why the audit DB does not rely on either.
+
 **Teardown.** All artifacts are under `$probeRoot` and go with the global
 `Remove-Item`. (For a system path you would `icacls … /remove:d`; here the DENY
 lives inside the root, so deleting the root suffices.)
 
 | State touched | Detail |
 |---|---|
-| Creates | dirs and ACLs under `$probeRoot` (`project/`, `other-project/`, `home/.ssh/`); container processes |
+| Creates | dirs and ACLs under `$probeRoot` (`project/`, `other-project/`, `home/.ssh/`); renames/deletes/recreates the in-project `.nock/` (delete-via-parent step, all under `$probeRoot`); container processes |
 | Removes | nothing (all under `$probeRoot`, removed globally) |
-| Must never touch | `$env:USERPROFILE` ACLs; real `~/.ssh` |
+| Must never touch | `$env:USERPROFILE` ACLs; real `~/.ssh`; the real audit DB in the per-user state dir |
 
 ### Probe 5: toolchain survival
 
@@ -1249,7 +1314,7 @@ machine change the teardown cannot undo.
 ```powershell
 # DESKTOP-SAFE: non-elevated attempt — run-unique session name so teardown
 # never touches a session belonging to a concurrent run or another user.
-$etwSession = "nocklock-fileprobe-$stamp"
+$etwSession = "nocklock-fileprobe-$runId"
 $etwCreated = $false
 logman create trace $etwSession -p Microsoft-Windows-Kernel-File -o (Join-Path $probeRoot 'f.etl') -ets
 if ($LASTEXITCODE -eq 0) { $etwCreated = $true }
@@ -1262,14 +1327,14 @@ Log Users* (persistent group membership change) and retry, then retry elevated.
 If the non-elevated attempt fails on the desktop, record the result and stop —
 the answer is that file-event logging is Phase 2.
 
-**Teardown.** The trace session (`nocklock-fileprobe-$stamp`, run-unique) is
+**Teardown.** The trace session (`nocklock-fileprobe-$runId`, run-unique) is
 machine state and leaks if `stop` is skipped; the global teardown stops it only
 if `$etwCreated` is true. The `.etl` file is under `$probeRoot`. On the disposable
 box, group membership changes go with the box.
 
 | State touched | Detail |
 |---|---|
-| Creates | ETW trace session `nocklock-fileprobe-$stamp` (machine state, run-unique); `.etl` file under `$probeRoot` |
+| Creates | ETW trace session `nocklock-fileprobe-$runId` (machine state, run-unique); `.etl` file under `$probeRoot` |
 | Removes | the trace session (only if this run created it); `.etl` removed globally with `$probeRoot` |
 | Must never touch | other ETW sessions; Performance Log Users group membership (desktop run) |
 
@@ -1311,24 +1376,36 @@ to get wrong.
 
 ```powershell
 # ELEVATED, on a throwaway VM only.
-netsh advfirewall show allprofiles state    # RECORD this — restore to exactly this
-netsh advfirewall set allprofiles state off
-# from inside a ZERO-capability container:
-curl.exe -sS -m 5 https://example.com/      # does it now SUCCEED?
-# restore each profile to its recorded state, e.g.:
-netsh advfirewall set domainprofile  state on
-netsh advfirewall set privateprofile state on
-netsh advfirewall set publicprofile  state on
+# Snapshot each profile's Enabled state FIRST, then restore each one CONDITIONALLY
+# from that snapshot in a finally block. `set allprofiles state on` would force
+# every profile on, which is NOT necessarily the pre-probe state.
+$fwSnapshot = Get-NetFirewallProfile -Name Domain,Private,Public |
+  Select-Object Name, Enabled
+$fwSnapshot | Format-Table -AutoSize        # RECORD this — restore to exactly this
+try {
+  Set-NetFirewallProfile -Name Domain,Private,Public -Enabled False
+  # from inside a ZERO-capability container:
+  curl.exe -sS -m 5 https://example.com/    # does it now SUCCEED?
+} finally {
+  foreach ($p in $fwSnapshot) {
+    Set-NetFirewallProfile -Name $p.Name -Enabled $p.Enabled   # restore per profile, to its recorded value
+  }
+}
 ```
 
 Also capture the actual drop filter for the record (into the probe root):
 
 ```powershell
 Push-Location $probeRoot
-netsh wfp capture start keywords=19
-# reproduce a blocked connection from inside the container
-netsh wfp capture stop                       # writes wfpdiag.cab in the CWD ($probeRoot)
-Pop-Location
+$wfpStarted = $false
+try {
+  netsh wfp capture start keywords=19
+  if ($LASTEXITCODE -eq 0) { $wfpStarted = $true }
+  # reproduce a blocked connection from inside the container
+} finally {
+  if ($wfpStarted) { netsh wfp capture stop }  # writes wfpdiag.cab in the CWD ($probeRoot)
+  Pop-Location                                 # unconditional: always leave $probeRoot
+}
 # inspect wfpdiag.xml for FWPM_NET_EVENT_TYPE_CLASSIFY_DROP and the filter name
 ```
 
@@ -1352,13 +1429,24 @@ leaks. The `wfpdiag` output is under `$probeRoot`.
 
 The escape question, and the WMI-token question from
 [(c)](#c-processsyscall-ish-limits). From inside a **zero-capability** container.
-The module is already in `$probeRoot\modules` from the shared scaffold; import it
-from there rather than `Install-Module` (which mutates the user scope):
+Import NtObjectManager the same way the shared scaffold does — the pre-installed
+module on the desktop, the `$probeRoot\modules` copy only on a disposable box
+(the only mode that `Save-Module`s it there), otherwise SETUP-FAULT. Never
+`Install-Module` here (it mutates the user scope):
 
 ```powershell
-Import-Module (Join-Path $probeRoot 'modules\NtObjectManager')   # does even this work in here?
+# Same rule as the shared scaffold: pre-installed module on the desktop; the
+# probe-root copy exists only in DisposableBox mode; otherwise SETUP-FAULT.
+if (Get-Module -ListAvailable NtObjectManager) {
+  Import-Module NtObjectManager
+} elseif (Test-Path (Join-Path $probeRoot 'modules\NtObjectManager')) {
+  Import-Module (Join-Path $probeRoot 'modules\NtObjectManager')
+} else {
+  "SETUP-FAULT: NtObjectManager absent inside container — Probe 10 not scored"
+  return
+}
 # (a) re-container escape:
-$escMoniker = "agent-escape-$stamp"
+$escMoniker = "agent-escape-$runId"
 $s2 = Get-NtSid -PackageName $escMoniker
 New-Win32Process -CommandLine 'curl.exe -sS -m 5 https://example.com/' `
   -AppContainerSid $s2 -Capabilities (Get-NtSid -KnownSid CapabilityInternetClient)
@@ -1436,7 +1524,7 @@ timeout (`-m 5`) and self-terminates; it is not tracked by an identity file.
 
 | State touched | Detail |
 |---|---|
-| Creates | escape container profile (`agent-escape-$stamp`); WMI keepalive child process; `wmi-child.txt` in `$out` |
+| Creates | escape container profile (`agent-escape-$runId`); WMI keepalive child process; `wmi-child.txt` in `$out` |
 | Removes | keepalive child (by verified PID+StartTime+Path); escape profile (global teardown) |
 | Must never touch | other running processes; the primary container profile |
 
@@ -1481,7 +1569,7 @@ Test-Path $probeRoot
 # --- TEARDOWN (desktop run — no package uninstalls) ---
 CheckNetIsolation.exe LoopbackExempt -d -n=$moniker           # machine-wide exemption (Probes 1-2)
 Remove-AppContainerProfile -Name $moniker 2>$null            # %LOCALAPPDATA%\Packages\<moniker>
-Remove-AppContainerProfile -Name "agent-escape-$stamp" 2>$null  # Probe 10, if created
+Remove-AppContainerProfile -Name "agent-escape-$runId" 2>$null  # Probe 10, if created
 # (Remove-AppContainerProfile wraps the DeleteAppContainerProfile API; resolve the
 #  exact cmdlet spelling on the box if the name differs.)
 if ($etwCreated) { logman stop $etwSession -ets 2>$null }  # only if THIS run created it
@@ -1520,6 +1608,7 @@ throwaway VM. Their teardown is "discard the box" — the VM is the cleanup.
 | 12 | Whether `LOCALAPPDATA`/`TEMP` stay redirected when an explicit environment block is passed | Reconciles (a) with (d) |
 | 13 | Go's AF_UNIX support on Windows (checkable on the Linux build host, not the probe box) | Event-listener transport choice |
 | 14 | Whether a WMI (`Win32_Process.Create`) child inherits the AppContainer token or is spawned by the broker under the plain user token | **Phase 0** — full escape if it escapes the token |
+| 15 | Whether a package SID granted recursive Modify on `filesystem.root` can rename/delete/replace an in-project `.nock/` via the parent (`FILE_DELETE_CHILD`) — why the audit DB moves to the per-user state dir | Audit-DB location (Phase 0) |
 
 ---
 
