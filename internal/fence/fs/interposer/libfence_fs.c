@@ -586,8 +586,17 @@ static void fence_init(void)
     }
     memcpy(envbuf, env, envlen + 1);
 
-    /* Split on FIELD_SEP. */
-    char *fields[MAX_PATHS + 4];
+    /*
+     * Split on FIELD_SEP.
+     *
+     * Size the array for every field the parser below can ACCEPT: 3 header
+     * fields (root, mode, socket) plus MAX_PATHS shared between the allow and
+     * allow_rw lists plus MAX_PATHS denies. A smaller array silently stopped
+     * tokenizing part way, and because Serialize emits denies LAST, denies were
+     * what got dropped -- a fence that ignores the operator's deny list with no
+     * indication that anything was lost.
+     */
+    char *fields[2 * MAX_PATHS + 4];
     int field_count = 0;
     char *p = envbuf;
     fields[field_count++] = p;
@@ -597,6 +606,17 @@ static void fence_init(void)
             fields[field_count++] = p + 1;
         }
         p++;
+    }
+    if (*p != '\0') {
+        /*
+         * More fields than the array holds. Every other overflow path here
+         * fails closed for the same reason: a partially parsed rule set can
+         * drop denies and leave dangerous paths reachable.
+         */
+        g_config.deny_all = 1;
+        g_config.initialized = 1;
+        free(envbuf);
+        return;
     }
 
     if (field_count < 3) {

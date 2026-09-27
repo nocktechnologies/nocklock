@@ -76,3 +76,58 @@ func TestAuditStateDirWithoutHome(t *testing.T) {
 		t.Fatalf("fallback audit state directory %q is under /tmp, which the presets grant", dir)
 	}
 }
+
+// TestResolveDBPathSeparatesProjectsWithoutAConfigFile: `wrap --profile X` in a
+// directory with no .nock/config.toml hands ResolveDBPath the sentinel
+// "embedded profile X" as the config path, which reduces to "." and used to give
+// every such project the SAME audit state directory, interleaving unrelated
+// chains in one log. The project root is absolutized before it is hashed.
+func TestResolveDBPathSeparatesProjectsWithoutAConfigFile(t *testing.T) {
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	cfg := config.DefaultConfig()
+	cfgPtr := &cfg
+
+	resolve := func() string {
+		dir, err := filepath.EvalSymlinks(t.TempDir())
+		if err != nil {
+			t.Fatalf("resolve temp dir: %v", err)
+		}
+		t.Chdir(dir)
+		dbPath, _, err := config.ResolveDBPath(cfgPtr, "embedded profile claude-code")
+		if err != nil {
+			t.Fatalf("ResolveDBPath: %v", err)
+		}
+		return dbPath
+	}
+
+	if a, b := resolve(), resolve(); a == b {
+		t.Fatalf("two profile-only projects share one event log: %q", a)
+	}
+}
+
+// TestResolveDBPathAdoptsHandWrittenRelativeLog: a relative logging.db holding a
+// separator is a path the operator wrote, and before the relocation it named a
+// real in-project log. Abandoning that chain would break the promise that
+// NockLock never changes which chain is authoritative.
+func TestResolveDBPathAdoptsHandWrittenRelativeLog(t *testing.T) {
+	projectRoot, configPath := writeProjectConfig(t, `db = "logs/events.db"`)
+	legacy := filepath.Join(projectRoot, "logs", "events.db")
+	if err := os.MkdirAll(filepath.Dir(legacy), 0o755); err != nil {
+		t.Fatalf("mkdir logs: %v", err)
+	}
+	if err := os.WriteFile(legacy, []byte("existing chain"), 0o600); err != nil {
+		t.Fatalf("write legacy log: %v", err)
+	}
+
+	cfg, err := config.Load(configPath)
+	if err != nil {
+		t.Fatalf("load config: %v", err)
+	}
+	dbPath, _, err := config.ResolveDBPath(cfg, configPath)
+	if err != nil {
+		t.Fatalf("ResolveDBPath: %v", err)
+	}
+	if dbPath != legacy {
+		t.Fatalf("event log = %q, want the operator's existing log %q; a new chain would abandon it", dbPath, legacy)
+	}
+}

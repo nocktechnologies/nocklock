@@ -44,7 +44,16 @@ func ResolveDBPath(cfg *Config, configPath string) (dbPath string, projectRoot s
 	if configured == "" {
 		configured = DefaultConfig().Logging.DB
 	}
+	// Absolutize the project root before anything is derived from it. With
+	// `wrap --profile X` and no config file, loadWrapConfig hands us the
+	// sentinel "embedded profile X", and plain relative config paths reach here
+	// too; either way filepath.Dir twice yields ".". Hashing "." would give
+	// EVERY such project the same audit state directory and interleave their
+	// chains, and EvalSymlinks does not absolutize, so it would not catch it.
 	projectRoot = filepath.Dir(filepath.Dir(configPath))
+	if abs, absErr := filepath.Abs(projectRoot); absErr == nil {
+		projectRoot = abs
+	}
 	if filepath.IsAbs(configured) {
 		return configured, projectRoot, nil
 	}
@@ -53,13 +62,27 @@ func ResolveDBPath(cfg *Config, configPath string) (dbPath string, projectRoot s
 	// The default logging.db is now the bare name "events.db", so treating the
 	// configured relative path as a candidate would make <projectRoot>/events.db
 	// -- plausibly a file the project owns -- look like NockLock's own state.
-	legacyDB := filepath.Join(projectRoot, Dir, filepath.Base(configured))
-	legacyExists := false
-	if info, statErr := os.Lstat(legacyDB); statErr == nil {
-		if info.Mode()&os.ModeSymlink != 0 {
-			return "", projectRoot, fmt.Errorf("refusing to use the event log at %s: path is a symlink", legacyDB)
+	candidates := []string{filepath.Join(projectRoot, Dir, filepath.Base(configured))}
+	// A relative logging.db that contains a separator is a PATH the operator
+	// wrote by hand, and before the relocation it named a real in-project log,
+	// so honor it. A bare filename is deliberately NOT probed: it is what this
+	// version's own default carries, so no NockLock ever wrote a chain to
+	// <root>/<bare name>, and a file sitting there belongs to the project.
+	if cleaned := filepath.Clean(configured); cleaned != filepath.Base(cleaned) {
+		candidates = append(candidates, filepath.Join(projectRoot, cleaned))
+	}
+
+	legacyDB := ""
+	for _, candidate := range candidates {
+		info, statErr := os.Lstat(candidate)
+		if statErr != nil {
+			continue
 		}
-		legacyExists = true
+		if info.Mode()&os.ModeSymlink != 0 {
+			return "", projectRoot, fmt.Errorf("refusing to use the event log at %s: path is a symlink", candidate)
+		}
+		legacyDB = candidate
+		break
 	}
 
 	// Exactly one authoritative log per root. Two of them is an operator-visible
@@ -71,7 +94,7 @@ func ResolveDBPath(cfg *Config, configPath string) (dbPath string, projectRoot s
 	// there, and hard-failing it over the trust checks on a directory it does
 	// not use would refuse to run for no reason. Lstat resolves intermediate
 	// symlinks itself, so an unresolved path still detects an existing log.
-	if legacyExists {
+	if legacyDB != "" {
 		stateDB, dirErr := AuditStateDir(projectRoot)
 		if dirErr == nil {
 			stateDB = filepath.Join(stateDB, filepath.Base(configured))

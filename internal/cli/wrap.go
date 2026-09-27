@@ -390,7 +390,14 @@ var wrapCmd = &cobra.Command{
 						break
 					}
 					sensitive := append(defaultSensitive, fsCfg.DenyPaths...)
-					stateDir := filepath.Join(projectRoot, config.Dir)
+					// The Seatbelt profile grants WRITE to the audit state
+					// directory, so it has to be the directory the log is
+					// actually in. Hardcoding <project>/.nock granted the child
+					// write access to the project's .nock even in read-only
+					// mode -- where the root itself is NOT granted -- which,
+					// once the log moved out, bought nothing but the ability to
+					// rewrite the fence's own config.toml.
+					stateDir := filepath.Dir(dbPath)
 					profile, pathCount, err := fsfence.GenerateWriteConfinementProfile(
 						sensitive, fsCfg.Root, fsCfg.Mode, stateDir, cfg.Filesystem.Hardened,
 					)
