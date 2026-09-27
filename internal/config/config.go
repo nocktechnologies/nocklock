@@ -211,32 +211,12 @@ func ResolveDBPath(cfg *Config, configPath string) (dbPath string, projectRoot s
 			len(existing), strings.Join(existing, ", "))
 	}
 	// An absolute logging.db is used as written once nothing else conflicts.
-	// When its canonical path is inside the canonical audit state directory,
-	// apply the same state-root trust checks as the relative/default route.
+	// When it lands inside NockLock's own audit state directory it must first
+	// clear the same trust chain the relative/default route clears, at every
+	// depth; a path inside the operator's project is left alone.
 	if absoluteConfigured != "" {
-		if stateDB != "" && withinDir(filepath.Dir(stateDB), absoluteConfigured) {
-			stateDir, ensErr := EnsureAuditStateDir(projectRoot)
-			if ensErr != nil {
-				return "", projectRoot, ensErr
-			}
-			// EnsureAuditStateDir validated the fixed nocklock/<hash>
-			// components only. An absolute path may nest deeper --
-			// validateAuditDBLocation permits any depth under the state dir --
-			// and a trusted directory reached through an untrusted parent is
-			// not trusted, so hold every component below the state dir to the
-			// same rule rather than capping the depth, which would refuse
-			// configs config load accepts.
-			rel, relErr := filepath.Rel(stateDir, filepath.Dir(absoluteConfigured))
-			if relErr != nil {
-				return "", projectRoot, fmt.Errorf("cannot check the audit state directory holding logging.db %q: %w", configured, relErr)
-			}
-			var nested []string
-			if rel != "." {
-				nested = strings.Split(rel, string(os.PathSeparator))
-			}
-			if _, err := ensureTrustedComponents(stateDir, nested); err != nil {
-				return "", projectRoot, err
-			}
+		if err := ensureTrustedAuditDBDir(projectRoot, filepath.Dir(absoluteConfigured)); err != nil {
+			return "", projectRoot, err
 		}
 		return configured, projectRoot, nil
 	}

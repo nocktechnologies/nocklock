@@ -8,6 +8,7 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
+	"strings"
 )
 
 // EnsureAuditStateDir returns the directory holding NockLock's own audit state
@@ -70,13 +71,11 @@ func EnsureAuditStateDir(projectRoot string) (string, error) {
 	return ensureTrustedComponents(dir, owned)
 }
 
-// ensureTrustedComponents walks components one at a time beneath an
-// already-trusted base, creating and trust-checking each with ensureTrustedDir,
-// and returns the leaf. A trusted directory reached through an untrusted parent
-// is not trusted, so every component is checked, not just the leaf. Shared by
-// EnsureAuditStateDir (the fixed nocklock/<hash> components) and ResolveDBPath's
-// absolute-path route (any components an absolute logging.db nests deeper),
-// so the two routes into the audit state directory cannot drift apart.
+// ensureTrustedComponents walks components one at a time beneath base, creating
+// and trust-checking each with ensureTrustedDir, and returns the leaf. base
+// must already be trusted: the caller establishes that. A trusted directory
+// reached through an untrusted parent is not trusted, so every component is
+// checked, not just the leaf.
 func ensureTrustedComponents(base string, components []string) (string, error) {
 	dir := base
 	for _, component := range components {
@@ -227,4 +226,54 @@ func projectStateKey(projectRoot string) string {
 	}
 	sum := sha256.Sum256([]byte(real))
 	return hex.EncodeToString(sum[:])[:16]
+}
+
+// ensureTrustedAuditDBDir holds dbDir to NockLock's audit-state trust rule when
+// -- and only when -- it lies inside the audit state directory NockLock owns
+// for projectRoot. A path elsewhere (inside the operator's own project, say) is
+// left alone and reported as nil: the project is the operator's, and it carries
+// no NockLock-owned trust checks.
+//
+// EnsureAuditStateDir validates only the fixed nocklock/<hash> layout it
+// creates, while validateAuditDBLocation accepts an absolute logging.db at any
+// depth under the state directory. Without this, <state>/nocklock/<hash>/sub
+// would be a directory NockLock trusts with the audit chain that nothing had
+// checked -- another user who can write `sub` can swap it for their own. Depth
+// is deliberately not capped: capping here would refuse configs config load
+// accepts.
+func ensureTrustedAuditDBDir(projectRoot, dbDir string) error {
+	auditDir, err := AuditStateDir(projectRoot)
+	if err != nil {
+		// Where the audit state directory would be is unknown, so dbDir cannot
+		// be inside it. validateAuditDBLocation confines an absolute logging.db
+		// to the project in exactly this case, so there is nothing of
+		// NockLock's here to protect.
+		return nil
+	}
+	// withinDir canonicalizes both sides, so a symlinked XDG_STATE_HOME still
+	// matches a dbDir that reached the same place by its resolved spelling.
+	if !withinDir(auditDir, dbDir) {
+		return nil
+	}
+	stateDir, err := EnsureAuditStateDir(projectRoot)
+	if err != nil {
+		return err
+	}
+	rel, err := filepath.Rel(stateDir, resolveExisting(dbDir))
+	if err != nil {
+		return fmt.Errorf("cannot check the audit state directory %s: %w", dbDir, err)
+	}
+	if rel == "." {
+		// EnsureAuditStateDir just validated this directory itself.
+		return nil
+	}
+	// withinDir said dbDir is inside auditDir, so a rel that climbs out means
+	// the two spellings of the state directory disagreed. Fences fail closed:
+	// walking `..` components would create and "trust" directories outside the
+	// audit state directory entirely.
+	if rel == ".." || strings.HasPrefix(rel, ".."+string(os.PathSeparator)) {
+		return fmt.Errorf("refusing to use the audit state directory %s: it resolves outside %s", dbDir, stateDir)
+	}
+	_, err = ensureTrustedComponents(stateDir, strings.Split(rel, string(os.PathSeparator)))
+	return err
 }
