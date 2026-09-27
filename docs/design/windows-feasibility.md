@@ -1163,6 +1163,12 @@ Get-Content $sentinel   # EXPECTED TO SUCCEED — the ALL APPLICATION PACKAGES r
 Rename-Item $nock.FullName -NewName '.nock-moved' 2>&1                     # rename via parent
 Remove-Item -Recurse -Force (Join-Path $project.FullName '.nock-moved') 2>&1  # delete via parent
 New-Item -ItemType Directory -Force -Path $nock.FullName 2>&1              # replace via parent
+# NOTE: this recreated .nock/ INHERITS the project root's (OI)(CI)(M) package-SID
+# ACE (Step 1's /inheritance:r removal applied only to the ORIGINAL directory) —
+# so the child now holds Modify on its own replacement audit dir. That is not a
+# gap to fix; it is further proof the audit DB cannot live under filesystem.root.
+# It also means no later step may re-test "write inside .nock denied" against this
+# recreated dir — nothing here does (Phase 4b tests $sentinel, not .nock).
 "delete-via-parent: record whether rename/delete/replace of .nock via the project root succeeded"
 ```
 
@@ -1379,6 +1385,10 @@ to get wrong.
 # Snapshot each profile's Enabled state FIRST, then restore each one CONDITIONALLY
 # from that snapshot in a finally block. `set allprofiles state on` would force
 # every profile on, which is NOT necessarily the pre-probe state.
+# NetSecurity cmdlets (Win8+, present under PS 5.1). On a GPO-managed VM these
+# target the LOCAL store, so a GPO-forced profile restores to its local value,
+# not the GPO value (which cannot be overridden anyway); the netsh fallback is
+# `netsh advfirewall set <domain|private|public>profile state on|off` per profile.
 $fwSnapshot = Get-NetFirewallProfile -Name Domain,Private,Public |
   Select-Object Name, Enabled
 $fwSnapshot | Format-Table -AutoSize        # RECORD this — restore to exactly this
@@ -1608,7 +1618,7 @@ throwaway VM. Their teardown is "discard the box" — the VM is the cleanup.
 | 12 | Whether `LOCALAPPDATA`/`TEMP` stay redirected when an explicit environment block is passed | Reconciles (a) with (d) |
 | 13 | Go's AF_UNIX support on Windows (checkable on the Linux build host, not the probe box) | Event-listener transport choice |
 | 14 | Whether a WMI (`Win32_Process.Create`) child inherits the AppContainer token or is spawned by the broker under the plain user token | **Phase 0** — full escape if it escapes the token |
-| 15 | Whether a package SID granted recursive Modify on `filesystem.root` can rename/delete/replace an in-project `.nock/` via the parent (`FILE_DELETE_CHILD`) — why the audit DB moves to the per-user state dir | Audit-DB location (Phase 0) |
+| 15 | Whether a package SID granted recursive Modify on `filesystem.root` can rename/delete/replace an in-project `.nock/` via the parent (`FILE_DELETE_CHILD`) — why the audit DB moves to the per-user state dir | Informational — the DB moves out either way; does not gate Phase 0 |
 
 ---
 
