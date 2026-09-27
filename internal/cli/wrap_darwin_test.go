@@ -3,6 +3,7 @@
 package cli
 
 import (
+	"bytes"
 	"context"
 	"database/sql"
 	"errors"
@@ -13,6 +14,7 @@ import (
 
 	"github.com/nocktechnologies/nocklock/internal/config"
 	fsfence "github.com/nocktechnologies/nocklock/internal/fence/fs"
+	"github.com/nocktechnologies/nocklock/internal/logging"
 	"github.com/spf13/cobra"
 
 	_ "modernc.org/sqlite"
@@ -108,6 +110,116 @@ func TestWrapMacOSFilesystemFenceConfinesWritesToRoot(t *testing.T) {
 	}
 	if _, statErr := os.Stat(outsideFile); !os.IsNotExist(statErr) {
 		t.Fatalf("outside-root target exists after denied wrap write: %v", statErr)
+	}
+}
+
+// TestWrapMacOSFilesystemFenceDeniesAuditStateTampering proves a fenced child
+// cannot truncate or rename the event database, active WAL sidecar, or chain
+// anchor. The unfenced parent must still write a complete, signed audit trail
+// for both the denied attempts and a subsequent ordinary wrapped command.
+func TestWrapMacOSFilesystemFenceDeniesAuditStateTampering(t *testing.T) {
+	if err := fsfence.EnsureSandboxExecAvailable(); err != nil {
+		if os.Getenv("NOCKLOCK_SANDBOX_REQUIRE") == "1" {
+			t.Fatalf("sandbox-exec unavailable: %v; NOCKLOCK_SANDBOX_REQUIRE=1 forbids skipping", err)
+		}
+		t.Skipf("sandbox-exec unavailable: %v", err)
+	}
+
+	project := t.TempDir()
+	policy := strings.Replace(config.DefaultTOML(), "allow_all = false", "allow_all = true", 1)
+	writeTestConfig(t, project, policy)
+	withWorkingDir(t, project)
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+
+	runWrap := func(args ...string) error {
+		cmd := &cobra.Command{}
+		cmd.SetContext(context.Background())
+		return wrapCmd.RunE(cmd, append([]string{"--"}, args...))
+	}
+	if err := runWrap("/usr/bin/true"); err != nil {
+		t.Fatalf("initial wrapped command failed: %v", err)
+	}
+
+	dbPath := resolvedAuditDB(t, project)
+	anchorPath := logging.DefaultAnchorPath(dbPath)
+	if _, err := os.Stat(anchorPath); err != nil {
+		t.Fatalf("initial wrapped session did not write chain anchor: %v", err)
+	}
+
+	// Keep a parent-owned connection open so SQLite retains a real WAL sidecar
+	// while the fenced child attempts to damage it.
+	parentLogger, err := logging.NewLogger(dbPath, project, signingLoggerOpts()...)
+	if err != nil {
+		t.Fatalf("open parent audit logger: %v", err)
+	}
+	if err := parentLogger.Log(logging.Event{
+		EventType: logging.EventFilePassed,
+		Category:  "filesystem",
+		Detail:    "prepare WAL tamper test",
+		SessionID: "audit-state-tamper-test",
+	}); err != nil {
+		_ = parentLogger.Close()
+		t.Fatalf("write parent audit event: %v", err)
+	}
+	walPath := dbPath + "-wal"
+	if _, err := os.Stat(walPath); err != nil {
+		_ = parentLogger.Close()
+		t.Fatalf("active audit WAL is missing before child tamper attempt: %v", err)
+	}
+
+	// Each pathname is passed as an argument, never interpolated into the shell
+	// source. A successful truncate or rename makes the child exit non-zero;
+	// denied operations are intentionally handled so all six attempts run.
+	tamperScript := `status=0
+for target in "$@"; do
+  if : > "$target"; then status=1; fi
+  if mv "$target" "$target.renamed"; then status=1; fi
+done
+exit "$status"`
+	if err := runWrap("/bin/sh", "-c", tamperScript, "sh", dbPath, walPath, anchorPath); err != nil {
+		_ = parentLogger.Close()
+		t.Fatalf("FENCE FAILED OPEN: audit-state truncate or rename succeeded: %v", err)
+	}
+	for _, path := range []string{dbPath, walPath, anchorPath} {
+		if _, err := os.Stat(path); err != nil {
+			_ = parentLogger.Close()
+			t.Fatalf("audit state target %s changed after denied child tamper attempt: %v", path, err)
+		}
+		if _, err := os.Stat(path + ".renamed"); !os.IsNotExist(err) {
+			_ = parentLogger.Close()
+			t.Fatalf("FENCE FAILED OPEN: child renamed audit state target %s: %v", path, err)
+		}
+	}
+	if err := parentLogger.Close(); err != nil {
+		t.Fatalf("close parent audit logger: %v", err)
+	}
+
+	normalFile := filepath.Join(project, "normal-wrapped-command")
+	if err := runWrap("/usr/bin/touch", normalFile); err != nil {
+		t.Fatalf("normal wrapped command failed after denied tamper attempts: %v", err)
+	}
+	if _, err := os.Stat(normalFile); err != nil {
+		t.Fatalf("normal wrapped command did not create its project file: %v", err)
+	}
+
+	// This is the handler behind `nocklock verify --audit`; it checks both the
+	// hash chain and the local managed signing key.
+	var verifyOut bytes.Buffer
+	if err := runAuditVerify(context.Background(), &verifyOut, ""); err != nil {
+		t.Fatalf("nocklock verify --audit did not pass after wrapped session: %v\n%s", err, verifyOut.String())
+	}
+
+	db, err := sql.Open("sqlite", dbPath)
+	if err != nil {
+		t.Fatalf("open verified audit log: %v", err)
+	}
+	defer db.Close()
+	var successfulSessions int
+	if err := db.QueryRow(`SELECT COUNT(*) FROM events WHERE event_type = 'session_end' AND detail = 'exit_code=0'`).Scan(&successfulSessions); err != nil {
+		t.Fatalf("count successful wrapped sessions: %v", err)
+	}
+	if successfulSessions < 3 {
+		t.Fatalf("successful wrapped sessions = %d, want at least 3", successfulSessions)
 	}
 }
 

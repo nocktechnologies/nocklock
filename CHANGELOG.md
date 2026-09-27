@@ -14,6 +14,11 @@ All notable changes to NockLock will be documented in this file.
 
 ### Changed
 
+- macOS Seatbelt root-write confinement no longer grants the fenced child
+  write access to NockLock's audit state directory. The unfenced parent alone
+  writes the event database, SQLite sidecars, and chain anchor; a macOS
+  enforcement test now proves child truncate and rename attempts are denied
+  while a wrapped session still produces a verifiable audit chain.
 - New projects keep their audit trail outside the project, so the fenced agent
   can finally use its own project root (N10749). Two requirements had been in
   direct conflict: the agent must be able to create and remove files directly in
