@@ -75,6 +75,7 @@ jobs:
       - name: build and stage nocklock with the filesystem interposer
         run: |
           make build build-fence-fs
+          install -d "$HOME/.claude"
           install -d "$HOME/.cache/nocklock-ci"
           install -m 0755 nocklock "$HOME/.cache/nocklock-ci/nocklock"
           install -m 0755 internal/fence/fs/interposer/libfence_fs.so \
