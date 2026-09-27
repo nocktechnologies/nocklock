@@ -65,10 +65,16 @@ func ResolveDBPath(cfg *Config, configPath string) (dbPath string, projectRoot s
 	resolvedStateBase := resolveExisting(stateBase)
 	stateBaseAvailable := false
 	if info, statErr := os.Stat(stateBase); statErr == nil && info.IsDir() {
-		if resolved, resolveErr := evalAuditStateRoot(stateBase); resolveErr == nil {
-			resolvedStateBase = resolved
-			stateBaseAvailable = true
+		resolved, resolveErr := evalAuditStateRoot(stateBase)
+		if resolveErr != nil {
+			// A state base that stats as a directory but cannot be resolved is not
+			// an absent state root either: the same risk as the Stat-error branch
+			// below applies, so this fails closed the same way instead of quietly
+			// dropping the state-dir candidates and letting a legacy chain win.
+			return "", projectRoot, fmt.Errorf("cannot resolve the audit state root %s: %w", stateBase, resolveErr)
 		}
+		resolvedStateBase = resolved
+		stateBaseAvailable = true
 	} else if statErr != nil && !errors.Is(statErr, os.ErrNotExist) {
 		// An unreadable state root is not an absent state root. Treating it as
 		// unavailable could select a legacy chain while another audit chain is
