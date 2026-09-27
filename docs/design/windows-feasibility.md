@@ -67,6 +67,16 @@ feasibility study.
   [(d)](#d-secret-fence-and-the-audit-chain).
 - **A kernel minifilter driver.** Requires a signed driver and elevated install.
   Out of scope; it is what Phase 2 stops short of.
+- **Job objects + a minifilter, as [`CONTRIBUTING.md`](../../CONTRIBUTING.md)
+  currently advertises.** That line ("Windows filesystem fence implementation
+  (job objects, minifilter)") predates this study and should be updated if this
+  lands. Job objects are in the design — but for the *process tree*, not files;
+  they carry no path-level access control. A minifilter is the elevated
+  driver option rejected above. The file fence belongs on the AppContainer token
+  and DACLs, which is both stronger and free of elevation.
+  [ADR-002](../../.claude/decisions/002-fence-approaches.md) chose
+  LD_PRELOAD/`DYLD_INSERT_LIBRARIES` and named no Windows mechanism at all; this
+  document fills that gap rather than contradicting it.
 - **Do nothing: document WSL2 as the supported Windows path.** The null option,
   and it costs zero PR rounds — inside WSL2 the existing Landlock, seccomp and
   netns fences already work, unmodified. Rejected because it does not fence the
