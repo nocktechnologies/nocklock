@@ -217,6 +217,46 @@ func TestResolveDBPathLegacyLogIgnoresUnavailableStateRoot(t *testing.T) {
 	}
 }
 
+// TestResolveDBPathRefusesStateRootStatError ensures an inaccessible state
+// root cannot be mistaken for an absent one. Otherwise an existing legacy
+// chain would be selected while a state-dir chain could be hidden behind the
+// unreadable path.
+func TestResolveDBPathRefusesStateRootStatError(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("root can traverse the denied state-root parent")
+	}
+
+	projectRoot := resolvedTempDir(t)
+	configPath := filepath.Join(projectRoot, Dir, File)
+	legacyDir := filepath.Join(projectRoot, Dir)
+	if err := os.MkdirAll(legacyDir, 0o700); err != nil {
+		t.Fatalf("mkdir legacy directory: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(legacyDir, DefaultConfig().Logging.DB), []byte("existing chain"), 0o600); err != nil {
+		t.Fatalf("write legacy log: %v", err)
+	}
+
+	blockedParent := filepath.Join(resolvedTempDir(t), "blocked")
+	if err := os.Mkdir(blockedParent, 0o700); err != nil {
+		t.Fatalf("mkdir blocked state-root parent: %v", err)
+	}
+	t.Cleanup(func() {
+		if err := os.Chmod(blockedParent, 0o700); err != nil {
+			t.Errorf("restore blocked state-root parent permissions: %v", err)
+		}
+	})
+	if err := os.Chmod(blockedParent, 0o000); err != nil {
+		t.Fatalf("deny state-root parent traversal: %v", err)
+	}
+	t.Setenv("XDG_STATE_HOME", filepath.Join(blockedParent, "state"))
+
+	if _, _, err := ResolveDBPath(&Config{}, configPath); err == nil {
+		t.Fatal("expected an inaccessible state root to be refused, not omitted")
+	} else if !strings.Contains(err.Error(), "state root") {
+		t.Fatalf("expected a state-root error, got: %v", err)
+	}
+}
+
 func TestResolveDBPathFreshAccountCreatesStateRoot(t *testing.T) {
 	projectRoot := resolvedTempDir(t)
 	configPath := filepath.Join(projectRoot, Dir, File)

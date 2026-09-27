@@ -8,6 +8,7 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
+	"strings"
 )
 
 var evalAuditStateRoot = filepath.EvalSymlinks
@@ -86,7 +87,19 @@ func ensureAuditStateDirAt(dir string, owned []string, checkBase bool) (string, 
 			return "", err
 		}
 	}
-	for _, component := range owned {
+	return ensureTrustedComponents(dir, owned)
+}
+
+// ensureTrustedComponents walks components one at a time beneath an
+// already-trusted base, creating and trust-checking each with ensureTrustedDir,
+// and returns the leaf. A trusted directory reached through an untrusted parent
+// is not trusted, so every component is checked, not just the leaf. Shared by
+// ensureAuditStateDirAt (the fixed nocklock/<hash> components) and
+// ensureTrustedAuditDBDir (any components an absolute logging.db nests deeper),
+// so the two routes into the audit state directory cannot drift apart.
+func ensureTrustedComponents(base string, components []string) (string, error) {
+	dir := base
+	for _, component := range components {
 		dir = filepath.Join(dir, component)
 		if err := ensureTrustedDir(dir); err != nil {
 			return "", err
@@ -234,4 +247,71 @@ func projectStateKey(projectRoot string) string {
 	}
 	sum := sha256.Sum256([]byte(real))
 	return hex.EncodeToString(sum[:])[:16]
+}
+
+// ensureTrustedAuditDBDir holds dbDir to NockLock's audit-state trust rule when
+// -- and only when -- it lies inside the audit state directory NockLock owns
+// for projectRoot. A path elsewhere (inside the operator's own project, say) is
+// left alone and reported as nil: the project is the operator's, and it carries
+// no NockLock-owned trust checks.
+//
+// ensureAuditStateDirAt validates only the fixed nocklock/<hash> layout it
+// creates, while validateAuditDBLocation accepts an absolute logging.db at any
+// depth under the state directory. Without this, <state>/nocklock/<hash>/sub
+// would be a directory NockLock trusts with the audit chain that nothing had
+// checked -- another user who can write `sub` can swap it for their own. Depth
+// is deliberately not capped: capping here would refuse configs config load
+// accepts.
+//
+// dbDir is the directory as the operator spelled it, uncanonicalized: the
+// escape check below needs both spellings to tell the two cases apart.
+// ensureStateDir is the caller's own "create and validate the audit state
+// directory" step, passed in rather than called here so the state root is still
+// created only when this destination is actually selected, and only through the
+// single resolution the caller already scanned with.
+func ensureTrustedAuditDBDir(projectRoot, dbDir string, ensureStateDir func() (string, error)) error {
+	rawAuditDir, err := AuditStateDir(projectRoot)
+	if err != nil {
+		// Where the audit state directory would be is unknown, so dbDir cannot
+		// be inside it. validateAuditDBLocation confines an absolute logging.db
+		// to the project in exactly this case, so there is nothing of
+		// NockLock's here to protect.
+		return nil
+	}
+	stateBase, owned, _ := auditStateLayout(projectRoot)
+	canonicalAuditDir := filepath.Join(resolveExisting(stateBase), filepath.Join(owned...))
+
+	// Preserve the component names the operator supplied. A dbDir written
+	// beneath either spelling of the audit directory is inside, even if a
+	// nested link would resolve elsewhere. The suffix is later joined to the
+	// canonical directory so ensureTrustedDir Lstats every supplied component.
+	prefix := ""
+	if withinDirLexical(rawAuditDir, dbDir) {
+		prefix = rawAuditDir
+	} else if withinDirLexical(canonicalAuditDir, dbDir) {
+		prefix = canonicalAuditDir
+	}
+	if prefix == "" {
+		// An alternate path that resolves into the audit directory has bypassed
+		// the spelling the component walk can vouch for. It is not an external
+		// location, so refuse it rather than applying the outside-path rule.
+		if withinDir(canonicalAuditDir, dbDir) {
+			return fmt.Errorf("refusing to use the audit state directory %s: it reaches %s through a symlink", dbDir, canonicalAuditDir)
+		}
+		return nil
+	}
+	rel, err := filepath.Rel(filepath.Clean(prefix), filepath.Clean(dbDir))
+	if err != nil {
+		return fmt.Errorf("cannot check the audit state directory %s: %w", dbDir, err)
+	}
+	stateDir, err := ensureStateDir()
+	if err != nil {
+		return err
+	}
+	if rel == "." {
+		// ensureStateDir just validated this directory itself.
+		return nil
+	}
+	_, err = ensureTrustedComponents(stateDir, strings.Split(rel, string(os.PathSeparator)))
+	return err
 }

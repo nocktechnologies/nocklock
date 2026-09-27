@@ -69,6 +69,11 @@ func ResolveDBPath(cfg *Config, configPath string) (dbPath string, projectRoot s
 			resolvedStateBase = resolved
 			stateBaseAvailable = true
 		}
+	} else if statErr != nil && !errors.Is(statErr, os.ErrNotExist) {
+		// An unreadable state root is not an absent state root. Treating it as
+		// unavailable could select a legacy chain while another audit chain is
+		// hidden beneath the inaccessible path.
+		return "", projectRoot, fmt.Errorf("cannot stat the audit state root %s: %w", stateBase, statErr)
 	}
 	stateDir := filepath.Join(resolvedStateBase, filepath.Join(stateOwned...))
 
@@ -228,13 +233,16 @@ func ResolveDBPath(cfg *Config, configPath string) (dbPath string, projectRoot s
 		return ensureAuditStateDirAt(createdBase, stateOwned, checkStateBase)
 	}
 	// An absolute logging.db is used as written once nothing else conflicts.
-	// When its canonical path is inside the canonical audit state directory,
-	// apply the same state-root trust checks as the relative/default route.
+	// When it lands inside NockLock's own audit state directory it must first
+	// clear the same trust chain the relative/default route clears, at every
+	// depth; a path inside the operator's project is left alone.
 	if absoluteConfigured != "" {
-		if stateDB != "" && withinDir(filepath.Dir(stateDB), absoluteConfigured) {
-			if _, err := ensureSelectedStateDir(); err != nil {
-				return "", projectRoot, err
-			}
+		// Hand over the path as the operator SPELLED it, not the canonicalized
+		// absoluteConfigured: telling "inside the audit state dir" apart from
+		// "spelled inside it but symlinked out of it" needs both spellings, and
+		// the canonical one alone cannot show the difference.
+		if err := ensureTrustedAuditDBDir(projectRoot, filepath.Dir(configured), ensureSelectedStateDir); err != nil {
+			return "", projectRoot, err
 		}
 		return configured, projectRoot, nil
 	}
@@ -519,7 +527,15 @@ func expandHome(path string) (string, error) {
 // withinDir reports whether path is dir or lies beneath it, comparing at
 // component boundaries so a sibling named like dir plus a suffix does not match.
 func withinDir(dir, path string) bool {
-	rel, err := filepath.Rel(resolveExisting(dir), resolveExisting(path))
+	return withinDirLexical(resolveExisting(dir), resolveExisting(path))
+}
+
+// withinDirLexical is withinDir without the symlink resolution: it compares the
+// paths as spelled. Callers that need to tell "outside the directory" apart
+// from "inside it by name, but outside once its symlinks are followed" -- an
+// escape -- need both answers, and only this one reports the former.
+func withinDirLexical(dir, path string) bool {
+	rel, err := filepath.Rel(filepath.Clean(dir), filepath.Clean(path))
 	if err != nil {
 		return false
 	}
