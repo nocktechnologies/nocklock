@@ -699,3 +699,75 @@ func TestResolveDBPathAbsoluteInStateDirThroughSymlinkedStateRootWithNestedCompo
 		t.Fatalf("nested component mode = %04o, want 0700", perm)
 	}
 }
+
+// TestResolveDBPathAbsoluteInStateDirRejectsEscapingSymlinkedComponent covers
+// the shape canonicalization hides: a component under the audit state directory
+// that is a symlink OUT of it. The containment gate resolves symlinks, so the
+// configured path reads as "somewhere else entirely" -- the one answer that
+// runs no trust checks at all -- even though it was spelled as a path inside
+// the directory NockLock owns. config.Load refuses the same shape, but
+// ResolveDBPath is reachable without it (LoadProfile runs only Validate), so
+// the refusal has to live here too.
+func TestResolveDBPathAbsoluteInStateDirRejectsEscapingSymlinkedComponent(t *testing.T) {
+	projectRoot, configPath := writeProjectConfig(t, `db = "events.db"`)
+	stateDir, err := config.EnsureAuditStateDir(projectRoot)
+	if err != nil {
+		t.Fatalf("EnsureAuditStateDir: %v", err)
+	}
+	outside := filepath.Join(t.TempDir(), "elsewhere")
+	if err := os.Mkdir(outside, 0o700); err != nil {
+		t.Fatalf("mkdir outside: %v", err)
+	}
+	if err := os.Symlink(outside, filepath.Join(stateDir, "sub")); err != nil {
+		t.Skipf("symlinks unsupported: %v", err)
+	}
+
+	cfg, err := config.Load(configPath)
+	if err != nil {
+		t.Fatalf("load config: %v", err)
+	}
+	cfg.Logging.DB = filepath.Join(stateDir, "sub", "events.db")
+
+	dbPath, _, err := config.ResolveDBPath(cfg, configPath)
+	if err == nil {
+		t.Fatalf("expected a symlinked component escaping the audit state dir to be refused, got %q", dbPath)
+	}
+	if !strings.Contains(err.Error(), "resolves outside") {
+		t.Fatalf("expected an escape error, got: %v", err)
+	}
+}
+
+// TestResolveDBPathAbsoluteInStateDirAllowsSymlinkedComponentStayingInside is
+// the negative control for the refusal above: the escape check keys on leaving
+// the audit state directory, not on a symlink being present, so a component
+// that resolves to another path still inside it is checked rather than refused.
+// Without this, the refusal above would pass on any symlink at all.
+func TestResolveDBPathAbsoluteInStateDirAllowsSymlinkedComponentStayingInside(t *testing.T) {
+	projectRoot, configPath := writeProjectConfig(t, `db = "events.db"`)
+	stateDir, err := config.EnsureAuditStateDir(projectRoot)
+	if err != nil {
+		t.Fatalf("EnsureAuditStateDir: %v", err)
+	}
+	real := filepath.Join(stateDir, "real")
+	if err := os.Mkdir(real, 0o700); err != nil {
+		t.Fatalf("mkdir real: %v", err)
+	}
+	if err := os.Symlink(real, filepath.Join(stateDir, "sub")); err != nil {
+		t.Skipf("symlinks unsupported: %v", err)
+	}
+
+	cfg, err := config.Load(configPath)
+	if err != nil {
+		t.Fatalf("load config: %v", err)
+	}
+	absDB := filepath.Join(stateDir, "sub", "events.db")
+	cfg.Logging.DB = absDB
+
+	dbPath, _, err := config.ResolveDBPath(cfg, configPath)
+	if err != nil {
+		t.Fatalf("ResolveDBPath with a symlinked component staying inside the state dir: %v", err)
+	}
+	if dbPath != absDB {
+		t.Fatalf("event log = %q, want the configured absolute path %q", dbPath, absDB)
+	}
+}

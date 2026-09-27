@@ -215,7 +215,11 @@ func ResolveDBPath(cfg *Config, configPath string) (dbPath string, projectRoot s
 	// clear the same trust chain the relative/default route clears, at every
 	// depth; a path inside the operator's project is left alone.
 	if absoluteConfigured != "" {
-		if err := ensureTrustedAuditDBDir(projectRoot, filepath.Dir(absoluteConfigured)); err != nil {
+		// Hand over the path as the operator SPELLED it, not the canonicalized
+		// absoluteConfigured: telling "inside the audit state dir" apart from
+		// "spelled inside it but symlinked out of it" needs both spellings, and
+		// the canonical one alone cannot show the difference.
+		if err := ensureTrustedAuditDBDir(projectRoot, filepath.Dir(configured)); err != nil {
 			return "", projectRoot, err
 		}
 		return configured, projectRoot, nil
@@ -501,7 +505,15 @@ func expandHome(path string) (string, error) {
 // withinDir reports whether path is dir or lies beneath it, comparing at
 // component boundaries so a sibling named like dir plus a suffix does not match.
 func withinDir(dir, path string) bool {
-	rel, err := filepath.Rel(resolveExisting(dir), resolveExisting(path))
+	return withinDirLexical(resolveExisting(dir), resolveExisting(path))
+}
+
+// withinDirLexical is withinDir without the symlink resolution: it compares the
+// paths as spelled. Callers that need to tell "outside the directory" apart
+// from "inside it by name, but outside once its symlinks are followed" -- an
+// escape -- need both answers, and only this one reports the former.
+func withinDirLexical(dir, path string) bool {
+	rel, err := filepath.Rel(filepath.Clean(dir), filepath.Clean(path))
 	if err != nil {
 		return false
 	}

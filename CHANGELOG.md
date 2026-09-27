@@ -106,7 +106,9 @@ All notable changes to NockLock will be documented in this file.
   the same state-root ownership and permission checks as a relative path to
   that directory, and every directory it nests deeper than `nocklock/<hash>`
   is held to the same 0700/owner/symlink rule, so a writable directory
-  planted between the state directory and the log cannot be used (N10830).
+  planted between the state directory and the log cannot be used. A component
+  spelled inside that directory but symlinked out of it is refused rather than
+  waved through as a path NockLock does not own (N10830).
 - The configured state root (`XDG_STATE_HOME`, or the `~/.local/state`
   fallback) is now itself checked before anything is created beneath it: it
   must be owned by the current user and not group- or world-writable, or

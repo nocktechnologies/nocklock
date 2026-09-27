@@ -241,6 +241,8 @@ func projectStateKey(projectRoot string) string {
 // checked -- another user who can write `sub` can swap it for their own. Depth
 // is deliberately not capped: capping here would refuse configs config load
 // accepts.
+// dbDir is the directory as the operator spelled it, uncanonicalized: the
+// escape check below needs both spellings to tell the two cases apart.
 func ensureTrustedAuditDBDir(projectRoot, dbDir string) error {
 	auditDir, err := AuditStateDir(projectRoot)
 	if err != nil {
@@ -252,7 +254,19 @@ func ensureTrustedAuditDBDir(projectRoot, dbDir string) error {
 	}
 	// withinDir canonicalizes both sides, so a symlinked XDG_STATE_HOME still
 	// matches a dbDir that reached the same place by its resolved spelling.
-	if !withinDir(auditDir, dbDir) {
+	inside := withinDir(auditDir, dbDir)
+	// Canonicalizing cuts the other way too: a component between the audit
+	// state directory and dbDir may be a symlink pointing OUT of it, and
+	// following it makes the canonical dbDir read as "somewhere else" -- the
+	// one answer that skips every check. Inside by name but outside once
+	// resolved is an escape, not a path elsewhere, so refuse it. (config.Load's
+	// own validateAuditDBLocation refuses the same shape for a config read off
+	// disk, but ResolveDBPath is reachable without it -- LoadProfile runs only
+	// Validate -- and it is this function that promises the trust rule.)
+	if !inside && withinDirLexical(auditDir, dbDir) {
+		return fmt.Errorf("refusing to use the audit state directory %s: a path component resolves outside %s", dbDir, auditDir)
+	}
+	if !inside {
 		return nil
 	}
 	stateDir, err := EnsureAuditStateDir(projectRoot)
