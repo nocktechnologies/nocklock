@@ -1,6 +1,7 @@
 package fs
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -90,6 +91,38 @@ func TestProcessConfig_Valid(t *testing.T) {
 	wantDeny := filepath.Clean(filepath.Join(home, ".aws"))
 	if fc.DenyPaths[0] != wantDeny {
 		t.Errorf("DenyPaths[0] = %q, want %q", fc.DenyPaths[0], wantDeny)
+	}
+}
+
+// TestProcessConfig_AllowPathCapBoundary is the boundary test for #10757's
+// thread 2: the interposer's libfence_fs.c fails closed (denies everything)
+// once its allow_count reaches MAX_PATHS (256), and the __landlock-exec shim
+// injects one allow entry per fsfence.SelfProcFiles AFTER ProcessConfig runs
+// (see allowSelfProcFS in internal/cli/landlock_exec.go). A user config with
+// exactly 256 allow paths used to pass validation and then trip the
+// interposer's cap at runtime once the self-proc entries were appended — a
+// silent full deny-all, not a config error. ProcessConfig must now reserve
+// that headroom and reject at config time instead.
+func TestProcessConfig_AllowPathCapBoundary(t *testing.T) {
+	root := t.TempDir()
+
+	allow := func(n int) []string {
+		paths := make([]string, n)
+		for i := 0; i < n; i++ {
+			paths[i] = filepath.Join(root, fmt.Sprintf("f%d", i))
+		}
+		return paths
+	}
+	room := maxAllowPaths - len(SelfProcFiles)
+
+	cfg := config.FilesystemConfig{Root: root, Allow: allow(room)}
+	if _, err := ProcessConfig(cfg); err != nil {
+		t.Fatalf("ProcessConfig with %d allow paths (exactly the reserved cap) should succeed: %v", room, err)
+	}
+
+	cfg.Allow = allow(room + 1)
+	if _, err := ProcessConfig(cfg); err == nil {
+		t.Fatalf("ProcessConfig with %d allow paths (one past the reserved cap) should fail closed with a config error", room+1)
 	}
 }
 

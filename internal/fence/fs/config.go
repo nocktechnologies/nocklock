@@ -16,6 +16,28 @@ import (
 // the serialized fence config passed to the LD_PRELOAD interposer.
 const fieldSep = "\x1f"
 
+// maxAllowPaths mirrors MAX_PATHS in the interposer's libfence_fs.c
+// (internal/fence/fs/interposer/libfence_fs.c). Past this count the
+// interposer fails closed (denies every path) rather than silently dropping
+// entries, so ProcessConfig must refuse a policy that would push it there.
+const maxAllowPaths = 256
+
+// SelfProcFiles are the specific, read-only /proc/<pid> entries the fence
+// grants a wrapped process for its own runtime introspection (e.g. Node's
+// process.memoryUsage(), which reads /proc/self/stat). Only these files are
+// ever granted — never the /proc/<pid> directory itself, which would also
+// expose environ, cmdline, mem, maps and fd to the wrapped process AND to any
+// descendant that inherits the Landlock rule.
+//
+// Both the Landlock ruleset (landlockProcSelfAllowPaths in
+// internal/cli/wrap.go) and the userspace interposer's allow-list injection
+// (allowSelfProcFS in internal/cli/landlock_exec.go) grant exactly this list
+// and must stay in sync, so this is the single source of truth for both. It
+// is also why ProcessConfig reserves len(SelfProcFiles) entries below
+// maxAllowPaths: those two injection points add one allow entry per file,
+// after config validation has already run.
+var SelfProcFiles = []string{"stat", "status", "statm"}
+
 // FenceConfig holds resolved, absolute filesystem fence paths ready
 // for enforcement. All paths have been cleaned, expanded, and (for Root)
 // symlink-resolved.
@@ -142,6 +164,12 @@ func ProcessConfig(cfg config.FilesystemConfig) (*FenceConfig, error) {
 			return nil, fmt.Errorf("cannot resolve allow path %q: %w", p, err)
 		}
 		allowPaths = append(allowPaths, resolved)
+	}
+	if room := maxAllowPaths - len(SelfProcFiles); len(allowPaths) > room {
+		return nil, fmt.Errorf(
+			"too many filesystem allow paths (%d): the fence interposer supports at most %d, "+
+				"and %d are reserved for the wrapped process's own /proc/<pid> grants (see SelfProcFiles); "+
+				"remove entries from [filesystem].allow", len(allowPaths), maxAllowPaths, len(SelfProcFiles))
 	}
 
 	// Resolve deny paths.

@@ -1026,28 +1026,48 @@ func resolvePathBestEffort(p string) string {
 	return filepath.Clean(p)
 }
 
-// landlockProcSelfAllowPaths grants the child read-only access to its OWN
-// /proc/<pid> directory via the /proc/self symlink. This is what Node needs for
-// process.memoryUsage() (reads /proc/self/stat) and fs reads of
-// /proc/self/status; without it the calls throw EACCES and can crash the agent.
+// landlockProcSelfAllowPaths grants the child read-only access to the specific
+// files in fsfence.SelfProcFiles under its OWN /proc/<pid>, via the /proc/self
+// symlink. This is what Node needs for process.memoryUsage() (reads
+// /proc/self/stat) and fs reads of /proc/self/status; without it the calls
+// throw EACCES and can crash the agent.
 //
 // Correctness hinges on the exec model: the __landlock-exec shim builds the
 // Landlock ruleset and then execve's the child IN PLACE (unix.Exec preserves the
-// pid — see landlock_exec.go). So the literal string "/proc/self", opened when
-// the shim applies the ruleset, binds to the very inode that becomes the child's
-// own /proc/<pid> — never a sibling's or another user's. It must stay the
-// literal "/proc/self": resolving the symlink (as the config allow list does)
-// would bind it to some other process's pid dir.
+// pid — see landlock_exec.go). So the literal string "/proc/self/<file>",
+// opened when the shim applies the ruleset, binds to a file inode inside the
+// very directory that becomes the child's own /proc/<pid> — never a sibling's
+// or another user's. It must stay the literal "/proc/self/<file>": resolving
+// the symlink (as the config allow list does) would bind it to some other
+// process's pid dir.
 //
-// The grant is read-only and reaches exactly one directory: the wrapped child's
-// own /proc/<pid>. That never widens the fence boundary — no process outside the
-// wrapped command is exposed. (Landlock is inode-bound, so the rule does NOT
-// cover a descendant that later execs under a DIFFERENT pid; such a grandchild's
-// own /proc/self stays denied. Fixing that without re-granting the broad /proc
-// tree #115 removed needs a pid namespace + fresh proc mount, which the syscall
-// fence's allow_namespaces=false posture precludes — out of scope here.)
+// It grants FILES, never the /proc/<pid> DIRECTORY: a directory-level Landlock
+// rule covers every entry beneath it (RulesFromConfig grants a directory
+// read+readdir+execute over its whole subtree), which would reopen environ,
+// cmdline, mem, maps and fd — the same-UID leak #115 removed. Landlock rules
+// are also inherited by every future descendant of the process they were
+// applied to, so a directory grant would let a GRANDCHILD of the wrapped
+// process read the wrapped process's own environ too — reopening the leak one
+// level down (round 2). A file-level grant is inode-bound to that one file, so
+// an inheriting descendant can only re-read those same few files, never
+// environ/cmdline/mem/maps/fd (see
+// TestWrapClaudeCodePresetBlocksDescendantParentProcEnviron).
+//
+// The grant reaches only the wrapped child's own /proc/<pid>/<file> entries.
+// That never widens the fence boundary — no process outside the wrapped
+// command's own descendants is exposed, and even descendants only inherit
+// read on this same curated file list. (A grandchild that later execs under a
+// DIFFERENT pid does not get its OWN /proc/self grant — Landlock is
+// inode-bound to the original pid's files. Fixing that without re-granting the
+// broad /proc tree #115 removed needs a pid namespace + fresh proc mount,
+// which the syscall fence's allow_namespaces=false posture precludes — out of
+// scope here.)
 func landlockProcSelfAllowPaths() []landlock.AllowPath {
-	return []landlock.AllowPath{{Path: "/proc/self", Access: landlock.AccessReadOnly}}
+	paths := make([]landlock.AllowPath, 0, len(fsfence.SelfProcFiles))
+	for _, f := range fsfence.SelfProcFiles {
+		paths = append(paths, landlock.AllowPath{Path: "/proc/self/" + f, Access: landlock.AccessReadOnly})
+	}
+	return paths
 }
 
 func landlockAuditAllowPaths(dbPath string) []landlock.AllowPath {
