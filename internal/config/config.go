@@ -69,6 +69,11 @@ func ResolveDBPath(cfg *Config, configPath string) (dbPath string, projectRoot s
 			resolvedStateBase = resolved
 			stateBaseAvailable = true
 		}
+	} else if statErr != nil && !errors.Is(statErr, os.ErrNotExist) {
+		// An unreadable state root is not an absent state root. Treating it as
+		// unavailable could select a legacy chain while another audit chain is
+		// hidden beneath the inaccessible path.
+		return "", projectRoot, fmt.Errorf("cannot stat the audit state root %s: %w", stateBase, statErr)
 	}
 	stateDir := filepath.Join(resolvedStateBase, filepath.Join(stateOwned...))
 

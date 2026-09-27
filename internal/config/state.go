@@ -270,7 +270,7 @@ func projectStateKey(projectRoot string) string {
 // created only when this destination is actually selected, and only through the
 // single resolution the caller already scanned with.
 func ensureTrustedAuditDBDir(projectRoot, dbDir string, ensureStateDir func() (string, error)) error {
-	auditDir, err := AuditStateDir(projectRoot)
+	rawAuditDir, err := AuditStateDir(projectRoot)
 	if err != nil {
 		// Where the audit state directory would be is unknown, so dbDir cannot
 		// be inside it. validateAuditDBLocation confines an absolute logging.db
@@ -278,59 +278,39 @@ func ensureTrustedAuditDBDir(projectRoot, dbDir string, ensureStateDir func() (s
 		// NockLock's here to protect.
 		return nil
 	}
-	// withinDir canonicalizes both sides, so a symlinked XDG_STATE_HOME still
-	// matches a dbDir that reached the same place by its resolved spelling.
-	inside := withinDir(auditDir, dbDir)
-	// Canonicalizing cuts the other way too: a component between the audit
-	// state directory and dbDir may be a symlink pointing OUT of it, and
-	// following it makes the canonical dbDir read as "somewhere else" -- the
-	// one answer that skips every check. Inside by name but outside once
-	// resolved is an escape, not a path elsewhere, so refuse it. (config.Load's
-	// own validateAuditDBLocation refuses the same shape for a config read off
-	// disk, but ResolveDBPath is reachable without it -- LoadProfile runs only
-	// Validate -- and it is this function that promises the trust rule.)
-	if !inside && withinDirLexical(auditDir, dbDir) {
-		return fmt.Errorf("refusing to use the audit state directory %s: a path component resolves outside %s", dbDir, auditDir)
+	stateBase, owned, _ := auditStateLayout(projectRoot)
+	canonicalAuditDir := filepath.Join(resolveExisting(stateBase), filepath.Join(owned...))
+
+	// Preserve the component names the operator supplied. A dbDir written
+	// beneath either spelling of the audit directory is inside, even if a
+	// nested link would resolve elsewhere. The suffix is later joined to the
+	// canonical directory so ensureTrustedDir Lstats every supplied component.
+	prefix := ""
+	if withinDirLexical(rawAuditDir, dbDir) {
+		prefix = rawAuditDir
+	} else if withinDirLexical(canonicalAuditDir, dbDir) {
+		prefix = canonicalAuditDir
 	}
-	if !inside {
+	if prefix == "" {
+		// An alternate path that resolves into the audit directory has bypassed
+		// the spelling the component walk can vouch for. It is not an external
+		// location, so refuse it rather than applying the outside-path rule.
+		if withinDir(canonicalAuditDir, dbDir) {
+			return fmt.Errorf("refusing to use the audit state directory %s: it reaches %s through a symlink", dbDir, canonicalAuditDir)
+		}
 		return nil
+	}
+	rel, err := filepath.Rel(filepath.Clean(prefix), filepath.Clean(dbDir))
+	if err != nil {
+		return fmt.Errorf("cannot check the audit state directory %s: %w", dbDir, err)
 	}
 	stateDir, err := ensureStateDir()
 	if err != nil {
 		return err
 	}
-	// Take the components from the spelling the operator wrote, not from the
-	// canonical path: canonicalizing replaces a symlinked component with its
-	// target, so walking the canonical form would check the target and never
-	// Lstat the symlink -- exempting nested components from the symlink
-	// refusal ensureTrustedDir applies to nocklock/<hash>, and leaving a
-	// re-targeting window between this check and the database open. The
-	// component NAMES are what matter; they get joined onto the canonical,
-	// already-validated stateDir either way. auditDir is deliberately the RAW
-	// spelling from AuditStateDir for the same reason: relative to the
-	// caller's resolved state directory, a dbDir spelled through a symlinked
-	// XDG_STATE_HOME would climb out and fall to the canonical branch below,
-	// which is the one that cannot see a symlinked component.
-	rel, err := filepath.Rel(auditDir, dbDir)
-	if err != nil || rel == ".." || strings.HasPrefix(rel, ".."+string(os.PathSeparator)) {
-		// dbDir reaches the audit directory by some other spelling than
-		// auditDir's own. Fall back to the canonical pair, which withinDir
-		// already agreed on.
-		rel, err = filepath.Rel(stateDir, resolveExisting(dbDir))
-		if err != nil {
-			return fmt.Errorf("cannot check the audit state directory %s: %w", dbDir, err)
-		}
-	}
 	if rel == "." {
 		// ensureStateDir just validated this directory itself.
 		return nil
-	}
-	// withinDir said dbDir is inside auditDir, so a rel that still climbs out
-	// after the fallback means the two spellings of the state directory
-	// disagreed. Block instead: walking `..` components would create and
-	// "trust" directories outside the audit state directory entirely.
-	if rel == ".." || strings.HasPrefix(rel, ".."+string(os.PathSeparator)) {
-		return fmt.Errorf("refusing to use the audit state directory %s: it resolves outside %s", dbDir, stateDir)
 	}
 	_, err = ensureTrustedComponents(stateDir, strings.Split(rel, string(os.PathSeparator)))
 	return err

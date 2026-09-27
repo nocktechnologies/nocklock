@@ -674,29 +674,41 @@ func TestResolveDBPathAbsoluteInStateDirThroughSymlinkedStateRootChecksStateRoot
 // This is the case that exercises the component walk against a symlinked state
 // dir, which the refusal test cannot reach.
 func TestResolveDBPathAbsoluteInStateDirThroughSymlinkedStateRootWithNestedComponentSucceeds(t *testing.T) {
-	projectRoot, configPath := writeProjectConfig(t, `db = "events.db"`)
-	auditDir := symlinkedAuditStateDir(t, projectRoot, trustedStateRoot(t))
-	absDB := filepath.Join(auditDir, "sub", "events.db")
+	for _, spelling := range []string{"state link", "resolved state root"} {
+		t.Run(spelling, func(t *testing.T) {
+			projectRoot, configPath := writeProjectConfig(t, `db = "events.db"`)
+			auditDir := symlinkedAuditStateDir(t, projectRoot, trustedStateRoot(t))
+			stateDir, err := config.EnsureAuditStateDir(projectRoot)
+			if err != nil {
+				t.Fatalf("EnsureAuditStateDir: %v", err)
+			}
+			spelledStateDir := auditDir
+			if spelling == "resolved state root" {
+				spelledStateDir = stateDir
+			}
+			absDB := filepath.Join(spelledStateDir, "sub", "events.db")
 
-	cfg, err := config.Load(configPath)
-	if err != nil {
-		t.Fatalf("load config: %v", err)
-	}
-	cfg.Logging.DB = absDB
+			cfg, err := config.Load(configPath)
+			if err != nil {
+				t.Fatalf("load config: %v", err)
+			}
+			cfg.Logging.DB = absDB
 
-	dbPath, _, err := config.ResolveDBPath(cfg, configPath)
-	if err != nil {
-		t.Fatalf("ResolveDBPath with a trusted, symlinked state root: %v", err)
-	}
-	if dbPath != absDB {
-		t.Fatalf("event log = %q, want the configured absolute path %q", dbPath, absDB)
-	}
-	info, err := os.Stat(filepath.Dir(dbPath))
-	if err != nil {
-		t.Fatalf("stat nested component: %v", err)
-	}
-	if perm := info.Mode().Perm(); perm != 0o700 {
-		t.Fatalf("nested component mode = %04o, want 0700", perm)
+			dbPath, _, err := config.ResolveDBPath(cfg, configPath)
+			if err != nil {
+				t.Fatalf("ResolveDBPath with a trusted, symlinked state root: %v", err)
+			}
+			if dbPath != absDB {
+				t.Fatalf("event log = %q, want the configured absolute path %q", dbPath, absDB)
+			}
+			info, err := os.Stat(filepath.Dir(dbPath))
+			if err != nil {
+				t.Fatalf("stat nested component: %v", err)
+			}
+			if perm := info.Mode().Perm(); perm != 0o700 {
+				t.Fatalf("nested component mode = %04o, want 0700", perm)
+			}
+		})
 	}
 }
 
@@ -732,8 +744,8 @@ func TestResolveDBPathAbsoluteInStateDirRejectsEscapingSymlinkedComponent(t *tes
 	if err == nil {
 		t.Fatalf("expected a symlinked component escaping the audit state dir to be refused, got %q", dbPath)
 	}
-	if !strings.Contains(err.Error(), "resolves outside") {
-		t.Fatalf("expected an escape error, got: %v", err)
+	if !strings.Contains(err.Error(), "symlink") {
+		t.Fatalf("expected a symlink refusal, got: %v", err)
 	}
 }
 
@@ -811,5 +823,99 @@ func TestResolveDBPathAbsoluteInStateDirRejectsSymlinkedComponentThroughSymlinke
 	}
 	if !strings.Contains(err.Error(), "symlink") {
 		t.Fatalf("expected a symlink refusal, got: %v", err)
+	}
+}
+
+// TestResolveDBPathAbsoluteInStateDirRejectsEscapingSymlinkViaResolvedStateRoot
+// covers an operator spelling the audit directory through the real target of a
+// symlinked XDG_STATE_HOME. The intermediate link escapes that directory, so
+// canonical containment alone would make it look outside and skip the trust
+// walk entirely.
+func TestResolveDBPathAbsoluteInStateDirRejectsEscapingSymlinkViaResolvedStateRoot(t *testing.T) {
+	projectRoot, configPath := writeProjectConfig(t, `db = "events.db"`)
+	_ = symlinkedAuditStateDir(t, projectRoot, trustedStateRoot(t))
+	stateDir, err := config.EnsureAuditStateDir(projectRoot)
+	if err != nil {
+		t.Fatalf("EnsureAuditStateDir: %v", err)
+	}
+	outside := filepath.Join(t.TempDir(), "elsewhere")
+	if err := os.Mkdir(outside, 0o700); err != nil {
+		t.Fatalf("mkdir outside: %v", err)
+	}
+	if err := os.Symlink(outside, filepath.Join(stateDir, "sub")); err != nil {
+		t.Skipf("symlinks unsupported: %v", err)
+	}
+
+	cfg, err := config.Load(configPath)
+	if err != nil {
+		t.Fatalf("load config: %v", err)
+	}
+	cfg.Logging.DB = filepath.Join(stateDir, "sub", "events.db")
+
+	if dbPath, _, err := config.ResolveDBPath(cfg, configPath); err == nil {
+		t.Fatalf("expected a symlinked component through the resolved state root to be refused, got %q", dbPath)
+	} else if !strings.Contains(err.Error(), "symlink") {
+		t.Fatalf("expected a symlink refusal, got: %v", err)
+	}
+}
+
+// TestResolveDBPathAbsoluteInStateDirRejectsContainedSymlinkViaResolvedStateRoot
+// covers the same spelling with a link that stays inside the audit directory.
+// The link is still forbidden because it can be retargeted after validation.
+func TestResolveDBPathAbsoluteInStateDirRejectsContainedSymlinkViaResolvedStateRoot(t *testing.T) {
+	projectRoot, configPath := writeProjectConfig(t, `db = "events.db"`)
+	_ = symlinkedAuditStateDir(t, projectRoot, trustedStateRoot(t))
+	stateDir, err := config.EnsureAuditStateDir(projectRoot)
+	if err != nil {
+		t.Fatalf("EnsureAuditStateDir: %v", err)
+	}
+	real := filepath.Join(stateDir, "real")
+	if err := os.Mkdir(real, 0o700); err != nil {
+		t.Fatalf("mkdir real intermediate: %v", err)
+	}
+	if err := os.Symlink(real, filepath.Join(stateDir, "sub")); err != nil {
+		t.Skipf("symlinks unsupported: %v", err)
+	}
+
+	cfg, err := config.Load(configPath)
+	if err != nil {
+		t.Fatalf("load config: %v", err)
+	}
+	cfg.Logging.DB = filepath.Join(stateDir, "sub", "events.db")
+
+	if dbPath, _, err := config.ResolveDBPath(cfg, configPath); err == nil {
+		t.Fatalf("expected a contained symlink through the resolved state root to be refused, got %q", dbPath)
+	} else if !strings.Contains(err.Error(), "symlink") {
+		t.Fatalf("expected a symlink refusal, got: %v", err)
+	}
+}
+
+// TestResolveDBPathAbsoluteInStateDirRejectsAlternateSpellingResolvedInside
+// covers a path that is lexically outside both audit-directory spellings but
+// reaches the canonical directory through a separate symlink. Its components
+// cannot be vouched for by the audit-state walk, so it must not be treated as
+// an ordinary external database location.
+func TestResolveDBPathAbsoluteInStateDirRejectsAlternateSpellingResolvedInside(t *testing.T) {
+	projectRoot, configPath := writeProjectConfig(t, `db = "events.db"`)
+	_ = symlinkedAuditStateDir(t, projectRoot, trustedStateRoot(t))
+	stateDir, err := config.EnsureAuditStateDir(projectRoot)
+	if err != nil {
+		t.Fatalf("EnsureAuditStateDir: %v", err)
+	}
+	alternate := filepath.Join(t.TempDir(), "alternate-audit-spelling")
+	if err := os.Symlink(stateDir, alternate); err != nil {
+		t.Skipf("symlinks unsupported: %v", err)
+	}
+
+	cfg, err := config.Load(configPath)
+	if err != nil {
+		t.Fatalf("load config: %v", err)
+	}
+	cfg.Logging.DB = filepath.Join(alternate, "events.db")
+
+	if dbPath, _, err := config.ResolveDBPath(cfg, configPath); err == nil {
+		t.Fatalf("expected an alternate spelling resolved into the audit state dir to be refused, got %q", dbPath)
+	} else if !strings.Contains(err.Error(), "through a symlink") {
+		t.Fatalf("expected an alternate-spelling refusal, got: %v", err)
 	}
 }

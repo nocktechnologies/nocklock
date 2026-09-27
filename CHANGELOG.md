@@ -78,6 +78,10 @@ All notable changes to NockLock will be documented in this file.
   config loads, with an error naming the setting. `logging.db` is a setting a
   repository can ship, so an unrestricted absolute path would let a hostile
   checkout aim a SQLite write at any path the invoking user can reach.
+  Absolute paths below a symlinked audit state root are evaluated in both their
+  raw and resolved spellings, and every supplied intermediate component is
+  `Lstat`-checked before use. An error while inspecting the state root now also
+  stops resolution rather than making the root look unavailable.
   `nocklock doctor` warns when an absolute path lands back inside
   `filesystem.root`, where the agent can reach its own audit trail, and when the
   audit state directory falls inside a `filesystem.allow` grant.
