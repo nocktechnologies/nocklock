@@ -686,6 +686,38 @@ may write, delete, rename, or change registry/firewall/machine state outside its
 own probe root** — the exceptions are called out below and each is undone in
 teardown.
 
+### Probe classification
+
+Every probe is one of two classes. **DESKTOP-SAFE** probes create only inside the
+probe root, install nothing, change no machine-wide state except the
+AppContainer profile and loopback exemption (both torn down), and can be fully
+cleaned up by deleting the probe root and running the global teardown.
+**DISPOSABLE-BOX ONLY** probes install software, change machine or user-scope
+package state, need a reboot, or cannot be fully torn down — run them in Windows
+Sandbox or a throwaway VM, never on the desktop.
+
+| Probe | Class | Reason |
+|---|---|---|
+| 1 — zero-capability loopback | DESKTOP-SAFE | Listeners inside probe root; loopback exemption torn down |
+| 2 — exemption elevation | DESKTOP-SAFE | Read-only check of Probe 1's exemption |
+| 3 — AppContainer launch | DESKTOP-SAFE | Transient container process |
+| 4 — ACL grant and deny | DESKTOP-SAFE | ACLs and dirs under probe root |
+| 5 (a) — toolchain offline | DESKTOP-SAFE | Runs pre-installed tools; artifacts under probe root |
+| 5 (b) — toolchain network-fetch | DISPOSABLE-BOX ONLY | `npm install`, `pip install` write only into the probe root, but exercise the package-manager install path |
+| 6 — brokered egress † | DESKTOP-SAFE † | † The `Start-Process "https://…"` step opens the operator's real browser and is DISPOSABLE-BOX ONLY; the remaining steps (nslookup, BITS, Invoke-WebRequest, curl) are desktop-safe |
+| 7 — ETW file events ‡ | DESKTOP-SAFE ‡ | ‡ Non-elevated `logman create/stop` only; the "add user to Performance Log Users" retry is DISPOSABLE-BOX ONLY (persistent group membership change) |
+| 8 — packaging no-admin | DISPOSABLE-BOX ONLY | Installs user-scope packages (winget, scoop) |
+| 9 — fail-open firewall | DISPOSABLE-BOX ONLY | Disables the firewall — VM-only |
+| 10 — container escape | DESKTOP-SAFE | Container profiles and WMI child torn down |
+| 11 — named pipe | DESKTOP-SAFE | In-memory kernel object vanishes when process exits |
+| Box setup | DISPOSABLE-BOX ONLY | Installs Git, Node, Python via winget |
+
+On the desktop run, required tools (python, git, node, curl) must already be
+present. The shared scaffold checks with `Get-Command` and records
+**SETUP-FAULT** for any probe whose prerequisites are missing — it never
+installs. Disposable-box probes run on a throwaway VM where the teardown is
+"discard the box."
+
 **Target shell: Windows PowerShell 5.1** (`powershell.exe`, not `pwsh`).
 Do not use PS 7-only constructs: trailing `&`, `&&`, `||`, ternary `? :`,
 null-coalescing `??`, `-Parallel`, `Split-Path -LeafBase`, or `Clean` blocks.
@@ -701,12 +733,42 @@ are exactly how a "MUST fail" assertion passes for the wrong reason):
 $stamp     = Get-Date -Format 'yyyyMMdd-HHmmss'
 $probeRoot = Join-Path $env:TEMP "nocklock-probe-$stamp"
 $moniker   = "nocklock-probe-$stamp"
-$installedByThisRun = @()
 New-Item -ItemType Directory -Force -Path $probeRoot | Out-Null
-Save-Module -Name NtObjectManager -Path (Join-Path $probeRoot 'modules')  # no user-scope install
-Import-Module (Join-Path $probeRoot 'modules\NtObjectManager')
-# Note: Save-Module may pull the NuGet provider on first use; if it does, record
-# it in the teardown listing rather than assuming it was already present.
+
+# --- Tool prerequisites (desktop run) ---
+# On the desktop, required tools must already be present. Each probe declares
+# which commands it needs; a missing command records SETUP-FAULT for that probe
+# and the probe is not scored. Never install on the desktop.
+$requiredTools = @{
+  'Probe 1'  = @('python','curl.exe')
+  'Probe 5a' = @('git','node','python')
+  'Probe 5b' = @('git','node','python','npm','pip')   # disposable-box only
+  'Probe 6'  = @('curl.exe','nslookup')
+  'Probe 10' = @('curl.exe')
+}
+$setupFaults = @()
+foreach ($probe in $requiredTools.Keys) {
+  foreach ($cmd in $requiredTools[$probe]) {
+    if (-not (Get-Command $cmd -ErrorAction SilentlyContinue)) {
+      $setupFaults += "$probe requires $cmd"
+      "SETUP-FAULT: $probe requires $cmd — tool not found, probe not scored"
+    }
+  }
+}
+
+# --- NtObjectManager module ---
+# Desktop run: the module and the NuGet provider must already be present.
+# Disposable-box run: Save-Module into the probe root (may pull NuGet).
+if (Get-Module -ListAvailable NtObjectManager) {
+  Import-Module NtObjectManager
+} elseif (Get-PackageProvider NuGet -ErrorAction SilentlyContinue) {
+  Save-Module -Name NtObjectManager -Path (Join-Path $probeRoot 'modules')
+  Import-Module (Join-Path $probeRoot 'modules\NtObjectManager')
+} else {
+  "SETUP-FAULT: NtObjectManager module and NuGet provider both absent"
+  "  Desktop: Install-Module NtObjectManager in a prior session"
+  "  Disposable box: Save-Module will pull NuGet automatically"
+}
 
 # Denial helper used by every "MUST fail" step. It discriminates the HResult:
 # only E_ACCESSDENIED (0x80070005) is a pass; not-found (0x80070002/3) is a
@@ -762,8 +824,11 @@ inside probe. Every "from INSIDE the container" verdict below — Probe 4's Phas
 this way; a container that just exits with nothing captured is a setup-vs-result
 ambiguity of the exact class this round removes.
 
-**Probe 9 is deferred and VM/throwaway-only. Do not run it on Kevin's desktop** —
-it turns the firewall off. See its own warning below.
+**DISPOSABLE-BOX ONLY probes run on a throwaway VM, never on the desktop.** See
+the [classification table](#probe-classification) above for which probes and
+steps belong to which class. Probe 9 (firewall off) is the most dangerous;
+Probe 8 (package installs) and the disposable-box steps of Probes 5b, 6, and 7
+also belong on the throwaway box.
 
 Follow the house convention in [`docs/probes/n10753/`](../probes/n10753/): commit
 a `docs/probes/n10825/run-probe.ps1` plus an `output.txt` carrying environment
@@ -772,7 +837,8 @@ whether the session is elevated). That `run-probe.ps1` is where the shared
 `$probeRoot` / `$moniker` / `Assert-AccessDenied` scaffold and the teardown blocks
 below belong — the reader should not hand-assemble them.
 
-**Box setup**, once:
+**Box setup** (DISPOSABLE-BOX ONLY — run on a throwaway VM, never on the
+desktop):
 
 ```powershell
 winget install --id Git.Git --scope user
@@ -780,6 +846,18 @@ winget install --id OpenJS.NodeJS.LTS --scope user
 winget install --id Python.Python.3.12 --scope user
 # MSVC only if testing compilers: Visual Studio Build Tools (needs admin)
 [Environment]::OSVersion.Version; (Get-ComputerInfo).WindowsProductName
+```
+
+On the **desktop**, these tools must already be present. The shared scaffold's
+`Get-Command` checks record SETUP-FAULT for any probe whose prerequisites are
+missing. Record the environment stamps regardless:
+
+```powershell
+[Environment]::OSVersion.Version; (Get-ComputerInfo).WindowsProductName
+foreach ($cmd in @('git','node','python','curl.exe','npm')) {
+  $loc = Get-Command $cmd -ErrorAction SilentlyContinue
+  if ($loc) { "$cmd -> $($loc.Source)" } else { "SETUP-FAULT: $cmd not found" }
+}
 ```
 
 **Elevation over SSH.** OpenSSH on Windows gives a non-elevated shell, and `runas`
@@ -793,8 +871,9 @@ console. Option (b) is the one to script.
 creates an AppContainer profile with a chosen capability set and runs a command
 in it. Do **not** write one from scratch — use James Forshaw's
 [NtObjectManager](https://www.powershellgallery.com/packages/NtObjectManager)
-PowerShell module, already loaded via `Save-Module` into the probe root by the
-shared scaffold above (no user-scope install to clean up):
+PowerShell module, loaded by the shared scaffold above (on the desktop it must
+be pre-installed; on a disposable box `Save-Module` fetches it into the probe
+root):
 
 ```powershell
 $sid = Get-NtSid -PackageName $moniker   # reused by Probes 4 and 11; persists for the run
@@ -858,10 +937,14 @@ curl.exe -sS -m 5 http://127.0.0.1:8899/ 2>&1; "8899 exit=$LASTEXITCODE"  # MUST
 curl.exe -sS -m 5 https://example.com/   2>&1; "example exit=$LASTEXITCODE"  # MUST fail (Block Outbound Default Rule)
 curl.exe -sS -m 5 http://127.0.0.1:9999/ 2>&1; "9999 exit=$LASTEXITCODE"  # unrelated loopback port: EXPECTED reachable
 # agent binds its own listener (Start-Process, not Start-Job — the container's
-# job objects are not reachable from the outer session). Hand the PID out through
-# the drop dir so the outer teardown can kill it by PID.
+# job objects are not reachable from the outer session). The Process object from
+# -PassThru is not accessible to the outer session (different process), so write
+# PID + StartTime + Path to the drop dir. The outer teardown verifies all three
+# before stopping — bare PID reuse across the ~minutes a probe run takes can
+# kill an unrelated process.
 $listener = Start-Process -PassThru python -ArgumentList "-m","http.server","9998","--bind","127.0.0.1","--directory",$probeRoot
-Set-Content -Path (Join-Path $out.FullName 'own-listener-pid.txt') -Value $listener.Id
+$info = '{0}|{1}|{2}' -f $listener.Id, $listener.StartTime.ToString('o'), $listener.Path
+Set-Content -Path (Join-Path $out.FullName 'own-listener.txt') -Value $info
 ```
 
 The first two must hold. The unrelated-port check (9999) is the all-loopback
@@ -876,27 +959,48 @@ Windows. Instead:
 - outside control succeeded **and** inside curl failed → the listener is live, so the failure is the fence: loopback is narrower than the per-identity model predicts. **Flag it**, and record the verbatim curl error and exit code for the report.
 - outside control on 9999 *failed* → the listener never came up: this is a **setup fault**, not a verdict — restart the 9999 job and rerun, do not score it.
 
-The agent's own `127.0.0.1:9998` listener is a separate blast-radius check. To
-confirm reachability rather than just that `bind()` succeeded, poll it from
-OUTSIDE the container (same 10 s loop as the 8899/9999 controls above); if it
-never answers, record SETUP-FAULT — bind-success alone is the weaker claim.
+The agent's own `127.0.0.1:9998` listener is a separate blast-radius check, but
+**the loopback exemption covers the container as a client, not as a server** (the
+cited source in [(b)](#b-network-egress-floor): "a Windows Runtime app can use an
+IP loopback only as the target address for a *client* network request"). So an
+exempted container can *reach* loopback but may not be able to *receive* loopback
+connections — polling 9998 from OUTSIDE the container may always read
+SETUP-FAULT regardless of policy. This probe therefore scopes the claim to
+**outbound-only**: `bind()` + `listen()` succeeded inside the container, and the
+agent reached the *outside* listeners (8899, 9999). Whether the agent can also
+receive inbound loopback is left UNVERIFIED — it is not load-bearing for the
+proxy design, which only needs the container to reach out to the proxy.
 
 If the first `curl` fails, the recommendation's Phase 1 is dead and Phase 2
 becomes mandatory — report immediately, do not run the rest.
 
 **Teardown.** Stop all three `python` listeners: the two outer jobs by handle
 (`$job8899, $job9999 | Stop-Job -PassThru | Remove-Job`) and the inside 9998
-listener by PID (`Stop-Process -Id (Get-Content (Join-Path $out.FullName
-'own-listener-pid.txt'))`). Never `Get-Job | Stop-Job` — that kills every job in
-the operator's session. The
+listener by verified identity — read PID + StartTime + Path from
+`own-listener.txt`, confirm the live process still matches, and skip if missing
+or mismatched (PID reuse after the process exited on its own):
+
+```powershell
+$raw = Get-Content (Join-Path $out.FullName 'own-listener.txt') -ErrorAction SilentlyContinue
+if ($raw) {
+  $parts = $raw -split '\|',3
+  $probePid = [int]$parts[0]; $startTime = [datetime]$parts[1]; $path = $parts[2]
+  $proc = Get-Process -Id $probePid -ErrorAction SilentlyContinue
+  if ($proc -and $proc.StartTime.ToString('o') -eq $startTime.ToString('o') -and $proc.Path -eq $path) {
+    Stop-Process -Id $probePid
+  }
+}
+```
+
+Never `Get-Job | Stop-Job` — that kills every job in the operator's session. The
 loopback exemption is machine-wide session state shared by every probe, so it is
 **left in place until the global teardown** removes it with
 `CheckNetIsolation.exe LoopbackExempt -d -n=$moniker`.
 
 | State touched | Detail |
 |---|---|
-| Creates | 2 outer jobs (`$job8899`, `$job9999`); 1 inside listener process (PID in `own-listener-pid.txt`); loopback exemption (machine-wide, kept until global teardown) |
-| Removes | the 2 outer jobs (by handle); inside listener (by PID) |
+| Creates | 2 outer jobs (`$job8899`, `$job9999`); 1 inside listener process (identity in `own-listener.txt`); loopback exemption (machine-wide, kept until global teardown) |
+| Removes | the 2 outer jobs (by handle); inside listener (by verified PID+StartTime+Path) |
 | Must never touch | other user jobs; loopback exemptions not created by this run |
 
 ### Probe 2: does the exemption need elevation?
@@ -1026,24 +1130,33 @@ lives inside the root, so deleting the root suffices.)
 
 ### Probe 5: toolchain survival
 
-Split deliberately: the **offline** steps are the real toolchain-survival signal
-and need no network; the **network-fetch** steps are gated on a *genuine
-CONNECT-capable* proxy. Probe 1's listener is a plain HTTP file server (`GET`
-only, no `CONNECT`), so pointing `HTTPS_PROXY` at it makes `git clone https://…`
-fail at the TLS tunnel — a proxy artefact, not a broken toolchain. Use NockLock's
-own re-resolving proxy (`internal/fence/network`) or another real forward proxy
+Split deliberately into two classes. Part (a) is **DESKTOP-SAFE**: the offline
+steps are the real toolchain-survival signal and need no network. Part (b) is
+**DISPOSABLE-BOX ONLY**: the network-fetch steps exercise `npm install` and
+`pip install` into the probe root — project-local, but the install commands
+exercise the package-manager path that only belongs on a throwaway box.
+
+The network-fetch steps are gated on a *genuine CONNECT-capable* proxy.
+Probe 1's listener is a plain HTTP file server (`GET` only, no `CONNECT`), so
+pointing `HTTPS_PROXY` at it makes `git clone https://…` fail at the TLS
+tunnel — a proxy artefact, not a broken toolchain. Use NockLock's own
+re-resolving proxy (`internal/fence/network`) or another real forward proxy
 for part (b); do not reuse the Probe 1 file server.
 
 ```powershell
-# (a) OFFLINE — inside the container, no proxy needed. This is the survival signal.
+# (a) OFFLINE (DESKTOP-SAFE) — inside the container, no proxy needed.
+# This is the survival signal. Required tools must already be present on the
+# desktop (checked by the shared scaffold); if any are absent, record
+# SETUP-FAULT for this probe and skip it.
 $repo = Join-Path $probeRoot 'project\repo'
 git --version; git init $repo; git -C $repo status
 node -e "console.log(JSON.stringify(process.env).slice(0,400))"
 python -c "import sys; print(sys.prefix)"
 cl.exe /? 2>&1 | Select-Object -First 3      # only if Build Tools installed
 
-# (b) NETWORK-FETCH — only with a real CONNECT-capable proxy on 127.0.0.1:<port>.
-# Keep every cache and target inside the probe root so nothing lands in the profile.
+# (b) NETWORK-FETCH (DISPOSABLE-BOX ONLY) — only on a throwaway VM with a
+# real CONNECT-capable proxy on 127.0.0.1:<port>. Keep every cache and target
+# inside the probe root so nothing lands in the profile.
 $env:HTTPS_PROXY = 'http://127.0.0.1:<connect-proxy-port>'
 $env:GIT_CLONE_PROTECTION_ACTIVE = 'false'
 git clone https://github.com/octocat/Hello-World.git (Join-Path $probeRoot 'project\hw')
@@ -1062,8 +1175,8 @@ still applies on top when the launcher passes an explicit environment block —
 section (a) assumes the redirection happens and section (d) passes an explicit
 environment, and those two have not been reconciled against a real run).
 
-**Teardown.** Everything is under `$probeRoot`; the `--user`/profile-scoped writes
-of the old version are gone, so the global `Remove-Item` is the only cleanup.
+**Teardown.** Everything is under `$probeRoot`; the global `Remove-Item` is the
+only cleanup. On a disposable box, part (b)'s artifacts go with it.
 
 | State touched | Detail |
 |---|---|
@@ -1074,15 +1187,20 @@ of the old version are gone, so the global `Remove-Item` is the only cleanup.
 ### Probe 6: brokered egress — which services answer for us?
 
 Generalises the DNS question to the whole confused-deputy class. All from inside
-a **zero-capability** container, with no loopback exemption:
+a **zero-capability** container, with no loopback exemption. The probe is
+**DESKTOP-SAFE** except for the `Start-Process` step, which is
+**DISPOSABLE-BOX ONLY** because it opens the operator's real browser (outside
+the container, with full network access) and teardown is manual.
 
 ```powershell
+# DESKTOP-SAFE steps:
 nslookup example.com                                   # DNS Client service
 Resolve-DnsName example.com
 Start-BitsTransfer -Source https://example.com/ -Destination (Join-Path $probeRoot 'bits.out')
 Invoke-WebRequest https://example.com/ -UseBasicParsing
-Start-Process "https://example.com/"                   # shell handoff to a browser
 curl.exe -sS -m 5 https://example.com/                 # control: MUST fail
+# DISPOSABLE-BOX ONLY — opens the operator's real browser:
+Start-Process "https://example.com/"                   # shell handoff to a browser
 ```
 
 Any of these succeeding means a service outside the container performed network
@@ -1091,69 +1209,73 @@ success is a bypass of the egress floor and must be listed. If DNS resolves whil
 the direct connection fails, note it specifically: egress is still fenced, but
 queried names leak and DNS never reaches the proxy's allowlist.
 
-**Teardown.** `Start-Process` may open a real browser tab — close it. The
+**Teardown.** On a disposable box, `Start-Process` may open a real browser
+tab — close it. On the desktop, skip the `Start-Process` step entirely. The
 `bits.out` download is under `$probeRoot`; global `Remove-Item` clears it.
 
 | State touched | Detail |
 |---|---|
-| Creates | `bits.out` under `$probeRoot`; may open a browser tab (`Start-Process`) |
-| Removes | nothing (under `$probeRoot`, removed globally); close the browser tab manually |
+| Creates | `bits.out` under `$probeRoot`; may open a browser tab (disposable-box `Start-Process` step only) |
+| Removes | nothing (under `$probeRoot`, removed globally); close the browser tab manually on the disposable box |
 | Must never touch | user browser profile; DNS cache entries |
 
 ### Probe 7: ETW file events unelevated
 
+**DESKTOP-SAFE** for the non-elevated attempt. The "add user to Performance Log
+Users" retry is **DISPOSABLE-BOX ONLY** — group membership is a persistent
+machine change the teardown cannot undo.
+
 ```powershell
+# DESKTOP-SAFE: non-elevated attempt
 logman create trace nocklock-fileprobe -p Microsoft-Windows-Kernel-File -o (Join-Path $probeRoot 'f.etl') -ets
 logman stop nocklock-fileprobe -ets
 ```
 
-Run non-elevated first. If it fails, retry after adding the user to
-*Performance Log Users*, then elevated. This decides whether file-event logging
-is Phase 0 or Phase 2.
+Run non-elevated first. If it succeeds, file-event logging is Phase 0 material.
+If it fails, the **DISPOSABLE-BOX ONLY** path is: add the user to *Performance
+Log Users* (persistent group membership change) and retry, then retry elevated.
+If the non-elevated attempt fails on the desktop, record the result and stop —
+the answer is that file-event logging is Phase 2.
 
 **Teardown.** The trace session (`nocklock-fileprobe`) is machine state and leaks
 if `stop` is skipped; the global teardown force-stops it
 (`logman stop nocklock-fileprobe -ets` guarded by `logman query -ets`). The `.etl`
-file is under `$probeRoot`.
+file is under `$probeRoot`. On the disposable box, group membership changes go
+with the box.
 
 | State touched | Detail |
 |---|---|
 | Creates | ETW trace session `nocklock-fileprobe` (machine state); `.etl` file under `$probeRoot` |
 | Removes | the trace session (`logman stop`); `.etl` removed globally with `$probeRoot` |
-| Must never touch | other ETW sessions; Performance Log Users group membership |
+| Must never touch | other ETW sessions; Performance Log Users group membership (desktop run) |
 
 ### Probe 8: packaging no-admin
+
+> **DISPOSABLE-BOX ONLY.** This probe installs user-scope packages. Run it on a
+> throwaway VM or Windows Sandbox, never on the desktop.
 
 This probe **mutates the user profile by design** — installing to the user scope
 without a UAC prompt is the exact behaviour under test, so it cannot be sandboxed
 into `$probeRoot` (Save-Module / portable downloads would skip the install-path
-code entirely, which is what this probe exists to exercise). It is undone by
-uninstalling, not by deleting a directory.
-
-Track installs in a positive list so the teardown is fail-safe: if Probe 8 is
-skipped or throws before the install lines run, `$installedByThisRun` stays empty
-and the teardown removes nothing.
+code entirely, which is what this probe exists to exercise).
 
 ```powershell
-# $installedByThisRun is initialized to @() in the shared scaffold (top of run-probe.ps1).
 winget install --id sharkdp.fd --scope user --exact
-if ($LASTEXITCODE -eq 0) { $script:installedByThisRun += 'winget:sharkdp.fd' }
 scoop install ripgrep
-if ($?) { $script:installedByThisRun += 'scoop:ripgrep' }   # scoop is a PS function; $LASTEXITCODE is stale
 where.exe fd; where.exe rg
 ```
 
 Confirm both complete with no UAC prompt and land under the user profile.
 
-**Teardown.** Handled by the global teardown (`$installedByThisRun` loop in the
-`finally` block). No inline teardown — a double-uninstall attempt is wasted I/O
-and the global path always runs.
+**Teardown.** Discard the box. The packages are user-scope state on the throwaway
+VM — discarding the VM is the complete, fail-safe cleanup. No uninstall path
+to get wrong.
 
 | State touched | Detail |
 |---|---|
-| Creates | user-scope packages (`sharkdp.fd` via winget, `ripgrep` via scoop) — only if install succeeds |
-| Removes | only packages recorded in `$installedByThisRun` (empty list = removes nothing) |
-| Must never touch | packages the operator already had installed |
+| Creates | user-scope packages (`sharkdp.fd` via winget, `ripgrep` via scoop) |
+| Removes | the box (discard the VM) |
+| Must never touch | the desktop |
 
 ### Probe 9: fail-open with the firewall off
 
@@ -1224,22 +1346,41 @@ New-Win32Process -CommandLine 'curl.exe -sS -m 5 https://example.com/' `
 # INSIDE the container ($probeRoot and $out are re-established by the _inside.ps1
 # bootstrap — see the "Inside-variable bootstrap" note above):
 #
-# Spawn the child and hand its PID OUT through the granted drop dir. Do NOT call
-# Get-NtToken here — if the child escaped to Medium IL, this Low-IL process cannot
-# open it, so Get-NtToken would THROW; a throw read as "contained" is the
-# wrong-reason verdict this round removes. Keep the child alive long enough for the
-# outer session to inspect it across the manual two-shell handoff (Start-Sleep, not
-# `cmd /c timeout`, which needs a console and dies immediately when spawned via
-# Win32_Process.Create with no stdin). 180s leaves ample room for the shell switch:
+# Spawn the child and hand its PID + StartTime + Path OUT through the granted
+# drop dir. Do NOT call Get-NtToken here — if the child escaped to Medium IL,
+# this Low-IL process cannot open it, so Get-NtToken would THROW; a throw read
+# as "contained" is the wrong-reason verdict this round removes. Keep the child
+# alive long enough for the outer session to inspect it across the manual
+# two-shell handoff (Start-Sleep, not `cmd /c timeout`, which needs a console
+# and dies immediately when spawned via Win32_Process.Create with no stdin).
+# 180s leaves ample room for the shell switch.
+#
+# Invoke-CimMethod returns only a ProcessId — the Process object is not available
+# across the WMI broker boundary. Record PID + StartTime + Path from Get-Process
+# so the outer teardown can verify identity before stopping (bare PID reuse can
+# kill an unrelated process):
 $p = Invoke-CimMethod -ClassName Win32_Process -MethodName Create `
   -Arguments @{CommandLine='powershell -NoProfile -Command "Start-Sleep 180"'}
-Set-Content -Path (Join-Path $out.FullName 'wmi-child-pid.txt') -Value $p.ProcessId
+$wmiChild = Get-Process -Id $p.ProcessId -ErrorAction SilentlyContinue
+if ($wmiChild) {
+  $info = '{0}|{1}|{2}' -f $wmiChild.Id, $wmiChild.StartTime.ToString('o'), $wmiChild.Path
+  Set-Content -Path (Join-Path $out.FullName 'wmi-child.txt') -Value $info
+} else {
+  Set-Content -Path (Join-Path $out.FullName 'wmi-child.txt') -Value "EXITED:$($p.ProcessId)"
+}
 
-# OUTER SESSION (plain user, Medium IL): read the PID and inspect the child's token.
+# OUTER SESSION (plain user, Medium IL): read the identity and inspect the child's token.
 # A Medium-IL child IS openable from here, so this discriminates the three cases:
-$childPid = [int](Get-Content (Join-Path $out.FullName 'wmi-child-pid.txt'))
-if (-not (Get-Process -Id $childPid -ErrorAction SilentlyContinue)) {
-  "VERDICT(b): child $childPid already exited — INDETERMINATE, re-run with a longer keepalive"
+$raw = Get-Content (Join-Path $out.FullName 'wmi-child.txt')
+if ($raw -like 'EXITED:*') {
+  "VERDICT(b): child exited before identity capture — INDETERMINATE"
+  return
+}
+$parts = $raw -split '\|',3
+$childPid = [int]$parts[0]; $childStart = [datetime]$parts[1]; $childPath = $parts[2]
+$proc = Get-Process -Id $childPid -ErrorAction SilentlyContinue
+if (-not $proc -or $proc.StartTime.ToString('o') -ne $childStart.ToString('o') -or $proc.Path -ne $childPath) {
+  "VERDICT(b): child $childPid gone or PID reused — INDETERMINATE, re-run with a longer keepalive"
 } else {
   try {
     $tok = Get-NtToken -ProcessId $childPid
@@ -1265,14 +1406,15 @@ run them together.
 
 **Teardown.** The escape container profile is removed by the global teardown below
 (`$escMoniker` is assigned inside the container block, so cleanup belongs in the
-outer session — same pattern as Probe 3). Kill the keepalive child (the
-`Start-Sleep` PowerShell spawned by (b), tracked by the PID in `$out`) and any
-lingering `curl` child here.
+outer session — same pattern as Probe 3). Kill the keepalive child by verified
+identity (PID + StartTime + Path from `wmi-child.txt`); a missing or mismatched
+process means already gone — skip it. Any lingering `curl` child from (a) is
+reaped the same way by the global teardown's PID loop.
 
 | State touched | Detail |
 |---|---|
-| Creates | escape container profile (`agent-escape-$stamp`); WMI keepalive child process; `wmi-child-pid.txt` in `$out` |
-| Removes | keepalive child (by PID); escape profile (global teardown) |
+| Creates | escape container profile (`agent-escape-$stamp`); WMI keepalive child process; `wmi-child.txt` in `$out` |
+| Removes | keepalive child (by verified PID+StartTime+Path); escape profile (global teardown) |
 | Must never touch | other running processes; the primary container profile |
 
 ### Probe 11: named pipe into the container
@@ -1311,26 +1453,29 @@ CheckNetIsolation.exe LoopbackExempt -s
 Get-AppxPackage | Where-Object PackageFullName -like 'nocklock-probe*'   # or Get-NtSid check
 logman query -ets
 netsh advfirewall show allprofiles state
-winget list; scoop list
 Test-Path $probeRoot
 
-# --- TEARDOWN ---
+# --- TEARDOWN (desktop run — no package uninstalls) ---
 CheckNetIsolation.exe LoopbackExempt -d -n=$moniker           # machine-wide exemption (Probes 1-2)
 Remove-AppContainerProfile -Name $moniker 2>$null            # %LOCALAPPDATA%\Packages\<moniker>
 Remove-AppContainerProfile -Name "agent-escape-$stamp" 2>$null  # Probe 10, if created
 # (Remove-AppContainerProfile wraps the DeleteAppContainerProfile API; resolve the
 #  exact cmdlet spelling on the box if the name differs.)
 logman stop nocklock-fileprobe -ets 2>$null                # Probe 7 session, if it leaked
-foreach ($pkg in $installedByThisRun) {                       # Probe 8, fail-safe: empty list = no-op
-  switch -Wildcard ($pkg) {
-    'winget:*' { winget uninstall --id ($pkg -replace '^winget:','') --exact 2>$null }
-    'scoop:*'  { scoop uninstall ($pkg -replace '^scoop:','') 2>$null }
+# Reap spawned processes BEFORE deleting $probeRoot (identity files live there).
+# Read PID + StartTime + Path from each identity file and verify all three match
+# the live process before stopping — bare PID reuse can kill an unrelated process.
+# $probePid (not $pid — avoids shadowing PowerShell's automatic $PID).
+foreach ($idFile in (Get-ChildItem -Path $probeRoot -Filter '*.txt' -Recurse -ErrorAction SilentlyContinue |
+    Where-Object { $_.Name -match '(own-listener|wmi-child)\.txt$' })) {
+  $raw = Get-Content $idFile.FullName -ErrorAction SilentlyContinue
+  if (-not $raw -or $raw -like 'EXITED:*') { continue }
+  $parts = $raw -split '\|',3
+  $probePid = [int]$parts[0]; $startTime = [datetime]$parts[1]; $path = $parts[2]
+  $proc = Get-Process -Id $probePid -ErrorAction SilentlyContinue
+  if ($proc -and $proc.StartTime.ToString('o') -eq $startTime.ToString('o') -and $proc.Path -eq $path) {
+    Stop-Process -Id $probePid -ErrorAction SilentlyContinue
   }
-}
-# Reap spawned processes BEFORE deleting $probeRoot (PID files live there).
-foreach ($pidFile in (Get-ChildItem -Path $probeRoot -Filter '*-pid.txt' -Recurse -ErrorAction SilentlyContinue)) {
-  $pid = [int](Get-Content $pidFile.FullName -ErrorAction SilentlyContinue)
-  if ($pid) { Stop-Process -Id $pid -ErrorAction SilentlyContinue }
 }
 # Probe 9 (VM only): restore firewall to the recorded per-profile state
 Remove-Item -Recurse -Force $probeRoot                     # everything else lived here
@@ -1341,15 +1486,14 @@ logman query -ets
 Test-Path $probeRoot                                       # expect False
 ```
 
-If `Save-Module` pulled the NuGet provider on first use, note it here — it is the
-one install this scaffold cannot route into the probe root, and the operator
-should decide whether to keep or remove it.
+Disposable-box probes (8, 9, and the disposable-box steps of 5b, 6, 7) run on a
+throwaway VM. Their teardown is "discard the box" — the VM is the cleanup.
 
 ## Summary of UNVERIFIED items
 
 | # | Claim needing verification | Blocks |
 |---|---|---|
-| 1 | Zero-capability container can reach loopback when exempted | **Phase 1 entirely** |
+| 1 | Zero-capability container can reach loopback as a client when exempted (outbound only — inbound reachability is left UNVERIFIED, see Probe 1 scoping note) | **Phase 1 entirely** |
 | 2 | Loopback exemption registration needs elevation; and whether the exemption survives a reboot (reboot durability deliberately not run this round — see Probe 2) | Phase 1 install UX |
 | 3 | AppContainer launch works unelevated end to end | Phase 0 |
 | 4 | Package-SID ACLs grant/deny as the intersection rule implies | Phase 0 |
