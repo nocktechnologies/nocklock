@@ -6,6 +6,19 @@ All notable changes to NockLock will be documented in this file.
 
 ### Fixed
 
+- Interposer field-budget cap is now enforced post-ABI-detection (#10815).
+  The cap on allow/deny paths (matching libfence_fs.c's MAX_PATHS and field
+  tokenizer budget) previously ran unconditionally in ProcessConfig with
+  headroom reserved for the self-proc grants the __landlock-exec shim injects.
+  A config with linux_enforcement="off", syscall.enforcement="off" (pure
+  userspace interposer, no shim) was rejected at ~253 allow paths even though
+  the shim's injections would never happen. The validation now runs in wrap.go
+  after both the Landlock ABI probe and the syscall-fence decision, so headroom
+  is only reserved when the shim actually engages. A userspace-only config gets
+  the interposer's real 256-path budget. --dry-run and validateWrapRuntimeConfig
+  no longer catch over-budget configs (that information is unavailable before
+  fence setup); this is an inherent trade-off documented below.
+
 - claude-code preset: Node runtime introspection no longer breaks under the
   fence (#10757). With the broad `/proc/` grant removed in #115 (it exposed a
   same-UID sibling's `/proc/<pid>/environ`), `process.memoryUsage()` threw

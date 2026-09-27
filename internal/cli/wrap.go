@@ -255,6 +255,7 @@ var wrapCmd = &cobra.Command{
 		var fsFenceCancel context.CancelFunc
 		var fsSandboxPrefix []string
 		var landlockPrefix []string
+		var fsCfg *fsfence.FenceConfig
 		if cfg.Filesystem.Root != "" {
 			// Fence the audit log from the CHILD so the fenced agent can't delete
 			// or corrupt the record of its own actions (the unfenced parent still
@@ -267,7 +268,8 @@ var wrapCmd = &cobra.Command{
 			// tamper events.db directly, so this is consistent, not a new gap.
 			cfg.Filesystem.Deny = append(cfg.Filesystem.Deny, egressChildDenyPaths(dbPath, projectRoot, decisionLogDir)...)
 
-			fsCfg, err := fsfence.ProcessConfig(cfg.Filesystem)
+			var err error
+			fsCfg, err = fsfence.ProcessConfig(cfg.Filesystem)
 			if err != nil {
 				if runtime.GOOS == "darwin" {
 					if logErr := recordMacOSFilesystemFenceState("REFUSED-TO-START", "invalid filesystem configuration", true); logErr != nil {
@@ -454,6 +456,20 @@ var wrapCmd = &cobra.Command{
 				}
 				fmt.Fprintf(os.Stderr, "NockLock: Linux syscall fence active — seccomp-BPF (%s)\n", policy.Mode)
 				logEvent(logging.EventFilePassed, "syscall", fmt.Sprintf("seccomp mode=%s socket_families=%d allow_namespaces=%t", policy.Mode, len(policy.AllowedSocketFamilies), policy.AllowNamespaces), false)
+			}
+		}
+
+		// Validate the interposer's field budget now that we know whether the
+		// __landlock-exec shim will engage. The shim injects self-proc allow
+		// entries (allowSelfProcFS) that consume budget; a pure userspace-only
+		// fence (no shim) gets the interposer's full budget.
+		if runtime.GOOS == "linux" && fsCfg != nil {
+			reserve := 0
+			if len(landlockPrefix) > 0 {
+				reserve = len(fsfence.SelfProcFiles())
+			}
+			if err := fsfence.CheckInterposerBudget(fsCfg, reserve); err != nil {
+				return fmt.Errorf("invalid filesystem fence config: %w", err)
 			}
 		}
 

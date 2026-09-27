@@ -7,7 +7,6 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
-	"runtime"
 	"strings"
 
 	"github.com/nocktechnologies/nocklock/internal/config"
@@ -31,7 +30,7 @@ const maxAllowPaths = 256
 // splitting the string and silently drops the remainder — including any
 // deny paths that land in the dropped tail, which never reach deny_count's
 // own "too many, fail closed" check because that check never sees them.
-// ProcessConfig must never let a config reach that combined budget.
+// CheckInterposerBudget must never let a config reach that combined budget.
 const interposerMaxPathFields = maxAllowPaths + 4
 const interposerMetadataFields = 3
 
@@ -49,10 +48,7 @@ const interposerMetadataFields = 3
 // internal/cli/wrap.go) and the userspace interposer's allow-list injection
 // (allowSelfProcFS in internal/cli/landlock_exec.go) grant exactly this list
 // and must stay in sync, so this is the single source of truth for both —
-// call SelfProcFiles() rather than duplicating the list. It is also why
-// ProcessConfig reserves len(SelfProcFiles()) entries below the combined
-// field budget: those two injection points add one allow entry per file,
-// after config validation has already run.
+// call SelfProcFiles() rather than duplicating the list.
 var selfProcFiles = []string{"stat", "status", "statm"}
 
 // SelfProcFiles returns a copy of the curated /proc/<pid> file list (see
@@ -200,47 +196,6 @@ func ProcessConfig(cfg config.FilesystemConfig) (*FenceConfig, error) {
 		denyPaths = append(denyPaths, resolved)
 	}
 
-	// The two checks below only apply on Linux: they exist because
-	// FenceConfig gets serialized (FenceConfig.Serialize) into the wire
-	// format the LD_PRELOAD interposer parses (libfence_fs.c), and only the
-	// Linux fence path (NewFence in fence.go) ever does that serialization.
-	// macOS builds a Seatbelt profile straight from FenceConfig instead and
-	// has no such field budget, so applying either check there would reject
-	// otherwise-valid configs for a constraint that never applies to them.
-	if runtime.GOOS == "linux" {
-		// Per-category: the interposer fails closed once allow_count alone
-		// reaches maxAllowPaths (libfence_fs.c's "allow_count >= MAX_PATHS"
-		// check), and the shim injects one allow entry per self-proc file
-		// AFTER this validation runs (allowSelfProcFS in
-		// internal/cli/landlock_exec.go) — so the user's own allow paths must
-		// leave room for those before this function ever sees them appended.
-		injected := len(SelfProcFiles())
-		if room := maxAllowPaths - injected; len(allowPaths) > room {
-			return nil, fmt.Errorf(
-				"too many filesystem allow paths (%d): the fence interposer supports at most %d, "+
-					"and %d are reserved for the wrapped process's own /proc/<pid> grants (see "+
-					"SelfProcFiles); remove entries from [filesystem].allow", len(allowPaths), maxAllowPaths, injected)
-		}
-
-		// Combined: the interposer's wire-format tokenizer (see
-		// interposerMaxPathFields) shares ONE field budget between allow and
-		// deny paths combined — past that budget it silently drops whatever
-		// does not fit, including deny paths, before either category's own
-		// per-category check above ever sees them. This is a DIFFERENT
-		// failure mode than the per-category one (triggerable even when
-		// allow alone stays under the per-category cap, if deny is large
-		// enough), so both checks are needed.
-		room := interposerMaxPathFields - interposerMetadataFields - injected
-		if combined := len(allowPaths) + len(denyPaths); combined > room {
-			return nil, fmt.Errorf(
-				"too many combined filesystem allow (%d) and deny (%d) paths: the fence interposer's "+
-					"wire format supports at most %d combined, and %d are reserved for the wrapped "+
-					"process's own /proc/<pid> grants (see SelfProcFiles); remove entries from "+
-					"[filesystem].allow or [filesystem].deny",
-				len(allowPaths), len(denyPaths), room, injected)
-		}
-	}
-
 	// Validate that no resolved path contains the field separator character.
 	if err := validateNoSeparator(rootPath, "root"); err != nil {
 		return nil, err
@@ -262,6 +217,40 @@ func ProcessConfig(cfg config.FilesystemConfig) (*FenceConfig, error) {
 		AllowPaths: allowPaths,
 		DenyPaths:  denyPaths,
 	}, nil
+}
+
+// CheckInterposerBudget validates that fc's allow and deny paths fit within the
+// C interposer's field budget (libfence_fs.c MAX_PATHS / fields[] array).
+// selfProcReserve is the number of additional allow entries that will be injected
+// after config load (the /proc/<pid> self-proc grants from allowSelfProcFS in
+// landlock_exec.go). Pass len(SelfProcFiles()) when the __landlock-exec shim
+// will engage; pass 0 when it will not (pure userspace-only fence).
+//
+// This check is deliberately separate from ProcessConfig: ProcessConfig runs
+// before wrap.go knows whether the shim will actually engage (that depends on a
+// runtime landlock.DetectABI() probe and the syscall fence config, both resolved
+// later). Callers in wrap.go invoke this once the shim-engagement decision is
+// final.
+func CheckInterposerBudget(fc *FenceConfig, selfProcReserve int) error {
+	if fc == nil {
+		return nil
+	}
+	if room := maxAllowPaths - selfProcReserve; len(fc.AllowPaths) > room {
+		return fmt.Errorf(
+			"too many filesystem allow paths (%d): the fence interposer supports at most %d, "+
+				"and %d are reserved for the wrapped process's own /proc/<pid> grants (see "+
+				"SelfProcFiles); remove entries from [filesystem].allow", len(fc.AllowPaths), maxAllowPaths, selfProcReserve)
+	}
+	room := interposerMaxPathFields - interposerMetadataFields - selfProcReserve
+	if combined := len(fc.AllowPaths) + len(fc.DenyPaths); combined > room {
+		return fmt.Errorf(
+			"too many combined filesystem allow (%d) and deny (%d) paths: the fence interposer's "+
+				"wire format supports at most %d combined, and %d are reserved for the wrapped "+
+				"process's own /proc/<pid> grants (see SelfProcFiles); remove entries from "+
+				"[filesystem].allow or [filesystem].deny",
+			len(fc.AllowPaths), len(fc.DenyPaths), room+selfProcReserve, selfProcReserve)
+	}
+	return nil
 }
 
 // validateNoSeparator checks that a path does not contain the field separator
