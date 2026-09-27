@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -431,12 +432,14 @@ var wrapCmd = &cobra.Command{
 		// __landlock-exec shim that applies Landlock — extended to apply the
 		// seccomp filter just before execve (see landlock_exec.go). On non-Linux
 		// the syscall fence is a no-op and we skip the wiring entirely.
+		syscallProxyModeActive := false
 		if runtime.GOOS == "linux" {
 			// Tell the syscall fence which network mode is active EXPLICITLY, so
 			// it can grant the child inet/inet6 sockets under the netns egress
 			// floor while keeping unix-only for the userspace proxy (N10710).
 			netFence := wrapNetworkFenceMode(useNetns, cfg.Network.AllowAll)
 			if policy, ok := buildSyscallPolicy(cfg, netFence); ok {
+				syscallProxyModeActive = netFence == networkFenceProxy
 				encoded, err := marshalSyscallPolicy(policy)
 				if err != nil {
 					return fmt.Errorf("failed to serialize syscall policy: %w", err)
@@ -527,7 +530,31 @@ var wrapCmd = &cobra.Command{
 		} else if !cfg.Network.AllowAll {
 			proxyCfg := effectiveCfg.Network
 			proxy := network.NewProxyServer(proxyCfg, logger, sessionID)
-			addr, proxyErr := proxy.Start()
+			var addr string
+			var proxyErr error
+			var proxyUnixSocket string
+			if syscallProxyModeActive {
+				if runtime.GOOS != "linux" || fsFence == nil {
+					logEvent(logging.EventNetworkError, "network", "unix proxy bridge requires Linux LD_PRELOAD interposer", true)
+					return fmt.Errorf("network fence with syscall enforcement requires the Linux filesystem interposer so loopback proxy connects can be mapped onto a Unix socket")
+				}
+				proxyDir, err := createUnixProxyDir()
+				if err != nil {
+					return fmt.Errorf("create unix proxy socket directory: %w", err)
+				}
+				defer os.RemoveAll(proxyDir)
+				proxyUnixSocket = filepath.Join(proxyDir, "proxy.sock")
+				if err := validateUnixProxySocketPath(proxyUnixSocket); err != nil {
+					return err
+				}
+				addr, err = reserveLoopbackProxyAddr()
+				if err != nil {
+					return fmt.Errorf("reserve loopback proxy token address: %w", err)
+				}
+				addr, proxyErr = proxy.StartUnix(proxyUnixSocket, addr)
+			} else {
+				addr, proxyErr = proxy.Start()
+			}
 			if proxyErr != nil {
 				logEvent(logging.EventNetworkError, "network", fmt.Sprintf("proxy start failed: %v", proxyErr), false)
 				fmt.Fprintf(os.Stderr, "NockLock: fatal: network fence failed to start: %v\n", proxyErr)
@@ -535,7 +562,13 @@ var wrapCmd = &cobra.Command{
 				cmd.SilenceErrors = true
 				return &exitCodeError{code: 2}
 			} else {
-				if readyErr := network.WaitForProxyReady(cmd.Context(), addr, 5*time.Second); readyErr != nil {
+				var readyErr error
+				if proxyUnixSocket != "" {
+					readyErr = network.WaitForProxyReadyUnix(cmd.Context(), proxyUnixSocket, 5*time.Second)
+				} else {
+					readyErr = network.WaitForProxyReady(cmd.Context(), addr, 5*time.Second)
+				}
+				if readyErr != nil {
 					_ = proxy.Stop()
 					logEvent(logging.EventNetworkError, "network", fmt.Sprintf("proxy readiness failed: %v", readyErr), true)
 					fmt.Fprintf(os.Stderr, "NockLock: fatal: network fence proxy is not healthy: %v\n", readyErr)
@@ -548,16 +581,26 @@ var wrapCmd = &cobra.Command{
 				// Launch watchdog: if proxy crashes mid-session, cancel childCtx to kill the child.
 				watchdogCtx, watchdogCancel := context.WithCancel(cmd.Context())
 				defer watchdogCancel()
-				watchdog := network.NewProxyWatchdog(addr, 5*time.Second, 2, func() {
+				var watchdog *network.ProxyWatchdog
+				onProxyFailure := func() {
 					proxyFailed.Store(true)
 					proxy.MarkDegraded("proxy watchdog: proxy died")
 					logEvent(logging.EventNetworkError, "network", "proxy watchdog: proxy died, killing child", true)
 					fmt.Fprintf(os.Stderr, "NockLock: fatal: network proxy died unexpectedly — terminating child process\n")
 					childCancel()
-				})
+				}
+				if proxyUnixSocket != "" {
+					watchdog = network.NewUnixProxyWatchdog(proxyUnixSocket, 5*time.Second, 2, onProxyFailure)
+				} else {
+					watchdog = network.NewProxyWatchdog(addr, 5*time.Second, 2, onProxyFailure)
+				}
 				watchdog.Start(watchdogCtx)
 
 				proxyURL := "http://" + addr
+				childEnv = removeEnvVars(childEnv,
+					"NOCKLOCK_PROXY_TCP_ADDR",
+					"NOCKLOCK_PROXY_UNIX_SOCKET",
+				)
 				childEnv = append(childEnv,
 					"HTTP_PROXY="+proxyURL,
 					"HTTPS_PROXY="+proxyURL,
@@ -566,6 +609,12 @@ var wrapCmd = &cobra.Command{
 					"ALL_PROXY="+proxyURL,
 					"all_proxy="+proxyURL,
 				)
+				if proxyUnixSocket != "" {
+					childEnv = append(childEnv,
+						"NOCKLOCK_PROXY_TCP_ADDR="+addr,
+						"NOCKLOCK_PROXY_UNIX_SOCKET="+proxyUnixSocket,
+					)
+				}
 				fmt.Fprintf(os.Stderr, "NockLock: network fence active — allowing %d domain(s)\n", len(cfg.Network.Allow))
 				logEvent(logging.EventNetworkPassed, "network", fmt.Sprintf("proxy=%s domains=%d", addr, len(cfg.Network.Allow)), false)
 			}
@@ -1047,6 +1096,38 @@ func findLibFenceFS() (string, error) {
 		return "", fmt.Errorf("cannot resolve current working directory for filesystem fence library trust check: %w", err)
 	}
 	return findTrustedLibFenceFS(exePath, cwd, nil, fileExists)
+}
+
+func reserveLoopbackProxyAddr() (string, error) {
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		return "", err
+	}
+	addr := ln.Addr().String()
+	if err := ln.Close(); err != nil {
+		return "", err
+	}
+	return addr, nil
+}
+
+func createUnixProxyDir() (string, error) {
+	base := os.Getenv("XDG_RUNTIME_DIR")
+	if base == "" {
+		base = filepath.Join("/run/user", fmt.Sprintf("%d", os.Getuid()))
+		if st, statErr := os.Stat(base); statErr != nil || !st.IsDir() {
+			base = "/tmp"
+		}
+	}
+	return os.MkdirTemp(base, "nlp-*")
+}
+
+func validateUnixProxySocketPath(path string) error {
+	const sunPathLimit = 108
+
+	if len(path) >= sunPathLimit {
+		return fmt.Errorf("unix proxy socket path is %d bytes; must be shorter than %d bytes for sockaddr_un.sun_path", len(path), sunPathLimit)
+	}
+	return nil
 }
 
 func findTrustedLibFenceFS(exePath, workingDir string, extraCandidates []string, exists func(string) (bool, error)) (string, error) {

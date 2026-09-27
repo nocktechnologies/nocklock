@@ -5,6 +5,8 @@ import (
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -65,6 +67,40 @@ func TestWatchdogDetectsProxyFailure(t *testing.T) {
 		time.Sleep(10 * time.Millisecond)
 	}
 	t.Error("watchdog did not fire after proxy failure")
+}
+
+func TestUnixWatchdogDetectsProxyFailure(t *testing.T) {
+	p := makeProxy(nil)
+	dir, err := os.MkdirTemp("/tmp", "nlproxy-watchdog-*")
+	if err != nil {
+		t.Fatalf("MkdirTemp: %v", err)
+	}
+	defer os.RemoveAll(dir)
+	socketPath := filepath.Join(dir, "proxy.sock")
+	if _, err := p.StartUnix(socketPath, "127.0.0.1:41234"); err != nil {
+		t.Fatalf("failed to start unix proxy: %v", err)
+	}
+
+	var fired atomic.Bool
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	w := NewUnixProxyWatchdog(socketPath, 20*time.Millisecond, 2, func() {
+		fired.Store(true)
+	})
+	w.Start(ctx)
+
+	time.Sleep(10 * time.Millisecond)
+	_ = p.Stop()
+
+	deadline := time.Now().Add(500 * time.Millisecond)
+	for time.Now().Before(deadline) {
+		if fired.Load() {
+			return
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	t.Error("unix watchdog did not fire after proxy failure")
 }
 
 func TestWatchdogTriggersFailClosedAfterThreshold(t *testing.T) {

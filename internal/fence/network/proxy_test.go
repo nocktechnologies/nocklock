@@ -5,6 +5,7 @@ import (
 	"net"
 	"net/http"
 	"net/url"
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -318,6 +319,41 @@ func TestWaitForProxyReadySucceeds(t *testing.T) {
 
 	if err := WaitForProxyReady(t.Context(), addr, time.Second); err != nil {
 		t.Fatalf("WaitForProxyReady() error: %v", err)
+	}
+}
+
+func TestProxyStartUnixAndWaitReady(t *testing.T) {
+	p := makeProxy([]string{"example.com"})
+	dir, err := os.MkdirTemp("/tmp", "nlproxy-test-*")
+	if err != nil {
+		t.Fatalf("MkdirTemp: %v", err)
+	}
+	defer os.RemoveAll(dir)
+	socketPath := filepath.Join(dir, "proxy.sock")
+	addr, err := p.StartUnix(socketPath, "127.0.0.1:43210")
+	if err != nil {
+		t.Fatalf("StartUnix() error: %v", err)
+	}
+	defer p.Stop()
+
+	if addr != "127.0.0.1:43210" {
+		t.Fatalf("StartUnix() addr = %q, want advertised loopback token", addr)
+	}
+	if p.Addr() != addr {
+		t.Fatalf("Addr() = %q, want %q", p.Addr(), addr)
+	}
+	if err := WaitForProxyReadyUnix(t.Context(), socketPath, time.Second); err != nil {
+		t.Fatalf("WaitForProxyReadyUnix() error: %v", err)
+	}
+}
+
+func TestProxyStartUnixRejectsLongSocketPath(t *testing.T) {
+	p := makeProxy([]string{"example.com"})
+	socketPath := "/" + strings.Repeat("a", 108)
+
+	if _, err := p.StartUnix(socketPath, "127.0.0.1:43210"); err == nil ||
+		!strings.Contains(err.Error(), "sockaddr_un.sun_path") {
+		t.Fatalf("StartUnix() error = %v, want sockaddr_un.sun_path limit", err)
 	}
 }
 

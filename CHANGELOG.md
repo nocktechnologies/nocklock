@@ -30,6 +30,13 @@ All notable changes to NockLock will be documented in this file.
   egress and hosts-pinning are not kernel-blocked (macOS has no netns floor). Both
   run in new `network-egress.yml` jobs — the Linux job as root, the macOS job on a
   hosted runner — each emitting a per-trick verdict table to the step summary.
+- Linux userspace proxy mode now bridges syscall-fenced children to the
+  allowlist proxy without granting IP sockets (N10753). When the syscall fence
+  narrows proxy-mode children to Unix sockets, `wrap` serves the HTTP(S) proxy on
+  a Unix domain socket and the LD_PRELOAD interposer rewrites only the configured
+  loopback proxy connect to that socket; unexpected AF_INET/AF_INET6 connects
+  fail closed. The probe and captured Node/undici output live under
+  `docs/probes/n10753/`.
 
 ### Fixed
 
