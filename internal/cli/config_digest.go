@@ -240,7 +240,7 @@ func inspectConfigDigestHistory(logger *logging.Logger) (configDigestHistory, er
 
 	history := configDigestHistory{}
 	pendingDigests := make(map[string]int)
-	activeDigestSessions := make(map[string]bool)
+	matchedDigestSessions := make(map[string]bool)
 	legacyStarts := make(map[string]bool)
 	legacySessions := make(map[string]bool)
 	missingSessions := make(map[string]bool)
@@ -280,12 +280,12 @@ func inspectConfigDigestHistory(logger *logging.Logger) (configDigestHistory, er
 				continue
 			}
 			if pendingDigests[event.SessionID] == 0 {
-				activeDigestSessions[event.SessionID] = false
+				matchedDigestSessions[event.SessionID] = false
 				missingSessions[event.SessionID] = true
 				continue
 			}
 			pendingDigests[event.SessionID]--
-			activeDigestSessions[event.SessionID] = true
+			matchedDigestSessions[event.SessionID] = true
 
 		default:
 			if event.SessionID == "" {
@@ -295,17 +295,13 @@ func inspectConfigDigestHistory(logger *logging.Logger) (configDigestHistory, er
 				legacySessions[event.SessionID] = true
 				continue
 			}
-			if activeDigestSessions[event.SessionID] {
-				if event.EventType == logging.EventSessionEnd {
-					delete(activeDigestSessions, event.SessionID)
-				}
+			if matchedDigestSessions[event.SessionID] {
+				// Teardown events such as proxy_stop are logged after session_end,
+				// so a verified digest remains valid for the session's later rows.
 				continue
 			}
 			if legacyStarts[event.SessionID] {
 				legacySessions[event.SessionID] = true
-				if event.EventType == logging.EventSessionEnd {
-					delete(legacyStarts, event.SessionID)
-				}
 				continue
 			}
 			missingSessions[event.SessionID] = true

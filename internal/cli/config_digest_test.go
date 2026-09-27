@@ -52,14 +52,69 @@ func TestWrapRecordsUnchangedConfigDigestWithoutWarning(t *testing.T) {
 	if records[0].Digest == "" || records[0].ConfigPath == "" || records[0].ConfigMTime == "" {
 		t.Fatalf("first config.digest record missing required metadata: %+v", records[0])
 	}
-	if records[0].ConfigPath != filepath.Join(dir, config.Dir, config.File) {
-		t.Fatalf("config.digest config path = %q", records[0].ConfigPath)
+	wantConfigPath, err := filepath.EvalSymlinks(filepath.Join(dir, config.Dir, config.File))
+	if err != nil {
+		t.Fatalf("resolve config path: %v", err)
+	}
+	if records[0].ConfigPath != wantConfigPath {
+		t.Fatalf("config.digest config path = %q, want %q", records[0].ConfigPath, wantConfigPath)
 	}
 	if records[1].Digest != records[0].Digest {
 		t.Fatalf("unchanged config digests differ: %s != %s", records[1].Digest, records[0].Digest)
 	}
 	if records[1].PreviousDigest != records[0].Digest {
 		t.Fatalf("second config.digest previous_digest = %q, want %q", records[1].PreviousDigest, records[0].Digest)
+	}
+}
+
+func TestWrapSymlinkedProjectRecordsCanonicalConfigPathAndVerifies(t *testing.T) {
+	if filepath.Separator == '\\' {
+		t.Skip("wrap test launches a POSIX command")
+	}
+
+	fixture := t.TempDir()
+	project := filepath.Join(fixture, "project")
+	projectLink := filepath.Join(fixture, "project-link")
+	if err := os.Mkdir(project, 0o700); err != nil {
+		t.Fatalf("create project: %v", err)
+	}
+	if err := os.Symlink(project, projectLink); err != nil {
+		t.Fatalf("create project symlink: %v", err)
+	}
+	writeTestConfig(t, project, plainLaunchTOML(t))
+	withWorkingDir(t, projectLink)
+	t.Setenv("PWD", projectLink)
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+
+	configPath, err := config.FindConfig()
+	if err != nil {
+		t.Fatalf("find config through symlink: %v", err)
+	}
+	wantConfigPath, err := filepath.EvalSymlinks(filepath.Join(projectLink, config.Dir, config.File))
+	if err != nil {
+		t.Fatalf("resolve config path: %v", err)
+	}
+	if configPath != wantConfigPath {
+		t.Fatalf("FindConfig path = %q, want canonical path %q", configPath, wantConfigPath)
+	}
+
+	cmd := &cobra.Command{}
+	cmd.SetContext(context.Background())
+	if err := wrapCmd.RunE(cmd, []string{"--", "/usr/bin/true"}); err != nil {
+		t.Fatalf("wrap through symlinked project: %v", err)
+	}
+
+	var verifyOut strings.Builder
+	if err := runAuditVerify(context.Background(), &verifyOut, ""); err != nil {
+		t.Fatalf("verify --audit after symlinked wrapped session: %v\n%s", err, verifyOut.String())
+	}
+
+	records := digestRecords(t, resolvedAuditDB(t, projectLink), projectLink)
+	if len(records) != 1 {
+		t.Fatalf("config.digest rows = %d, want 1", len(records))
+	}
+	if records[0].ConfigPath != wantConfigPath {
+		t.Fatalf("config.digest config path = %q, want canonical path %q", records[0].ConfigPath, wantConfigPath)
 	}
 }
 

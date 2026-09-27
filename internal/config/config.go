@@ -359,7 +359,11 @@ func FindConfig() (string, error) {
 	for {
 		candidate := filepath.Join(dir, Dir, File)
 		if _, err := os.Stat(candidate); err == nil {
-			return candidate, nil
+			resolved, err := filepath.EvalSymlinks(candidate)
+			if err != nil {
+				return "", fmt.Errorf("resolve config path %s: %w", candidate, err)
+			}
+			return resolved, nil
 		}
 		parent := filepath.Dir(dir)
 		if parent == dir {

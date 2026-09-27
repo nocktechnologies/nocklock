@@ -172,6 +172,10 @@ All notable changes to NockLock will be documented in this file.
 
 ### Fixed
 
+- Config discovery now resolves symlinks before `wrap` and `verify --audit`
+  derive audit state or signed config-digest paths. Digest verification also
+  keeps that association through teardown rows emitted after `session_end`, so
+  an untampered wrapped session verifies successfully.
 - `verify --audit` now treats sessions that started before the first
   `config.digest` row as legacy (and reports their count), while still
   rejecting a post-adoption session without a digest. The signed canonical
