@@ -825,7 +825,9 @@ function Assert-AccessDenied {
   param([scriptblock]$Action, [string]$Label)
   # Access-denied from Set-Content/Get-Content is NON-terminating, so it must be
   # forced to terminate or the catch never runs and the helper prints FAIL(no-error)
-  # on a real denial. Set here AND passed as -ErrorAction Stop at each call site.
+  # on a real denial. Each call site passes -ErrorAction Stop, which is the
+  # guaranteed path regardless of how $ErrorActionPreference scopes into a
+  # scriptblock invoked with `&`; this sets the preference too as a backstop.
   $ErrorActionPreference = 'Stop'
   try { & $Action | Out-Null; "FAIL(no-error): $Label" }
   catch [System.UnauthorizedAccessException] { "PASS(denied): $Label" }
