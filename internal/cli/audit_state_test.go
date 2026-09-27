@@ -33,19 +33,41 @@ func TestMain(m *testing.M) {
 	os.Exit(code)
 }
 
+// resolvedTempDir returns a t.TempDir() with symlinks resolved. On macOS it
+// lives under /var/folders/..., and /var is a system symlink into /private,
+// so an unresolved root would not match the paths NockLock resolves.
+func resolvedTempDir(t *testing.T) string {
+	t.Helper()
+	dir, err := filepath.EvalSymlinks(t.TempDir())
+	if err != nil {
+		t.Fatalf("resolve temp dir: %v", err)
+	}
+	return dir
+}
+
+// trustedStateRoot returns a resolved temp dir chmod'd 0700, standing in for
+// a state root (XDG_STATE_HOME) an operator actually trusts. t.TempDir()
+// itself is not good enough: its per-call leaf is created with
+// os.Mkdir(dir, 0777), so under a permissive umask (e.g. 002, common with
+// user-private-group setups) it comes back group-writable, which would trip
+// config.EnsureAuditStateDir's state-root check for reasons that have nothing
+// to do with what the test is checking.
+func trustedStateRoot(t *testing.T) string {
+	t.Helper()
+	dir := resolvedTempDir(t)
+	if err := os.Chmod(dir, 0o700); err != nil {
+		t.Fatalf("chmod state root: %v", err)
+	}
+	return dir
+}
+
 // writeProjectConfig lays out a project with a .nock/config.toml carrying the
 // given logging.db line, and points $XDG_STATE_HOME at a scratch directory so
 // the audit state root is isolated from the developer's real one.
 func writeProjectConfig(t *testing.T, dbLine string) (projectRoot, configPath string) {
 	t.Helper()
-	// Resolve the temp root: on macOS it lives under /var/folders/..., and /var
-	// is a system symlink into /private, so an unresolved root would not match
-	// the paths NockLock resolves.
-	var err error
-	if projectRoot, err = filepath.EvalSymlinks(t.TempDir()); err != nil {
-		t.Fatalf("resolve temp dir: %v", err)
-	}
-	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	projectRoot = resolvedTempDir(t)
+	t.Setenv("XDG_STATE_HOME", trustedStateRoot(t))
 	nockDir := filepath.Join(projectRoot, config.Dir)
 	if err := os.MkdirAll(nockDir, 0o700); err != nil {
 		t.Fatalf("mkdir .nock: %v", err)
@@ -104,7 +126,7 @@ func TestLoadRejectsAbsoluteAuditLogEscapingProject(t *testing.T) {
 // TestResolveDBPathSeparatesProjects guards against two projects sharing one
 // audit chain, which would interleave unrelated sessions in a single log.
 func TestResolveDBPathSeparatesProjects(t *testing.T) {
-	state := t.TempDir()
+	state := trustedStateRoot(t)
 	resolve := func() string {
 		projectRoot := t.TempDir()
 		nockDir := filepath.Join(projectRoot, config.Dir)

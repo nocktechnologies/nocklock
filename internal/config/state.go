@@ -34,7 +34,7 @@ import (
 // This mirrors logging.DefaultSigningKeyPath, which already keeps the Ed25519
 // signing key under $XDG_CONFIG_HOME for the same reason.
 func EnsureAuditStateDir(projectRoot string) (string, error) {
-	base, owned := auditStateLayout(projectRoot)
+	base, owned, checkBase := auditStateLayout(projectRoot)
 	// The base may not exist yet ($XDG_STATE_HOME on a fresh account, or
 	// ~/.local/state). Create it with ordinary directory permissions: it is not
 	// NockLock's directory and forcing 0700 on a user's ~/.local would be
@@ -50,6 +50,21 @@ func EnsureAuditStateDir(projectRoot string) (string, error) {
 	dir, err := filepath.EvalSymlinks(base)
 	if err != nil {
 		return "", fmt.Errorf("cannot resolve the audit state root %s: %w", base, err)
+	}
+	// The configured state root (XDG_STATE_HOME, or the ~/.local/state
+	// fallback) is never NockLock's own directory, so it is never created 0700
+	// like the components below it -- but a chain anchored under a base
+	// another user can write is not trustworthy either: whoever can write the
+	// base can rename a component away and substitute their own directory,
+	// exactly the threat ensureTrustedDir guards against one level down. The
+	// /var/tmp fallback below is deliberately exempt: it is a shared 1777
+	// system directory by design, and the per-uid component under it (part of
+	// owned, walked by ensureTrustedDir just below) is what NockLock actually
+	// trusts there.
+	if checkBase {
+		if err := validateStateRootBase(dir); err != nil {
+			return "", err
+		}
 	}
 	for _, component := range owned {
 		dir = filepath.Join(dir, component)
@@ -103,8 +118,39 @@ func ensureTrustedDir(dir string) error {
 // the side effect of creating a directory. Use EnsureAuditStateDir to obtain a
 // directory that is ready to write to.
 func AuditStateDir(projectRoot string) (string, error) {
-	base, owned := auditStateLayout(projectRoot)
+	base, owned, _ := auditStateLayout(projectRoot)
 	return filepath.Join(base, filepath.Join(owned...)), nil
+}
+
+// validateStateRootBase requires the configured state root -- XDG_STATE_HOME,
+// or the ~/.local/state fallback -- to be owned by the current user and not
+// group- or world-writable before NockLock creates or trusts anything beneath
+// it. Unlike ensureTrustedDir's components, NockLock does not own this
+// directory and must not create or chmod it; refusing with a clear fix is the
+// only option when it fails the check.
+//
+// The caller has already run this exact path through os.MkdirAll (confirming
+// it exists as a directory) and filepath.EvalSymlinks (resolving it), so
+// unlike ensureTrustedDir's components this cannot be a symlink or a
+// non-directory; only the mode and the owner remain to check.
+func validateStateRootBase(dir string) error {
+	info, err := os.Lstat(dir)
+	if err != nil {
+		return fmt.Errorf("cannot stat the state root %s: %w", dir, err)
+	}
+	if perm := info.Mode().Perm(); perm&0o022 != 0 {
+		return fmt.Errorf(
+			"refusing to use the state root %s: mode %04o is group- or world-writable; "+
+				"run 'chmod go-w %s' or unset XDG_STATE_HOME to use a trusted location",
+			dir, perm, dir)
+	}
+	if err := validateStateDirOwner(info); err != nil {
+		return fmt.Errorf(
+			"refusing to use the state root %s: %w; chmod the directory to the correct owner "+
+				"or unset XDG_STATE_HOME to use a trusted location",
+			dir, err)
+	}
+	return nil
 }
 
 // auditStateLayout splits the audit state location into a BASE that NockLock only
@@ -126,7 +172,12 @@ func AuditStateDir(projectRoot string) (string, error) {
 // presets, and an audit state directory inside a Landlock-granted tree makes its
 // own deny unenforceable and aborts rule generation. /var/tmp also survives a
 // reboot on most systems, which /tmp does not.
-func auditStateLayout(projectRoot string) (base string, owned []string) {
+// checkBase reports whether the base directory itself must pass
+// validateStateRootBase: true for XDG_STATE_HOME and the ~/.local/state
+// fallback, both of which are expected to be a normal user-owned directory;
+// false for the /var/tmp fallback, which is a shared 1777 system directory by
+// design and is never held to that rule (see EnsureAuditStateDir).
+func auditStateLayout(projectRoot string) (base string, owned []string, checkBase bool) {
 	key := projectStateKey(projectRoot)
 	// A RELATIVE XDG_STATE_HOME is ignored, not honored. The XDG spec requires
 	// an absolute path, and a relative one resolves against the working
@@ -136,12 +187,12 @@ func auditStateLayout(projectRoot string) (base string, owned []string) {
 	// out of the project; a caller that wants a specific location can still set
 	// an absolute path.
 	if x := os.Getenv("XDG_STATE_HOME"); filepath.IsAbs(x) {
-		return x, []string{"nocklock", key}
+		return x, []string{"nocklock", key}, true
 	}
 	if home, err := os.UserHomeDir(); err == nil && home != "" {
-		return filepath.Join(home, ".local", "state"), []string{"nocklock", key}
+		return filepath.Join(home, ".local", "state"), []string{"nocklock", key}, true
 	}
-	return "/var/tmp", []string{fmt.Sprintf("nocklock-state-%d", os.Geteuid()), "nocklock", key}
+	return "/var/tmp", []string{fmt.Sprintf("nocklock-state-%d", os.Geteuid()), "nocklock", key}, false
 }
 
 // projectStateKey names a project's audit state directory: a SHA-256 prefix of

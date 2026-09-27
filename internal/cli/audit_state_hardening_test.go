@@ -83,7 +83,7 @@ func TestAuditStateDirWithoutHome(t *testing.T) {
 // every such project the SAME audit state directory, interleaving unrelated
 // chains in one log. The project root is absolutized before it is hashed.
 func TestResolveDBPathSeparatesProjectsWithoutAConfigFile(t *testing.T) {
-	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	t.Setenv("XDG_STATE_HOME", trustedStateRoot(t))
 	cfg := config.DefaultConfig()
 	cfgPtr := &cfg
 
@@ -235,5 +235,142 @@ func TestResolveDBPathRejectsRelativeTraversal(t *testing.T) {
 		t.Fatal("expected a relative logging.db that traverses outside the project to be rejected")
 	} else if !strings.Contains(err.Error(), "logging.db") {
 		t.Fatalf("expected an error naming logging.db, got: %v", err)
+	}
+}
+
+// TestResolveDBPathRejectsSymlinkedConventionalLog: canonicalizing candidates
+// for de-duplication must not blind the existence scan to a symlink planted
+// AT a candidate path. resolveExisting follows a symlink leaf as readily as a
+// symlinked ancestor, so canonicalizing before the Lstat that detects a
+// symlink -- instead of after -- would silently follow ".nock/events.db" to
+// wherever it points and adopt that file as the audit chain, exactly the
+// attack the symlink refusal exists to stop.
+func TestResolveDBPathRejectsSymlinkedConventionalLog(t *testing.T) {
+	projectRoot, configPath := writeProjectConfig(t, `db = "events.db"`)
+	outside := filepath.Join(t.TempDir(), "attacker-controlled.db")
+	if err := os.WriteFile(outside, []byte("not the real chain"), 0o600); err != nil {
+		t.Fatalf("write outside file: %v", err)
+	}
+	conventional := filepath.Join(projectRoot, config.Dir, "events.db")
+	if err := os.Symlink(outside, conventional); err != nil {
+		t.Skipf("symlinks unsupported: %v", err)
+	}
+
+	cfg, err := config.Load(configPath)
+	if err != nil {
+		t.Fatalf("load config: %v", err)
+	}
+	if _, _, err := config.ResolveDBPath(cfg, configPath); err == nil {
+		t.Fatal("expected a symlinked conventional log to be refused")
+	} else if !strings.Contains(err.Error(), "symlink") {
+		t.Fatalf("expected a symlink error, got: %v", err)
+	}
+}
+
+// TestResolveDBPathCanonicalizesSymlinkedStateDirCandidate reproduces, without
+// depending on any one platform's temp-dir layout, the shape of the macOS CI
+// failure that motivated canonicalizing every ResolveDBPath candidate: the
+// project-side candidates are already resolved (writeProjectConfig resolves
+// the project root), but the state-dir candidate is built from whatever
+// XDG_STATE_HOME says, unresolved. Routing XDG_STATE_HOME through an explicit
+// symlink reproduces that same "same file, two spellings" shape portably.
+// Without canonicalizing every candidate first, the refusal below would name
+// the relocated chain by its symlinked spelling instead of the canonical path
+// EnsureAuditStateDir actually created it under.
+func TestResolveDBPathCanonicalizesSymlinkedStateDirCandidate(t *testing.T) {
+	projectRoot, configPath := writeProjectConfig(t, `db = "events.db"`)
+
+	realStateHome := trustedStateRoot(t)
+	linkedStateHome := filepath.Join(t.TempDir(), "state-link")
+	if err := os.Symlink(realStateHome, linkedStateHome); err != nil {
+		t.Skipf("symlinks unsupported: %v", err)
+	}
+	t.Setenv("XDG_STATE_HOME", linkedStateHome)
+
+	stateDir, err := config.EnsureAuditStateDir(projectRoot)
+	if err != nil {
+		t.Fatalf("EnsureAuditStateDir: %v", err)
+	}
+	relocated := filepath.Join(stateDir, "events.db")
+	if err := os.WriteFile(relocated, []byte("relocated chain"), 0o600); err != nil {
+		t.Fatalf("write relocated log: %v", err)
+	}
+	conventional := filepath.Join(projectRoot, config.Dir, "events.db")
+	if err := os.WriteFile(conventional, []byte("conventional chain"), 0o600); err != nil {
+		t.Fatalf("write conventional log: %v", err)
+	}
+
+	cfg, err := config.Load(configPath)
+	if err != nil {
+		t.Fatalf("load config: %v", err)
+	}
+	_, _, err = config.ResolveDBPath(cfg, configPath)
+	if err == nil {
+		t.Fatal("expected two coexisting audit chains to be refused")
+	}
+	if !strings.Contains(err.Error(), relocated) {
+		t.Fatalf("expected the error to name the relocated chain at its canonical path %q, got: %v", relocated, err)
+	}
+	if strings.Contains(err.Error(), linkedStateHome) {
+		t.Fatalf("expected the error to use the canonical state-dir spelling, not the symlinked one %q, got: %v", linkedStateHome, err)
+	}
+}
+
+// TestResolveDBPathRefusesAbsoluteConfiguredAlongsideStateDirChain: an
+// absolute logging.db used to be returned immediately, before the state-dir
+// candidate was even scanned, so a real chain already sitting in the state
+// dir was silently abandoned the moment logging.db was reconfigured to an
+// absolute path. It must now join the same candidate scan and be refused when
+// a state-dir chain already exists.
+func TestResolveDBPathRefusesAbsoluteConfiguredAlongsideStateDirChain(t *testing.T) {
+	projectRoot, configPath := writeProjectConfig(t, `db = "events.db"`)
+	cfg, err := config.Load(configPath)
+	if err != nil {
+		t.Fatalf("load config: %v", err)
+	}
+
+	stateDir, err := config.EnsureAuditStateDir(projectRoot)
+	if err != nil {
+		t.Fatalf("EnsureAuditStateDir: %v", err)
+	}
+	relocated := filepath.Join(stateDir, "events.db")
+	if err := os.WriteFile(relocated, []byte("relocated chain"), 0o600); err != nil {
+		t.Fatalf("write relocated log: %v", err)
+	}
+
+	absDB := filepath.Join(projectRoot, "audit", "events.db")
+	cfg.Logging.DB = absDB
+
+	_, _, err = config.ResolveDBPath(cfg, configPath)
+	if err == nil {
+		t.Fatal("expected an absolute logging.db to be refused when a state-dir chain already exists")
+	}
+	if !strings.Contains(err.Error(), "event logs found") {
+		t.Fatalf("expected an event-logs-found error, got: %v", err)
+	}
+	if !strings.Contains(err.Error(), relocated) || !strings.Contains(err.Error(), absDB) {
+		t.Fatalf("expected the error to name both the state-dir chain %q and the absolute path %q, got: %v", relocated, absDB, err)
+	}
+}
+
+// TestResolveDBPathAbsoluteConfiguredWithNoConflict is the positive control
+// for the refusal above: an absolute logging.db with nothing else on disk
+// still resolves to exactly the configured path.
+func TestResolveDBPathAbsoluteConfiguredWithNoConflict(t *testing.T) {
+	projectRoot, configPath := writeProjectConfig(t, `db = "events.db"`)
+	cfg, err := config.Load(configPath)
+	if err != nil {
+		t.Fatalf("load config: %v", err)
+	}
+
+	absDB := filepath.Join(projectRoot, "audit", "events.db")
+	cfg.Logging.DB = absDB
+
+	dbPath, _, err := config.ResolveDBPath(cfg, configPath)
+	if err != nil {
+		t.Fatalf("ResolveDBPath: %v", err)
+	}
+	if dbPath != absDB {
+		t.Fatalf("event log = %q, want the configured absolute path %q", dbPath, absDB)
 	}
 }

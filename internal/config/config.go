@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 
 	"github.com/BurntSushi/toml"
@@ -31,9 +32,12 @@ import (
 // Nothing NockLock owns is then inside the fence root, which is what lets the
 // root be granted so the agent can create and remove files in its own project.
 //
-// An ABSOLUTE logging.db is returned as written. Validate rejects one that
-// points outside the project and its audit state directory, so the check
-// happens at config load with a clear error rather than here.
+// An ABSOLUTE logging.db is returned as written, once it does not conflict
+// with a legacy chain sitting in the conventional spot or the state dir --
+// it joins the SAME scan as those, rather than short-circuiting before they
+// are even looked at. Validate rejects an absolute path that points outside
+// the project and its audit state directory, so that check happens at config
+// load with a clear error rather than here.
 //
 // Note that projectRoot (the directory holding .nock/config.toml) and
 // filesystem.root need not be the same directory. The choice above is keyed on
@@ -55,35 +59,41 @@ func ResolveDBPath(cfg *Config, configPath string) (dbPath string, projectRoot s
 	if abs, absErr := filepath.Abs(projectRoot); absErr == nil {
 		projectRoot = abs
 	}
-	if filepath.IsAbs(configured) {
-		return configured, projectRoot, nil
-	}
+
+	isAbs := filepath.IsAbs(configured)
 
 	// Only the conventional <projectRoot>/.nock location counts as a legacy log.
 	// The default logging.db is now the bare name "events.db", so treating the
 	// configured relative path as a candidate would make <projectRoot>/events.db
 	// -- plausibly a file the project owns -- look like NockLock's own state.
+	// This candidate is built the same way whether configured is absolute or
+	// relative: an older NockLock could have written it to the conventional spot
+	// regardless of what the CURRENT config says.
 	conventional := filepath.Join(projectRoot, Dir, filepath.Base(configured))
 	candidates := []string{conventional}
 	// A relative logging.db that contains a separator is a PATH the operator
 	// wrote by hand, and before the relocation it named a real in-project log,
 	// so honor it. A bare filename is deliberately NOT probed: it is what this
 	// version's own default carries, so no NockLock ever wrote a chain to
-	// <root>/<bare name>, and a file sitting there belongs to the project.
-	if cleaned := filepath.Clean(configured); cleaned != filepath.Base(cleaned) {
-		joined := filepath.Join(projectRoot, cleaned)
-		// filepath.Join cleans ".." components away silently, so a hand-written
-		// "../audit/events.db" would otherwise join to a path outside the
-		// project and get adopted, below, as the AUTHORITATIVE log -- handing a
-		// file the fenced agent's own project never owned the same trust as a
-		// real audit chain. Refuse the config outright instead of just skipping
-		// the candidate: a config that names a path outside the project is
-		// invalid, not merely one with nothing to find there.
-		if !withinDir(projectRoot, joined) {
-			return "", projectRoot, fmt.Errorf("logging.db %q escapes the project root %s; use a path inside the project or a bare filename", configured, projectRoot)
-		}
-		if joined != conventional {
-			candidates = append(candidates, joined)
+	// <root>/<bare name>, and a file sitting there belongs to the project. This
+	// only applies when configured is itself relative: an absolute path is
+	// handled as its own candidate below, not folded into this one.
+	if !isAbs {
+		if cleaned := filepath.Clean(configured); cleaned != filepath.Base(cleaned) {
+			joined := filepath.Join(projectRoot, cleaned)
+			// filepath.Join cleans ".." components away silently, so a hand-written
+			// "../audit/events.db" would otherwise join to a path outside the
+			// project and get adopted, below, as the AUTHORITATIVE log -- handing a
+			// file the fenced agent's own project never owned the same trust as a
+			// real audit chain. Refuse the config outright instead of just skipping
+			// the candidate: a config that names a path outside the project is
+			// invalid, not merely one with nothing to find there.
+			if !withinDir(projectRoot, joined) {
+				return "", projectRoot, fmt.Errorf("logging.db %q escapes the project root %s; use a path inside the project or a bare filename", configured, projectRoot)
+			}
+			if joined != conventional {
+				candidates = append(candidates, joined)
+			}
 		}
 	}
 
@@ -102,9 +112,51 @@ func ResolveDBPath(cfg *Config, configPath string) (dbPath string, projectRoot s
 		candidates = append(candidates, stateDB)
 	}
 
+	// An absolute logging.db joins the SAME scan as everything above it,
+	// instead of being returned before any of it is even looked at: unlike the
+	// other candidates, it is always treated as "existing" below, because an
+	// explicit absolute path IS the operator's chosen destination whether or
+	// not a file has been written there yet, so it conflicts -- and is refused
+	// -- whenever a real chain also sits at one of the other candidates.
+	absoluteConfigured := ""
+	if isAbs {
+		absoluteConfigured = configured
+		candidates = append(candidates, configured)
+	}
+
+	// Canonicalize every candidate (resolving symlinks on its existing parent,
+	// keeping the leaf) before de-duplicating or naming it in the error below.
+	// A symlinked ancestor -- macOS routes TMPDIR and /var through /private,
+	// for instance -- would otherwise make the same file look like two
+	// different chains, because the .nock candidates are reached through the
+	// already-resolved project root while the state-dir candidate is not.
+	//
+	// This canonicalization must not feed the existence/symlink scan below:
+	// resolveExisting follows a symlink LEAF too, which would turn a symlink
+	// planted at a candidate path (pointing anywhere the invoking user can
+	// write) into that target's path before the symlink check ever saw it.
+	// Lstat has to see each candidate exactly as configured.
+	type dbCandidate struct{ raw, canon string }
+	seenCanon := make(map[string]bool, len(candidates))
+	scan := make([]dbCandidate, 0, len(candidates))
+	for _, raw := range candidates {
+		canon := resolveExisting(raw)
+		if seenCanon[canon] {
+			continue
+		}
+		seenCanon[canon] = true
+		scan = append(scan, dbCandidate{raw: raw, canon: canon})
+	}
+	if stateDB != "" {
+		stateDB = resolveExisting(stateDB)
+	}
+	if absoluteConfigured != "" {
+		absoluteConfigured = resolveExisting(absoluteConfigured)
+	}
+
 	var existing []string
-	for _, candidate := range candidates {
-		info, statErr := os.Lstat(candidate)
+	for _, candidate := range scan {
+		info, statErr := os.Lstat(candidate.raw)
 		if statErr != nil {
 			// Only "not there" means not there. A permission error, an I/O
 			// error or a symlink loop would otherwise read as absence, and wrap
@@ -113,12 +165,18 @@ func ResolveDBPath(cfg *Config, configPath string) (dbPath string, projectRoot s
 			if errors.Is(statErr, os.ErrNotExist) {
 				continue
 			}
-			return "", projectRoot, fmt.Errorf("cannot determine whether an event log exists at %s: %w", candidate, statErr)
+			return "", projectRoot, fmt.Errorf("cannot determine whether an event log exists at %s: %w", candidate.raw, statErr)
 		}
 		if info.Mode()&os.ModeSymlink != 0 {
-			return "", projectRoot, fmt.Errorf("refusing to use the event log at %s: path is a symlink", candidate)
+			return "", projectRoot, fmt.Errorf("refusing to use the event log at %s: path is a symlink", candidate.raw)
 		}
-		existing = append(existing, candidate)
+		existing = append(existing, candidate.canon)
+	}
+
+	// The explicit absolute destination always counts, even when nothing has
+	// been written there yet: see the comment above candidates' construction.
+	if absoluteConfigured != "" && !slices.Contains(existing, absoluteConfigured) {
+		existing = append(existing, absoluteConfigured)
 	}
 
 	// Exactly one authoritative log per root. More than one is an
@@ -131,6 +189,12 @@ func ResolveDBPath(cfg *Config, configPath string) (dbPath string, projectRoot s
 				"Verify each one, then move the ones you are discarding aside "+
 				"(their -wal/-shm sidecars and chain anchors travel with them)",
 			len(existing), strings.Join(existing, ", "))
+	}
+	// An absolute logging.db is used as written, once nothing else conflicts:
+	// Validate/validateAuditDBLocation already confined it to the project or
+	// the audit state directory, so no further trust checks apply here.
+	if absoluteConfigured != "" {
+		return configured, projectRoot, nil
 	}
 	// The state-dir candidate, existing or not, is the one case that still
 	// needs EnsureAuditStateDir: unlike an in-project log, it carries the

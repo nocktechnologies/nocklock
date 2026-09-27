@@ -20,8 +20,24 @@ func resolvedTempDir(t *testing.T) string {
 	return dir
 }
 
+// trustedStateRoot returns a resolved temp dir chmod'd 0700, standing in for a
+// state root (XDG_STATE_HOME or ~/.local/state) an operator actually trusts.
+// t.TempDir() itself is not good enough here: its per-call leaf is created
+// with os.Mkdir(dir, 0777), so under a permissive umask (e.g. 002, common with
+// user-private-group setups) it comes back group-writable, which would trip
+// validateStateRootBase for reasons that have nothing to do with what the test
+// is checking.
+func trustedStateRoot(t *testing.T) string {
+	t.Helper()
+	dir := resolvedTempDir(t)
+	if err := os.Chmod(dir, 0o700); err != nil {
+		t.Fatalf("chmod state root: %v", err)
+	}
+	return dir
+}
+
 func TestEnsureAuditStateDirCreatesPrivateDirs(t *testing.T) {
-	base := resolvedTempDir(t)
+	base := trustedStateRoot(t)
 	t.Setenv("XDG_STATE_HOME", base)
 
 	dir, err := EnsureAuditStateDir(resolvedTempDir(t))
@@ -48,7 +64,7 @@ func TestEnsureAuditStateDirCreatesPrivateDirs(t *testing.T) {
 // rename the leaf away and substitute their own directory, and no mode on the
 // event log prevents that.
 func TestEnsureAuditStateDirRejectsWritableAncestor(t *testing.T) {
-	base := resolvedTempDir(t)
+	base := trustedStateRoot(t)
 	t.Setenv("XDG_STATE_HOME", base)
 	// "nocklock" is the intermediate directory NockLock owns, one level above
 	// the per-project dir. Make it group- and world-writable.
@@ -72,7 +88,7 @@ func TestEnsureAuditStateDirRejectsWritableAncestor(t *testing.T) {
 // so those components are Lstat'd rather than followed. Symlinks ABOVE the state
 // root stay allowed — /tmp and /var are system links into /private on macOS.
 func TestEnsureAuditStateDirRejectsSymlinkComponent(t *testing.T) {
-	base := resolvedTempDir(t)
+	base := trustedStateRoot(t)
 	t.Setenv("XDG_STATE_HOME", base)
 	elsewhere := resolvedTempDir(t)
 	if err := os.Symlink(elsewhere, filepath.Join(base, "nocklock")); err != nil {
@@ -91,7 +107,7 @@ func TestEnsureAuditStateDirRejectsSymlinkComponent(t *testing.T) {
 // TMPDIR reaches its real location through a system symlink, so a blanket
 // no-symlinks rule would reject ordinary machines.
 func TestEnsureAuditStateDirAcceptsSymlinkedStateRoot(t *testing.T) {
-	real := resolvedTempDir(t)
+	real := trustedStateRoot(t)
 	link := filepath.Join(resolvedTempDir(t), "state-link")
 	if err := os.Symlink(real, link); err != nil {
 		t.Skipf("symlinks unsupported: %v", err)
@@ -104,6 +120,75 @@ func TestEnsureAuditStateDirAcceptsSymlinkedStateRoot(t *testing.T) {
 	}
 	if !strings.HasPrefix(dir, real+string(os.PathSeparator)) {
 		t.Fatalf("audit state dir %q was not resolved through the symlinked root to %q", dir, real)
+	}
+}
+
+// TestEnsureAuditStateDirRejectsGroupWritableStateRoot: the configured state
+// root itself (XDG_STATE_HOME, or the ~/.local/state fallback) must be
+// trusted before NockLock creates anything beneath it, same as any other
+// ancestor -- a group-writable base lets another member of the group rename
+// away a component NockLock owns and substitute their own directory.
+func TestEnsureAuditStateDirRejectsGroupWritableStateRoot(t *testing.T) {
+	base := trustedStateRoot(t)
+	if err := os.Chmod(base, 0o770); err != nil {
+		t.Fatalf("chmod base: %v", err)
+	}
+	t.Setenv("XDG_STATE_HOME", base)
+
+	if _, err := EnsureAuditStateDir(resolvedTempDir(t)); err == nil {
+		t.Fatal("expected a group-writable state root to be refused")
+	} else if !strings.Contains(err.Error(), "writable") {
+		t.Fatalf("expected a writable-directory error, got: %v", err)
+	}
+}
+
+// TestEnsureAuditStateDirRejectsWorldWritableStateRoot is the other half of
+// the same rule: the world-write bit is just as dangerous as the group-write
+// one.
+func TestEnsureAuditStateDirRejectsWorldWritableStateRoot(t *testing.T) {
+	base := trustedStateRoot(t)
+	if err := os.Chmod(base, 0o707); err != nil {
+		t.Fatalf("chmod base: %v", err)
+	}
+	t.Setenv("XDG_STATE_HOME", base)
+
+	if _, err := EnsureAuditStateDir(resolvedTempDir(t)); err == nil {
+		t.Fatal("expected a world-writable state root to be refused")
+	} else if !strings.Contains(err.Error(), "writable") {
+		t.Fatalf("expected a writable-directory error, got: %v", err)
+	}
+}
+
+// TestEnsureAuditStateDirRejectsForeignOwnedStateRoot only exercises the
+// ownership half of the check when the test can actually produce a
+// foreign-owned directory, which needs chown privileges this process rarely
+// has outside a root-run CI job. Everywhere else it documents the requirement
+// via a loud skip reason instead of silently doing nothing.
+func TestEnsureAuditStateDirRejectsForeignOwnedStateRoot(t *testing.T) {
+	base := trustedStateRoot(t)
+	const otherUID = 65534 // "nobody" on most systems, and never this test's own uid
+	if err := os.Chown(base, otherUID, -1); err != nil {
+		t.Skipf("cannot chown %s to a foreign uid without privileges (expected outside a root-run CI job): %v", base, err)
+	}
+	t.Setenv("XDG_STATE_HOME", base)
+
+	if _, err := EnsureAuditStateDir(resolvedTempDir(t)); err == nil {
+		t.Fatal("expected a foreign-owned state root to be refused")
+	} else if !strings.Contains(err.Error(), "owned by uid") {
+		t.Fatalf("expected an ownership error, got: %v", err)
+	}
+}
+
+// TestEnsureAuditStateDirAcceptsDefaultStateRoot: with XDG_STATE_HOME unset,
+// the ~/.local/state fallback must still pass for the common case -- a
+// freshly created or ordinarily permissioned home directory is not group- or
+// world-writable and is owned by the current user.
+func TestEnsureAuditStateDirAcceptsDefaultStateRoot(t *testing.T) {
+	t.Setenv("XDG_STATE_HOME", "")
+	t.Setenv("HOME", trustedStateRoot(t))
+
+	if _, err := EnsureAuditStateDir(resolvedTempDir(t)); err != nil {
+		t.Fatalf("a default, untampered state root should be accepted: %v", err)
 	}
 }
 

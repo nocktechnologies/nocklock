@@ -86,6 +86,26 @@ All notable changes to NockLock will be documented in this file.
   `../audit/events.db`) is now rejected at load if it would resolve outside
   the project root, instead of silently being joined to the project root and
   adopted as the authoritative legacy log wherever it landed.
+- `ResolveDBPath` now canonicalizes every candidate (resolving symlinks on
+  each one's existing parent) before de-duplicating them and before naming
+  them in a refusal. The state-dir candidate previously was not canonicalized
+  while the in-project candidates were, so on platforms where a temp root
+  reaches its real location through a symlink, the same file could be named
+  with a different spelling than the other candidates, or fail to collapse
+  with one that reached it another way.
+- An absolute `logging.db` now joins the same candidate scan as the
+  conventional `.nock` path, the hand-written relative path and the state-dir
+  path, instead of being returned before any of them were even looked at. A
+  legacy chain already sitting in the state dir is refused rather than
+  silently abandoned when logging.db is reconfigured to an absolute path.
+- The configured state root (`XDG_STATE_HOME`, or the `~/.local/state`
+  fallback) is now itself checked before anything is created beneath it: it
+  must be owned by the current user and not group- or world-writable, or
+  `nocklock` refuses to start and names the path and the fix (chmod it, or
+  unset `XDG_STATE_HOME`). The `/var/tmp` per-uid fallback used when no home
+  directory is available is unaffected — it is a shared system directory by
+  design, and only the per-uid component NockLock creates under it is held to
+  this rule.
 - Linux userspace proxy mode now bridges syscall-fenced children to the
   allowlist proxy without granting IP sockets (N10753). When the syscall fence
   narrows proxy-mode children to Unix sockets, `wrap` serves the HTTP(S) proxy on
