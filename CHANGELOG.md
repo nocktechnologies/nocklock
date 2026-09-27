@@ -4,6 +4,17 @@ All notable changes to NockLock will be documented in this file.
 
 ## [Unreleased]
 
+### Breaking
+
+- Fresh projects now keep audit state outside the project in
+  `$XDG_STATE_HOME/nocklock` (or `~/.local/state/nocklock`). As a result,
+  NockLock refuses to start when a `filesystem.deny` path is inside
+  `filesystem.root`; move the denied path outside the root. It also refuses to
+  start when `filesystem.root` is `$HOME` or another ancestor of the audit
+  state directory; narrow `filesystem.root` to the project. If more than one
+  audit chain exists for a project, NockLock refuses to guess which chain to
+  use.
+
 ### Added
 
 - Linux `filesystem.allow_rw` entries grant explicit read-write access while
