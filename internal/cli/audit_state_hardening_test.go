@@ -508,3 +508,83 @@ func TestResolveDBPathAbsoluteInStateDirRejectsWritableIntermediate(t *testing.T
 		t.Fatalf("expected a writable-directory error, got: %v", err)
 	}
 }
+
+// symlinkedAbsoluteStateRoot points XDG_STATE_HOME at a symlink to a trusted
+// root and returns both the resolved root and the absolute logging.db an
+// absoluteConfigured input would carry: the RAW, symlinked spelling, since
+// that is what AuditStateDir returns once XDG_STATE_HOME is a symlink.
+func symlinkedAbsoluteStateRoot(t *testing.T, projectRoot string) (resolvedRoot, absDB string) {
+	t.Helper()
+	resolvedRoot = os.Getenv("XDG_STATE_HOME")
+	linked := filepath.Join(t.TempDir(), "state-link")
+	if err := os.Symlink(resolvedRoot, linked); err != nil {
+		t.Skipf("symlinks unsupported: %v", err)
+	}
+	t.Setenv("XDG_STATE_HOME", linked)
+	auditDir, err := config.AuditStateDir(projectRoot)
+	if err != nil {
+		t.Fatalf("AuditStateDir: %v", err)
+	}
+	return resolvedRoot, filepath.Join(auditDir, "events.db")
+}
+
+// TestResolveDBPathAbsoluteInStateDirThroughSymlinkedStateRootChecksStateRoot
+// covers a false-positive Gander raised reviewing this PR: it read
+// AuditStateDir's raw, uncanonicalized result being compared against the
+// already-canonicalized absoluteConfigured as a bypass on a symlinked state
+// root. withinDir (config.go) actually resolves both of its arguments before
+// comparing, so the gate is correct as written; this pins that so a future
+// change to withinDir or AuditStateDir can't silently reopen it.
+func TestResolveDBPathAbsoluteInStateDirThroughSymlinkedStateRootChecksStateRoot(t *testing.T) {
+	projectRoot, configPath := writeProjectConfig(t, `db = "events.db"`)
+	realStateHome, absDB := symlinkedAbsoluteStateRoot(t, projectRoot)
+
+	cfg, err := config.Load(configPath)
+	if err != nil {
+		t.Fatalf("load config: %v", err)
+	}
+	cfg.Logging.DB = absDB
+
+	if err := os.Chmod(realStateHome, 0o770); err != nil {
+		t.Fatalf("chmod real state root: %v", err)
+	}
+
+	if _, _, err := config.ResolveDBPath(cfg, configPath); err == nil {
+		t.Fatal("expected an absolute logging.db reached through a symlinked, group-writable state root to be refused")
+	} else if !strings.Contains(err.Error(), "writable") || !strings.Contains(err.Error(), realStateHome) {
+		t.Fatalf("expected a writable-directory error naming the resolved state root %q, got: %v", realStateHome, err)
+	}
+}
+
+// TestResolveDBPathAbsoluteInStateDirThroughSymlinkedStateRootWithNestedComponentSucceeds
+// is the positive control: with the state root trusted, a symlinked
+// XDG_STATE_HOME and a logging.db nested one level below the audit state
+// directory must still resolve, exercising the filepath.Rel/
+// ensureTrustedComponents walk (config.go) against a symlinked stateDir,
+// which the refusal test above cannot reach.
+func TestResolveDBPathAbsoluteInStateDirThroughSymlinkedStateRootWithNestedComponentSucceeds(t *testing.T) {
+	projectRoot, configPath := writeProjectConfig(t, `db = "events.db"`)
+	_, absDB := symlinkedAbsoluteStateRoot(t, projectRoot)
+	absDB = filepath.Join(filepath.Dir(absDB), "sub", "events.db")
+
+	cfg, err := config.Load(configPath)
+	if err != nil {
+		t.Fatalf("load config: %v", err)
+	}
+	cfg.Logging.DB = absDB
+
+	dbPath, _, err := config.ResolveDBPath(cfg, configPath)
+	if err != nil {
+		t.Fatalf("ResolveDBPath with a trusted, symlinked state root: %v", err)
+	}
+	if dbPath != absDB {
+		t.Fatalf("event log = %q, want the configured absolute path %q", dbPath, absDB)
+	}
+	info, err := os.Stat(filepath.Dir(dbPath))
+	if err != nil {
+		t.Fatalf("stat nested component: %v", err)
+	}
+	if perm := info.Mode().Perm(); perm != 0o700 {
+		t.Fatalf("nested component mode = %04o, want 0700", perm)
+	}
+}
