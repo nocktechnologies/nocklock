@@ -686,6 +686,10 @@ may write, delete, rename, or change registry/firewall/machine state outside its
 own probe root** — the exceptions are called out below and each is undone in
 teardown.
 
+**Target shell: Windows PowerShell 5.1** (`powershell.exe`, not `pwsh`).
+Do not use PS 7-only constructs: trailing `&`, `&&`, `||`, ternary `? :`,
+null-coalescing `??`, `-Parallel`, `Split-Path -LeafBase`, or `Clean` blocks.
+
 **Shared scaffold — set once at the top of the run.** Everything a probe creates
 lives under a fresh, unique, timestamped root, and the AppContainer moniker
 carries the same suffix so a rerun never inherits a previous run's package-SID
@@ -728,12 +732,22 @@ only by the global teardown, never left behind:
 - The loopback exemption list is machine-wide; teardown clears the entry.
 
 **Getting the scaffold *into* the container.** `New-Win32Process` launches a
-*fresh* process, so none of `$probeRoot`, `$moniker`, `$sid`, `$stamp`, or
-`Assert-AccessDenied` crosses into it — every "from INSIDE the container" snippet
-below assumes they have been re-established there. The launcher does this by
-writing a bootstrap `_inside.ps1` into `$probeRoot` (which it ACLs to the package
-SID, like any other granted path) that re-declares the paths and defines
-`Assert-AccessDenied`, then running each inside-container step as
+*fresh* process, so none of `$probeRoot`, `$moniker`, `$sid`, `$stamp`, `$out`,
+or `Assert-AccessDenied` crosses into it — every "from INSIDE the container"
+snippet below assumes they have been re-established there. The launcher does this
+by writing a bootstrap `_inside.ps1` into `$probeRoot` (which it ACLs to the
+package SID, like any other granted path) that re-derives all paths from
+`$PSScriptRoot` and re-defines `Assert-AccessDenied`:
+
+```powershell
+$probeRoot = $PSScriptRoot
+$stamp     = (Split-Path -Leaf $probeRoot) -replace '^nocklock-probe-',''
+$moniker   = "nocklock-probe-$stamp"
+$out       = Get-Item (Join-Path $probeRoot 'out')
+```
+
+Probes that need additional paths (e.g. Probe 4's `$project`, `$sentinel`) derive
+them from `$probeRoot` the same way. Each inside-container step runs as
 `New-Win32Process -CommandLine "powershell -NoProfile -ExecutionPolicy Bypass
 -File $probeRoot\_inside.ps1 -Phase <name>"`. The `-Phase` argument selects which
 body to run, so a probe that needs two container launches (Probe 4, `4a`/`4b`)
@@ -747,18 +761,6 @@ inside probe. Every "from INSIDE the container" verdict below — Probe 4's Phas
 `Assert-AccessDenied` results, Probe 10's spawn, and the rest — reaches the operator
 this way; a container that just exits with nothing captured is a setup-vs-result
 ambiguity of the exact class this round removes.
-
-**Inside-variable bootstrap.** The outer session's variables (`$probeRoot`, `$out`,
-`$project`, `$nock`, `$other`, `$sentinel`) are not inherited into the
-`New-Win32Process` child. `_inside.ps1` re-establishes them on entry:
-
-```powershell
-$probeRoot = $PSScriptRoot
-$out       = Get-Item (Join-Path $probeRoot 'out')
-```
-
-Probes that need additional paths (e.g. Probe 4's `$project`, `$sentinel`) derive
-them from `$probeRoot` the same way.
 
 **Probe 9 is deferred and VM/throwaway-only. Do not run it on Kevin's desktop** —
 it turns the firewall off. See its own warning below.
@@ -938,7 +940,8 @@ whoami /all
 Confirm the token shows an AppContainer SID and Low integrity, from a
 non-elevated parent.
 
-**Teardown.** None — read-only (the container profile is removed globally).
+**Teardown.** None of its own — the container process exits and the profile is
+removed globally.
 
 | State touched | Detail |
 |---|---|
@@ -1136,22 +1139,15 @@ and the teardown removes nothing.
 winget install --id sharkdp.fd --scope user --exact
 if ($LASTEXITCODE -eq 0) { $script:installedByThisRun += 'winget:sharkdp.fd' }
 scoop install ripgrep
-if ($LASTEXITCODE -eq 0) { $script:installedByThisRun += 'scoop:ripgrep' }
+if ($?) { $script:installedByThisRun += 'scoop:ripgrep' }   # scoop is a PS function; $LASTEXITCODE is stale
 where.exe fd; where.exe rg
 ```
 
 Confirm both complete with no UAC prompt and land under the user profile.
 
-**Teardown.** Uninstall only packages this run actually installed:
-
-```powershell
-foreach ($pkg in $installedByThisRun) {
-  switch -Wildcard ($pkg) {
-    'winget:*' { winget uninstall --id ($pkg -replace '^winget:','') --exact 2>$null }
-    'scoop:*'  { scoop uninstall ($pkg -replace '^scoop:','') 2>$null }
-  }
-}
-```
+**Teardown.** Handled by the global teardown (`$installedByThisRun` loop in the
+`finally` block). No inline teardown — a double-uninstall attempt is wasted I/O
+and the global path always runs.
 
 | State touched | Detail |
 |---|---|
@@ -1330,6 +1326,11 @@ foreach ($pkg in $installedByThisRun) {                       # Probe 8, fail-sa
     'winget:*' { winget uninstall --id ($pkg -replace '^winget:','') --exact 2>$null }
     'scoop:*'  { scoop uninstall ($pkg -replace '^scoop:','') 2>$null }
   }
+}
+# Reap spawned processes BEFORE deleting $probeRoot (PID files live there).
+foreach ($pidFile in (Get-ChildItem -Path $probeRoot -Filter '*-pid.txt' -Recurse -ErrorAction SilentlyContinue)) {
+  $pid = [int](Get-Content $pidFile.FullName -ErrorAction SilentlyContinue)
+  if ($pid) { Stop-Process -Id $pid -ErrorAction SilentlyContinue }
 }
 # Probe 9 (VM only): restore firewall to the recorded per-profile state
 Remove-Item -Recurse -Force $probeRoot                     # everything else lived here
