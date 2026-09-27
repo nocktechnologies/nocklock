@@ -24,6 +24,7 @@
 #include <netinet/tcp.h>
 #include <pthread.h>
 #include <stdarg.h>
+#include <stddef.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -43,7 +44,7 @@
 
 #define MAX_PATHS 256
 #define FIELD_SEP '\x1f'
-#define MAX_TRACKED_FD 65536
+#define BRIDGE_ABSTRACT_TAG "nocklock-proxy-bridge:"
 #ifndef SOCK_TYPE_MASK
 #define SOCK_TYPE_MASK 0xf
 #endif
@@ -66,8 +67,7 @@ typedef struct {
 
 static fence_config_t g_config;
 static pthread_once_t g_init_once = PTHREAD_ONCE_INIT;
-static unsigned char g_swapped_fd[MAX_TRACKED_FD];
-static pthread_mutex_t g_swapped_fd_lock = PTHREAD_MUTEX_INITIALIZER;
+static unsigned long g_bridge_socket_seq;
 
 /* ------------------------------------------------------------------ */
 /* Real function pointers                                              */
@@ -84,15 +84,13 @@ typedef int    (*real_rmdir_t)(const char *);
 typedef ssize_t (*real_readlink_t)(const char *, char *, size_t);
 typedef char * (*real_realpath_t)(const char *, char *);
 typedef int    (*real_socket_t)(int, int, int);
+typedef int    (*real_bind_t)(int, const struct sockaddr *, socklen_t);
 typedef int    (*real_connect_t)(int, const struct sockaddr *, socklen_t);
 typedef int    (*real_setsockopt_t)(int, int, int, const void *, socklen_t);
 typedef int    (*real_getsockopt_t)(int, int, int, void *, socklen_t *);
 typedef int    (*real_getsockname_t)(int, struct sockaddr *, socklen_t *);
 typedef int    (*real_getpeername_t)(int, struct sockaddr *, socklen_t *);
 typedef int    (*real_dup_t)(int);
-typedef int    (*real_dup2_t)(int, int);
-typedef int    (*real_dup3_t)(int, int, int);
-typedef int    (*real_fcntl_t)(int, int, ...);
 typedef int    (*real_close_t)(int);
 
 /* 64-bit variants */
@@ -137,15 +135,13 @@ static real_rmdir_t    real_rmdir;
 static real_readlink_t real_readlink;
 static real_realpath_t real_realpath;
 static real_socket_t   real_socket;
+static real_bind_t     real_bind;
 static real_connect_t  real_connect;
 static real_setsockopt_t real_setsockopt;
 static real_getsockopt_t real_getsockopt;
 static real_getsockname_t real_getsockname;
 static real_getpeername_t real_getpeername;
 static real_dup_t real_dup;
-static real_dup2_t real_dup2;
-static real_dup3_t real_dup3;
-static real_fcntl_t real_fcntl;
 static real_close_t real_close;
 
 /* 64-bit variants */
@@ -494,6 +490,22 @@ static int check_path(const char *resolved, int is_write,
         }
     }
 
+    /* 1b. Standard character devices every program needs. /dev/null and
+     * /dev/tty accept reads and writes (git, shells and echo write to them
+     * constantly); /dev/zero is read-only. Permitted unconditionally —
+     * independent of the allow list, which would otherwise restrict them to
+     * reads — but AFTER the deny list, so an explicit deny still wins. Mirrors
+     * the baseline device grants in the Landlock ruleset
+     * (baselineDeviceRules in internal/fence/fs/landlock/rules.go). */
+    if (strcmp(resolved, "/dev/null") == 0 || strcmp(resolved, "/dev/tty") == 0) {
+        return 0; /* read + write */
+    }
+    if ((strcmp(resolved, "/dev/zero") == 0 ||
+         strcmp(resolved, "/dev/urandom") == 0 ||
+         strcmp(resolved, "/dev/random") == 0) && !is_write) {
+        return 0; /* read only */
+    }
+
     /* 2. Check root — if path starts with root, ALLOW (respect mode). */
     if (path_starts_with(resolved, g_config.root)) {
         if (is_write && !g_config.mode_rw) {
@@ -542,15 +554,13 @@ static void fence_init(void)
     real_readlink = (real_readlink_t)dlsym(RTLD_NEXT, "readlink");
     real_realpath = (real_realpath_t)dlsym(RTLD_NEXT, "realpath");
     real_socket   = (real_socket_t)dlsym(RTLD_NEXT, "socket");
+    real_bind     = (real_bind_t)dlsym(RTLD_NEXT, "bind");
     real_connect  = (real_connect_t)dlsym(RTLD_NEXT, "connect");
     real_setsockopt = (real_setsockopt_t)dlsym(RTLD_NEXT, "setsockopt");
     real_getsockopt = (real_getsockopt_t)dlsym(RTLD_NEXT, "getsockopt");
     real_getsockname = (real_getsockname_t)dlsym(RTLD_NEXT, "getsockname");
     real_getpeername = (real_getpeername_t)dlsym(RTLD_NEXT, "getpeername");
     real_dup = (real_dup_t)dlsym(RTLD_NEXT, "dup");
-    real_dup2 = (real_dup2_t)dlsym(RTLD_NEXT, "dup2");
-    real_dup3 = (real_dup3_t)dlsym(RTLD_NEXT, "dup3");
-    real_fcntl = (real_fcntl_t)dlsym(RTLD_NEXT, "fcntl");
     real_close = (real_close_t)dlsym(RTLD_NEXT, "close");
 
     /* 64-bit variants (may be NULL on platforms that don't have them). */
@@ -2674,18 +2684,6 @@ int statx(int dirfd, const char *pathname, int flags,
 /* Network proxy AF_INET -> AF_UNIX bridge                             */
 /* ------------------------------------------------------------------ */
 
-static int bridge_fd_tracked(int fd)
-{
-    int tracked = 0;
-
-    if (fd >= 0 && fd < MAX_TRACKED_FD) {
-        pthread_mutex_lock(&g_swapped_fd_lock);
-        tracked = g_swapped_fd[fd];
-        pthread_mutex_unlock(&g_swapped_fd_lock);
-    }
-    return tracked;
-}
-
 static int bridge_expected_v4(const struct sockaddr_in *addr)
 {
     struct in_addr expected;
@@ -2710,15 +2708,90 @@ static int bridge_expected_v6(const struct sockaddr_in6 *addr)
            ntohs(addr->sin6_port) == g_config.proxy_tcp_port;
 }
 
+static int bridge_bind_abstract_tag(int fd)
+{
+    struct sockaddr_un un;
+    unsigned long seq;
+    int n;
+
+    if (!real_bind) {
+        errno = ENOSYS;
+        return -1;
+    }
+    memset(&un, 0, sizeof(un));
+    un.sun_family = AF_UNIX;
+    seq = __sync_add_and_fetch(&g_bridge_socket_seq, 1);
+    n = snprintf(&un.sun_path[1], sizeof(un.sun_path) - 1, "%s%ld:%d:%lu",
+                 BRIDGE_ABSTRACT_TAG, (long)getpid(), fd, seq);
+    if (n <= 0 || (size_t)n >= sizeof(un.sun_path) - 1) {
+        errno = ENAMETOOLONG;
+        return -1;
+    }
+    return real_bind(fd, (const struct sockaddr *)&un,
+                     (socklen_t)(offsetof(struct sockaddr_un, sun_path) + 1 + (size_t)n));
+}
+
+static int bridge_name_has_tag(const struct sockaddr_un *un, socklen_t len)
+{
+    size_t prefix_len = strlen(BRIDGE_ABSTRACT_TAG);
+    size_t payload_len;
+
+    if (!un || len <= (socklen_t)(offsetof(struct sockaddr_un, sun_path) + 1))
+        return 0;
+    if (un->sun_family != AF_UNIX || un->sun_path[0] != '\0')
+        return 0;
+    payload_len = (size_t)len - offsetof(struct sockaddr_un, sun_path) - 1;
+    return payload_len >= prefix_len &&
+           memcmp(&un->sun_path[1], BRIDGE_ABSTRACT_TAG, prefix_len) == 0;
+}
+
+static int bridge_fd_tagged(int fd)
+{
+    int domain = 0;
+    socklen_t domain_len = sizeof(domain);
+    struct sockaddr_un un;
+    socklen_t un_len = sizeof(un);
+
+    if (fd < 0 || !real_getsockopt || !real_getsockname)
+        return 0;
+    if (real_getsockopt(fd, SOL_SOCKET, SO_DOMAIN, &domain, &domain_len) != 0 ||
+        domain_len < (socklen_t)sizeof(domain) || domain != AF_UNIX)
+        return 0;
+    memset(&un, 0, sizeof(un));
+    if (real_getsockname(fd, (struct sockaddr *)&un, &un_len) != 0)
+        return 0;
+    return bridge_name_has_tag(&un, un_len);
+}
+
+static int bridge_dup_tagged_fd(int fd)
+{
+    int dupfd;
+
+    if (!real_dup || !real_close)
+        return -1;
+    dupfd = real_dup(fd);
+    if (dupfd < 0)
+        return -1;
+    if (!bridge_fd_tagged(dupfd)) {
+        real_close(dupfd);
+        return -1;
+    }
+    return dupfd;
+}
+
+static int bridge_tcp_int_opt_supported(int optname);
+
 static int bridge_connect_unix(int fd)
 {
     struct sockaddr_un un;
+    size_t socket_len;
 
     if (!g_config.proxy_bridge_enabled || g_config.proxy_unix_socket[0] == '\0') {
         errno = EPERM;
         return -1;
     }
-    if (strlen(g_config.proxy_unix_socket) >= sizeof(un.sun_path)) {
+    socket_len = strlen(g_config.proxy_unix_socket);
+    if (socket_len >= sizeof(un.sun_path)) {
         errno = ENAMETOOLONG;
         return -1;
     }
@@ -2784,34 +2857,44 @@ int socket(int domain, int type, int protocol)
         fd = real_socket(AF_UNIX, type, 0);
     else
         fd = real_socket(domain, type, protocol);
-    if (swapped && fd >= MAX_TRACKED_FD) {
+    if (swapped && fd >= 0 && bridge_bind_abstract_tag(fd) != 0) {
+        int saved = errno;
         real_close(fd);
-        errno = EMFILE;
+        errno = saved;
         return -1;
-    }
-    if (fd >= 0 && fd < MAX_TRACKED_FD) {
-        pthread_mutex_lock(&g_swapped_fd_lock);
-        g_swapped_fd[fd] = swapped;
-        pthread_mutex_unlock(&g_swapped_fd_lock);
     }
     return fd;
 }
 
 int connect(int fd, const struct sockaddr *addr, socklen_t len)
 {
+    int bridge_fd;
+    int result;
+    int saved;
+
     pthread_once(&g_init_once, fence_init);
 
-    if (bridge_fd_tracked(fd)) {
+    bridge_fd = bridge_dup_tagged_fd(fd);
+    if (bridge_fd >= 0) {
         if (addr && addr->sa_family == AF_INET &&
             len >= (socklen_t)sizeof(struct sockaddr_in) &&
             bridge_expected_v4((const struct sockaddr_in *)addr)) {
-            return bridge_connect_unix(fd);
+            result = bridge_connect_unix(bridge_fd);
+            saved = errno;
+            real_close(bridge_fd);
+            errno = saved;
+            return result;
         }
         if (addr && addr->sa_family == AF_INET6 &&
             len >= (socklen_t)sizeof(struct sockaddr_in6) &&
             bridge_expected_v6((const struct sockaddr_in6 *)addr)) {
-            return bridge_connect_unix(fd);
+            result = bridge_connect_unix(bridge_fd);
+            saved = errno;
+            real_close(bridge_fd);
+            errno = saved;
+            return result;
         }
+        real_close(bridge_fd);
         report_blocked("(network)", "connect", "unexpected AF_INET/AF_INET6 proxy bridge target");
         errno = EPERM;
         return -1;
@@ -2821,171 +2904,114 @@ int connect(int fd, const struct sockaddr *addr, socklen_t len)
 
 int setsockopt(int fd, int level, int optname, const void *optval, socklen_t optlen)
 {
+    int bridge_fd;
+
     pthread_once(&g_init_once, fence_init);
 
-    if (bridge_fd_tracked(fd) && level == IPPROTO_TCP) {
-        (void)optname;
-        (void)optval;
-        (void)optlen;
+    bridge_fd = bridge_dup_tagged_fd(fd);
+    if (bridge_fd >= 0) {
+        real_close(bridge_fd);
+        if (level != IPPROTO_TCP)
+            return real_setsockopt(fd, level, optname, optval, optlen);
+        if (!bridge_tcp_int_opt_supported(optname)) {
+            errno = ENOPROTOOPT;
+            return -1;
+        }
+        if (!optval) {
+            errno = EFAULT;
+            return -1;
+        }
+        if (optlen < (socklen_t)sizeof(int)) {
+            errno = EINVAL;
+            return -1;
+        }
         return 0;
     }
     return real_setsockopt(fd, level, optname, optval, optlen);
 }
 
-int getsockopt(int fd, int level, int optname, void *optval, socklen_t *optlen)
+static int bridge_tcp_int_opt_supported(int optname)
 {
-    pthread_once(&g_init_once, fence_init);
-
-    if (bridge_fd_tracked(fd) && level == SOL_SOCKET && optname == SO_ERROR)
-        return real_getsockopt(fd, level, optname, optval, optlen);
-    if (bridge_fd_tracked(fd) && level == IPPROTO_TCP) {
-        if (optval && optlen && *optlen >= (socklen_t)sizeof(int)) {
-            *(int *)optval = 1;
-            *optlen = sizeof(int);
-        }
-        (void)optname;
+    switch (optname) {
+    case TCP_NODELAY:
+#ifdef TCP_KEEPIDLE
+    case TCP_KEEPIDLE:
+#endif
+#ifdef TCP_KEEPINTVL
+    case TCP_KEEPINTVL:
+#endif
+#ifdef TCP_KEEPCNT
+    case TCP_KEEPCNT:
+#endif
+        return 1;
+    default:
         return 0;
     }
+}
+
+int getsockopt(int fd, int level, int optname, void *optval, socklen_t *optlen)
+{
+    int bridge_fd;
+    int result;
+    int saved;
+
+    pthread_once(&g_init_once, fence_init);
+
+    bridge_fd = bridge_dup_tagged_fd(fd);
+    if (bridge_fd >= 0 && level == SOL_SOCKET && optname == SO_ERROR) {
+        result = real_getsockopt(bridge_fd, level, optname, optval, optlen);
+        saved = errno;
+        real_close(bridge_fd);
+        errno = saved;
+        return result;
+    }
+    if (bridge_fd >= 0 && level == IPPROTO_TCP) {
+        real_close(bridge_fd);
+        if (!bridge_tcp_int_opt_supported(optname)) {
+            errno = ENOPROTOOPT;
+            return -1;
+        }
+        if (!optval || !optlen) {
+            errno = EFAULT;
+            return -1;
+        }
+        if (*optlen < (socklen_t)sizeof(int)) {
+            errno = EINVAL;
+            return -1;
+        }
+        *(int *)optval = 1;
+        *optlen = sizeof(int);
+        return 0;
+    }
+    if (bridge_fd >= 0)
+        real_close(bridge_fd);
     return real_getsockopt(fd, level, optname, optval, optlen);
 }
 
 int getsockname(int fd, struct sockaddr *addr, socklen_t *len)
 {
+    int bridge_fd;
+
     pthread_once(&g_init_once, fence_init);
 
-    if (bridge_fd_tracked(fd))
+    bridge_fd = bridge_dup_tagged_fd(fd);
+    if (bridge_fd >= 0) {
+        real_close(bridge_fd);
         return bridge_fake_name(addr, len);
+    }
     return real_getsockname(fd, addr, len);
 }
 
 int getpeername(int fd, struct sockaddr *addr, socklen_t *len)
 {
+    int bridge_fd;
+
     pthread_once(&g_init_once, fence_init);
 
-    if (bridge_fd_tracked(fd))
+    bridge_fd = bridge_dup_tagged_fd(fd);
+    if (bridge_fd >= 0) {
+        real_close(bridge_fd);
         return bridge_fake_name(addr, len);
+    }
     return real_getpeername(fd, addr, len);
-}
-
-static int bridge_dup_result_locked(int oldfd, int newfd)
-{
-    if (newfd >= MAX_TRACKED_FD && oldfd >= 0 && oldfd < MAX_TRACKED_FD &&
-        g_swapped_fd[oldfd]) {
-        real_close(newfd);
-        errno = EMFILE;
-        return -1;
-    }
-    if (newfd >= 0 && newfd < MAX_TRACKED_FD)
-        g_swapped_fd[newfd] = oldfd >= 0 && oldfd < MAX_TRACKED_FD &&
-                              g_swapped_fd[oldfd];
-    return newfd;
-}
-
-int dup(int oldfd)
-{
-    int result;
-
-    pthread_once(&g_init_once, fence_init);
-    pthread_mutex_lock(&g_swapped_fd_lock);
-    result = bridge_dup_result_locked(oldfd, real_dup(oldfd));
-    pthread_mutex_unlock(&g_swapped_fd_lock);
-    return result;
-}
-
-int dup2(int oldfd, int newfd)
-{
-    int result;
-
-    pthread_once(&g_init_once, fence_init);
-    pthread_mutex_lock(&g_swapped_fd_lock);
-    if (newfd >= MAX_TRACKED_FD && oldfd >= 0 && oldfd < MAX_TRACKED_FD &&
-        g_swapped_fd[oldfd]) {
-        pthread_mutex_unlock(&g_swapped_fd_lock);
-        errno = EMFILE;
-        return -1;
-    }
-    result = bridge_dup_result_locked(oldfd, real_dup2(oldfd, newfd));
-    pthread_mutex_unlock(&g_swapped_fd_lock);
-    return result;
-}
-
-int dup3(int oldfd, int newfd, int flags)
-{
-    int result;
-
-    pthread_once(&g_init_once, fence_init);
-    pthread_mutex_lock(&g_swapped_fd_lock);
-    if (newfd >= MAX_TRACKED_FD && oldfd >= 0 && oldfd < MAX_TRACKED_FD &&
-        g_swapped_fd[oldfd]) {
-        pthread_mutex_unlock(&g_swapped_fd_lock);
-        errno = EMFILE;
-        return -1;
-    }
-    result = bridge_dup_result_locked(oldfd, real_dup3(oldfd, newfd, flags));
-    pthread_mutex_unlock(&g_swapped_fd_lock);
-    return result;
-}
-
-int fcntl(int fd, int cmd, ...)
-{
-    long arg = 0;
-    int has_arg = 1;
-    int result;
-    va_list ap;
-
-    pthread_once(&g_init_once, fence_init);
-    switch (cmd) {
-    case F_GETFD:
-    case F_GETFL:
-    case F_GETOWN:
-#ifdef F_GETSIG
-    case F_GETSIG:
-#endif
-#ifdef F_GETLEASE
-    case F_GETLEASE:
-#endif
-#ifdef F_GETPIPE_SZ
-    case F_GETPIPE_SZ:
-#endif
-#ifdef F_GET_SEALS
-    case F_GET_SEALS:
-#endif
-        has_arg = 0;
-        break;
-    default:
-        break;
-    }
-    if (has_arg) {
-        va_start(ap, cmd);
-        arg = va_arg(ap, long);
-        va_end(ap);
-    }
-
-    if (cmd != F_DUPFD && cmd != F_DUPFD_CLOEXEC) {
-        if (has_arg)
-            return real_fcntl(fd, cmd, arg);
-        return real_fcntl(fd, cmd);
-    }
-
-    pthread_mutex_lock(&g_swapped_fd_lock);
-    result = bridge_dup_result_locked(fd, real_fcntl(fd, cmd, arg));
-    pthread_mutex_unlock(&g_swapped_fd_lock);
-    return result;
-}
-
-int close(int fd)
-{
-    int result;
-
-    pthread_once(&g_init_once, fence_init);
-
-    if (fd >= 0 && fd < MAX_TRACKED_FD) {
-        pthread_mutex_lock(&g_swapped_fd_lock);
-        /* Do not let a reused descriptor inherit the bridge state. */
-        result = real_close(fd);
-        g_swapped_fd[fd] = 0;
-        pthread_mutex_unlock(&g_swapped_fd_lock);
-        return result;
-    }
-    return real_close(fd);
 }

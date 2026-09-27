@@ -538,12 +538,15 @@ var wrapCmd = &cobra.Command{
 					logEvent(logging.EventNetworkError, "network", "unix proxy bridge requires Linux LD_PRELOAD interposer", true)
 					return fmt.Errorf("network fence with syscall enforcement requires the Linux filesystem interposer so loopback proxy connects can be mapped onto a Unix socket")
 				}
-				proxyDir, err := os.MkdirTemp("/tmp", "nlproxy-*")
+				proxyDir, err := createUnixProxyDir()
 				if err != nil {
 					return fmt.Errorf("create unix proxy socket directory: %w", err)
 				}
 				defer os.RemoveAll(proxyDir)
 				proxyUnixSocket = filepath.Join(proxyDir, "proxy.sock")
+				if err := validateUnixProxySocketPath(proxyUnixSocket); err != nil {
+					return err
+				}
 				addr, err = reserveLoopbackProxyAddr()
 				if err != nil {
 					return fmt.Errorf("reserve loopback proxy token address: %w", err)
@@ -1105,6 +1108,26 @@ func reserveLoopbackProxyAddr() (string, error) {
 		return "", err
 	}
 	return addr, nil
+}
+
+func createUnixProxyDir() (string, error) {
+	base := os.Getenv("XDG_RUNTIME_DIR")
+	if base == "" {
+		base = filepath.Join("/run/user", fmt.Sprintf("%d", os.Getuid()))
+		if st, statErr := os.Stat(base); statErr != nil || !st.IsDir() {
+			base = "/tmp"
+		}
+	}
+	return os.MkdirTemp(base, "nlp-*")
+}
+
+func validateUnixProxySocketPath(path string) error {
+	const sunPathLimit = 108
+
+	if len(path) >= sunPathLimit {
+		return fmt.Errorf("unix proxy socket path is %d bytes; must be shorter than %d bytes for sockaddr_un.sun_path", len(path), sunPathLimit)
+	}
+	return nil
 }
 
 func findTrustedLibFenceFS(exePath, workingDir string, extraCandidates []string, exists func(string) (bool, error)) (string, error) {

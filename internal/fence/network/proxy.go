@@ -17,6 +17,8 @@ import (
 	"github.com/nocktechnologies/nocklock/internal/logging"
 )
 
+const unixSocketPathLimit = 108
+
 // cgnat is the IANA Shared Address Space (RFC 6598) — 100.64.0.0/10.
 // Carrier-grade NAT addresses are not routable on the public internet and
 // must not be reachable via the proxy to prevent SSRF.
@@ -253,6 +255,9 @@ func (p *ProxyServer) StartUnix(unixSocketPath, advertisedAddr string) (string, 
 	}
 	if unixSocketPath == "" {
 		return "", fmt.Errorf("unix proxy socket path is empty")
+	}
+	if len(unixSocketPath) >= unixSocketPathLimit {
+		return "", fmt.Errorf("unix proxy socket path is %d bytes; must be shorter than %d bytes for sockaddr_un.sun_path", len(unixSocketPath), unixSocketPathLimit)
 	}
 	if advertisedAddr == "" {
 		return "", fmt.Errorf("advertised proxy address is empty")

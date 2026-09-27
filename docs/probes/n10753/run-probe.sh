@@ -3,11 +3,9 @@ set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)"
 PROBE_DIR="${ROOT}/docs/probes/n10753"
-WORK="${TMPDIR:-/tmp}/nocklock-n10753-probe.$$"
 OUT="${PROBE_DIR}/output.txt"
 
-rm -rf "${WORK}"
-mkdir -p "${WORK}"
+WORK="$(mktemp -d "${TMPDIR:-/tmp}/nocklock-n10753-probe.XXXXXX")"
 trap 'kill "${PROXY_PID:-}" 2>/dev/null || true; rm -rf "${WORK}"' EXIT
 
 {

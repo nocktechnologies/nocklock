@@ -114,6 +114,10 @@ static int connect_v4(int port) {
     if (fd < 0) return -1;
     int one = 1;
     if (setsockopt(fd, IPPROTO_TCP, TCP_NODELAY, &one, sizeof(one)) != 0) return -2;
+#ifdef TCP_CONGESTION
+    if (setsockopt(fd, IPPROTO_TCP, TCP_CONGESTION, "reno", 4) == 0) return -5;
+    if (errno != ENOPROTOOPT) return -6;
+#endif
     struct sockaddr_in addr;
     memset(&addr, 0, sizeof(addr));
     addr.sin_family = AF_INET;
@@ -153,6 +157,19 @@ int main(void) {
         fprintf(stderr, "SO_ERROR=%d want 0\n", socket_error);
         return 15;
     }
+    struct tcp_info info;
+    socklen_t info_len = sizeof(info);
+    if (getsockopt(fd, IPPROTO_TCP, TCP_INFO, &info, &info_len) == 0) return 25;
+    if (errno != ENOPROTOOPT) return 26;
+    int tcp_value = 0;
+    socklen_t short_len = 1;
+    if (getsockopt(fd, IPPROTO_TCP, TCP_NODELAY, &tcp_value, &short_len) == 0) return 27;
+    if (errno != EINVAL) return 28;
+    if (getsockopt(fd, IPPROTO_TCP, TCP_NODELAY, NULL, &socket_error_len) == 0) return 29;
+    if (errno != EFAULT) return 30;
+    socket_error_len = sizeof(tcp_value);
+    if (getsockopt(fd, IPPROTO_TCP, TCP_NODELAY, &tcp_value, &socket_error_len) != 0) return 31;
+    if (tcp_value != 1 || socket_error_len != (socklen_t)sizeof(tcp_value)) return 32;
 
     int duplicated[4];
     duplicated[0] = dup(fd);

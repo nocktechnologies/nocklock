@@ -101,6 +101,31 @@ func TestInterposerSourceHandlesMetadataMutatorReviewRegressions(t *testing.T) {
 	}
 }
 
+// TestInterposerSourceAllowsBaselineDeviceNodes asserts the interposer's
+// check_path permits the standard character devices every program needs —
+// /dev/null and /dev/tty read+write, /dev/zero read-only — regardless of the
+// allow list, mirroring baselineDeviceRules in the Landlock ruleset. Without
+// this the interposer restricts allow-listed device nodes to reads and denies
+// the writes git and shells make to /dev/null constantly.
+func TestInterposerSourceAllowsBaselineDeviceNodes(t *testing.T) {
+	source, err := os.ReadFile("interposer/libfence_fs.c")
+	if err != nil {
+		t.Fatalf("read interposer source: %v", err)
+	}
+	text := string(source)
+
+	for _, pattern := range []string{
+		// /dev/null and /dev/tty are read+write (no !is_write guard).
+		`(?s)strcmp\s*\(\s*resolved\s*,\s*"/dev/null"\s*\)\s*==\s*0\s*\|\|\s*strcmp\s*\(\s*resolved\s*,\s*"/dev/tty"\s*\)\s*==\s*0.*?return\s+0`,
+		// /dev/zero, /dev/urandom and /dev/random are read-only (gated by !is_write).
+		`(?s)strcmp\s*\(\s*resolved\s*,\s*"/dev/zero"\s*\)\s*==\s*0.*?strcmp\s*\(\s*resolved\s*,\s*"/dev/urandom"\s*\)\s*==\s*0.*?strcmp\s*\(\s*resolved\s*,\s*"/dev/random"\s*\)\s*==\s*0.*?!is_write.*?return\s+0`,
+	} {
+		if !regexp.MustCompile(pattern).MatchString(text) {
+			t.Fatalf("libfence_fs.c missing baseline device-node pattern %q", pattern)
+		}
+	}
+}
+
 func TestInterposerSourceHandlesStatAtNullAndATEmptyPathReporting(t *testing.T) {
 	source, err := os.ReadFile("interposer/libfence_fs.c")
 	if err != nil {
@@ -183,11 +208,12 @@ func TestInterposerSourceCoversProxyBridgeHooks(t *testing.T) {
 		`int\s+socket\s*\(\s*int\s+domain\s*,\s*int\s+type\s*,\s*int\s+protocol\s*\)`,
 		`protocol\s*==\s*0\s*\|\|\s*protocol\s*==\s*IPPROTO_TCP`,
 		`real_socket\s*\(\s*AF_UNIX\s*,\s*type\s*,\s*0\s*\)`,
+		`bridge_bind_abstract_tag\s*\(\s*fd\s*\)`,
 		`int\s+connect\s*\(\s*int\s+fd\s*,\s*const\s+struct\s+sockaddr\s+\*\s*addr\s*,\s*socklen_t\s+len\s*\)`,
 		`report_blocked\s*\(\s*"\(network\)"\s*,\s*"connect"\s*,\s*"unexpected AF_INET/AF_INET6 proxy bridge target"\s*\)`,
 		`int\s+setsockopt\s*\(\s*int\s+fd\s*,\s*int\s+level\s*,\s*int\s+optname\s*,\s*const\s+void\s+\*\s*optval\s*,\s*socklen_t\s+optlen\s*\)`,
-		`bridge_fd_tracked\s*\(\s*fd\s*\)\s*&&\s*level\s*==\s*IPPROTO_TCP`,
-		`bridge_fd_tracked\s*\(\s*fd\s*\)\s*&&\s*level\s*==\s*SOL_SOCKET\s*&&\s*optname\s*==\s*SO_ERROR`,
+		`bridge_dup_tagged_fd\s*\(\s*fd\s*\)`,
+		`level\s*==\s*SOL_SOCKET\s*&&\s*optname\s*==\s*SO_ERROR`,
 		`int\s+getsockname\s*\(\s*int\s+fd\s*,\s*struct\s+sockaddr\s+\*\s*addr\s*,\s*socklen_t\s+\*\s*len\s*\)`,
 		`int\s+getpeername\s*\(\s*int\s+fd\s*,\s*struct\s+sockaddr\s+\*\s*addr\s*,\s*socklen_t\s+\*\s*len\s*\)`,
 	} {
@@ -197,7 +223,7 @@ func TestInterposerSourceCoversProxyBridgeHooks(t *testing.T) {
 	}
 }
 
-func TestInterposerSourceSynchronizesProxyBridgeDescriptors(t *testing.T) {
+func TestInterposerSourceUsesStatelessProxyBridgeDescriptors(t *testing.T) {
 	source, err := os.ReadFile("interposer/libfence_fs.c")
 	if err != nil {
 		t.Fatalf("read interposer source: %v", err)
@@ -205,22 +231,36 @@ func TestInterposerSourceSynchronizesProxyBridgeDescriptors(t *testing.T) {
 	text := string(source)
 
 	for _, pattern := range []string{
-		`static\s+pthread_mutex_t\s+g_swapped_fd_lock\s*=\s*PTHREAD_MUTEX_INITIALIZER\s*;`,
-		`(?s)static\s+int\s+bridge_fd_tracked\s*\(\s*int\s+fd\s*\).*?pthread_mutex_lock\s*\(\s*&g_swapped_fd_lock\s*\).*?g_swapped_fd\s*\[\s*fd\s*\].*?pthread_mutex_unlock\s*\(\s*&g_swapped_fd_lock\s*\)`,
-		`(?s)int\s+socket\s*\(.*?pthread_mutex_lock\s*\(\s*&g_swapped_fd_lock\s*\).*?g_swapped_fd\s*\[\s*fd\s*\]\s*=\s*swapped\s*;.*?pthread_mutex_unlock\s*\(\s*&g_swapped_fd_lock\s*\)`,
-		`(?s)int\s+connect\s*\(.*?bridge_fd_tracked\s*\(\s*fd\s*\)`,
-		`(?s)int\s+setsockopt\s*\(.*?bridge_fd_tracked\s*\(\s*fd\s*\)`,
-		`(?s)int\s+getsockopt\s*\(.*?bridge_fd_tracked\s*\(\s*fd\s*\)`,
-		`(?s)int\s+getsockname\s*\(.*?bridge_fd_tracked\s*\(\s*fd\s*\)`,
-		`(?s)int\s+getpeername\s*\(.*?bridge_fd_tracked\s*\(\s*fd\s*\)`,
-		`(?s)int\s+dup\s*\(.*?bridge_dup_result_locked\s*\(\s*oldfd\s*,\s*real_dup\s*\(\s*oldfd\s*\)\s*\)`,
-		`(?s)int\s+dup2\s*\(.*?bridge_dup_result_locked\s*\(\s*oldfd\s*,\s*real_dup2\s*\(\s*oldfd\s*,\s*newfd\s*\)\s*\)`,
-		`(?s)int\s+dup3\s*\(.*?bridge_dup_result_locked\s*\(\s*oldfd\s*,\s*real_dup3\s*\(\s*oldfd\s*,\s*newfd\s*,\s*flags\s*\)\s*\)`,
-		`(?s)int\s+fcntl\s*\(.*?cmd\s*!=\s*F_DUPFD\s*&&\s*cmd\s*!=\s*F_DUPFD_CLOEXEC.*?bridge_dup_result_locked`,
-		`(?s)int\s+close\s*\(.*?pthread_mutex_lock\s*\(\s*&g_swapped_fd_lock\s*\).*?result\s*=\s*real_close\s*\(\s*fd\s*\)\s*;.*?g_swapped_fd\s*\[\s*fd\s*\]\s*=\s*0\s*;.*?pthread_mutex_unlock\s*\(\s*&g_swapped_fd_lock\s*\)`,
+		`#define\s+BRIDGE_ABSTRACT_TAG\s+"nocklock-proxy-bridge:"`,
+		`real_bind\s*\(\s*fd\s*,\s*\(const\s+struct\s+sockaddr\s+\*\)&un\s*,`,
+		`real_getsockopt\s*\(\s*fd\s*,\s*SOL_SOCKET\s*,\s*SO_DOMAIN\s*,\s*&domain\s*,\s*&domain_len\s*\)`,
+		`real_getsockname\s*\(\s*fd\s*,\s*\(struct\s+sockaddr\s+\*\)&un\s*,\s*&un_len\s*\)`,
+		`bridge_name_has_tag\s*\(\s*&un\s*,\s*un_len\s*\)`,
+		`(?s)static\s+int\s+bridge_dup_tagged_fd\s*\(.*?real_dup\s*\(\s*fd\s*\).*?bridge_fd_tagged\s*\(\s*dupfd\s*\)`,
+		`(?s)int\s+connect\s*\(.*?bridge_dup_tagged_fd\s*\(\s*fd\s*\)`,
+		`(?s)int\s+setsockopt\s*\(.*?bridge_dup_tagged_fd\s*\(\s*fd\s*\)`,
+		`(?s)int\s+getsockopt\s*\(.*?bridge_dup_tagged_fd\s*\(\s*fd\s*\)`,
+		`(?s)int\s+getsockname\s*\(.*?bridge_dup_tagged_fd\s*\(\s*fd\s*\)`,
+		`(?s)int\s+getpeername\s*\(.*?bridge_dup_tagged_fd\s*\(\s*fd\s*\)`,
 	} {
 		if !regexp.MustCompile(pattern).MatchString(text) {
-			t.Fatalf("libfence_fs.c missing synchronized proxy bridge descriptor pattern %q", pattern)
+			t.Fatalf("libfence_fs.c missing stateless proxy bridge descriptor pattern %q", pattern)
+		}
+	}
+
+	for _, forbidden := range []string{
+		`g_swapped_fd`,
+		`g_swapped_fd_lock`,
+		`bridge_fd_tracked`,
+		`bridge_dup_result_locked`,
+		`int\s+dup\s*\(`,
+		`int\s+dup2\s*\(`,
+		`int\s+dup3\s*\(`,
+		`int\s+fcntl\s*\(`,
+		`int\s+close\s*\(`,
+	} {
+		if regexp.MustCompile(forbidden).MatchString(text) {
+			t.Fatalf("libfence_fs.c still contains table-based proxy bridge pattern %q", forbidden)
 		}
 	}
 }

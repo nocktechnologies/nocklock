@@ -347,6 +347,16 @@ func TestProxyStartUnixAndWaitReady(t *testing.T) {
 	}
 }
 
+func TestProxyStartUnixRejectsLongSocketPath(t *testing.T) {
+	p := makeProxy([]string{"example.com"})
+	socketPath := "/" + strings.Repeat("a", 108)
+
+	if _, err := p.StartUnix(socketPath, "127.0.0.1:43210"); err == nil ||
+		!strings.Contains(err.Error(), "sockaddr_un.sun_path") {
+		t.Fatalf("StartUnix() error = %v, want sockaddr_un.sun_path limit", err)
+	}
+}
+
 func TestWaitForProxyReadyFailsClosedPort(t *testing.T) {
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {

@@ -199,6 +199,18 @@ func TestLoadProfilesValidateEmbeddedPresets(t *testing.T) {
 		if cfg.Syscall.Enforcement != "required" {
 			t.Fatalf("%s syscall.enforcement = %q, want required", profile.Name, cfg.Syscall.Enforcement)
 		}
+		// No preset may directory-grant the whole /proc or /dev tree: /proc exposes
+		// every same-UID process's /proc/<pid>/cmdline (secrets on a command line)
+		// and metadata; /dev exposes sibling pty slaves and /dev/shm. The device
+		// nodes a child needs are granted individually by baselineDeviceNodes, and
+		// no preset needs a whole-directory /proc grant (N10748 round 2). Compare on
+		// the cleaned path so an unslashed "/proc" or "/dev" cannot slip past.
+		for _, allow := range cfg.Filesystem.Allow {
+			switch filepath.Clean(allow) {
+			case "/proc", "/dev":
+				t.Fatalf("%s profile filesystem.allow must not directory-grant %q (exposes same-UID /proc/<pid> and pty slaves); have %v", profile.Name, allow, cfg.Filesystem.Allow)
+			}
+		}
 	}
 }
 
