@@ -56,6 +56,39 @@ jobs:
       - name: test
         run: go test ./... -count=1
 
+  claude-code-preset:
+    name: claude-code preset · Landlock enforcement (non-root)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      # The preset grants ~/.cache read-only, while the checkout itself is not
+      # readable from inside the fence. Keep the executable and its trusted
+      # LD_PRELOAD sidecar together in a preset-readable directory.
+      - name: build and stage nocklock with the filesystem interposer
+        run: |
+          make build build-fence-fs
+          install -d "$HOME/.cache/nocklock-ci"
+          install -m 0755 nocklock "$HOME/.cache/nocklock-ci/nocklock"
+          install -m 0755 internal/fence/fs/interposer/libfence_fs.so \
+            "$HOME/.cache/nocklock-ci/libfence_fs.so"
+
+      # GitHub's runner user is unprivileged. Strict mode converts every missing
+      # prerequisite into a failure, so these enforcement proofs cannot go green
+      # by silently skipping.
+      - name: run claude-code preset enforcement proofs (skips forbidden)
+        run: |
+          NOCKLOCK_AUDIT_REQUIRE=1 \
+            NOCKLOCK_TEST_BIN="$HOME/.cache/nocklock-ci/nocklock" \
+            go test ./internal/cli/ -run '^TestWrapClaudeCodePreset' -v -count=1
+
   fuzz-smoke:
     name: fuzz smoke (fence decision surface)
     runs-on: ubuntu-latest
