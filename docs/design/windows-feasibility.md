@@ -18,13 +18,24 @@ proxy.** An AppContainer holding *no* network capabilities is dropped by WFP's
 "Block Outbound Default Rule" on every outbound packet, at the same kernel choke
 point Windows uses for UWP isolation. (Empty is the requirement, not merely
 "no `internetClient`" — `privateNetworkClientServer` alone still reaches the
-intranet.) If the loopback exemption can be granted
-to a zero-capability container, then the proxy is the *only* reachable socket,
-and Windows lands **above macOS** on the egress row — a real default-drop floor
-with a re-resolving proxy, which is the Linux netns model, not the macOS
-`HTTP_PROXY` suggestion.
+intranet.) The free default-drop floor alone already lands Windows **above
+macOS** on the egress row — a real kernel deny for every off-box packet,
+inherited from WFP at no elevation cost, where macOS carries no network rules at
+all. If the loopback exemption can additionally be granted to a zero-capability
+container, the proxy becomes reachable too: a re-resolving proxy on a
+default-drop floor, the Linux netns model rather than the macOS `HTTP_PROXY`
+suggestion.
 
-That single "if" is the pivot of this whole study. It is **UNVERIFIED** and is
+**One caveat that shapes Phase 1: a loopback exemption is per-AppContainer
+identity, not per-port** — it opens *all* of the host's loopback, so the proxy is
+*a* reachable socket, not the *only* one, and any other local listener that will
+forward off-box is a confused-deputy path around the allowlist. Making the proxy
+the sole loopback peer needs the elevated Phase 2 port-scoped WFP filter; Phase 1
+ships default-drop-plus-proxy with this caveat stated. The mechanism and evidence
+are in [(b)](#b-network-egress-floor).
+
+Whether the exemption reaches loopback *at all* at zero capability is the pivot
+of this whole study. It is **UNVERIFIED** and is
 [Probe 1](#probe-1-the-pivot--zero-capability-loopback).
 
 The fence decomposes cleanly by what elevation it costs:
@@ -32,8 +43,8 @@ The fence decomposes cleanly by what elevation it costs:
 | Phase | Needs admin? | What it buys |
 |---|---|---|
 | **0 (MVP)** | No | Files (AppContainer + per-user ACLs), process tree (job object), `network.allow = []` as a real all-or-nothing floor, audit chain the agent cannot touch |
-| **1** | One-time at install, *if [Probe 2](#probe-2-does-the-exemption-need-elevation) says so* | Loopback exemption for a fixed container moniker → selective egress through the proxy, DNS-trick resistance |
-| **2** (deferred; mandatory if Probe 1 fails) | One-time, service | WFP provider with persistent filters scoped by package SID → egress floor independent of the proxy; ETW file-event stream |
+| **1** | One-time at install, *if [Probe 2](#probe-2-does-the-exemption-need-elevation) says so* | Loopback exemption for a fixed container moniker → proxy reachable (opens *all* host loopback; sole-socket egress is Phase 2), DNS-trick resistance |
+| **2** (deferred; mandatory if Probe 1 fails) | One-time, service | WFP provider with persistent filters scoped by package SID → egress floor independent of the proxy, **port-scoped so the proxy is the sole loopback peer**; ETW file-event stream |
 
 Phase 0 ships standalone and is honest on its own. Crucially, the loopback
 exemption in Phase 1 is keyed to a **container moniker**, and NockLock can pick a
@@ -110,7 +121,10 @@ for why NockLock can use it unelevated, and the same argument is available to th
 agent. Whether a process inside a zero-capability container can create a *new*
 AppContainer granting itself `internetClient` is
 [Probe 10](#probe-10-container-escape--can-the-agent-re-container-itself), and if
-the answer is yes the network fence is escapable by construction.
+the answer is yes the network fence is escapable by construction. Escape need not
+even mean re-containering: an out-of-process broker such as WMI
+(`Win32_Process.Create`) may spawn a child from the plain user token, outside the
+fence entirely — the same Probe 10 inspects that child's token.
 
 ---
 
@@ -313,18 +327,31 @@ boundary, and it is what makes Phase 2 an elevated phase.
 | no | no | No network at all. Blunt but real floor. **SOURCED** |
 | yes | no | Internet-client egress *and* the proxy is unreachable. Worst cell. **SOURCED** |
 | yes | yes | Proxy reachable, but the agent can bypass it. Useless without WFP. **INFERENCE** (chains the capability page to the loopback page; not a single citation) |
-| **no** | **yes** | **Only 127.0.0.1 reachable → the proxy is the sole egress path.** **UNVERIFIED** |
+| **no** | **yes** | **Off-box egress dropped; all of 127.0.0.1 reachable → the proxy is reachable, but not it alone (Phase 2 closes this).** Reaching loopback at zero capability is **UNVERIFIED** ([Probe 1](#probe-1-the-pivot--zero-capability-loopback)) |
 
 The bottom row is the product. The proxy runs *outside* the container as an
 ordinary user process with normal network access; the agent runs *inside* with
-no capabilities plus a loopback exemption. Direct egress dies on the default
-block filter. The proxy re-resolves hostnames itself, exactly as the Linux
-transparent proxy does.
+no capabilities plus a loopback exemption. Direct off-box egress dies on the
+default block filter. The proxy re-resolves hostnames itself, exactly as the
+Linux transparent proxy does.
 
-Whether that cell exists is the pivot. The loopback documentation is written
-around *enabling* loopback for apps that already have capabilities; nothing
-states whether the exemption short-circuits the capability check or is
-`AND`-ed with it. That is [Probe 1](#probe-1-the-pivot--zero-capability-loopback).
+**The exemption is per-identity, not per-port, so it opens all of loopback.**
+`CheckNetIsolation` / `NetworkIsolationSetAppContainerConfig` exempt a *container
+SID*, with no port argument — so the container can reach every `127.0.0.1`
+listener on the box, not only ours. That is a confused-deputy egress channel: any
+local dev server, debug endpoint, or service that itself has network access and
+will forward a request becomes an off-box path around the proxy's allowlist.
+Phase 1 must therefore state this all-loopback caveat rather than claim the proxy
+is the sole socket; making the proxy the *only* reachable loopback peer requires
+a **port-scoped WFP filter**, the elevated Phase 2 install. Probe 1's last two
+steps measure the blast radius (unrelated port reachable? can the agent bind its
+own listener?).
+
+Whether the container can reach loopback *at all* at zero capability is the
+pivot. The loopback documentation is written around *enabling* loopback for apps
+that already have capabilities; nothing states whether the exemption
+short-circuits the capability check or is `AND`-ed with it. That is
+[Probe 1](#probe-1-the-pivot--zero-capability-loopback).
 
 ### Loopback is blocked by default, and the exemption is a dev tool
 
@@ -363,13 +390,17 @@ Two honest caveats, both material:
 ### The three July DNS tricks
 
 All three collapse onto the same question, and the answer is clean: **the tricks
-are defeated if and only if the container can open no socket except the proxy.**
-All three are moot against a proxy that re-resolves names itself, so that
-property is assumed once here rather than repeated per row.
+are defeated because no *off-box* socket opens** — every off-box address dies on
+the default block filter, and the proxy re-resolves names itself. The all-loopback
+caveat above does not reopen them: a resolver the agent stands up on `127.0.0.1`
+still cannot reach a nameserver off-box. (What the caveat *does* leave open is
+reaching a *different* local service that already has network — the
+confused-deputy class, not these DNS tricks.) That off-box-drop property is
+assumed once here rather than repeated per row.
 
 | Trick | Windows outcome |
 |---|---|
-| Agent runs its own resolver query (UDP/53 or DoH) | **Defeated.** Every off-box address is dropped by the default block filter; under the Phase 1 design the only socket that opens at all is to 127.0.0.1, where only our proxy listens. Same mechanism as the Linux netns drop. Probe 1 must confirm the exemption does not also let the agent bind its own loopback resolver. |
+| Agent runs its own resolver query (UDP/53 or DoH) | **Defeated.** Off-box drop as above — a nameserver is just another off-box address, and a resolver the agent binds on `127.0.0.1` has nowhere to send. Same mechanism as the Linux netns drop; Probe 1 records whether the agent can bind a local listener. |
 | Pins `C:\Windows\System32\drivers\etc\hosts` | **Defeated.** That path is under `%SystemRoot%\System32`; an unprivileged agent cannot write it, and inside a Low-IL AppContainer, doubly not. Mirrors how Linux defeats it — by file ownership, the child being non-root — rather than by the egress drop. |
 | Changes resolver configuration | **Defeated.** Interface DNS settings are machine state requiring admin (**UNVERIFIED** background); per-process resolver override doesn't exist. |
 
@@ -417,11 +448,20 @@ SIGKILL` (`internal/cli/sysproc_linux.go`), and extends it: `Pdeathsig` kills th
 direct child, whereas kill-on-close tears down the whole job hierarchy. Parity
 plus reach, not a new capability.
 
-**One documented hole:** "Child processes created using **Win32_Process.Create**
-are not associated with the job" (SOURCED, same page). An agent that shells out
-via WMI escapes the job. It does *not* escape the AppContainer — the token is
-inherited regardless — so files and network stay fenced; only the job's
-accounting and kill-on-close leak. Worth an event, not a redesign.
+**One documented hole, and it may be worse than a job leak.** "Child processes
+created using **Win32_Process.Create** are not associated with the job" (SOURCED,
+same page), so an agent that shells out via WMI escapes the job's accounting and
+kill-on-close. The dangerous part is the token: `Win32_Process.Create` is
+serviced by the **WMI provider host out of process**, so the child is spawned by
+that broker, *not* forked from the agent — and it does **not** necessarily
+inherit the AppContainer token. If the broker launches it with the plain user
+token instead, the WMI child is outside the file *and* network fence — a full
+escape, not a mere accounting leak. This is **UNVERIFIED**: treat a successful WMI
+spawn as a possible full escape until
+[Probe 10](#probe-10-container-escape--can-the-agent-re-container-itself)
+inspects the spawned process's token. If that token is not an AppContainer token,
+**Phase 0 does not hold**, and WMI must be blocked (child-process policy) or the
+design reconsidered.
 
 ### Process mitigation policies — useful, but not seccomp
 
@@ -569,11 +609,11 @@ elevated install); Phase 0 differences are noted.
 | | Linux | macOS | Windows (proposed) |
 |---|---|---|---|
 | **Files** | Kernel allowlist (Landlock) | Kernel Seatbelt, writes + credential paths | Kernel token+DACL (AppContainer package SID); deny-by-default, holes are explicit ACEs |
-| **Network egress floor** | **Opt-in** netns + nftables default-drop; needs the privileged egress helper | **None** — proxy is an env var, bypassable | WFP default-block on a zero-capability AppContainer; only the loopback proxy reachable. *Phase 0: all-or-nothing deny* |
+| **Network egress floor** | **Opt-in** netns + nftables default-drop; needs the privileged egress helper | **None** — proxy is an env var, bypassable | WFP default-block on a zero-capability AppContainer; off-box egress dropped, loopback proxy reachable (Phase 1 opens *all* loopback — a port-scoped WFP filter to make the proxy the sole peer is Phase 2). *Phase 0: all-or-nothing deny* |
 | **DNS-trick resistance** | Yes, in netns mode — no direct socket; `resolv.conf`/`hosts` root-owned and the child is non-root | **No** — all three tricks work | Yes *pending [Probe 6](#probe-6-brokered-egress--which-services-answer-for-us)* — no direct socket; hosts file needs admin. *Phase 0: n/a (no network at all)* |
 | **Syscall limits** | seccomp allowlist | Opt-in `filesystem.hardened` bundle — approximation, not an allowlist | **—** — win32k/FSCTL lockdown + child-process policy only; same category as the macOS bundle |
 | **Audit** | SHA-256 chain + Ed25519 signatures + anchor; interposer file events | Same chain, no file events | Same chain, plus **tamper-resistance by token** (agent cannot write `.nock/` at all); **no file-event stream** (ETW is Phase 2) |
-| **Process tree** | `Setpgid` + `Pdeathsig: SIGKILL` | process group | Job object, kill-on-close across the hierarchy, no breakaway (WMI-spawned children escape the job, not the fence) |
+| **Process tree** | `Setpgid` + `Pdeathsig: SIGKILL` | process group | Job object, kill-on-close across the hierarchy, no breakaway (WMI-spawned children escape the job; whether they also escape the AppContainer token is **UNVERIFIED** — see Probe 10) |
 
 ---
 
@@ -591,7 +631,9 @@ elevated install); Phase 0 differences are noted.
 **Phase 1 — selective egress (~2–3 PR rounds)**, gated on Probe 1
 5. Fixed moniker + loopback exemption registration at `nocklock init`
     (elevating once if Probe 2 says so); proxy on loopback; fail-closed if the
-    exemption is absent. (1–2 rounds)
+    exemption is absent. Phase 1 accepts the all-loopback caveat — the exemption
+    opens every `127.0.0.1` listener, not just the proxy; the port-scoped WFP
+    filter that closes it is Phase 2. (1–2 rounds)
 6. CI escape job mirroring PR #124's macOS DNS-escape test, asserting the
     Windows container *cannot* reach a non-allowlisted address directly. (1 round)
 
@@ -614,8 +656,10 @@ Total to a shippable Windows fence at Phase 1 parity: **~6–8 PR rounds**
 2. **Reliance on a documented-as-development-only mechanism.** "Loopback is
    permitted only for development purposes." Microsoft could tighten or remove
    the exemption, and we would have no notice. *Mitigation:* treat Phase 2's WFP
-   provider as the durable answer rather than an optional extra, and fail closed
-   with a clear error if the exemption stops working.
+   provider as the durable answer rather than an optional extra — it is also the
+   only thing that scopes the exemption to the proxy's port and closes the
+   all-loopback confused-deputy channel — and fail closed with a clear error if
+   the exemption stops working.
 3. **AppContainer breaks the toolchain badly enough that users disable the
    fence.** The `LOCALAPPDATA`/`TEMP` redirection is certain; what it does to
    npm/pip/cargo/MSVC in practice is not. A fence users turn off protects
@@ -637,13 +681,71 @@ Total to a shippable Windows fence at Phase 1 parity: **~6–8 PR rounds**
 ## Probes to run on a real Windows box
 
 Run as a **standard (non-admin) user** unless a step says elevated. Nothing here
-runs on the Linux build host. Suggested scratch dir `C:\probe`, moniker
-`nocklock-probe`.
+runs on the Linux build host. **These run on a real Windows desktop, so no probe
+may write, delete, rename, or change registry/firewall/machine state outside its
+own probe root** — the exceptions are called out below and each is undone in
+teardown.
+
+**Shared scaffold — set once at the top of the run.** Everything a probe creates
+lives under a fresh, unique, timestamped root, and the AppContainer moniker
+carries the same suffix so a rerun never inherits a previous run's package-SID
+ACEs (the stale-ACE hazard of a fixed moniker in
+[the recommendation](#recommendation) applies to the probes too — inherited ACEs
+are exactly how a "MUST fail" assertion passes for the wrong reason):
+
+```powershell
+$stamp     = Get-Date -Format 'yyyyMMdd-HHmmss'
+$probeRoot = Join-Path $env:TEMP "nocklock-probe-$stamp"
+$moniker   = "nocklock-probe-$stamp"
+New-Item -ItemType Directory -Force -Path $probeRoot | Out-Null
+Save-Module -Name NtObjectManager -Path (Join-Path $probeRoot 'modules')  # no user-scope install
+Import-Module (Join-Path $probeRoot 'modules\NtObjectManager')
+# Note: Save-Module may pull the NuGet provider on first use; if it does, record
+# it in the teardown listing rather than assuming it was already present.
+
+# Denial helper used by every "MUST fail" step. It discriminates the HResult:
+# only E_ACCESSDENIED (0x80070005) is a pass; not-found (0x80070002/3) is a
+# FAILED probe — that is the exact bug this round fixes.
+function Assert-AccessDenied {
+  param([scriptblock]$Action, [string]$Label)
+  try { & $Action | Out-Null; "FAIL(no-error): $Label" }
+  catch [System.UnauthorizedAccessException] { "PASS(denied): $Label" }
+  catch {
+    $h = '0x{0:X8}' -f $_.Exception.HResult
+    if ($h -eq '0x80070005') { "PASS(denied): $Label" }
+    else { "FAIL(wrong-error): $Label -> $($_.Exception.GetType().FullName) HResult=$h" }
+  }
+}
+```
+
+**Two things the probe root cannot contain** — both unavoidable, both covered
+only by the global teardown, never left behind:
+
+- `CreateAppContainerProfile` / `Get-NtSid -PackageName` materialises
+  `%LOCALAPPDATA%\Packages\<moniker>\`, outside the root. The timestamped moniker
+  keeps reruns from colliding; teardown removes the profile.
+- The loopback exemption list is machine-wide; teardown clears the entry.
+
+**Getting the scaffold *into* the container.** `New-Win32Process` launches a
+*fresh* process, so none of `$probeRoot`, `$moniker`, `$sid`, `$stamp`, or
+`Assert-AccessDenied` crosses into it — every "from INSIDE the container" snippet
+below assumes they have been re-established there. The launcher does this by
+writing a bootstrap `_inside.ps1` into `$probeRoot` (which it ACLs to the package
+SID, like any other granted path) that re-declares the paths and defines
+`Assert-AccessDenied`, then running each inside-container step as
+`New-Win32Process -CommandLine "powershell -NoProfile -ExecutionPolicy Bypass
+-File $probeRoot\_inside.ps1"`. Read the inside-container snippets as the *body* of
+that bootstrap, not as commands typed into the outer shell.
+
+**Probe 9 is deferred and VM/throwaway-only. Do not run it on Kevin's desktop** —
+it turns the firewall off. See its own warning below.
 
 Follow the house convention in [`docs/probes/n10753/`](../probes/n10753/): commit
 a `docs/probes/n10825/run-probe.ps1` plus an `output.txt` carrying environment
 stamps (`[Environment]::OSVersion`, build number, edition, architecture, and
-whether the session is elevated).
+whether the session is elevated). That `run-probe.ps1` is where the shared
+`$probeRoot` / `$moniker` / `Assert-AccessDenied` scaffold and the teardown blocks
+below belong — the reader should not hand-assemble them.
 
 **Box setup**, once:
 
@@ -666,12 +768,12 @@ console. Option (b) is the one to script.
 creates an AppContainer profile with a chosen capability set and runs a command
 in it. Do **not** write one from scratch — use James Forshaw's
 [NtObjectManager](https://www.powershellgallery.com/packages/NtObjectManager)
-PowerShell module, which exposes this directly and installs per-user:
+PowerShell module, already loaded via `Save-Module` into the probe root by the
+shared scaffold above (no user-scope install to clean up):
 
 ```powershell
-Install-Module NtObjectManager -Scope CurrentUser
-$sid = Get-NtSid -PackageName 'nocklock-probe'
-$sid.ToString()   # record this; the icacls probes need it
+$sid = Get-NtSid -PackageName $moniker   # reused by Probes 4 and 11; persists for the run
+$sid.ToString()                          # record this SID string; the icacls probes need it
 # zero-capability container:
 New-Win32Process -CommandLine 'cmd.exe' -AppContainerSid $sid
 # with a capability, for the contrast case:
@@ -685,46 +787,72 @@ Either way it is throwaway probe scaffolding, not product code.
 
 ### Probe 1: the pivot — zero-capability loopback
 
-**Question:** can a container with *no* capabilities reach `127.0.0.1` once
-loopback-exempted, and *only* our proxy? This subsumes the elevation question,
-so run it before Probe 2's persistence checks.
+**Question:** can a container with *no* capabilities reach `127.0.0.1` at all
+once loopback-exempted, and how wide does the exemption open? (Sole-socket egress
+is a Phase 2 property, not something this probe can confirm — see
+[(b)](#b-network-egress-floor).) This subsumes the elevation question, so run it
+before Probe 2's persistence checks.
 
 ```powershell
-# terminal A - a listener OUTSIDE any container
-python -m http.server 8899 --bind 127.0.0.1
+# terminal A - a listener OUTSIDE any container (serves from the probe root)
+python -m http.server 8899 --bind 127.0.0.1 --directory $probeRoot
 
 # terminal B - register the exemption NON-ELEVATED first and record the result
-CheckNetIsolation.exe LoopbackExempt -a -n=nocklock-probe; "exit=$LASTEXITCODE"
+CheckNetIsolation.exe LoopbackExempt -a -n=$moniker; "exit=$LASTEXITCODE"
 CheckNetIsolation.exe LoopbackExempt -s      # did the entry actually appear?
 # if it did not, repeat the -a in an ELEVATED shell and note that Probe 2 = "admin required"
 
 # then, inside a ZERO-capability container:
 curl.exe -sS -m 5 http://127.0.0.1:8899/   # MUST succeed, or Phase 1 is dead
 curl.exe -sS -m 5 https://example.com/     # MUST fail (Block Outbound Default Rule)
-curl.exe -sS -m 5 http://127.0.0.1:9999/   # unrelated loopback port: note reachable or not
-python -m http.server 9998 --bind 127.0.0.1  # can the agent BIND its own loopback listener?
+curl.exe -sS -m 5 http://127.0.0.1:9999/   # unrelated loopback port: EXPECTED reachable
+python -m http.server 9998 --bind 127.0.0.1 --directory $probeRoot  # agent binds its own listener
 ```
 
-All of the first two must hold. The last two matter for the DNS row: if the
-exemption opens *all* of loopback rather than just our proxy, an agent can stand
-up its own resolver or relay on 127.0.0.1 and talk to it. Report each separately.
+The first two must hold. The last two are the all-loopback blast-radius check:
+because the exemption is per-identity, not per-port
+([(b)](#b-network-egress-floor)), the *expectation* is that the unrelated port is
+reachable and the agent can bind its own `127.0.0.1` listener — this probe
+confirms it rather than treating it as open. If either comes back *unreachable*,
+that is the surprising result worth flagging (it would mean loopback is narrower
+than the per-identity model predicts). Report each separately.
 
 If the first `curl` fails, the recommendation's Phase 1 is dead and Phase 2
 becomes mandatory — report immediately, do not run the rest.
 
+**Teardown.** Stop both `python` listeners (`Ctrl-C` / kill the jobs). The
+loopback exemption is **left in place for Probe 2** (which tests whether it
+survives a reboot) and is removed only by the global teardown's
+`CheckNetIsolation.exe LoopbackExempt -d -n=$moniker`.
+
 ### Probe 2: does the exemption need elevation?
 
-Probe 1 already records the non-elevated exit code. This probe covers durability:
+Probe 1 already records the non-elevated exit code. This probe covers durability.
+**Run its reboot step last** — after Probes 3–11, just before the global teardown —
+so the single `try/finally` run is not interrupted mid-session; only Probe 1
+(which registers the exemption) must precede it. Rebooting mid-run would force a
+re-scaffold with a fresh `$stamp`/`$moniker`, orphaning the pre-reboot profile and
+the machine-wide exemption on the very desktop the preamble says must be left
+clean.
 
 ```powershell
-CheckNetIsolation.exe LoopbackExempt -s      # before reboot
-Restart-Computer
+CheckNetIsolation.exe LoopbackExempt -s      # before reboot: note the entry
+```
+
+Then **reboot the desktop at a convenient time** — do not script a bare
+`Restart-Computer` in an unattended run; it will drop unsaved work. Reboot
+manually (or `Restart-Computer -Confirm` interactively), and after it comes back:
+
+```powershell
 CheckNetIsolation.exe LoopbackExempt -s      # after reboot: entry still present?
 ```
 
 Report the non-elevated exit code from Probe 1, whether `-s` listed the entry,
 and whether it survived the reboot. ("Survives a Windows Update" is an
 observation to make over time, not a command to run.)
+
+**Teardown.** None of its own — the exemption it inspects is removed by the
+global teardown.
 
 ### Probe 3: AppContainer launch unelevated
 
@@ -737,57 +865,98 @@ whoami /all
 Confirm the token shows an AppContainer SID and Low integrity, from a
 non-elevated parent.
 
+**Teardown.** None — read-only (the container profile is removed globally).
+
 ### Probe 4: ACL grant and the deny-default
 
-Covers the plain grant/deny, the ALL APPLICATION PACKAGES read hole, and ACE
-inheritance leaking into the audit directory.
+Covers the plain grant/deny, the ALL APPLICATION PACKAGES read hole, the explicit
+DENY that closes it, and ACE inheritance leaking into the audit directory. **The
+deny-target sentinel is a *fake* home inside the probe root — never the real
+`$env:USERPROFILE`** — so no probe can touch a real key, and its "MUST fail" read
+cannot pass merely because the file is absent.
 
 ```powershell
-mkdir C:\probe\project, C:\probe\.nock, C:\probe\other-project
-"secret" > $env:USERPROFILE\.ssh\id_rsa     # create the target the fence must deny
-$sid = (Get-NtSid -PackageName 'nocklock-probe').ToString()
+$project = New-Item -ItemType Directory -Force -Path (Join-Path $probeRoot 'project')
+$other   = New-Item -ItemType Directory -Force -Path (Join-Path $probeRoot 'other-project')
+$fakeHome = New-Item -ItemType Directory -Force -Path (Join-Path $probeRoot 'home\.ssh')
+$sentinel = Join-Path $fakeHome 'id_rsa'
+Set-Content -Path $sentinel -Value 'FAKE-not-a-real-key'   # sentinel, inside the root
+# $sid comes from the launcher prerequisite; it stringifies to the SID in the icacls calls below
 
-icacls C:\probe\project /grant "*${sid}:(OI)(CI)(M)"
+# Negative control: the sentinel must READ from OUTSIDE the container, so that a
+# later denial is a real deny and not a missing file.
+if (Test-Path $sentinel) { "PASS(control): sentinel readable outside" } else { "FAIL(control): sentinel missing" }
+
+icacls $project.FullName /grant "*${sid}:(OI)(CI)(M)"
 # inheritance check: does the (OI)(CI) grant above reach a .nock INSIDE the root?
-mkdir C:\probe\project\.nock
-icacls C:\probe\project\.nock            # inspect: inherited ACE present?
-icacls C:\probe\project\.nock /inheritance:r /remove "*${sid}"
+$nock = New-Item -ItemType Directory -Force -Path (Join-Path $project.FullName '.nock')
+icacls $nock.FullName                       # inspect: inherited ACE present?
+icacls $nock.FullName /inheritance:r /remove "*${sid}"
 
-# from INSIDE the container:
-echo ok  > C:\probe\project\write-test.txt        # MUST succeed
-echo bad > C:\probe\project\.nock\tamper.txt      # MUST fail (audit tamper-resistance)
-echo bad > C:\probe\other-project\leak.txt        # MUST fail (cross-project isolation)
-type $env:USERPROFILE\.ssh\id_rsa                 # MUST fail
-type C:\Windows\System32\drivers\etc\hosts        # EXPECTED TO SUCCEED - the ALL
-                                                  # APPLICATION PACKAGES read hole
+# ALL APPLICATION PACKAGES read hole, then the explicit DENY that closes it —
+# tested on the fake home, not a system path, so it is fully self-contained:
+icacls $fakeHome /grant "*S-1-15-2-1:(OI)(CI)(R)"   # simulate the standing read hole
+
+# from INSIDE the container (run each line in the launched AppContainer):
+Set-Content (Join-Path $project.FullName 'write-test.txt') 'ok'        # MUST succeed
+Assert-AccessDenied { Set-Content (Join-Path $nock.FullName 'tamper.txt') 'bad' } 'audit tamper-resistance'
+Assert-AccessDenied { Set-Content (Join-Path $other.FullName 'leak.txt') 'bad' }  'cross-project isolation'
+Get-Content $sentinel   # EXPECTED TO SUCCEED once - the ALL APPLICATION PACKAGES read hole is open
+# now add the explicit DENY and confirm it closes:
+icacls $fakeHome /deny "*${sid}:(OI)(CI)(R)"
+Assert-AccessDenied { Get-Content $sentinel } 'explicit DENY closes the read hole'
 ```
 
-The last line is the point: confirm the size of the standing read hole on system
-paths, and confirm an explicit DENY ACE closes it where NockLock needs it to.
+The point is the last pair: confirm the standing ALL APPLICATION PACKAGES read
+hole is open (the sentinel reads), then confirm an explicit DENY ACE closes it
+where NockLock needs it to. `Assert-AccessDenied` makes each "MUST fail" a
+*specific* access-denied assertion (E_ACCESSDENIED `0x80070005`) — a not-found
+result is scored `FAIL`, which is exactly the wrong-reason pass this round removes.
+
+**Teardown.** All artifacts are under `$probeRoot` and go with the global
+`Remove-Item`. (For a system path you would `icacls … /remove:d`; here the DENY
+lives inside the root, so deleting the root suffices.)
 
 ### Probe 5: toolchain survival
 
-Run with the proxy from Probe 1 still listening on 127.0.0.1:8899 and
-`HTTPS_PROXY` pointed at it, so the network-dependent steps have a path out.
+Split deliberately: the **offline** steps are the real toolchain-survival signal
+and need no network; the **network-fetch** steps are gated on a *genuine
+CONNECT-capable* proxy. Probe 1's listener is a plain HTTP file server (`GET`
+only, no `CONNECT`), so pointing `HTTPS_PROXY` at it makes `git clone https://…`
+fail at the TLS tunnel — a proxy artefact, not a broken toolchain. Use NockLock's
+own re-resolving proxy (`internal/fence/network`) or another real forward proxy
+for part (b); do not reuse the Probe 1 file server.
 
 ```powershell
-# inside the container
-git --version; git init C:\probe\project\repo; git -C C:\probe\project\repo status
-$env:HTTPS_PROXY = 'http://127.0.0.1:8899'
-git clone https://github.com/octocat/Hello-World.git C:\probe\project\hw
+# (a) OFFLINE — inside the container, no proxy needed. This is the survival signal.
+$repo = Join-Path $probeRoot 'project\repo'
+git --version; git init $repo; git -C $repo status
 node -e "console.log(JSON.stringify(process.env).slice(0,400))"
-npm --version; npm install --prefer-offline lodash
 python -c "import sys; print(sys.prefix)"
-pip install --user requests
 cl.exe /? 2>&1 | Select-Object -First 3      # only if Build Tools installed
+
+# (b) NETWORK-FETCH — only with a real CONNECT-capable proxy on 127.0.0.1:<port>.
+# Keep every cache and target inside the probe root so nothing lands in the profile.
+$env:HTTPS_PROXY = 'http://127.0.0.1:<connect-proxy-port>'
+$env:GIT_CLONE_PROTECTION_ACTIVE = 'false'
+git clone https://github.com/octocat/Hello-World.git (Join-Path $probeRoot 'project\hw')
+$env:npm_config_cache = Join-Path $probeRoot 'npm-cache'
+npm --version; npm install --prefix (Join-Path $probeRoot 'npm-proj') lodash
+$env:PIP_CACHE_DIR = Join-Path $probeRoot 'pip-cache'
+python -m venv (Join-Path $probeRoot 'venv'); & (Join-Path $probeRoot 'venv\Scripts\pip.exe') install requests
 ```
 
 Record which fail, and whether failures are ACL-related (fixable with a grant) or
-architectural (COM / named pipe / Low IL). Explicitly note **where npm and pip
-actually wrote their caches**, and whether the cache-directory variables are
-still redirected when the launcher passes an explicit environment block —
+architectural (COM / named pipe / Low IL) — and separate those from part (b)
+failures that are merely "no real proxy was supplied." Explicitly note **where
+npm and pip actually wrote their caches** (the overrides above force them into the
+probe root; note whether the AppContainer redirection of `LOCALAPPDATA`/`TEMP`
+still applies on top when the launcher passes an explicit environment block —
 section (a) assumes the redirection happens and section (d) passes an explicit
-environment, and those two have not been reconciled against a real run.
+environment, and those two have not been reconciled against a real run).
+
+**Teardown.** Everything is under `$probeRoot`; the `--user`/profile-scoped writes
+of the old version are gone, so the global `Remove-Item` is the only cleanup.
 
 ### Probe 6: brokered egress — which services answer for us?
 
@@ -797,7 +966,7 @@ a **zero-capability** container, with no loopback exemption:
 ```powershell
 nslookup example.com                                   # DNS Client service
 Resolve-DnsName example.com
-Start-BitsTransfer -Source https://example.com/ -Destination C:\probe\bits.out
+Start-BitsTransfer -Source https://example.com/ -Destination (Join-Path $probeRoot 'bits.out')
 Invoke-WebRequest https://example.com/ -UseBasicParsing
 Start-Process "https://example.com/"                   # shell handoff to a browser
 curl.exe -sS -m 5 https://example.com/                 # control: MUST fail
@@ -809,10 +978,13 @@ success is a bypass of the egress floor and must be listed. If DNS resolves whil
 the direct connection fails, note it specifically: egress is still fenced, but
 queried names leak and DNS never reaches the proxy's allowlist.
 
+**Teardown.** `Start-Process` may open a real browser tab — close it. The
+`bits.out` download is under `$probeRoot`; global `Remove-Item` clears it.
+
 ### Probe 7: ETW file events unelevated
 
 ```powershell
-logman create trace nocklock-fileprobe -p Microsoft-Windows-Kernel-File -o C:\probe\f.etl -ets
+logman create trace nocklock-fileprobe -p Microsoft-Windows-Kernel-File -o (Join-Path $probeRoot 'f.etl') -ets
 logman stop nocklock-fileprobe -ets
 ```
 
@@ -820,68 +992,117 @@ Run non-elevated first. If it fails, retry after adding the user to
 *Performance Log Users*, then elevated. This decides whether file-event logging
 is Phase 0 or Phase 2.
 
+**Teardown.** The trace session (`nocklock-fileprobe`) is machine state and leaks
+if `stop` is skipped; the global teardown force-stops it
+(`logman stop nocklock-fileprobe -ets` guarded by `logman query -ets`). The `.etl`
+file is under `$probeRoot`.
+
 ### Probe 8: packaging no-admin
 
+This probe **mutates the user profile by design** — installing to the user scope
+without a UAC prompt is the exact behaviour under test, so it cannot be sandboxed
+into `$probeRoot`. It is undone by uninstalling, not by deleting a directory.
+
 ```cmd
-winget install --id Git.Git --scope user
+:: pick any small package NOT already placed by Box setup, so teardown is
+:: unconditional. sharkdp.fd is one example; substitute any valid id you can
+:: confirm on the box.
+winget install --id sharkdp.fd --scope user
 scoop install ripgrep
-where nocklock
+where fd & where rg
 ```
 
 Confirm both complete with no UAC prompt and land under the user profile.
 
+**Teardown.** `winget uninstall --id sharkdp.fd` and `scoop uninstall ripgrep` —
+both are fresh installs this probe made (neither is in Box setup), so removal is
+unconditional. The global `winget list` / `scoop list` diff still records them.
+
 ### Probe 9: fail-open with the firewall off
 
-```cmd
-:: ELEVATED, on a throwaway box only
+> **⚠ DEFERRED — VM / throwaway box only. Do NOT run this on Kevin's desktop.**
+> It disables the firewall, the single most dangerous action in this document.
+> Run it only on a disposable VM, and capture the prior per-profile state first so
+> it can be restored exactly (`set allprofiles state on` forces every profile on,
+> which is *not* necessarily the pre-probe state).
+
+```powershell
+# ELEVATED, on a throwaway VM only.
+netsh advfirewall show allprofiles state    # RECORD this — restore to exactly this
 netsh advfirewall set allprofiles state off
-:: from inside a ZERO-capability container:
-curl.exe -sS -m 5 https://example.com/      :: does it now SUCCEED?
-netsh advfirewall set allprofiles state on
+# from inside a ZERO-capability container:
+curl.exe -sS -m 5 https://example.com/      # does it now SUCCEED?
+# restore each profile to its recorded state, e.g.:
+netsh advfirewall set domainprofile  state on
+netsh advfirewall set privateprofile state on
+netsh advfirewall set publicprofile  state on
 ```
 
-Also capture the actual drop filter for the record:
+Also capture the actual drop filter for the record (into the probe root):
 
-```cmd
+```powershell
+Push-Location $probeRoot
 netsh wfp capture start keywords=19
-:: reproduce a blocked connection from inside the container
-netsh wfp capture stop
-:: inspect wfpdiag.xml for FWPM_NET_EVENT_TYPE_CLASSIFY_DROP and the filter name
+# reproduce a blocked connection from inside the container
+netsh wfp capture stop                       # writes wfpdiag.cab in the CWD ($probeRoot)
+Pop-Location
+# inspect wfpdiag.xml for FWPM_NET_EVENT_TYPE_CLASSIFY_DROP and the filter name
 ```
 
 If traffic flows with the firewall off, NockLock must verify firewall state at
 launch and refuse to start — a fence that silently disappears is worse than no
 fence.
 
+**Teardown.** Restore the firewall to the *recorded* per-profile state (above);
+`netsh wfp capture stop` must run even if the repro throws, or the capture session
+leaks. The `wfpdiag` output is under `$probeRoot`.
+
 ---
 
 ### Probe 10: container escape — can the agent re-container itself?
 
-The escape question. From inside a **zero-capability** container:
+The escape question, and the WMI-token question from
+[(c)](#c-processsyscall-ish-limits). From inside a **zero-capability** container.
+The module is already in `$probeRoot\modules` from the shared scaffold; import it
+from there rather than `Install-Module` (which mutates the user scope):
 
 ```powershell
-Install-Module NtObjectManager -Scope CurrentUser   # does this even work in here?
-$s2 = Get-NtSid -PackageName 'agent-escape'
+Import-Module (Join-Path $probeRoot 'modules\NtObjectManager')   # does even this work in here?
+# (a) re-container escape:
+$escMoniker = "agent-escape-$stamp"
+$s2 = Get-NtSid -PackageName $escMoniker
 New-Win32Process -CommandLine 'curl.exe -sS -m 5 https://example.com/' `
   -AppContainerSid $s2 -Capabilities (Get-NtSid -KnownSid CapabilityInternetClient)
 
-# and the job-object escape the doc already flags:
-Invoke-CimMethod -ClassName Win32_Process -MethodName Create `
-  -Arguments @{CommandLine='cmd.exe /c curl.exe -sS -m 5 https://example.com/'}
-# inspect the spawned process token: AppContainer SID present? job assigned?
+# (b) WMI broker escape — the out-of-process spawn from (c). Inspect the TOKEN,
+# not just whether curl ran: a WMI child may be spawned by the broker under the
+# plain user token, which would be a FULL escape of the fence.
+$p = Invoke-CimMethod -ClassName Win32_Process -MethodName Create `
+  -Arguments @{CommandLine='cmd.exe /c timeout /t 30'}
+$tok = Get-NtToken -ProcessId $p.ProcessId
+"AppContainer=$($tok.AppContainer)  IntegrityLevel=$($tok.IntegrityLevel)  Package=$($tok.PackageName)"
+# VERDICT: AppContainer=$false  =>  WMI child ran under the plain user token
+#          => FULL escape of the file AND network fence, and Phase 0 does not hold.
+#          AppContainer=$true   =>  token inherited; only the job accounting leaked.
 ```
 
-If either spawns a process that reaches the internet, the network fence is
-escapable by construction and Phase 1 does not hold. This is as important as
+If (a) spawns a process that reaches the internet, the network fence is escapable
+by construction and Phase 1 does not hold. If (b)'s WMI child carries a
+non-AppContainer token, that is the more serious result: **Phase 0** does not hold
+and WMI must be blocked with the child-process policy. This is as important as
 Probe 1; run them together.
+
+**Teardown.** The escape container profile is removed by the global teardown below
+(`$escMoniker` is assigned inside the container block, so cleanup belongs in the
+outer session — same pattern as Probe 3). Kill any lingering `timeout`/`curl`
+children here.
 
 ### Probe 11: named pipe into the container
 
 The event listener depends on it.
 
 ```powershell
-# OUTSIDE: create a pipe whose ACL grants the package SID
-$sid = (Get-NtSid -PackageName 'nocklock-probe').ToString()
+# OUTSIDE: create a pipe whose ACL grants the package SID ($sid from the launcher prereq)
 # (NtObjectManager: New-NtNamedPipeFile with an explicit SD granting $sid write)
 
 # INSIDE the container:
@@ -890,6 +1111,45 @@ $sid = (Get-NtSid -PackageName 'nocklock-probe').ToString()
 
 Confirm a package-SID-granted pipe is reachable from inside, and that one without
 the ACE is not.
+
+**Teardown.** The named pipe is an in-memory kernel object that vanishes when its
+creating process exits — close that process. No on-disk state.
+
+### Global teardown and state listing
+
+Run this last, unconditionally (wrap the whole probe run in `try { … } finally {
+<teardown> }` so it runs even on failure). It removes everything the run created
+and prints a before/after state listing so nothing is left behind:
+
+```powershell
+# --- BEFORE (also run this at the very start, to diff against) ---
+CheckNetIsolation.exe LoopbackExempt -s
+Get-AppxPackage | Where-Object PackageFullName -like 'nocklock-probe*'   # or Get-NtSid check
+logman query -ets
+netsh advfirewall show allprofiles state
+winget list; scoop list
+Test-Path $probeRoot
+
+# --- TEARDOWN ---
+CheckNetIsolation.exe LoopbackExempt -d -n=$moniker           # machine-wide exemption (Probes 1-2)
+Remove-AppContainerProfile -Name $moniker 2>$null            # %LOCALAPPDATA%\Packages\<moniker>
+Remove-AppContainerProfile -Name "agent-escape-$stamp" 2>$null  # Probe 10, if created
+# (Remove-AppContainerProfile wraps the DeleteAppContainerProfile API; resolve the
+#  exact cmdlet spelling on the box if the name differs.)
+logman stop nocklock-fileprobe -ets 2>$null                # Probe 7 session, if it leaked
+# Probe 8 (only packages this run installed): winget uninstall / scoop uninstall
+# Probe 9 (VM only): restore firewall to the recorded per-profile state
+Remove-Item -Recurse -Force $probeRoot                     # everything else lived here
+
+# --- AFTER (must match BEFORE, minus this run's additions) ---
+CheckNetIsolation.exe LoopbackExempt -s
+logman query -ets
+Test-Path $probeRoot                                       # expect False
+```
+
+If `Save-Module` pulled the NuGet provider on first use, note it here — it is the
+one install this scaffold cannot route into the probe root, and the operator
+should decide whether to keep or remove it.
 
 ## Summary of UNVERIFIED items
 
@@ -908,6 +1168,7 @@ the ACE is not.
 | 11 | Package-SID-granted named pipe reachable from inside the container | Event listener |
 | 12 | Whether `LOCALAPPDATA`/`TEMP` stay redirected when an explicit environment block is passed | Reconciles (a) with (d) |
 | 13 | Go's AF_UNIX support on Windows (checkable on the Linux build host, not the probe box) | Event-listener transport choice |
+| 14 | Whether a WMI (`Win32_Process.Create`) child inherits the AppContainer token or is spawned by the broker under the plain user token | **Phase 0** — full escape if it escapes the token |
 
 ---
 
