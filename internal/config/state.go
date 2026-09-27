@@ -67,7 +67,19 @@ func EnsureAuditStateDir(projectRoot string) (string, error) {
 			return "", err
 		}
 	}
-	for _, component := range owned {
+	return ensureTrustedComponents(dir, owned)
+}
+
+// ensureTrustedComponents walks components one at a time beneath an
+// already-trusted base, creating and trust-checking each with ensureTrustedDir,
+// and returns the leaf. A trusted directory reached through an untrusted parent
+// is not trusted, so every component is checked, not just the leaf. Shared by
+// EnsureAuditStateDir (the fixed nocklock/<hash> components) and ResolveDBPath's
+// absolute-path route (any components an absolute logging.db nests deeper),
+// so the two routes into the audit state directory cannot drift apart.
+func ensureTrustedComponents(base string, components []string) (string, error) {
+	dir := base
+	for _, component := range components {
 		dir = filepath.Join(dir, component)
 		if err := ensureTrustedDir(dir); err != nil {
 			return "", err

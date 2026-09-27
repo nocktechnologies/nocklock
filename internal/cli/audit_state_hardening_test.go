@@ -410,3 +410,101 @@ func TestResolveDBPathAbsoluteConfiguredWithNoConflict(t *testing.T) {
 		t.Fatalf("event log = %q, want the configured absolute path %q", dbPath, absDB)
 	}
 }
+
+// TestResolveDBPathAbsoluteInStateDirChecksStateRoot is the fix for the gap
+// PR #120 flagged: an absolute logging.db that resolves INSIDE the audit state
+// directory used to be returned as written, skipping the state-root
+// ownership/permission checks the relative-`logging.db` route runs through
+// EnsureAuditStateDir. A group-writable state root lets another group member
+// swap a component NockLock owns and substitute their own directory, so the
+// absolute route must refuse on the same state-root problem the relative route
+// (TestEnsureAuditStateDirRejectsGroupWritableStateRoot) already refuses on.
+func TestResolveDBPathAbsoluteInStateDirChecksStateRoot(t *testing.T) {
+	projectRoot, configPath := writeProjectConfig(t, `db = "events.db"`)
+	cfg, err := config.Load(configPath)
+	if err != nil {
+		t.Fatalf("load config: %v", err)
+	}
+
+	auditDir, err := config.AuditStateDir(projectRoot)
+	if err != nil {
+		t.Fatalf("AuditStateDir: %v", err)
+	}
+	cfg.Logging.DB = filepath.Join(auditDir, "events.db")
+
+	// writeProjectConfig pointed XDG_STATE_HOME at a trusted 0700 root; open it
+	// up so the state-root trust check has something to refuse.
+	stateRoot := os.Getenv("XDG_STATE_HOME")
+	if err := os.Chmod(stateRoot, 0o770); err != nil {
+		t.Fatalf("chmod state root: %v", err)
+	}
+
+	if _, _, err := config.ResolveDBPath(cfg, configPath); err == nil {
+		t.Fatal("expected an absolute logging.db inside a group-writable state root to be refused")
+	} else if !strings.Contains(err.Error(), "writable") {
+		t.Fatalf("expected a writable-directory error naming the state-root problem, got: %v", err)
+	} else if !strings.Contains(err.Error(), stateRoot) {
+		t.Fatalf("expected the error to name the state root %q, got: %v", stateRoot, err)
+	}
+}
+
+// TestResolveDBPathAbsoluteInStateDirWithCleanStateRootSucceeds is the negative
+// control for the check above: with the state root left trusted, an absolute
+// logging.db inside the audit state directory still resolves to exactly the
+// configured path. Without this, the test above would pass on any error at all.
+func TestResolveDBPathAbsoluteInStateDirWithCleanStateRootSucceeds(t *testing.T) {
+	projectRoot, configPath := writeProjectConfig(t, `db = "events.db"`)
+	cfg, err := config.Load(configPath)
+	if err != nil {
+		t.Fatalf("load config: %v", err)
+	}
+
+	auditDir, err := config.AuditStateDir(projectRoot)
+	if err != nil {
+		t.Fatalf("AuditStateDir: %v", err)
+	}
+	absDB := filepath.Join(auditDir, "events.db")
+	cfg.Logging.DB = absDB
+
+	dbPath, _, err := config.ResolveDBPath(cfg, configPath)
+	if err != nil {
+		t.Fatalf("ResolveDBPath with a trusted state root: %v", err)
+	}
+	if dbPath != absDB {
+		t.Fatalf("event log = %q, want the configured absolute path %q", dbPath, absDB)
+	}
+}
+
+// TestResolveDBPathAbsoluteInStateDirRejectsWritableIntermediate justifies
+// walking intermediate components rather than capping nesting depth: an
+// absolute logging.db may resolve deeper than the fixed nocklock/<hash>
+// components EnsureAuditStateDir validates (validateAuditDBLocation permits
+// arbitrary nesting under the state dir). A group-writable directory between
+// the state dir and the log is exactly the substitution threat the per-directory
+// trust check exists to stop, so it must be refused too.
+func TestResolveDBPathAbsoluteInStateDirRejectsWritableIntermediate(t *testing.T) {
+	projectRoot, configPath := writeProjectConfig(t, `db = "events.db"`)
+	cfg, err := config.Load(configPath)
+	if err != nil {
+		t.Fatalf("load config: %v", err)
+	}
+
+	stateDir, err := config.EnsureAuditStateDir(projectRoot)
+	if err != nil {
+		t.Fatalf("EnsureAuditStateDir: %v", err)
+	}
+	intermediate := filepath.Join(stateDir, "sub")
+	if err := os.Mkdir(intermediate, 0o777); err != nil {
+		t.Fatalf("mkdir intermediate: %v", err)
+	}
+	if err := os.Chmod(intermediate, 0o777); err != nil {
+		t.Fatalf("chmod intermediate: %v", err)
+	}
+	cfg.Logging.DB = filepath.Join(intermediate, "events.db")
+
+	if _, _, err := config.ResolveDBPath(cfg, configPath); err == nil {
+		t.Fatal("expected an absolute logging.db under a group/world-writable intermediate to be refused")
+	} else if !strings.Contains(err.Error(), "writable") {
+		t.Fatalf("expected a writable-directory error, got: %v", err)
+	}
+}

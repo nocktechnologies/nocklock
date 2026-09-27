@@ -193,10 +193,48 @@ func ResolveDBPath(cfg *Config, configPath string) (dbPath string, projectRoot s
 				"(their -wal/-shm sidecars and chain anchors travel with them)",
 			len(existing), strings.Join(existing, ", "))
 	}
-	// An absolute logging.db is used as written, once nothing else conflicts:
+	// An absolute logging.db is used as written, once nothing else conflicts.
 	// Validate/validateAuditDBLocation already confined it to the project or
-	// the audit state directory, so no further trust checks apply here.
+	// the audit state directory. A path inside the PROJECT carries no
+	// NockLock-owned trust checks -- the project is the operator's. But a path
+	// that lands inside NockLock's OWN audit state directory must clear the
+	// same trust chain the relative route clears through EnsureAuditStateDir:
+	// the state-root ownership/permission check, and the per-component
+	// 0700/owner/symlink checks on every directory NockLock owns beneath it --
+	// including any nested deeper than the fixed nocklock/<hash> the relative
+	// route walks. Without this, an absolute path resolving into the state dir
+	// would be the one remaining route into a directory NockLock trusts with
+	// the audit chain that skipped those checks entirely.
 	if absoluteConfigured != "" {
+		auditDir, dirErr := AuditStateDir(projectRoot)
+		if dirErr != nil {
+			// Fail closed: not knowing where the audit state directory is means
+			// the containment check cannot be made, not that the path is safe.
+			return "", projectRoot, fmt.Errorf("cannot locate the audit state directory to check logging.db %q: %w", configured, dirErr)
+		}
+		if withinDir(auditDir, absoluteConfigured) {
+			stateDir, ensErr := EnsureAuditStateDir(projectRoot)
+			if ensErr != nil {
+				return "", projectRoot, ensErr
+			}
+			// EnsureAuditStateDir already validated stateDir itself
+			// (nocklock/<hash>). Walk each component the absolute path nests
+			// below it, holding every one to the same trust rule rather than
+			// capping how deep the path may go -- validateAuditDBLocation
+			// permits arbitrary nesting, so rejecting a depth here would refuse
+			// configs it accepts.
+			rel, relErr := filepath.Rel(stateDir, filepath.Dir(absoluteConfigured))
+			if relErr != nil {
+				return "", projectRoot, fmt.Errorf("cannot check the audit state directory holding logging.db %q: %w", configured, relErr)
+			}
+			var nested []string
+			if rel != "." {
+				nested = strings.Split(rel, string(os.PathSeparator))
+			}
+			if _, err := ensureTrustedComponents(stateDir, nested); err != nil {
+				return "", projectRoot, err
+			}
+		}
 		return configured, projectRoot, nil
 	}
 	// The state-dir candidate, existing or not, is the one case that still
