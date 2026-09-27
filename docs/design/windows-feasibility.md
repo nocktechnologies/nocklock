@@ -1487,18 +1487,55 @@ if (Get-Module -ListAvailable NtObjectManager) {
 # container, so — unlike the shared scaffold's outer (Medium-IL) profile creation —
 # this New-AppContainerProfile can legitimately return E_ACCESSDENIED (the same
 # CreateAppContainerProfile-in-a-restricted-context denial the "What breaks" section
-# documents). A denial here IS containment holding for (a), not a probe crash, so it
-# gets its own verdict rather than an unhandled throw. Same reason and cmdlet-spelling
-# caveat as the shared scaffold; teardown removes the profile by name if registered.
+# documents). Each step gets its own try and its own verdict, so a launch or curl
+# failure is never misread as a profile denial; every path sets $verdictA exactly
+# once and prints it once. Same cmdlet-spelling caveat as the shared scaffold;
+# teardown removes the profile by name if registered.
 $escMoniker = "agent-escape-$runId"
+$verdictA = $null
 try {
   New-AppContainerProfile -Name $escMoniker -DisplayName $escMoniker -Description $escMoniker -ErrorAction Stop | Out-Null
-  $s2 = Get-NtSid -PackageName $escMoniker
-  New-Win32Process -CommandLine 'curl.exe -sS -m 5 https://example.com/' `
-    -AppContainerSid $s2 -Capabilities (Get-NtSid -KnownSid CapabilityInternetClient)
 } catch {
-  "VERDICT(a): could not create the escape AppContainer profile from inside the container -> $($_.Exception.GetType().FullName): $($_.Exception.Message) — contained, unless a later run from a different context succeeds"
+  $h = '0x{0:X8}' -f $_.Exception.HResult
+  if ($h -eq '0x80070005') {
+    $verdictA = "VERDICT(a): CONTAINED - escape profile creation denied (E_ACCESSDENIED)"
+  } else {
+    $verdictA = "VERDICT(a): INDETERMINATE - escape profile creation failed, not a denial -> $($_.Exception.GetType().FullName) HResult=$h $($_.Exception.Message)"
+  }
 }
+if (-not $verdictA) {
+  try {
+    $s2 = Get-NtSid -PackageName $escMoniker
+    $escChild = New-Win32Process -CommandLine 'curl.exe -sS -m 5 https://example.com/' `
+      -AppContainerSid $s2 -Capabilities (Get-NtSid -KnownSid CapabilityInternetClient) -ErrorAction Stop
+  } catch {
+    $h = '0x{0:X8}' -f $_.Exception.HResult
+    if ($h -eq '0x80070005') {
+      $verdictA = "VERDICT(a): CONTAINED - profile created, but launching into it was denied (E_ACCESSDENIED)"
+    } else {
+      $verdictA = "VERDICT(a): INDETERMINATE - profile created, launch failed, not a denial -> $($_.Exception.GetType().FullName) HResult=$h $($_.Exception.Message)"
+    }
+  }
+}
+if (-not $verdictA) {
+  # New-Win32Process returns no stdout, so score curl by exit code, read through the
+  # process handle CreateProcess returned (curl's -m 5 bounds the wait). Resolve the
+  # NtProcess member spelling on the box if it differs.
+  try {
+    $escChild.Process.Wait() | Out-Null
+    $curlRc = $escChild.Process.ExitStatus
+    if ($curlRc -eq 0) {
+      $verdictA = "VERDICT(a): ESCAPED - re-contained child with internetClient reached https://example.com/ (curl exit 0)"
+    } else {
+      # The re-containment itself succeeded; only the network reach failed (or the
+      # host is offline). That is not containment, so it is never scored CONTAINED.
+      $verdictA = "VERDICT(a): INDETERMINATE - profile created and child launched, curl exited $curlRc"
+    }
+  } catch {
+    $verdictA = "VERDICT(a): INDETERMINATE - child launched, could not read curl's exit status -> $($_.Exception.Message)"
+  }
+}
+$verdictA
 
 # (b) WMI broker escape — the out-of-process spawn from (c). Inspect the child's
 # TOKEN, not just whether it ran: a WMI child may be spawned by the broker under the
@@ -1507,7 +1544,7 @@ try {
 # INSIDE the container ($probeRoot and $out are re-established by the _inside.ps1
 # bootstrap — see the "Inside-variable bootstrap" note above):
 #
-# Spawn the child and hand its PID + StartTime + Path OUT through the granted
+# Spawn the child and hand its PID + spawn time OUT through the granted
 # drop dir. Do NOT call Get-NtToken here — if the child escaped to Medium IL,
 # this Low-IL process cannot open it, so Get-NtToken would THROW; a throw read
 # as "contained" is the wrong-reason verdict this round removes. Keep the child
@@ -1516,51 +1553,93 @@ try {
 # and dies immediately when spawned via Win32_Process.Create with no stdin).
 # 180s leaves ample room for the shell switch.
 #
-# Invoke-CimMethod returns only a ProcessId — the Process object is not available
-# across the WMI broker boundary. Record PID + StartTime + Path from Get-Process
-# so the outer teardown can verify identity before stopping (bare PID reuse can
-# kill an unrelated process):
+# Invoke-CimMethod returns only a ProcessId. The child's command line carries a run-unique tag (a trailing PowerShell comment)
+# and the spawn time is recorded BEFORE the Create call, so the outer session can
+# prove the PID it finds is this child and not a later process that reused the PID.
+$childTag  = "nocklock-wmi-child-$runId"
+$spawnedAt = (Get-Date).ToUniversalTime().Ticks
 $p = Invoke-CimMethod -ClassName Win32_Process -MethodName Create `
-  -Arguments @{CommandLine='powershell -NoProfile -Command "Start-Sleep 180"'}
+  -Arguments @{CommandLine=('powershell -NoProfile -Command "Start-Sleep 180 # ' + $childTag + '"')}
 $wmiChild = Get-Process -Id $p.ProcessId -ErrorAction SilentlyContinue
 if ($wmiChild) {
-  # Write ONLY the ProcessId from inside, to a DISTINCT file. Reading
+  # Write ONLY ProcessId|spawn-ticks from inside, to a DISTINCT file. Reading
   # $wmiChild.StartTime/.Path here THROWS if the child escaped to Medium IL (a Low-IL
   # process cannot open a higher-IL one) — exactly the full-escape case 10(b) is
   # trying to catch — so a throw would be misread as INDETERMINATE. The Medium-IL
-  # outer session below reads this and writes the canonical PID+StartTime+Path
-  # 'wmi-child.txt' that teardown consumes.
-  Set-Content -Path (Join-Path $out.FullName 'wmi-child-pid.txt') -Value $p.ProcessId
+  # outer session below verifies the child and writes the canonical 'wmi-child.txt'
+  # that teardown consumes.
+  Set-Content -Path (Join-Path $out.FullName 'wmi-child-pid.txt') -Value ('{0}|{1}' -f $p.ProcessId, $spawnedAt)
 } else {
   Set-Content -Path (Join-Path $out.FullName 'wmi-child-pid.txt') -Value "EXITED:$($p.ProcessId)"
 }
 
 # OUTER SESSION (plain user, Medium IL): read the PID the inside session recorded,
-# then capture StartTime/Path and inspect the token from HERE — a Medium-IL child IS
-# openable from the outer session (see the inside note above), so this discriminates
-# the three cases.
+# prove it is still the probe's child, then capture identity and inspect the token
+# from HERE — a Medium-IL child IS openable from the outer session (see the inside
+# note above), so this discriminates the three cases.
+$idFile = Join-Path $out.FullName 'wmi-child.txt'
 $raw = Get-Content (Join-Path $out.FullName 'wmi-child-pid.txt')
 if ($raw -like 'EXITED:*') {
+  Set-Content -Path $idFile -Value $raw
   "VERDICT(b): child exited before identity capture — INDETERMINATE"
   return
 }
-$childPid = [int]$raw
+$parts    = $raw -split '\|', 2
+$childPid = [int]$parts[0]
+# 1s grace for system-clock tick granularity only. The run-unique $childTag in the
+# command line is what rules out a PID-reusing process: it starts after our child
+# exits, so a start-time floor alone cannot reject it.
+$notBefore = [long]$parts[1] - [TimeSpan]::TicksPerSecond
+$childTag  = "nocklock-wmi-child-$runId"
+# Three outcomes, never collapsed: OURS (tag and start time confirmed), REUSED (the
+# PID provably belongs to another process, or is gone), UNREADABLE (a process at or
+# after the spawn time that this Medium-IL session cannot fully read — the case where
+# the child may have run above Medium IL, so it must not read as a benign exit).
+$state = 'REUSED'
 $proc = Get-Process -Id $childPid -ErrorAction SilentlyContinue
-if (-not $proc) {
-  "VERDICT(b): child $childPid gone before capture — INDETERMINATE, re-run with a longer keepalive"
+if ($proc) {
+  # Capture StartTime/Path ONCE, before the command-line read, and record exactly
+  # these values: re-reading them later could pick up a process that reused the PID.
+  # Each read gets its own try so one failure does not blank the others.
+  $childStart = $null; $childPath = $null; $childCmd = $null
+  try { $childStart = $proc.StartTime } catch { }
+  try { $childPath  = $proc.Path } catch { }
+  try { $childCmd   = (Get-CimInstance Win32_Process -Filter "ProcessId=$childPid" -ErrorAction Stop).CommandLine } catch { }
+  if (-not $childStart) {
+    $state = 'UNREADABLE'
+  } elseif (($childStart.ToUniversalTime().Ticks -lt $notBefore) -or
+            ($childCmd -and $childCmd -notlike "*$childTag*")) {
+    $state = 'REUSED'
+  } elseif (-not $childCmd -or -not $childPath) {
+    $state = 'UNREADABLE'
+  } else {
+    $state = 'OURS'
+  }
+}
+if ($state -ne 'OURS') {
+  # Record it as exited either way, so teardown never stops whatever holds this PID
+  # now (the keepalive self-exits after 180s, so nothing leaks).
+  Set-Content -Path $idFile -Value "EXITED:$childPid"
+}
+if ($state -eq 'REUSED') {
+  "VERDICT(b): PID $childPid is no longer the probe's tagged child (exited or PID reused) — INDETERMINATE, re-run with a longer keepalive"
+} elseif ($state -eq 'UNREADABLE') {
+  "VERDICT(b): process at PID $childPid could not be fully read from the OUTER session (StartTime/Path/CommandLine) -> INDETERMINATE, treat as possible escape above Medium IL"
 } else {
+  Set-Content -Path $idFile -Value ('{0}|{1}|{2}' -f $childPid, $childStart.ToString('o'), $childPath)
   try {
-    # Record full identity (PID+StartTime+Path) from the outer session so teardown's
-    # Stop-VerifiedProcess can verify it before killing. The PID-reuse guard now lives
-    # at teardown (identity captured here vs. the live process there), not at capture —
-    # the inside Low-IL session could not read these fields, so there is no earlier
-    # baseline to compare against; the 180s keepalive keeps the window small.
-    Write-ProcessIdentity -Proc $proc -FilePath (Join-Path $out.FullName 'wmi-child.txt')
     $tok = Get-NtToken -ProcessId $childPid
-    "AppContainer=$($tok.AppContainer)  IntegrityLevel=$($tok.IntegrityLevel)  Package=$($tok.PackageName)"
-    # VERDICT: AppContainer=$false => WMI child ran under the plain user token
-    #          => FULL escape of the file AND network fence, and Phase 0 does not hold.
-    #          AppContainer=$true  => token inherited; only the job accounting leaked.
+    # Re-verify AFTER opening the token: if the PID changed hands in between, the
+    # token belongs to another process and must not be scored.
+    $again = Get-Process -Id $childPid -ErrorAction SilentlyContinue
+    if (-not $again -or $again.StartTime -ne $childStart) {
+      "VERDICT(b): child $childPid exited while its token was being opened — INDETERMINATE, re-run"
+    } else {
+      "AppContainer=$($tok.AppContainer)  IntegrityLevel=$($tok.IntegrityLevel)  Package=$($tok.PackageName)"
+      # VERDICT: AppContainer=$false => WMI child ran under the plain user token
+      #          => FULL escape of the file AND network fence, and Phase 0 does not hold.
+      #          AppContainer=$true  => token inherited; only the job accounting leaked.
+    }
   } catch {
     # Even the outer Medium-IL session could not open it (e.g. it elevated further).
     # This is its OWN verdict — never scored as "contained".
@@ -1569,8 +1648,12 @@ if (-not $proc) {
 }
 ```
 
-If (a) spawns a process that reaches the internet, the network fence is escapable
-by construction and Phase 1 does not hold. If (b)'s WMI child carries a
+Every 10(a) path prints exactly one `VERDICT(a)` line: CONTAINED only for an
+E_ACCESSDENIED profile-creation or launch denial; ESCAPED when the re-contained
+child reaches the internet; INDETERMINATE for anything else (including a curl
+that launched but failed), with the error or exit code printed.
+If (a) is ESCAPED, the network fence is escapable by construction and Phase 1
+does not hold. If (b)'s WMI child carries a
 non-AppContainer token, that is the more serious result: **Phase 0** does not hold
 and WMI must be blocked with the child-process policy. If (b) is INDETERMINATE
 (child exited early, or even the outer session cannot open it), it is reported as
@@ -1580,13 +1663,16 @@ run them together.
 **Teardown.** The escape container profile is removed by the global teardown below
 (`$escMoniker` is assigned inside the container block, so cleanup belongs in the
 outer session — same pattern as Probe 3). Kill the keepalive child by verified
-identity (PID + StartTime + Path from `wmi-child.txt`); a missing or mismatched
-process means already gone — skip it. The `curl` child from (a) has a 5-second
-timeout (`-m 5`) and self-terminates; it is not tracked by an identity file.
+identity (PID + StartTime + Path from `wmi-child.txt`). The outer session writes
+that record only after proving the PID is this run's tagged child; otherwise it
+writes `EXITED:<pid>`, which teardown skips — no process is ever stopped by PID
+alone, and a missing or mismatched process means already gone. The `curl` child
+from (a) is waited on for its exit code (its `-m 5` timeout bounds it); it is not
+tracked by an identity file.
 
 | State touched | Detail |
 |---|---|
-| Creates | escape container profile (`agent-escape-$runId`); WMI keepalive child process; `wmi-child-pid.txt` (inside PID handoff) and `wmi-child.txt` (outer canonical identity) in `$out` |
+| Creates | escape container profile (`agent-escape-$runId`); WMI keepalive child process (command line tagged `nocklock-wmi-child-$runId`); `wmi-child-pid.txt` (inside PID + spawn-time handoff) and `wmi-child.txt` (outer verified identity, or `EXITED:<pid>`) in `$out` |
 | Removes | keepalive child (by verified PID+StartTime+Path); escape profile (global teardown) |
 | Must never touch | other running processes; the primary container profile |
 
