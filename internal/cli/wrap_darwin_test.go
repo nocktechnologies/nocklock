@@ -41,7 +41,9 @@ func TestWrapMacOSFilesystemFenceRecordsOneEngagedState(t *testing.T) {
 		t.Fatalf("wrap should launch an allowed command under Seatbelt: %v", err)
 	}
 
-	dbPath := filepath.Join(project, config.Dir, "events.db")
+	// The event log lives in the audit state directory outside the project
+	// (config.AuditStateDir), so resolve it the way the CLI does.
+	dbPath := resolvedAuditDB(t, project)
 	db, err := sql.Open("sqlite", dbPath)
 	if err != nil {
 		t.Fatalf("open audit log: %v", err)
@@ -133,7 +135,9 @@ func TestWrapMacOSFilesystemFenceRefusesBeforeLaunchingChild(t *testing.T) {
 		t.Fatalf("fail-closed wrap ran the child: stat marker = %v", statErr)
 	}
 
-	dbPath := filepath.Join(project, config.Dir, "events.db")
+	// The event log lives in the audit state directory outside the project
+	// (config.AuditStateDir), so resolve it the way the CLI does.
+	dbPath := resolvedAuditDB(t, project)
 	db, err := sql.Open("sqlite", dbPath)
 	if err != nil {
 		t.Fatalf("open audit log: %v", err)
@@ -170,7 +174,9 @@ func TestWrapMacOSFilesystemFenceOptOutRecordsDegraded(t *testing.T) {
 		t.Fatalf("opt-out child did not run: %v", err)
 	}
 
-	dbPath := filepath.Join(project, config.Dir, "events.db")
+	// The event log lives in the audit state directory outside the project
+	// (config.AuditStateDir), so resolve it the way the CLI does.
+	dbPath := resolvedAuditDB(t, project)
 	db, err := sql.Open("sqlite", dbPath)
 	if err != nil {
 		t.Fatalf("open audit log: %v", err)
