@@ -211,10 +211,12 @@ func resolveAuditDBPath() (dbPath, projectRoot string, err error) {
 		return "", "", fmt.Errorf("no logging DB configured")
 	}
 
-	dbPath = cfg.Logging.DB
-	projectRoot = filepath.Dir(filepath.Dir(configPath))
-	if !filepath.IsAbs(dbPath) {
-		dbPath = filepath.Join(projectRoot, dbPath)
+	// Share the resolver with every other command rather than repeating it:
+	// an audit command that looked in a different place from the one wrap
+	// writes to would report a missing or stale chain.
+	dbPath, projectRoot, err = config.ResolveDBPath(cfg, configPath)
+	if err != nil {
+		return "", "", err
 	}
 
 	if _, err := os.Stat(dbPath); err != nil {
@@ -596,6 +598,16 @@ func runProbeUnderWrap(ctx context.Context, cfg *config.Config, configPath, fenc
 	absolutizeConfigPaths(&cfgCopy, projectRoot)
 	cfgCopy.Logging.DB = filepath.Join(tmpNock, "events.db")
 	cfgCopy.Cloud.APIKey = ""
+	// Keep the probe's audit state inside the scratch tree, which
+	// createScratchOutside already placed outside every configured grant. The
+	// probe runs a real `wrap`, and a relative logging.db resolves into
+	// $XDG_STATE_HOME (config.AuditStateDir) — inheriting the caller's would
+	// scatter throwaway probe logs through the developer's real audit state and
+	// leave them behind when the scratch is cleaned up.
+	probeStateHome := filepath.Join(tmp, "state")
+	if err := os.MkdirAll(probeStateHome, 0o700); err != nil {
+		return probeResult{Fence: fence}, err
+	}
 	exe, err := os.Executable()
 	if err != nil {
 		return probeResult{Fence: fence}, err
@@ -638,6 +650,7 @@ func runProbeUnderWrap(ctx context.Context, cfg *config.Config, configPath, fenc
 	cmd := exec.CommandContext(childCtx, probeExe, "wrap", "--", probeExe, "__probe", fence)
 	cmd.Dir = tmpWork
 	cmd.Env = envWithOverrides(os.Environ(), extraEnv)
+	cmd.Env = envWithOverrides(cmd.Env, map[string]string{"XDG_STATE_HOME": probeStateHome})
 	var stdout, stderr bytes.Buffer
 	cmd.Stdout = &stdout
 	cmd.Stderr = &stderr

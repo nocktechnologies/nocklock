@@ -9,18 +9,59 @@ import (
 	"github.com/BurntSushi/toml"
 )
 
-// ResolveDBPath returns the absolute path to the event log database
-// and the project root directory, given a config and the path it was loaded from.
-func ResolveDBPath(cfg *Config, configPath string) (dbPath string, projectRoot string) {
-	dbPath = cfg.Logging.DB
-	if dbPath == "" {
-		dbPath = DefaultConfig().Logging.DB
+// ResolveDBPath returns the absolute path to the event log database and the
+// project root directory, given a config and the path it was loaded from.
+//
+// A RELATIVE logging.db resolves into the project's audit state directory
+// OUTSIDE the project (AuditStateDir), keeping only its filename — NOT against
+// the project root. An event log inside the fence root cannot be protected from
+// the fenced child once the root itself is granted, and the root must be granted
+// for the child to create and remove entries in its own project; AuditStateDir
+// explains why Landlock offers no third option. Relative is the default and
+// covers every config nocklock init writes, so ordinary projects relocate with
+// no config change.
+//
+// An ABSOLUTE logging.db is honored exactly as written. It is an explicit
+// operator choice and the escape hatch for anyone who needs the log in a
+// specific place; pointing it back inside filesystem.root re-exposes it to the
+// child, which 'nocklock doctor' warns about.
+//
+// A log left inside a project by an older NockLock is moved into the state
+// directory on first use (migrateLegacyAuditState), so an existing audit chain
+// keeps verifying across the upgrade.
+//
+// Note that projectRoot (the directory holding .nock/config.toml) and
+// filesystem.root need not be the same directory. The relocation is keyed on
+// projectRoot because that is what identifies the project; when filesystem.root
+// points somewhere else, the state directory is outside both, which is the
+// property that matters.
+func ResolveDBPath(cfg *Config, configPath string) (dbPath string, projectRoot string, err error) {
+	configured := cfg.Logging.DB
+	if configured == "" {
+		configured = DefaultConfig().Logging.DB
 	}
 	projectRoot = filepath.Dir(filepath.Dir(configPath))
-	if !filepath.IsAbs(dbPath) {
-		dbPath = filepath.Join(projectRoot, dbPath)
+	if filepath.IsAbs(configured) {
+		return configured, projectRoot, nil
 	}
-	return dbPath, projectRoot
+
+	stateDir, err := AuditStateDir(projectRoot)
+	if err != nil {
+		return "", projectRoot, err
+	}
+	dbPath = filepath.Join(stateDir, filepath.Base(configured))
+
+	// Look for a legacy log both where this config points and at the
+	// conventional .nock location, so a config that never set logging.db still
+	// finds the chain an older NockLock wrote to <root>/.nock/events.db.
+	legacy := []string{filepath.Join(projectRoot, configured)}
+	if conventional := filepath.Join(projectRoot, Dir, filepath.Base(configured)); conventional != legacy[0] {
+		legacy = append(legacy, conventional)
+	}
+	if err := migrateLegacyAuditState(dbPath, legacy); err != nil {
+		return "", projectRoot, err
+	}
+	return dbPath, projectRoot, nil
 }
 
 // Config is the top-level NockLock configuration.

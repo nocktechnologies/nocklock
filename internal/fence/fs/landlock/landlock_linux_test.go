@@ -48,7 +48,17 @@ func TestLandlockAllowRWPaths(t *testing.T) {
 	}
 }
 
-func TestLandlockStaticChildCannotMutateProtectedRootDescendants(t *testing.T) {
+// TestLandlockChildCanMutateRootButNotRelocatedAudit is the end-to-end
+// acceptance test for the two requirements that used to collide: the fenced
+// child CAN create and remove entries directly in the fence root, and it CANNOT
+// touch its own audit trail. They coexist only because the audit state now lives
+// outside the fence root (config.AuditStateDir) — while the log sat in
+// <root>/.nock, granting the root granted the log with it, since a Landlock rule
+// on a subdirectory cannot narrow a grant on its parent.
+//
+// The probe is a CGO_ENABLED=0 static binary, so the LD_PRELOAD interposer
+// cannot load into it and every result is the kernel ruleset's doing alone.
+func TestLandlockChildCanMutateRootButNotRelocatedAudit(t *testing.T) {
 	if abi, err := DetectABI(); err != nil {
 		t.Fatalf("detect Landlock ABI: %v", err)
 	} else if abi == 0 {
@@ -56,15 +66,18 @@ func TestLandlockStaticChildCannotMutateProtectedRootDescendants(t *testing.T) {
 	}
 
 	root := t.TempDir()
-	auditDir := filepath.Join(root, ".nock")
-	if err := os.Mkdir(auditDir, 0o700); err != nil {
-		t.Fatalf("create protected audit directory: %v", err)
-	}
+	// The audit state root, standing in for config.AuditStateDir: a sibling of
+	// the fence root, never a descendant of it.
+	auditDir := t.TempDir()
 	auditDB := filepath.Join(auditDir, "events.db")
-	if err := os.WriteFile(auditDB, []byte("signed audit data"), 0o600); err != nil {
-		t.Fatalf("create protected audit database: %v", err)
+	const auditContent = "signed audit data"
+	if err := os.WriteFile(auditDB, []byte(auditContent), 0o600); err != nil {
+		t.Fatalf("create relocated audit database: %v", err)
 	}
-	denied := filepath.Join(root, "denied-later")
+	// A deny path must also sit outside the granted root: with the root granted
+	// as one hierarchy, a deny inside it is unenforceable and RulesFromConfig
+	// fails closed (TestRulesFromConfigRejectsDenyInsideGrantedRoot).
+	denied := filepath.Join(t.TempDir(), "denied-later")
 
 	probe := filepath.Join(t.TempDir(), "landlock-static-probe")
 	build := exec.Command("go", "build", "-o", probe, "./testdata/staticprobe")
@@ -75,15 +88,30 @@ func TestLandlockStaticChildCannotMutateProtectedRootDescendants(t *testing.T) {
 
 	cmd := exec.Command(probe, root, auditDB, denied)
 	if output, err := cmd.CombinedOutput(); err != nil {
-		t.Fatalf("static child mutated a protected root descendant: %v\n%s", err, output)
+		t.Fatalf("fenced static child: %v\n%s", err, output)
 	}
+
+	// Verify from OUTSIDE the fence that the audit trail is byte-identical: the
+	// probe checked the errno, this checks that nothing landed anyway.
 	if data, err := os.ReadFile(auditDB); err != nil {
-		t.Fatalf("read protected audit database after static child: %v", err)
-	} else if string(data) != "signed audit data" {
-		t.Fatalf("protected audit database content = %q, want original content", data)
+		t.Fatalf("read audit database after static child: %v", err)
+	} else if string(data) != auditContent {
+		t.Fatalf("audit database content = %q, want %q", data, auditContent)
+	}
+	if entries, err := os.ReadDir(auditDir); err != nil {
+		t.Fatalf("read audit directory after static child: %v", err)
+	} else if len(entries) != 1 {
+		t.Fatalf("audit directory has %d entries, want only the event log: %v", len(entries), entries)
 	}
 	if _, err := os.Stat(denied); !errors.Is(err, os.ErrNotExist) {
 		t.Fatalf("denied path was created by static child: %v", err)
+	}
+	// The child's own writes in the root were cleaned up by the probe, so a
+	// leftover entry means a remove was silently skipped.
+	if entries, err := os.ReadDir(root); err != nil {
+		t.Fatalf("read fence root after static child: %v", err)
+	} else if len(entries) != 0 {
+		t.Fatalf("fence root has %d leftover entries, want none: %v", len(entries), entries)
 	}
 }
 

@@ -38,7 +38,11 @@ var logCmd = &cobra.Command{
 			return fmt.Errorf("failed to load config: %w", err)
 		}
 
-		dbPath, projectRoot := config.ResolveDBPath(cfg, configPath)
+		dbPath, projectRoot, err := config.ResolveDBPath(cfg, configPath)
+		if err != nil {
+			cmd.SilenceUsage = true
+			return err
+		}
 
 		// Don't create the DB file for a read-only operation.
 		if _, statErr := os.Stat(dbPath); statErr != nil {

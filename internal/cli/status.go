@@ -58,7 +58,11 @@ var statusCmd = &cobra.Command{
 		}
 
 		// Event log summary
-		dbPath, projectRoot := config.ResolveDBPath(cfg, configPath)
+		dbPath, projectRoot, err := config.ResolveDBPath(cfg, configPath)
+		if err != nil {
+			cmd.SilenceUsage = true
+			return err
+		}
 		relDB := cfg.Logging.DB
 		if relDB == "" {
 			// Show the default path when config doesn't specify one.

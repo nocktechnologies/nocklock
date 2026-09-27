@@ -15,6 +15,8 @@ import (
 	"time"
 
 	_ "modernc.org/sqlite"
+
+	"github.com/nocktechnologies/nocklock/internal/config"
 )
 
 // EventType categorizes what kind of fence event occurred.
@@ -183,7 +185,17 @@ CREATE TABLE IF NOT EXISTS chain_head (
 );
 `
 
-// validatePath rejects paths containing traversal sequences and paths outside the project root.
+// validatePath rejects paths containing traversal sequences and paths outside
+// the two directories an event log may legitimately occupy: the project itself,
+// and the project's audit state directory.
+//
+// The guard's purpose is to stop a repository-supplied .nock/config.toml from
+// aiming logging.db at an arbitrary file (NockLock would create and write a
+// SQLite database over it). The audit state directory is admitted because that
+// is where NockLock now keeps the log by default — outside the project, so the
+// fenced agent cannot reach it (config.AuditStateDir). It is derived from the
+// project root here rather than trusted from the caller, so a hostile config
+// cannot nominate some other directory as "the state directory".
 func validatePath(dbPath, projectRoot string) error {
 	cleaned := filepath.Clean(dbPath)
 	if strings.Contains(cleaned, "..") {
@@ -208,12 +220,38 @@ func validatePath(dbPath, projectRoot string) error {
 		// Compare at component boundaries: rel is ".." or "../…" only when
 		// resolvedPath is outside root. A bare strings.HasPrefix(rel, "..") would
 		// also reject an in-root child literally named "..evil".
-		rel, err := filepath.Rel(resolvedRoot, resolvedPath)
-		if err != nil || rel == ".." || strings.HasPrefix(rel, ".."+string(os.PathSeparator)) {
-			return fmt.Errorf("DB path %q resolves outside project root %q", dbPath, projectRoot)
+		if !pathContains(resolvedRoot, resolvedPath) && !inAuditStateDir(projectRoot, resolvedPath) {
+			return fmt.Errorf("DB path %q resolves outside both project root %q and its audit state directory", dbPath, projectRoot)
 		}
 	}
 	return nil
+}
+
+// pathContains reports whether path is root itself or lies beneath it. The
+// comparison is at component boundaries: rel is ".." or "../…" only when path
+// is genuinely outside root, whereas a bare strings.HasPrefix(rel, "..") would
+// also reject an in-root child literally named "..evil".
+func pathContains(root, path string) bool {
+	rel, err := filepath.Rel(root, path)
+	if err != nil {
+		return false
+	}
+	return rel != ".." && !strings.HasPrefix(rel, ".."+string(os.PathSeparator))
+}
+
+// inAuditStateDir reports whether path lies in the audit state directory that
+// belongs to projectRoot. The directory is computed, never created, so a
+// validation call has no side effects.
+func inAuditStateDir(projectRoot, path string) bool {
+	stateDir, err := config.AuditStateDirPath(projectRoot)
+	if err != nil {
+		return false
+	}
+	resolved, err := resolveDeepestExisting(stateDir)
+	if err != nil {
+		resolved = filepath.Clean(stateDir)
+	}
+	return pathContains(resolved, path)
 }
 
 // resolveDeepestExisting canonicalizes dir by resolving symlinks in its deepest

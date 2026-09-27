@@ -5,7 +5,6 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
-	"sort"
 	"strings"
 
 	fsfence "github.com/nocktechnologies/nocklock/internal/fence/fs"
@@ -133,11 +132,11 @@ func RulesFromConfig(cfg *fsfence.FenceConfig, extra []AllowPath, abi int) (Spec
 	if cfg.Mode == "read-only" {
 		rootAccess = AccessReadOnly
 	}
-	rootRules, err := rootPathRules(cfg.Root, rootAccess, abi)
+	rootRule, err := rootPathRule(cfg.Root, rootAccess, abi)
 	if err != nil {
 		return Spec{}, err
 	}
-	spec.Paths = append(spec.Paths, rootRules...)
+	spec.Paths = append(spec.Paths, rootRule)
 	for _, p := range cfg.AllowPaths {
 		spec.Paths = append(spec.Paths, pathRule(p, AccessReadOnly, abi))
 	}
@@ -284,41 +283,31 @@ func isAncestor(ancestor, descendant string) bool {
 	return strings.HasPrefix(descendant, ancestor+sep)
 }
 
-func rootPathRules(root, access string, abi int) ([]PathRule, error) {
+// rootPathRule grants the fence root as a single hierarchy, so the fenced child
+// can create and remove entries DIRECTLY IN the root and not merely inside its
+// existing subdirectories.
+//
+// Earlier rounds enumerated the root's children and granted each one, precisely
+// so the audit directory could be skipped. That left the root itself ungranted,
+// and Landlock checks MAKE_REG/REMOVE_FILE against the directory holding the
+// entry — so `touch <root>/newfile` was denied even in read-write mode. No
+// rule arrangement fixes that while keeping a protected directory inside the
+// root: the kernel walks upward from the accessed file and allows as soon as an
+// ancestor rule grants the access, so a narrower rule on a subdirectory cannot
+// revoke the root's grant. The audit state moved out of the root instead (see
+// config.AuditStateDir), which is what makes this single rule safe.
+//
+// Granting the root alone is also strictly safer for symlinks than enumerating
+// children was: Landlock resolves the rule to the root's inode, so a symlink
+// inside the root pointing outside it grants nothing — the target's ancestors
+// carry no rule. The child enumeration needed an explicit escape check for
+// exactly that case; this does not.
+func rootPathRule(root, access string, abi int) (PathRule, error) {
 	cleanRoot, err := filepath.EvalSymlinks(filepath.Clean(root))
 	if err != nil {
-		return nil, fmt.Errorf("resolve Landlock root %q: %w", root, err)
+		return PathRule{}, fmt.Errorf("resolve Landlock root %q: %w", root, err)
 	}
-	entries, err := os.ReadDir(root)
-	if err != nil {
-		return nil, fmt.Errorf("read Landlock root %q: %w", root, err)
-	}
-
-	paths := make([]string, 0, len(entries))
-	for _, entry := range entries {
-		if entry.Name() == ".nock" {
-			continue
-		}
-		child := filepath.Join(cleanRoot, entry.Name())
-		if entry.Type()&os.ModeSymlink != 0 {
-			resolved, err := filepath.EvalSymlinks(child)
-			if err != nil {
-				return nil, fmt.Errorf("resolve Landlock root child %q: %w", child, err)
-			}
-			if !pathInsideRoot(cleanRoot, resolved) {
-				return nil, fmt.Errorf("Landlock root child %q resolves outside Landlock root %q to %q", child, cleanRoot, resolved)
-			}
-			child = resolved
-		}
-		paths = append(paths, child)
-	}
-	sort.Strings(paths)
-
-	rules := make([]PathRule, 0, len(paths))
-	for _, path := range paths {
-		rules = append(rules, pathRule(path, access, abi))
-	}
-	return rules, nil
+	return pathRule(cleanRoot, access, abi), nil
 }
 
 func pathInsideRoot(root, path string) bool {

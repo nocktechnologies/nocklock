@@ -65,7 +65,7 @@ func TestRulesFromConfigMapsReadOnlyAndReadWriteRights(t *testing.T) {
 	if spec.HandledAccessFS&RightTruncate == 0 {
 		t.Fatalf("ABI v3 handled rights should include truncate: %#x", spec.HandledAccessFS)
 	}
-	// Root child, allow, and extra rules are appended first, so indices 0-2 stay
+	// Root, allow, and extra rules are appended first, so indices 0-2 stay
 	// stable. Baseline device grants follow and vary by host, so filter them out
 	// and keep the exact-count assertion on everything else — an unintended
 	// extra grant from RulesFromConfig must still fail this test.
@@ -76,10 +76,10 @@ func TestRulesFromConfigMapsReadOnlyAndReadWriteRights(t *testing.T) {
 		}
 	}
 	if len(configured) != 3 {
-		t.Fatalf("expected exactly root child + allow + extra paths, got %d: %+v", len(configured), configured)
+		t.Fatalf("expected exactly root + allow + extra paths, got %d: %+v", len(configured), configured)
 	}
-	if spec.Paths[0].Path != readOnly || spec.Paths[0].Access != AccessReadOnly {
-		t.Fatalf("root child rule = %+v, want read-only %s", spec.Paths[0], readOnly)
+	if spec.Paths[0].Path != root || spec.Paths[0].Access != AccessReadOnly {
+		t.Fatalf("root rule = %+v, want read-only %s", spec.Paths[0], root)
 	}
 	if spec.Paths[1].Path != readOnly || spec.Paths[1].Access != AccessReadOnly {
 		t.Fatalf("allow rule = %+v, want read-only %s", spec.Paths[1], readOnly)
@@ -237,21 +237,23 @@ func TestRulesFromConfigMapsAllowRWPathsReadWrite(t *testing.T) {
 	}
 }
 
+// TestRulesFromConfigLimitsRegularFileRights asserts a rule naming a REGULAR
+// FILE carries only file rights: directory-entry rights (MAKE_DIR, REMOVE_DIR,
+// REFER) are meaningless on a file and must not be set. The rule comes from an
+// allow_rw entry, since the root is granted as one directory hierarchy and no
+// longer produces a per-file rule for each of its children.
 func TestRulesFromConfigLimitsRegularFileRights(t *testing.T) {
 	root := resolvedTempDir(t)
 	allowedPath := filepath.Join(root, "allowed.txt")
 	if err := os.WriteFile(allowedPath, []byte("allowed"), 0o600); err != nil {
 		t.Fatalf("write allowed placeholder: %v", err)
 	}
-	dbPath := filepath.Join(root, "events.db")
-	if err := os.WriteFile(dbPath, []byte(""), 0o600); err != nil {
-		t.Fatalf("write db placeholder: %v", err)
-	}
 
 	spec, err := RulesFromConfig(&fsfence.FenceConfig{
-		Root: root,
-		Mode: "read-write",
-	}, []AllowPath{{Path: dbPath, Access: AccessReadWrite}}, 5)
+		Root:         root,
+		Mode:         "read-write",
+		AllowRWPaths: []string{allowedPath},
+	}, nil, 5)
 	if err != nil {
 		t.Fatalf("RulesFromConfig failed: %v", err)
 	}
@@ -268,18 +270,17 @@ func TestRulesFromConfigLimitsRegularFileRights(t *testing.T) {
 	}
 }
 
-func TestRulesFromConfigEnumeratesRootButSkipsNockAuditDir(t *testing.T) {
+// TestRulesFromConfigGrantsFenceRootAsOneHierarchy is the acceptance test for
+// "the agent can create entries directly in the fence root". Landlock checks
+// MAKE_REG/MAKE_DIR/REMOVE_FILE/REMOVE_DIR against the DIRECTORY that holds the
+// entry, so a ruleset that granted only the root's existing children (what
+// earlier rounds did, to keep the in-root audit directory ungranted) denied
+// `touch <root>/newfile` even in read-write mode.
+func TestRulesFromConfigGrantsFenceRootAsOneHierarchy(t *testing.T) {
 	root := resolvedTempDir(t)
-	if err := os.Mkdir(filepath.Join(root, ".nock"), 0o700); err != nil {
-		t.Fatalf("mkdir .nock: %v", err)
-	}
 	src := filepath.Join(root, "src")
 	if err := os.Mkdir(src, 0o755); err != nil {
 		t.Fatalf("mkdir src: %v", err)
-	}
-	readme := filepath.Join(root, "README.md")
-	if err := os.WriteFile(readme, []byte("readme"), 0o644); err != nil {
-		t.Fatalf("write readme: %v", err)
 	}
 
 	spec, err := RulesFromConfig(&fsfence.FenceConfig{
@@ -290,20 +291,96 @@ func TestRulesFromConfigEnumeratesRootButSkipsNockAuditDir(t *testing.T) {
 		t.Fatalf("RulesFromConfig failed: %v", err)
 	}
 
-	got := map[string]bool{}
+	rootRule, ok := findPathRule(spec.Paths, root)
+	if !ok {
+		t.Fatalf("fence root %q is not granted: %+v", root, spec.Paths)
+	}
+	for _, right := range []struct {
+		name string
+		bit  uint64
+	}{
+		{"MAKE_REG", RightMakeReg},
+		{"MAKE_DIR", RightMakeDir},
+		{"REMOVE_FILE", RightRemoveFile},
+		{"REMOVE_DIR", RightRemoveDir},
+	} {
+		if rootRule.Rights&right.bit == 0 {
+			t.Fatalf("root rule is missing %s, so the child cannot create/remove entries in the root: %#x", right.name, rootRule.Rights)
+		}
+	}
+
+	// The root is granted as ONE rule, not re-enumerated per child. A stray
+	// per-child rule would be redundant at best and, for a symlinked child,
+	// would grant a path outside the root.
 	for _, rule := range spec.Paths {
-		got[rule.Path] = true
-		if rule.Path == filepath.Join(root, ".nock") || strings.HasPrefix(rule.Path, filepath.Join(root, ".nock")+string(os.PathSeparator)) {
-			t.Fatalf("ruleset granted audit path %q in %+v", rule.Path, spec.Paths)
+		if rule.Path == src {
+			t.Fatalf("root child %q got its own rule; the root grant already covers it: %+v", src, spec.Paths)
 		}
 	}
-	if rootRule, ok := findPathRule(spec.Paths, root); ok {
-		t.Fatalf("ruleset unexpectedly granted read-write root %q: %+v", root, rootRule)
+}
+
+// TestRulesFromConfigRootGrantCoversNockConfigDir codifies an ACCEPTED
+// CONSEQUENCE of granting the fence root, so it is a decision on the record
+// rather than a surprise.
+//
+// <root>/.nock/config.toml is the fence's own config, and it falls inside the
+// root grant. No Landlock ruleset can exclude it: the kernel walks upward from
+// the accessed file and allows as soon as an ancestor rule grants the access
+// (security/landlock/fs.c, is_access_to_paths_allowed), so a narrower rule on
+// .nock cannot revoke the root's grant, and stacking layers does not help
+// because every layer would have to grant MAKE_REG on the root for a create in
+// the root to succeed.
+//
+// What keeps this sound: the config is read by the UNFENCED parent before the
+// child starts, so in-session tampering cannot widen the fence the child is
+// already under; a rewritten config only takes effect on the NEXT wrap, and it
+// is a tracked file in the project, so the edit is visible in git. The audit
+// trail — which must survive a hostile child — is what moved out of the root
+// (config.AuditStateDir); see TestLandlockChildCanMutateRootButNotRelocatedAudit
+// for the enforced negative control.
+func TestRulesFromConfigRootGrantCoversNockConfigDir(t *testing.T) {
+	root := resolvedTempDir(t)
+	nockDir := filepath.Join(root, ".nock")
+	if err := os.Mkdir(nockDir, 0o700); err != nil {
+		t.Fatalf("mkdir .nock: %v", err)
 	}
-	for _, want := range []string{readme, src} {
-		if !got[want] {
-			t.Fatalf("missing root child rule %q in %+v", want, spec.Paths)
-		}
+
+	spec, err := RulesFromConfig(&fsfence.FenceConfig{
+		Root: root,
+		Mode: "read-write",
+	}, nil, 5)
+	if err != nil {
+		t.Fatalf("RulesFromConfig failed: %v", err)
+	}
+	if _, ok := findPathRule(spec.Paths, nockDir); ok {
+		t.Fatalf("expected no rule naming %q; it is covered by the root grant, not granted separately", nockDir)
+	}
+	if _, ok := findPathRule(spec.Paths, root); !ok {
+		t.Fatalf("fence root %q is not granted, so .nock would not be reachable: %+v", root, spec.Paths)
+	}
+}
+
+// TestRulesFromConfigRejectsDenyInsideGrantedRoot codifies the second accepted
+// consequence: with the root granted as one hierarchy, a filesystem.deny path
+// INSIDE the root can no longer be enforced by Landlock, and rule generation
+// fails closed rather than shipping a fence that ignores the deny. Before the
+// root was granted, such a deny worked only when the path did not yet exist.
+// Deny paths outside the root (the default set: ~/.ssh, ~/.aws, ~/.gnupg) are
+// unaffected.
+func TestRulesFromConfigRejectsDenyInsideGrantedRoot(t *testing.T) {
+	root := resolvedTempDir(t)
+	secret := filepath.Join(root, "secrets")
+
+	_, err := RulesFromConfig(&fsfence.FenceConfig{
+		Root:      root,
+		Mode:      "read-write",
+		DenyPaths: []string{secret},
+	}, nil, 5)
+	if err == nil {
+		t.Fatal("expected a deny path inside the granted root to be rejected")
+	}
+	if !strings.Contains(err.Error(), "cannot be enforced by Landlock") {
+		t.Fatalf("expected an unenforceable-deny error, got: %v", err)
 	}
 }
 
@@ -316,23 +393,35 @@ func findPathRule(rules []PathRule, path string) (PathRule, bool) {
 	return PathRule{}, false
 }
 
-func TestRulesFromConfigRejectsRootChildSymlinkOutsideRoot(t *testing.T) {
-	root := t.TempDir()
-	outside := t.TempDir()
-	link := filepath.Join(root, "loot")
-	if err := os.Symlink(outside, link); err != nil {
+// TestRulesFromConfigRootChildSymlinkGrantsNothingOutsideRoot replaces the
+// earlier "reject a root child that symlinks outside the root" guard. That
+// check existed because the ruleset enumerated and resolved each root child, so
+// a symlink to /etc would have produced a real rule on /etc. Granting the root
+// as one hierarchy removes the hazard at the source: Landlock binds the rule to
+// the root's inode, and the symlink TARGET has no rule on any of its ancestors,
+// so it is granted nothing. The guard is kept as an assertion on that outcome
+// rather than deleted.
+func TestRulesFromConfigRootChildSymlinkGrantsNothingOutsideRoot(t *testing.T) {
+	root := resolvedTempDir(t)
+	outside := resolvedTempDir(t)
+	if err := os.Symlink(outside, filepath.Join(root, "loot")); err != nil {
 		t.Skipf("symlinks unsupported: %v", err)
 	}
 
-	_, err := RulesFromConfig(&fsfence.FenceConfig{
+	spec, err := RulesFromConfig(&fsfence.FenceConfig{
 		Root: root,
 		Mode: "read-write",
 	}, nil, 5)
-	if err == nil {
-		t.Fatal("expected symlinked root child outside root to be rejected")
+	if err != nil {
+		t.Fatalf("RulesFromConfig failed: %v", err)
 	}
-	if !strings.Contains(err.Error(), "resolves outside Landlock root") {
-		t.Fatalf("expected outside-root symlink error, got: %v", err)
+	for _, rule := range spec.Paths {
+		if IsBaselineDeviceNode(rule.Path) {
+			continue
+		}
+		if !pathInsideRoot(root, rule.Path) {
+			t.Fatalf("rule %q lies outside the fence root %q: %+v", rule.Path, root, spec.Paths)
+		}
 	}
 }
 

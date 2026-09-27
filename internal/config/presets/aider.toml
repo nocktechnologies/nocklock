@@ -65,7 +65,13 @@ socket_families = [
 ]
 
 [logging]
-db = ".nock/events.db"
+# A relative db goes to NockLock's audit state directory OUTSIDE this project
+# ($XDG_STATE_HOME/nocklock/<project>), keeping only the filename. The fence
+# grants the project root to the agent so it can create files there, and
+# Landlock cannot exclude a path beneath a granted directory - so an event log
+# stored in the project would be editable by the agent it records. An absolute
+# path is used verbatim.
+db = "events.db"
 level = "info"
 
 [cloud]

@@ -8,6 +8,7 @@ import (
 	"io"
 	"net"
 	"os"
+	"path/filepath"
 	"runtime"
 	"strings"
 	"syscall"
@@ -385,6 +386,9 @@ func secretDoctorCheck(cfg *config.Config) doctorCheck {
 
 func sanityDoctorChecks(cfg *config.Config, caps doctorCapabilities) []doctorCheck {
 	var checks []doctorCheck
+	if check, ok := auditLogInsideFenceRootCheck(cfg); ok {
+		checks = append(checks, check)
+	}
 	if cfg.Network.AllowAll {
 		checks = append(checks, doctorCheck{
 			Group:    "Sanity",
@@ -448,7 +452,10 @@ func sanityDoctorChecks(cfg *config.Config, caps doctorCapabilities) []doctorChe
 }
 
 func doctorActivityCheck(cfg *config.Config, configPath string, now time.Time) doctorActivity {
-	dbPath, projectRoot := config.ResolveDBPath(cfg, configPath)
+	dbPath, projectRoot, err := config.ResolveDBPath(cfg, configPath)
+	if err != nil {
+		return doctorActivity{}
+	}
 	if _, err := os.Stat(dbPath); err != nil {
 		return doctorActivity{}
 	}
@@ -533,6 +540,50 @@ func doctorSymbol(severity doctorSeverity) string {
 	default:
 		return "ℹ"
 	}
+}
+
+// auditLogInsideFenceRootCheck warns when an ABSOLUTE logging.db points back
+// inside filesystem.root. A relative logging.db resolves into the audit state
+// directory outside the project (config.ResolveDBPath), which is what keeps the
+// event log out of the fenced child's reach; an absolute path is honored
+// verbatim, so an operator can aim it at a directory the fence grants.
+//
+// That is not a cosmetic preference. Landlock grants the fence root as one
+// hierarchy so the child can create and remove entries in its own project, and
+// no rule can carve a protected hole out of a granted tree — an event log
+// under filesystem.root is therefore writable and deletable by the very agent
+// it records. It also makes the log's own deny path unenforceable, so
+// 'nocklock wrap' fails closed rather than running with a forgeable audit
+// trail. Warn here so the failure is explained before it is hit.
+func auditLogInsideFenceRootCheck(cfg *config.Config) (doctorCheck, bool) {
+	db := strings.TrimSpace(cfg.Logging.DB)
+	if db == "" || !filepath.IsAbs(db) || strings.TrimSpace(cfg.Filesystem.Root) == "" {
+		return doctorCheck{}, false
+	}
+	root, err := fsfence.ExpandTilde(cfg.Filesystem.Root)
+	if err != nil {
+		return doctorCheck{}, false
+	}
+	root, err = filepath.Abs(root)
+	if err != nil {
+		return doctorCheck{}, false
+	}
+	root = resolvePathBestEffort(root)
+	db = resolvePathBestEffort(db)
+	rel, err := filepath.Rel(root, db)
+	if err != nil || rel == ".." || strings.HasPrefix(rel, ".."+string(os.PathSeparator)) {
+		return doctorCheck{}, false
+	}
+	return doctorCheck{
+		Group:    "Sanity",
+		Name:     "audit-log-inside-root",
+		Severity: doctorWarning,
+		Status:   "warning",
+		Message: fmt.Sprintf(
+			"logging.db (%s) is inside filesystem.root (%s), so the fenced agent can modify or delete its own audit trail. Landlock grants the root as one hierarchy and cannot exclude a path beneath it.",
+			db, root),
+		Fix: "remove the absolute logging.db so the event log goes to NockLock's audit state directory outside the project",
+	}, true
 }
 
 func doctorOKCheck(group, name, status, message string) doctorCheck {
