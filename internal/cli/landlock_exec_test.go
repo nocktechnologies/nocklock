@@ -30,7 +30,7 @@ func TestAllowSelfProcFS_GrantsFilesNotDirectory(t *testing.T) {
 	}
 
 	pid := os.Getpid()
-	for _, f := range fsfence.SelfProcFiles {
+	for _, f := range fsfence.SelfProcFiles() {
 		want := fmt.Sprintf("/proc/%d/%s", pid, f)
 		if !slices.Contains(sc.AllowPaths, want) {
 			t.Errorf("allowSelfProcFS: allow paths missing %q; got %v", want, sc.AllowPaths)

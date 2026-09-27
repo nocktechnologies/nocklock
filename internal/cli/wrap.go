@@ -1063,8 +1063,9 @@ func resolvePathBestEffort(p string) string {
 // which the syscall fence's allow_namespaces=false posture precludes — out of
 // scope here.)
 func landlockProcSelfAllowPaths() []landlock.AllowPath {
-	paths := make([]landlock.AllowPath, 0, len(fsfence.SelfProcFiles))
-	for _, f := range fsfence.SelfProcFiles {
+	files := fsfence.SelfProcFiles()
+	paths := make([]landlock.AllowPath, 0, len(files))
+	for _, f := range files {
 		paths = append(paths, landlock.AllowPath{Path: "/proc/self/" + f, Access: landlock.AccessReadOnly})
 	}
 	return paths

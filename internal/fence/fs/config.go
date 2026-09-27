@@ -17,26 +17,49 @@ import (
 const fieldSep = "\x1f"
 
 // maxAllowPaths mirrors MAX_PATHS in the interposer's libfence_fs.c
-// (internal/fence/fs/interposer/libfence_fs.c). Past this count the
-// interposer fails closed (denies every path) rather than silently dropping
-// entries, so ProcessConfig must refuse a policy that would push it there.
+// (internal/fence/fs/interposer/libfence_fs.c; kept in sync by
+// TestMaxAllowPathsMatchesInterposerMaxPaths). Past this count in EITHER the
+// allow or the deny category, the interposer fails closed (denies every
+// path) rather than silently dropping entries.
 const maxAllowPaths = 256
 
-// SelfProcFiles are the specific, read-only /proc/<pid> entries the fence
+// interposerMaxPathFields mirrors "char *fields[MAX_PATHS + 4]" in
+// libfence_fs.c: the total slots for the 3 metadata fields (root, mode,
+// socket) PLUS every "+allow"/"-deny" field combined, allow and deny sharing
+// one budget. Past this many total fields, the interposer's tokenizer stops
+// splitting the string and silently drops the remainder — including any
+// deny paths that land in the dropped tail, which never reach deny_count's
+// own "too many, fail closed" check because that check never sees them.
+// ProcessConfig must never let a config reach that combined budget.
+const interposerMaxPathFields = maxAllowPaths + 4
+const interposerMetadataFields = 3
+
+// selfProcFiles are the specific, read-only /proc/<pid> entries the fence
 // grants a wrapped process for its own runtime introspection (e.g. Node's
 // process.memoryUsage(), which reads /proc/self/stat). Only these files are
 // ever granted — never the /proc/<pid> directory itself, which would also
 // expose environ, cmdline, mem, maps and fd to the wrapped process AND to any
-// descendant that inherits the Landlock rule.
+// descendant that inherits the Landlock rule. (Verified empirically: Node
+// startup also touches /proc/self/exe, maps and cgroup, but tolerates each
+// failing to open — it falls back to argv[0] for process.execPath and
+// otherwise degrades silently — so none of those need a grant.)
 //
 // Both the Landlock ruleset (landlockProcSelfAllowPaths in
 // internal/cli/wrap.go) and the userspace interposer's allow-list injection
 // (allowSelfProcFS in internal/cli/landlock_exec.go) grant exactly this list
-// and must stay in sync, so this is the single source of truth for both. It
-// is also why ProcessConfig reserves len(SelfProcFiles) entries below
-// maxAllowPaths: those two injection points add one allow entry per file,
+// and must stay in sync, so this is the single source of truth for both —
+// call SelfProcFiles() rather than duplicating the list. It is also why
+// ProcessConfig reserves len(SelfProcFiles()) entries below the combined
+// field budget: those two injection points add one allow entry per file,
 // after config validation has already run.
-var SelfProcFiles = []string{"stat", "status", "statm"}
+var selfProcFiles = []string{"stat", "status", "statm"}
+
+// SelfProcFiles returns a copy of the curated /proc/<pid> file list (see
+// selfProcFiles); callers get their own slice so they cannot mutate the
+// shared source of truth.
+func SelfProcFiles() []string {
+	return append([]string(nil), selfProcFiles...)
+}
 
 // FenceConfig holds resolved, absolute filesystem fence paths ready
 // for enforcement. All paths have been cleaned, expanded, and (for Root)
@@ -165,12 +188,6 @@ func ProcessConfig(cfg config.FilesystemConfig) (*FenceConfig, error) {
 		}
 		allowPaths = append(allowPaths, resolved)
 	}
-	if room := maxAllowPaths - len(SelfProcFiles); len(allowPaths) > room {
-		return nil, fmt.Errorf(
-			"too many filesystem allow paths (%d): the fence interposer supports at most %d, "+
-				"and %d are reserved for the wrapped process's own /proc/<pid> grants (see SelfProcFiles); "+
-				"remove entries from [filesystem].allow", len(allowPaths), maxAllowPaths, len(SelfProcFiles))
-	}
 
 	// Resolve deny paths.
 	denyPaths := make([]string, 0, len(cfg.Deny))
@@ -180,6 +197,23 @@ func ProcessConfig(cfg config.FilesystemConfig) (*FenceConfig, error) {
 			return nil, fmt.Errorf("cannot resolve deny path %q: %w", p, err)
 		}
 		denyPaths = append(denyPaths, resolved)
+	}
+
+	// The interposer's wire-format tokenizer (see interposerMaxPathFields)
+	// shares ONE field budget between allow and deny paths combined: past
+	// that budget it silently drops whatever does not fit — including deny
+	// paths — before either category's own "too many, fail closed" check
+	// ever sees them. Reserve room for the metadata fields and for the
+	// self-proc files the shim injects into the allow list after this runs.
+	injected := len(SelfProcFiles())
+	room := interposerMaxPathFields - interposerMetadataFields - injected
+	if combined := len(allowPaths) + len(denyPaths); combined > room {
+		return nil, fmt.Errorf(
+			"too many combined filesystem allow (%d) and deny (%d) paths: the fence interposer's "+
+				"wire format supports at most %d combined, and %d are reserved for the wrapped "+
+				"process's own /proc/<pid> grants (see SelfProcFiles); remove entries from "+
+				"[filesystem].allow or [filesystem].deny",
+			len(allowPaths), len(denyPaths), room, injected)
 	}
 
 	// Validate that no resolved path contains the field separator character.

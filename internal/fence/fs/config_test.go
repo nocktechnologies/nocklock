@@ -94,35 +94,67 @@ func TestProcessConfig_Valid(t *testing.T) {
 	}
 }
 
+// paths returns n distinct, resolvable paths under root for cap-boundary
+// tests: ProcessConfig resolves every allow/deny entry, so each needs to be a
+// real, distinguishable filesystem path rather than an arbitrary string.
+func paths(root string, n int, prefix string) []string {
+	out := make([]string, n)
+	for i := 0; i < n; i++ {
+		out[i] = filepath.Join(root, fmt.Sprintf("%s%d", prefix, i))
+	}
+	return out
+}
+
 // TestProcessConfig_AllowPathCapBoundary is the boundary test for #10757's
 // thread 2: the interposer's libfence_fs.c fails closed (denies everything)
 // once its allow_count reaches MAX_PATHS (256), and the __landlock-exec shim
-// injects one allow entry per fsfence.SelfProcFiles AFTER ProcessConfig runs
-// (see allowSelfProcFS in internal/cli/landlock_exec.go). A user config with
-// exactly 256 allow paths used to pass validation and then trip the
+// injects one allow entry per fsfence.SelfProcFiles() AFTER ProcessConfig
+// runs (see allowSelfProcFS in internal/cli/landlock_exec.go). A user config
+// with exactly 256 allow paths used to pass validation and then trip the
 // interposer's cap at runtime once the self-proc entries were appended — a
 // silent full deny-all, not a config error. ProcessConfig must now reserve
 // that headroom and reject at config time instead.
 func TestProcessConfig_AllowPathCapBoundary(t *testing.T) {
 	root := t.TempDir()
+	room := interposerMaxPathFields - interposerMetadataFields - len(SelfProcFiles())
 
-	allow := func(n int) []string {
-		paths := make([]string, n)
-		for i := 0; i < n; i++ {
-			paths[i] = filepath.Join(root, fmt.Sprintf("f%d", i))
-		}
-		return paths
-	}
-	room := maxAllowPaths - len(SelfProcFiles)
-
-	cfg := config.FilesystemConfig{Root: root, Allow: allow(room)}
+	cfg := config.FilesystemConfig{Root: root, Allow: paths(root, room, "f")}
 	if _, err := ProcessConfig(cfg); err != nil {
 		t.Fatalf("ProcessConfig with %d allow paths (exactly the reserved cap) should succeed: %v", room, err)
 	}
 
-	cfg.Allow = allow(room + 1)
+	cfg.Allow = paths(root, room+1, "f")
 	if _, err := ProcessConfig(cfg); err == nil {
 		t.Fatalf("ProcessConfig with %d allow paths (one past the reserved cap) should fail closed with a config error", room+1)
+	}
+}
+
+// TestProcessConfig_CombinedAllowDenyPathCapBoundary proves the cap covers
+// allow and deny TOGETHER, not allow alone. libfence_fs.c's wire-format
+// tokenizer (char *fields[MAX_PATHS + 4]) splits root+mode+socket plus every
+// "+allow"/"-deny" field out of ONE shared array; past that combined budget
+// it silently stops splitting and drops the tail — which can be deny paths —
+// before either category's own "too many" check ever sees them. A config
+// with many allow paths and a handful of deny paths, each individually well
+// under 256, can still overflow that shared budget.
+func TestProcessConfig_CombinedAllowDenyPathCapBoundary(t *testing.T) {
+	root := t.TempDir()
+	room := interposerMaxPathFields - interposerMetadataFields - len(SelfProcFiles())
+
+	cfg := config.FilesystemConfig{
+		Root:  root,
+		Allow: paths(root, room-2, "a"),
+		Deny:  paths(root, 2, "d"),
+	}
+	if _, err := ProcessConfig(cfg); err != nil {
+		t.Fatalf("ProcessConfig with %d allow + %d deny paths (exactly the combined cap) should succeed: %v",
+			len(cfg.Allow), len(cfg.Deny), err)
+	}
+
+	cfg.Deny = paths(root, 3, "d")
+	if _, err := ProcessConfig(cfg); err == nil {
+		t.Fatalf("ProcessConfig with %d allow + %d deny paths (one past the combined cap) should fail closed, "+
+			"even though neither list alone reaches maxAllowPaths", len(cfg.Allow), len(cfg.Deny))
 	}
 }
 

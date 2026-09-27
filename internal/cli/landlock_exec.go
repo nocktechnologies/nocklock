@@ -153,7 +153,7 @@ func allowSelfProcFS(env []string) []string {
 		if !ok || name != fsfence.EnvFSAllowed || val == "" {
 			continue
 		}
-		for _, f := range fsfence.SelfProcFiles {
+		for _, f := range fsfence.SelfProcFiles() {
 			val = fsfence.AppendSerializedAllow(val, fmt.Sprintf("/proc/%d/%s", pid, f))
 		}
 		env[i] = fsfence.EnvFSAllowed + "=" + val
