@@ -1,6 +1,7 @@
 package config
 
 import (
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -254,6 +255,46 @@ func TestResolveDBPathRefusesStateRootStatError(t *testing.T) {
 		t.Fatal("expected an inaccessible state root to be refused, not omitted")
 	} else if !strings.Contains(err.Error(), "state root") {
 		t.Fatalf("expected a state-root error, got: %v", err)
+	}
+}
+
+// TestResolveDBPathRefusesStateRootEvalSymlinksError covers the sibling of
+// TestResolveDBPathRefusesStateRootStatError: the state base stats cleanly as
+// a directory, but resolving it (a mid-call symlink swap, or ELOOP) fails.
+// That must fail closed exactly like the Stat-error branch, not silently drop
+// the state-dir candidates and let a legacy in-project chain win by default.
+func TestResolveDBPathRefusesStateRootEvalSymlinksError(t *testing.T) {
+	projectRoot := resolvedTempDir(t)
+	configPath := filepath.Join(projectRoot, Dir, File)
+	legacyDir := filepath.Join(projectRoot, Dir)
+	if err := os.MkdirAll(legacyDir, 0o700); err != nil {
+		t.Fatalf("mkdir legacy directory: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(legacyDir, DefaultConfig().Logging.DB), []byte("existing chain"), 0o600); err != nil {
+		t.Fatalf("write legacy log: %v", err)
+	}
+
+	stateBase := trustedStateRoot(t)
+	t.Setenv("XDG_STATE_HOME", stateBase)
+
+	originalEval := evalAuditStateRoot
+	evalAuditStateRoot = func(base string) (string, error) {
+		if base == stateBase {
+			return "", errors.New("simulated ELOOP")
+		}
+		return originalEval(base)
+	}
+	t.Cleanup(func() { evalAuditStateRoot = originalEval })
+
+	got, _, err := ResolveDBPath(&Config{}, configPath)
+	if err == nil {
+		t.Fatalf("expected a state root that stats cleanly but fails to resolve to be refused, got db path %q", got)
+	}
+	if !strings.Contains(err.Error(), "resolve the audit state root") {
+		t.Fatalf("expected a state-root-resolve error, got: %v", err)
+	}
+	if got != "" {
+		t.Fatalf("db path = %q, want empty on error (the legacy chain must not be selected)", got)
 	}
 }
 
