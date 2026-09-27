@@ -102,12 +102,9 @@ All notable changes to NockLock will be documented in this file.
   path, instead of being returned before any of them were even looked at. A
   legacy chain already sitting in the state dir is refused rather than
   silently abandoned when logging.db is reconfigured to an absolute path.
-  (Known gap: an absolute path that itself resolves inside the audit state
-  directory still returns without the state-root/ownership checks below. The
-  bypass predates this change; what's new is that the relative-path route to
-  that same directory is now hardened, so this absolute-path case is the only
-  remaining unchecked route to it. Tracked as follow-up, not fixed in this
-  round.)
+  An absolute path that resolves inside the audit state directory also passes
+  the same state-root ownership and permission checks as a relative path to
+  that directory.
 - The configured state root (`XDG_STATE_HOME`, or the `~/.local/state`
   fallback) is now itself checked before anything is created beneath it: it
   must be owned by the current user and not group- or world-writable, or

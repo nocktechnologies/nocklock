@@ -410,3 +410,57 @@ func TestResolveDBPathAbsoluteConfiguredWithNoConflict(t *testing.T) {
 		t.Fatalf("event log = %q, want the configured absolute path %q", dbPath, absDB)
 	}
 }
+
+// TestResolveDBPathAbsoluteStateDirRequiresTrustedRoot pins that spelling an
+// audit-state path absolutely cannot bypass the trust checks used for the same
+// destination when logging.db is relative.
+func TestResolveDBPathAbsoluteStateDirRequiresTrustedRoot(t *testing.T) {
+	tests := []struct {
+		name    string
+		mode    os.FileMode
+		wantErr bool
+	}{
+		{name: "trusted", mode: 0o700},
+		{name: "group writable", mode: 0o770, wantErr: true},
+		{name: "world writable", mode: 0o707, wantErr: true},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			projectRoot, configPath := writeProjectConfig(t, `db = "events.db"`)
+			stateRoot := trustedStateRoot(t)
+			if err := os.Chmod(stateRoot, tt.mode); err != nil {
+				t.Fatalf("chmod state root: %v", err)
+			}
+			t.Setenv("XDG_STATE_HOME", stateRoot)
+
+			stateDir, err := config.AuditStateDir(projectRoot)
+			if err != nil {
+				t.Fatalf("AuditStateDir: %v", err)
+			}
+			absDB := filepath.Join(stateDir, "events.db")
+			cfg, err := config.Load(configPath)
+			if err != nil {
+				t.Fatalf("load config: %v", err)
+			}
+			cfg.Logging.DB = absDB
+
+			dbPath, _, err := config.ResolveDBPath(cfg, configPath)
+			if tt.wantErr {
+				if err == nil {
+					t.Fatal("expected an absolute audit-state path under an untrusted state root to be refused")
+				}
+				if !strings.Contains(err.Error(), "writable") {
+					t.Fatalf("expected a writable-directory error, got: %v", err)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("ResolveDBPath: %v", err)
+			}
+			if dbPath != absDB {
+				t.Fatalf("event log = %q, want %q", dbPath, absDB)
+			}
+		})
+	}
+}

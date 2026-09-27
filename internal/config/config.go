@@ -193,10 +193,15 @@ func ResolveDBPath(cfg *Config, configPath string) (dbPath string, projectRoot s
 				"(their -wal/-shm sidecars and chain anchors travel with them)",
 			len(existing), strings.Join(existing, ", "))
 	}
-	// An absolute logging.db is used as written, once nothing else conflicts:
-	// Validate/validateAuditDBLocation already confined it to the project or
-	// the audit state directory, so no further trust checks apply here.
+	// An absolute logging.db is used as written once nothing else conflicts.
+	// When its canonical path is inside the canonical audit state directory,
+	// apply the same state-root trust checks as the relative/default route.
 	if absoluteConfigured != "" {
+		if stateDB != "" && withinDir(filepath.Dir(stateDB), absoluteConfigured) {
+			if _, err := EnsureAuditStateDir(projectRoot); err != nil {
+				return "", projectRoot, err
+			}
+		}
 		return configured, projectRoot, nil
 	}
 	// The state-dir candidate, existing or not, is the one case that still
