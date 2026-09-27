@@ -90,7 +90,7 @@ typedef int    (*real_setsockopt_t)(int, int, int, const void *, socklen_t);
 typedef int    (*real_getsockopt_t)(int, int, int, void *, socklen_t *);
 typedef int    (*real_getsockname_t)(int, struct sockaddr *, socklen_t *);
 typedef int    (*real_getpeername_t)(int, struct sockaddr *, socklen_t *);
-typedef int    (*real_dup_t)(int);
+typedef int    (*real_fcntl_t)(int, int, ...);
 typedef int    (*real_close_t)(int);
 
 /* 64-bit variants */
@@ -141,7 +141,7 @@ static real_setsockopt_t real_setsockopt;
 static real_getsockopt_t real_getsockopt;
 static real_getsockname_t real_getsockname;
 static real_getpeername_t real_getpeername;
-static real_dup_t real_dup;
+static real_fcntl_t real_fcntl;
 static real_close_t real_close;
 
 /* 64-bit variants */
@@ -560,7 +560,7 @@ static void fence_init(void)
     real_getsockopt = (real_getsockopt_t)dlsym(RTLD_NEXT, "getsockopt");
     real_getsockname = (real_getsockname_t)dlsym(RTLD_NEXT, "getsockname");
     real_getpeername = (real_getpeername_t)dlsym(RTLD_NEXT, "getpeername");
-    real_dup = (real_dup_t)dlsym(RTLD_NEXT, "dup");
+    real_fcntl = (real_fcntl_t)dlsym(RTLD_NEXT, "fcntl");
     real_close = (real_close_t)dlsym(RTLD_NEXT, "close");
 
     /* 64-bit variants (may be NULL on platforms that don't have them). */
@@ -2767,9 +2767,11 @@ static int bridge_dup_tagged_fd(int fd)
 {
     int dupfd;
 
-    if (!real_dup || !real_close)
+    if (!g_config.proxy_bridge_enabled)
         return -1;
-    dupfd = real_dup(fd);
+    if (!real_fcntl || !real_close)
+        return -1;
+    dupfd = real_fcntl(fd, F_DUPFD_CLOEXEC, 0);
     if (dupfd < 0)
         return -1;
     if (!bridge_fd_tagged(dupfd)) {

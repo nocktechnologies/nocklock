@@ -110,7 +110,7 @@ const proxyBridgeChildSource = `
 #include <unistd.h>
 
 static int connect_v4(int port) {
-    int fd = socket(AF_INET, SOCK_STREAM, 0);
+    int fd = socket(AF_INET, SOCK_STREAM | SOCK_CLOEXEC, 0);
     if (fd < 0) return -1;
     int one = 1;
     if (setsockopt(fd, IPPROTO_TCP, TCP_NODELAY, &one, sizeof(one)) != 0) return -2;
@@ -150,6 +150,9 @@ int main(void) {
         fprintf(stderr, "proxy connect failed rc=%d errno=%d\n", fd, errno);
         return 10;
     }
+    int fd_flags = fcntl(fd, F_GETFD);
+    if (fd_flags < 0) return 33;
+    if ((fd_flags & FD_CLOEXEC) == 0) return 34;
     int socket_error = -1;
     socklen_t socket_error_len = sizeof(socket_error);
     if (getsockopt(fd, SOL_SOCKET, SO_ERROR, &socket_error, &socket_error_len) != 0) return 14;

@@ -1,22 +1,22 @@
 # NockLock N10753 AF_INET-to-AF_UNIX Node/undici probe
-date_utc=2026-09-27T14:56:36Z
-repo_head=36d9e50
+date_utc=2026-09-27T15:10:34Z
+repo_head=d7fa93e
 kernel=Linux kevinlinux 7.0.0-30-generic #30~24.04.1-Ubuntu SMP PREEMPT_DYNAMIC Fri Aug  7 13:27:52 UTC 2 x86_64 x86_64 x86_64 GNU/Linux
 node=v22.23.2
 claude=2.1.281 (Claude Code)
 gcc=gcc (Ubuntu 13.3.0-6ubuntu2~24.04.1) 13.3.0
 
-compiled_shim=/home/kevinlinux/.claude-remote/default/tmp/ash/nocklock-n10753-probe.9kWg7R/inet_to_unix_probe.so
-proxy_unix_socket=/home/kevinlinux/.claude-remote/default/tmp/ash/nocklock-n10753-probe.9kWg7R/proxy.sock
-proxy_advertised_tcp=127.0.0.1:35611
+compiled_shim=/tmp/nocklock-n10753-probe.mklLnD/inet_to_unix_probe.so
+proxy_unix_socket=/tmp/nocklock-n10753-probe.mklLnD/proxy.sock
+proxy_advertised_tcp=127.0.0.1:48559
 
 ## case: control-no-preload
 exit=1
-  (node:988070) [UNDICI-EHPA] Warning: EnvHttpProxyAgent is experimental, expect them to change at any time.
+  (node:3732545) [UNDICI-EHPA] Warning: EnvHttpProxyAgent is experimental, expect them to change at any time.
   (Use `node --trace-warnings ...` to show where the warning was created)
   node_version=v22.23.2
   target=https://api.anthropic.com/
-  HTTPS_PROXY=http://127.0.0.1:35611
+  HTTPS_PROXY=http://127.0.0.1:48559
   NODE_USE_ENV_PROXY=1
   fetch_error_name=TypeError
   fetch_error_message=fetch failed
@@ -24,11 +24,11 @@ exit=1
 
 ## case: preload-no-fakes
 exit=1
-  (node:988268) [UNDICI-EHPA] Warning: EnvHttpProxyAgent is experimental, expect them to change at any time.
+  (node:3732775) [UNDICI-EHPA] Warning: EnvHttpProxyAgent is experimental, expect them to change at any time.
   (Use `node --trace-warnings ...` to show where the warning was created)
   node_version=v22.23.2
   target=https://api.anthropic.com/
-  HTTPS_PROXY=http://127.0.0.1:35611
+  HTTPS_PROXY=http://127.0.0.1:48559
   NODE_USE_ENV_PROXY=1
   shim: socket(domain=AF_INET,type=526337,protocol=0) -> unix fd=21
   shim: setsockopt(fd=21,level=IPPROTO_TCP,opt=1) -> rc=-1 errno=95
@@ -38,19 +38,19 @@ exit=1
 
 ## case: preload-fake-tcp-and-names
 exit=0
-  (node:988444) [UNDICI-EHPA] Warning: EnvHttpProxyAgent is experimental, expect them to change at any time.
+  (node:3733065) [UNDICI-EHPA] Warning: EnvHttpProxyAgent is experimental, expect them to change at any time.
   (Use `node --trace-warnings ...` to show where the warning was created)
   node_version=v22.23.2
   target=https://api.anthropic.com/
-  HTTPS_PROXY=http://127.0.0.1:35611
+  HTTPS_PROXY=http://127.0.0.1:48559
   NODE_USE_ENV_PROXY=1
   shim: socket(domain=AF_INET,type=526337,protocol=0) -> unix fd=21
   shim: setsockopt(fd=21,level=IPPROTO_TCP,opt=1) -> fake success
   shim: setsockopt(fd=21,level=IPPROTO_TCP,opt=4) -> fake success
   shim: setsockopt(fd=21,level=IPPROTO_TCP,opt=5) -> fake success
   shim: setsockopt(fd=21,level=IPPROTO_TCP,opt=6) -> fake success
-  shim: connect(fd=21) requested 127.0.0.1:35611
-  shim: connect(fd=21) -> AF_UNIX /home/kevinlinux/.claude-remote/default/tmp/ash/nocklock-n10753-probe.9kWg7R/proxy.sock
+  shim: connect(fd=21) requested 127.0.0.1:48559
+  shim: connect(fd=21) -> AF_UNIX /tmp/nocklock-n10753-probe.mklLnD/proxy.sock
   shim: setsockopt(fd=21,level=IPPROTO_TCP,opt=1) -> fake success
   shim: setsockopt(fd=21,level=IPPROTO_TCP,opt=4) -> fake success
   shim: setsockopt(fd=21,level=IPPROTO_TCP,opt=5) -> fake success
@@ -63,6 +63,6 @@ exit=0
   fetch_body_prefix=""
 
 ## proxy log
-  proxy: ready socket=/home/kevinlinux/.claude-remote/default/tmp/ash/nocklock-n10753-probe.9kWg7R/proxy.sock
+  proxy: ready socket=/tmp/nocklock-n10753-probe.mklLnD/proxy.sock
   proxy: request_line=CONNECT api.anthropic.com:443 HTTP/1.1
   proxy: connected_upstream=api.anthropic.com:443
