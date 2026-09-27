@@ -739,6 +739,14 @@ body to run, so a probe that needs two container launches (Probe 4, `4a`/`4b`)
 picks its half unambiguously. Read the inside-container snippets as the *body* of
 that bootstrap, not as commands typed into the outer shell.
 
+Because `New-Win32Process` does not return the child's stdout, `_inside.ps1` tees
+its verdict lines to `$out\_inside-<phase>.log` (`Start-Transcript` on entry, or
+`Out-File -Append` per line) and the outer session reads those logs to score each
+inside probe. Every "from INSIDE the container" verdict below — Probe 4's Phase 4a
+`Assert-AccessDenied` results, Probe 10's spawn, and the rest — reaches the operator
+this way; a container that just exits with nothing captured is a setup-vs-result
+ambiguity of the exact class this round removes.
+
 **Probe 9 is deferred and VM/throwaway-only. Do not run it on Kevin's desktop** —
 it turns the firewall off. See its own warning below.
 
@@ -777,8 +785,9 @@ shared scaffold above (no user-scope install to clean up):
 $sid = Get-NtSid -PackageName $moniker   # reused by Probes 4 and 11; persists for the run
 $sid.ToString()                          # record this SID string; the icacls probes need it
 # One SID-writable drop dir, created and ACL'd from the OUTER shell (which holds
-# WRITE_DAC; the Low-IL container does not). Inside-container steps that must hand a
-# value back out to the outer session use it — e.g. Probe 10's WMI child PID:
+# WRITE_DAC; the Low-IL container does not). Inside-container steps hand their verdict
+# logs and any value back out through it — every inside probe's `_inside-<phase>.log`
+# and Probe 10's WMI child PID (see the bootstrap note above):
 $out = New-Item -ItemType Directory -Force -Path (Join-Path $probeRoot 'out')
 icacls $out.FullName /grant "*${sid}:(OI)(CI)(M)"
 # zero-capability container:
