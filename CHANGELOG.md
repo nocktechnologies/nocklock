@@ -7,10 +7,8 @@ All notable changes to NockLock will be documented in this file.
 ### Added
 
 - Linux `filesystem.allow_rw` entries grant explicit read-write access while
-  existing `filesystem.allow` entries remain read-only. Read-write filesystem
-  roots now permit creating and removing entries directly in the root.
-  `nocklock verify` keeps its temporary probe files outside granted paths,
-  including `/tmp`.
+  existing `filesystem.allow` entries remain read-only. `nocklock verify` keeps
+  its temporary probe files outside granted paths, including `/tmp`.
 - Source builds now embed `git describe --tags --always --dirty` in
   `nocklock version`.
 

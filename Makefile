@@ -1,6 +1,6 @@
 .PHONY: build build-fence-fs build-all test clean clean-fence-fs install install-egress-helper fmt vet lint
 
-VERSION ?= $(shell git describe --tags --always --dirty 2>/dev/null | sed 's/^v//' || echo 0.1.0)
+VERSION ?= $(or $(shell git describe --tags --always --dirty 2>/dev/null | sed 's/^v//'),0.0.0-dev)
 LDFLAGS := -ldflags "-X github.com/nocktechnologies/nocklock/internal/version.Version=$(VERSION)"
 
 build:

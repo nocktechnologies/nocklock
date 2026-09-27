@@ -211,12 +211,8 @@ func TestRulesFromConfigEnumeratesRootButSkipsNockAuditDir(t *testing.T) {
 			t.Fatalf("ruleset granted audit path %q in %+v", rule.Path, spec.Paths)
 		}
 	}
-	rootRule, ok := findPathRule(spec.Paths, root)
-	if !ok {
-		t.Fatalf("missing structural root rule %q in %+v", root, spec.Paths)
-	}
-	if rootRule.Rights != rootMutationRights(5) {
-		t.Fatalf("root rights = %#x, want root-mutation rights %#x", rootRule.Rights, rootMutationRights(5))
+	if rootRule, ok := findPathRule(spec.Paths, root); ok {
+		t.Fatalf("ruleset unexpectedly granted read-write root %q: %+v", root, rootRule)
 	}
 	for _, want := range []string{readme, src} {
 		if !got[want] {
