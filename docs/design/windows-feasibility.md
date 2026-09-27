@@ -747,9 +747,15 @@ $requiredTools = @{
   'Probe 10' = @('curl.exe')
 }
 $setupFaults = @()
+$checkedTools = @{}
 foreach ($probe in $requiredTools.Keys) {
   foreach ($cmd in $requiredTools[$probe]) {
-    if (-not (Get-Command $cmd -ErrorAction SilentlyContinue)) {
+    if (-not $checkedTools.ContainsKey($cmd)) {
+      $loc = Get-Command $cmd -ErrorAction SilentlyContinue
+      $checkedTools[$cmd] = $loc
+      if ($loc) { "$cmd -> $($loc.Source)" }
+    }
+    if (-not $checkedTools[$cmd]) {
       $setupFaults += "$probe requires $cmd"
       "SETUP-FAULT: $probe requires $cmd — tool not found, probe not scored"
     }
@@ -781,6 +787,25 @@ function Assert-AccessDenied {
     $h = '0x{0:X8}' -f $_.Exception.HResult
     if ($h -eq '0x80070005') { "PASS(denied): $Label" }
     else { "FAIL(wrong-error): $Label -> $($_.Exception.GetType().FullName) HResult=$h" }
+  }
+}
+
+# Process-identity helpers. Bare PID cleanup can kill an unrelated process after
+# PID reuse; these record and verify PID + StartTime + Path before acting.
+function Write-ProcessIdentity {
+  param([System.Diagnostics.Process]$Proc, [string]$FilePath)
+  $info = '{0}|{1}|{2}' -f $Proc.Id, $Proc.StartTime.ToString('o'), $Proc.Path
+  Set-Content -Path $FilePath -Value $info
+}
+function Stop-VerifiedProcess {
+  param([string]$IdentityFile)
+  $raw = Get-Content $IdentityFile -ErrorAction SilentlyContinue
+  if (-not $raw -or $raw -like 'EXITED:*') { return }
+  $parts = $raw -split '\|',3
+  $probePid = [int]$parts[0]; $startTime = [datetime]$parts[1]; $path = $parts[2]
+  $proc = Get-Process -Id $probePid -ErrorAction SilentlyContinue
+  if ($proc -and $proc.StartTime.ToString('o') -eq $startTime.ToString('o') -and $proc.Path -eq $path) {
+    Stop-Process -Id $probePid -ErrorAction SilentlyContinue
   }
 }
 ```
@@ -850,15 +875,8 @@ winget install --id Python.Python.3.12 --scope user
 
 On the **desktop**, these tools must already be present. The shared scaffold's
 `Get-Command` checks record SETUP-FAULT for any probe whose prerequisites are
-missing. Record the environment stamps regardless:
-
-```powershell
-[Environment]::OSVersion.Version; (Get-ComputerInfo).WindowsProductName
-foreach ($cmd in @('git','node','python','curl.exe','npm')) {
-  $loc = Get-Command $cmd -ErrorAction SilentlyContinue
-  if ($loc) { "$cmd -> $($loc.Source)" } else { "SETUP-FAULT: $cmd not found" }
-}
-```
+missing and also log the resolved path, so the environment stamps are already
+captured — no second `Get-Command` loop needed.
 
 **Elevation over SSH.** OpenSSH on Windows gives a non-elevated shell, and `runas`
 cannot accept a password on stdin. For the steps marked ELEVATED, either (a) run
@@ -943,8 +961,7 @@ curl.exe -sS -m 5 http://127.0.0.1:9999/ 2>&1; "9999 exit=$LASTEXITCODE"  # unre
 # before stopping — bare PID reuse across the ~minutes a probe run takes can
 # kill an unrelated process.
 $listener = Start-Process -PassThru python -ArgumentList "-m","http.server","9998","--bind","127.0.0.1","--directory",$probeRoot
-$info = '{0}|{1}|{2}' -f $listener.Id, $listener.StartTime.ToString('o'), $listener.Path
-Set-Content -Path (Join-Path $out.FullName 'own-listener.txt') -Value $info
+Write-ProcessIdentity -Proc $listener -FilePath (Join-Path $out.FullName 'own-listener.txt')
 ```
 
 The first two must hold. The unrelated-port check (9999) is the all-loopback
@@ -976,20 +993,12 @@ becomes mandatory — report immediately, do not run the rest.
 
 **Teardown.** Stop all three `python` listeners: the two outer jobs by handle
 (`$job8899, $job9999 | Stop-Job -PassThru | Remove-Job`) and the inside 9998
-listener by verified identity — read PID + StartTime + Path from
-`own-listener.txt`, confirm the live process still matches, and skip if missing
-or mismatched (PID reuse after the process exited on its own):
+listener via the scaffold's `Stop-VerifiedProcess` (reads `own-listener.txt`,
+confirms PID + StartTime + Path still match the live process, skips if missing
+or mismatched):
 
 ```powershell
-$raw = Get-Content (Join-Path $out.FullName 'own-listener.txt') -ErrorAction SilentlyContinue
-if ($raw) {
-  $parts = $raw -split '\|',3
-  $probePid = [int]$parts[0]; $startTime = [datetime]$parts[1]; $path = $parts[2]
-  $proc = Get-Process -Id $probePid -ErrorAction SilentlyContinue
-  if ($proc -and $proc.StartTime.ToString('o') -eq $startTime.ToString('o') -and $proc.Path -eq $path) {
-    Stop-Process -Id $probePid
-  }
-}
+Stop-VerifiedProcess -IdentityFile (Join-Path $out.FullName 'own-listener.txt')
 ```
 
 Never `Get-Job | Stop-Job` — that kills every job in the operator's session. The
@@ -1363,8 +1372,7 @@ $p = Invoke-CimMethod -ClassName Win32_Process -MethodName Create `
   -Arguments @{CommandLine='powershell -NoProfile -Command "Start-Sleep 180"'}
 $wmiChild = Get-Process -Id $p.ProcessId -ErrorAction SilentlyContinue
 if ($wmiChild) {
-  $info = '{0}|{1}|{2}' -f $wmiChild.Id, $wmiChild.StartTime.ToString('o'), $wmiChild.Path
-  Set-Content -Path (Join-Path $out.FullName 'wmi-child.txt') -Value $info
+  Write-ProcessIdentity -Proc $wmiChild -FilePath (Join-Path $out.FullName 'wmi-child.txt')
 } else {
   Set-Content -Path (Join-Path $out.FullName 'wmi-child.txt') -Value "EXITED:$($p.ProcessId)"
 }
@@ -1463,19 +1471,9 @@ Remove-AppContainerProfile -Name "agent-escape-$stamp" 2>$null  # Probe 10, if c
 #  exact cmdlet spelling on the box if the name differs.)
 logman stop nocklock-fileprobe -ets 2>$null                # Probe 7 session, if it leaked
 # Reap spawned processes BEFORE deleting $probeRoot (identity files live there).
-# Read PID + StartTime + Path from each identity file and verify all three match
-# the live process before stopping — bare PID reuse can kill an unrelated process.
-# $probePid (not $pid — avoids shadowing PowerShell's automatic $PID).
 foreach ($idFile in (Get-ChildItem -Path $probeRoot -Filter '*.txt' -Recurse -ErrorAction SilentlyContinue |
     Where-Object { $_.Name -match '(own-listener|wmi-child)\.txt$' })) {
-  $raw = Get-Content $idFile.FullName -ErrorAction SilentlyContinue
-  if (-not $raw -or $raw -like 'EXITED:*') { continue }
-  $parts = $raw -split '\|',3
-  $probePid = [int]$parts[0]; $startTime = [datetime]$parts[1]; $path = $parts[2]
-  $proc = Get-Process -Id $probePid -ErrorAction SilentlyContinue
-  if ($proc -and $proc.StartTime.ToString('o') -eq $startTime.ToString('o') -and $proc.Path -eq $path) {
-    Stop-Process -Id $probePid -ErrorAction SilentlyContinue
-  }
+  Stop-VerifiedProcess -IdentityFile $idFile.FullName
 }
 # Probe 9 (VM only): restore firewall to the recorded per-profile state
 Remove-Item -Recurse -Force $probeRoot                     # everything else lived here
