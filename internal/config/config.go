@@ -2,6 +2,7 @@
 package config
 
 import (
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -76,7 +77,14 @@ func ResolveDBPath(cfg *Config, configPath string) (dbPath string, projectRoot s
 	for _, candidate := range candidates {
 		info, statErr := os.Lstat(candidate)
 		if statErr != nil {
-			continue
+			// Only "not there" means not there. A permission error, an I/O
+			// error or a symlink loop would otherwise read as absence, and wrap
+			// would start a FRESH chain while the real audit trail sat in the
+			// now-writable project root. Fail closed instead.
+			if errors.Is(statErr, os.ErrNotExist) {
+				continue
+			}
+			return "", projectRoot, fmt.Errorf("cannot determine whether an event log exists at %s: %w", candidate, statErr)
 		}
 		if info.Mode()&os.ModeSymlink != 0 {
 			return "", projectRoot, fmt.Errorf("refusing to use the event log at %s: path is a symlink", candidate)
@@ -320,6 +328,33 @@ func validateAuditDBLocation(cfg *Config, configPath string) error {
 		return fmt.Errorf("logging.db %q cannot be checked: the project root %q could not be resolved: %w", db, projectRoot, err)
 	}
 	if withinDir(absRoot, db) {
+		// Inside the project is allowed, but NOT directly in its top level. The
+		// fence protects an in-project audit trail by withholding the grant on
+		// the root and granting each child except the audit directory, which
+		// only works when the audit directory IS a child. With the log sitting
+		// in the root itself there is nothing to skip: Landlock grants whole
+		// hierarchies, so any rule that let the agent work would also expose the
+		// log. Say so here rather than failing later while building the ruleset.
+		dbDir := resolveExisting(filepath.Dir(db))
+		tops := []string{absRoot}
+		// filesystem.root need not be the project root, and it is the one the
+		// fence actually grants, so check both.
+		if fenceRoot := strings.TrimSpace(cfg.Filesystem.Root); fenceRoot != "" {
+			if expanded, expErr := expandHome(fenceRoot); expErr == nil {
+				if abs, absErr := filepath.Abs(expanded); absErr == nil {
+					tops = append(tops, abs)
+				}
+			}
+		}
+		for _, top := range tops {
+			if dbDir == resolveExisting(top) {
+				return fmt.Errorf(
+					"logging.db %q sits directly in %s. Put it in a subdirectory (for example %q) "+
+						"or leave logging.db as a bare filename so the event log goes to NockLock's audit "+
+						"state directory outside the project, which is the recommended setting",
+					db, top, filepath.Join(Dir, filepath.Base(db)))
+			}
+		}
 		return nil
 	}
 	stateDir, err := AuditStateDir(absRoot)
@@ -331,6 +366,23 @@ func validateAuditDBLocation(cfg *Config, configPath string) error {
 			"Use a relative name such as \"events.db\" to keep the event log in the audit state directory, "+
 			"which is where it belongs and where the fenced agent cannot reach it",
 		db, absRoot)
+}
+
+// expandHome replaces a leading ~ with the user's home directory. internal/fence/fs
+// exports the shared version, but it imports this package, so this leaf cannot
+// call it.
+func expandHome(path string) (string, error) {
+	if path != "~" && !strings.HasPrefix(path, "~/") {
+		return path, nil
+	}
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return "", err
+	}
+	if path == "~" {
+		return home, nil
+	}
+	return filepath.Join(home, path[2:]), nil
 }
 
 // withinDir reports whether path is dir or lies beneath it, comparing at

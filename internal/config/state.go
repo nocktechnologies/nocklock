@@ -128,7 +128,14 @@ func AuditStateDir(projectRoot string) (string, error) {
 // reboot on most systems, which /tmp does not.
 func auditStateLayout(projectRoot string) (base string, owned []string) {
 	key := projectStateKey(projectRoot)
-	if x := os.Getenv("XDG_STATE_HOME"); x != "" {
+	// A RELATIVE XDG_STATE_HOME is ignored, not honored. The XDG spec requires
+	// an absolute path, and a relative one resolves against the working
+	// directory -- which for a fenced run is the project itself, so a value like
+	// ".state" would build the supposedly external audit state INSIDE the
+	// writable fence root. Falling back to the home directory keeps the trail
+	// out of the project; a caller that wants a specific location can still set
+	// an absolute path.
+	if x := os.Getenv("XDG_STATE_HOME"); filepath.IsAbs(x) {
 		return x, []string{"nocklock", key}
 	}
 	if home, err := os.UserHomeDir(); err == nil && home != "" {

@@ -121,3 +121,69 @@ func TestAuditStateDirSeparatesProjects(t *testing.T) {
 		t.Fatalf("two projects share one audit state dir: %q", a)
 	}
 }
+
+// TestRelativeXDGStateHomeIsIgnored: a relative XDG_STATE_HOME resolves against
+// the working directory, which for a fenced run is the project itself — so
+// honoring ".state" would build the supposedly external audit state inside the
+// writable fence root. The XDG spec requires an absolute path; a relative one is
+// ignored in favour of the home directory.
+func TestRelativeXDGStateHomeIsIgnored(t *testing.T) {
+	project := resolvedTempDir(t)
+	t.Setenv("XDG_STATE_HOME", ".state")
+	t.Setenv("HOME", resolvedTempDir(t))
+	t.Chdir(project)
+
+	dir, err := AuditStateDir(project)
+	if err != nil {
+		t.Fatalf("AuditStateDir: %v", err)
+	}
+	if !filepath.IsAbs(dir) {
+		t.Fatalf("audit state dir %q is not absolute", dir)
+	}
+	if rel, relErr := filepath.Rel(project, dir); relErr == nil && !strings.HasPrefix(rel, "..") {
+		t.Fatalf("audit state dir %q landed inside the project %q", dir, project)
+	}
+}
+
+// TestLoadRejectsAuditLogDirectlyInProjectRoot: the fence protects an in-project
+// audit trail by withholding the grant on the root and granting each child
+// except the audit directory. With the log in the root itself there is nothing
+// to skip, so this is refused at config load rather than failing later while
+// building the ruleset.
+func TestLoadRejectsAuditLogDirectlyInProjectRoot(t *testing.T) {
+	project := resolvedTempDir(t)
+	nockDir := filepath.Join(project, ".nock")
+	if err := os.MkdirAll(nockDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	configPath := filepath.Join(nockDir, "config.toml")
+	rootLevel := filepath.Join(project, "events.db")
+	if err := os.WriteFile(configPath, []byte("[logging]\ndb = \""+rootLevel+"\"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := Load(configPath); err == nil {
+		t.Fatal("expected an audit log directly in the project root to be rejected")
+	} else if !strings.Contains(err.Error(), "directly in") {
+		t.Fatalf("expected a root-level audit log error, got: %v", err)
+	}
+}
+
+// TestLoadAcceptsAuditLogInProjectSubdirectory is the positive control: a
+// subdirectory of the project is protectable, so it still loads.
+func TestLoadAcceptsAuditLogInProjectSubdirectory(t *testing.T) {
+	project := resolvedTempDir(t)
+	nockDir := filepath.Join(project, ".nock")
+	if err := os.MkdirAll(nockDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	configPath := filepath.Join(nockDir, "config.toml")
+	nested := filepath.Join(nockDir, "events.db")
+	if err := os.WriteFile(configPath, []byte("[logging]\ndb = \""+nested+"\"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := Load(configPath); err != nil {
+		t.Fatalf("an audit log in a project subdirectory should load: %v", err)
+	}
+}
