@@ -275,8 +275,8 @@ func TestResolveDBPathRefusesTwoAuditChains(t *testing.T) {
 
 	if _, _, err := config.ResolveDBPath(cfg, configPath); err == nil {
 		t.Fatal("expected two coexisting audit chains to be refused")
-	} else if !strings.Contains(err.Error(), "two event logs") {
-		t.Fatalf("expected a two-logs error, got: %v", err)
+	} else if !strings.Contains(err.Error(), "event logs found") {
+		t.Fatalf("expected an event-logs-found error, got: %v", err)
 	}
 }
 

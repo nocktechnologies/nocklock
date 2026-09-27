@@ -131,3 +131,109 @@ func TestResolveDBPathAdoptsHandWrittenRelativeLog(t *testing.T) {
 		t.Fatalf("event log = %q, want the operator's existing log %q; a new chain would abandon it", dbPath, legacy)
 	}
 }
+
+// TestResolveDBPathRefusesTwoLegacyCandidates: a project can carry both the
+// conventional <root>/.nock/events.db log and a hand-written relative
+// logging.db (e.g. "logs/events.db") that also names an existing file.
+// ResolveDBPath used to stop scanning at the first candidate it found and
+// silently adopt it; if both are real logs it must refuse to pick a side and
+// name both instead.
+func TestResolveDBPathRefusesTwoLegacyCandidates(t *testing.T) {
+	projectRoot, configPath := writeProjectConfig(t, `db = "logs/events.db"`)
+	conventional := filepath.Join(projectRoot, config.Dir, "events.db")
+	if err := os.WriteFile(conventional, []byte("conventional chain"), 0o600); err != nil {
+		t.Fatalf("write conventional log: %v", err)
+	}
+	handWritten := filepath.Join(projectRoot, "logs", "events.db")
+	if err := os.MkdirAll(filepath.Dir(handWritten), 0o755); err != nil {
+		t.Fatalf("mkdir logs: %v", err)
+	}
+	if err := os.WriteFile(handWritten, []byte("hand-written chain"), 0o600); err != nil {
+		t.Fatalf("write hand-written log: %v", err)
+	}
+
+	cfg, err := config.Load(configPath)
+	if err != nil {
+		t.Fatalf("load config: %v", err)
+	}
+	_, _, err = config.ResolveDBPath(cfg, configPath)
+	if err == nil {
+		t.Fatal("expected two coexisting legacy candidates to be refused")
+	}
+	if !strings.Contains(err.Error(), "event logs found") {
+		t.Fatalf("expected an event-logs-found error, got: %v", err)
+	}
+	if !strings.Contains(err.Error(), conventional) || !strings.Contains(err.Error(), handWritten) {
+		t.Fatalf("expected the error to name both candidates %q and %q, got: %v", conventional, handWritten, err)
+	}
+}
+
+// TestResolveDBPathRefusesThreeAuditChains: with the conventional in-project
+// log, a hand-written relative log, AND the relocated state-dir log all
+// present, ResolveDBPath must refuse and name every one of the three -- not
+// just the first two it happens to find, which is exactly the bug the "stops
+// at the first match" scan used to have.
+func TestResolveDBPathRefusesThreeAuditChains(t *testing.T) {
+	projectRoot, configPath := writeProjectConfig(t, `db = "logs/events.db"`)
+	conventional := filepath.Join(projectRoot, config.Dir, "events.db")
+	if err := os.WriteFile(conventional, []byte("conventional chain"), 0o600); err != nil {
+		t.Fatalf("write conventional log: %v", err)
+	}
+	handWritten := filepath.Join(projectRoot, "logs", "events.db")
+	if err := os.MkdirAll(filepath.Dir(handWritten), 0o755); err != nil {
+		t.Fatalf("mkdir logs: %v", err)
+	}
+	if err := os.WriteFile(handWritten, []byte("hand-written chain"), 0o600); err != nil {
+		t.Fatalf("write hand-written log: %v", err)
+	}
+	stateDir, err := config.EnsureAuditStateDir(projectRoot)
+	if err != nil {
+		t.Fatalf("EnsureAuditStateDir: %v", err)
+	}
+	relocated := filepath.Join(stateDir, "events.db")
+	if err := os.WriteFile(relocated, []byte("relocated chain"), 0o600); err != nil {
+		t.Fatalf("write relocated log: %v", err)
+	}
+
+	cfg, err := config.Load(configPath)
+	if err != nil {
+		t.Fatalf("load config: %v", err)
+	}
+	_, _, err = config.ResolveDBPath(cfg, configPath)
+	if err == nil {
+		t.Fatal("expected three coexisting audit chains to be refused")
+	}
+	if !strings.Contains(err.Error(), "event logs found") {
+		t.Fatalf("expected an event-logs-found error, got: %v", err)
+	}
+	for _, want := range []string{conventional, handWritten, relocated} {
+		if !strings.Contains(err.Error(), want) {
+			t.Fatalf("expected the error to name %q among all three candidates, got: %v", want, err)
+		}
+	}
+}
+
+// TestResolveDBPathRejectsRelativeTraversal: a hand-written relative
+// logging.db containing ".." must not be allowed to join outside the project
+// root and get adopted as the authoritative log -- that would let a config a
+// repository ships aim the audit chain at a file the project does not own.
+func TestResolveDBPathRejectsRelativeTraversal(t *testing.T) {
+	projectRoot, configPath := writeProjectConfig(t, `db = "../audit/events.db"`)
+	outside := filepath.Join(filepath.Dir(projectRoot), "audit", "events.db")
+	if err := os.MkdirAll(filepath.Dir(outside), 0o755); err != nil {
+		t.Fatalf("mkdir outside dir: %v", err)
+	}
+	if err := os.WriteFile(outside, []byte("outside chain"), 0o600); err != nil {
+		t.Fatalf("write outside log: %v", err)
+	}
+
+	cfg, err := config.Load(configPath)
+	if err != nil {
+		t.Fatalf("load config: %v", err)
+	}
+	if _, _, err := config.ResolveDBPath(cfg, configPath); err == nil {
+		t.Fatal("expected a relative logging.db that traverses outside the project to be rejected")
+	} else if !strings.Contains(err.Error(), "logging.db") {
+		t.Fatalf("expected an error naming logging.db, got: %v", err)
+	}
+}

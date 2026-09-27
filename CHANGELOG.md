@@ -76,6 +76,16 @@ All notable changes to NockLock will be documented in this file.
     by Landlock, and rule generation is refused rather than shipping a fence
     that ignores the deny. Deny paths outside the root — including every entry
     in the shipped defaults and presets — are unaffected.
+- `ResolveDBPath` now refuses to guess between two coexisting legacy audit
+  chains inside a project: previously, if both the conventional
+  `<root>/.nock/<name>` log and a hand-written relative `logging.db` path
+  existed, the scan stopped at the first one it found and silently adopted it.
+  It now collects every existing, deduplicated candidate and refuses to start,
+  naming all of them, unless exactly one exists.
+- A relative `logging.db` containing a separator (for example
+  `../audit/events.db`) is now rejected at load if it would resolve outside
+  the project root, instead of silently being joined to the project root and
+  adopted as the authoritative legacy log wherever it landed.
 - Linux userspace proxy mode now bridges syscall-fenced children to the
   allowlist proxy without granting IP sockets (N10753). When the syscall fence
   narrows proxy-mode children to Unix sockets, `wrap` serves the HTTP(S) proxy on

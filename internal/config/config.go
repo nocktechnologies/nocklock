@@ -63,17 +63,46 @@ func ResolveDBPath(cfg *Config, configPath string) (dbPath string, projectRoot s
 	// The default logging.db is now the bare name "events.db", so treating the
 	// configured relative path as a candidate would make <projectRoot>/events.db
 	// -- plausibly a file the project owns -- look like NockLock's own state.
-	candidates := []string{filepath.Join(projectRoot, Dir, filepath.Base(configured))}
+	conventional := filepath.Join(projectRoot, Dir, filepath.Base(configured))
+	candidates := []string{conventional}
 	// A relative logging.db that contains a separator is a PATH the operator
 	// wrote by hand, and before the relocation it named a real in-project log,
 	// so honor it. A bare filename is deliberately NOT probed: it is what this
 	// version's own default carries, so no NockLock ever wrote a chain to
 	// <root>/<bare name>, and a file sitting there belongs to the project.
 	if cleaned := filepath.Clean(configured); cleaned != filepath.Base(cleaned) {
-		candidates = append(candidates, filepath.Join(projectRoot, cleaned))
+		joined := filepath.Join(projectRoot, cleaned)
+		// filepath.Join cleans ".." components away silently, so a hand-written
+		// "../audit/events.db" would otherwise join to a path outside the
+		// project and get adopted, below, as the AUTHORITATIVE log -- handing a
+		// file the fenced agent's own project never owned the same trust as a
+		// real audit chain. Refuse the config outright instead of just skipping
+		// the candidate: a config that names a path outside the project is
+		// invalid, not merely one with nothing to find there.
+		if !withinDir(projectRoot, joined) {
+			return "", projectRoot, fmt.Errorf("logging.db %q escapes the project root %s; use a path inside the project or a bare filename", configured, projectRoot)
+		}
+		if joined != conventional {
+			candidates = append(candidates, joined)
+		}
 	}
 
-	legacyDB := ""
+	// The relocated (state-dir) path only competes with an in-project
+	// candidate; with none present, that path is the DESTINATION for a fresh
+	// chain below, not a second chain to reconcile. Computed WITHOUT creating
+	// or validating the directory: probing must never have the side effect of
+	// creating it, and a project whose log stays in .nock never writes a byte
+	// there, so hard-failing it over the trust checks on a directory it does
+	// not use would refuse to run for no reason. The trust checks run below,
+	// through EnsureAuditStateDir, whenever this candidate is the one actually
+	// selected.
+	stateDB := ""
+	if stateDir, dirErr := AuditStateDir(projectRoot); dirErr == nil {
+		stateDB = filepath.Join(stateDir, filepath.Base(configured))
+		candidates = append(candidates, stateDB)
+	}
+
+	var existing []string
 	for _, candidate := range candidates {
 		info, statErr := os.Lstat(candidate)
 		if statErr != nil {
@@ -89,33 +118,26 @@ func ResolveDBPath(cfg *Config, configPath string) (dbPath string, projectRoot s
 		if info.Mode()&os.ModeSymlink != 0 {
 			return "", projectRoot, fmt.Errorf("refusing to use the event log at %s: path is a symlink", candidate)
 		}
-		legacyDB = candidate
-		break
+		existing = append(existing, candidate)
 	}
 
-	// Exactly one authoritative log per root. Two of them is an operator-visible
-	// state, not a race, so name the way out instead of picking a side: choosing
-	// silently would let a stale or tampered chain shadow the real one.
-	//
-	// The legacy branch computes the state path WITHOUT creating or validating
-	// the directory: a project whose log stays in .nock never writes a byte
-	// there, and hard-failing it over the trust checks on a directory it does
-	// not use would refuse to run for no reason. Lstat resolves intermediate
-	// symlinks itself, so an unresolved path still detects an existing log.
-	if legacyDB != "" {
-		stateDB, dirErr := AuditStateDir(projectRoot)
-		if dirErr == nil {
-			stateDB = filepath.Join(stateDB, filepath.Base(configured))
-			if _, statErr := os.Lstat(stateDB); statErr == nil {
-				return "", projectRoot, fmt.Errorf(
-					"two event logs found: %s (inside the project) and %s. "+
-						"NockLock will not guess which audit chain is authoritative. "+
-						"Verify each one, then move the one you are discarding aside "+
-						"(its -wal/-shm sidecars and chain anchor travel with it)",
-					legacyDB, stateDB)
-			}
-		}
-		return legacyDB, projectRoot, nil
+	// Exactly one authoritative log per root. More than one is an
+	// operator-visible state, not a race, so name every candidate instead of
+	// picking a side: choosing silently could run against a stale or tampered
+	// chain while the real one sits right next to it.
+	if len(existing) > 1 {
+		return "", projectRoot, fmt.Errorf(
+			"%d event logs found: %s. NockLock will not guess which audit chain is authoritative. "+
+				"Verify each one, then move the ones you are discarding aside "+
+				"(their -wal/-shm sidecars and chain anchors travel with them)",
+			len(existing), strings.Join(existing, ", "))
+	}
+	// The state-dir candidate, existing or not, is the one case that still
+	// needs EnsureAuditStateDir: unlike an in-project log, it carries the
+	// ownership/permission/symlink trust checks a directory NockLock itself
+	// manages requires, and AuditStateDir above deliberately skipped them.
+	if len(existing) == 1 && existing[0] != stateDB {
+		return existing[0], projectRoot, nil
 	}
 
 	stateDir, err := EnsureAuditStateDir(projectRoot)
@@ -313,8 +335,11 @@ func loadIntoWithMetadata(cfg *Config, path string) (toml.MetaData, error) {
 // load naming the setting, instead of a failure from deep inside the event
 // logger at the moment the fence starts.
 //
-// Relative paths need no check: they are resolved into the audit state
-// directory or the project's own .nock, never anywhere else (ResolveDBPath).
+// Relative paths need no check here: a hand-written relative path containing
+// a separator is confined to the project root by ResolveDBPath itself, which
+// rejects one that would traverse outside it before ever probing or returning
+// it. Every other relative path resolves into the audit state directory or
+// the project's own .nock, never anywhere else.
 func validateAuditDBLocation(cfg *Config, configPath string) error {
 	db := strings.TrimSpace(cfg.Logging.DB)
 	if db == "" || !filepath.IsAbs(db) {
