@@ -10,6 +10,8 @@ import (
 	"path/filepath"
 )
 
+var evalAuditStateRoot = filepath.EvalSymlinks
+
 // EnsureAuditStateDir returns the directory holding NockLock's own audit state
 // for the project rooted at projectRoot: the event log and its SQLite sidecars,
 // the chain anchor, and the per-session egress decision logs. It is created
@@ -36,6 +38,17 @@ import (
 // signing key under $XDG_CONFIG_HOME for the same reason.
 func EnsureAuditStateDir(projectRoot string) (string, error) {
 	base, owned, checkBase := auditStateLayout(projectRoot)
+	base, err := resolveAuditStateRoot(base)
+	if err != nil {
+		return "", err
+	}
+	return ensureAuditStateDirAt(base, owned, checkBase)
+}
+
+// resolveAuditStateRoot creates the non-NockLock-owned state root when needed
+// and resolves its symlinks before any NockLock-owned component is constructed
+// beneath it.
+func resolveAuditStateRoot(base string) (string, error) {
 	// The base may not exist yet ($XDG_STATE_HOME on a fresh account, or
 	// ~/.local/state). Create it with ordinary directory permissions: it is not
 	// NockLock's directory and forcing 0700 on a user's ~/.local would be
@@ -48,10 +61,16 @@ func EnsureAuditStateDir(projectRoot string) (string, error) {
 	// (/var/folders/...) are system links into /private, so refusing symlink
 	// components outright would reject ordinary paths. Everything NockLock
 	// creates BELOW the resolved root is held to the strict rule instead.
-	dir, err := filepath.EvalSymlinks(base)
+	dir, err := evalAuditStateRoot(base)
 	if err != nil {
 		return "", fmt.Errorf("cannot resolve the audit state root %s: %w", base, err)
 	}
+	return dir, nil
+}
+
+// ensureAuditStateDirAt creates and validates NockLock-owned components below
+// an already-resolved audit state root.
+func ensureAuditStateDirAt(dir string, owned []string, checkBase bool) (string, error) {
 	// The configured state root (XDG_STATE_HOME, or the ~/.local/state
 	// fallback) is never NockLock's own directory, so it is never created 0700
 	// like the components below it -- but a chain anchored under a base
