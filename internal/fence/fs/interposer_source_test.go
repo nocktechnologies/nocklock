@@ -170,6 +170,31 @@ func TestInterposerSourceTreatsProcFSMagicTargetsAsNonPaths(t *testing.T) {
 	}
 }
 
+func TestInterposerSourceCoversProxyBridgeHooks(t *testing.T) {
+	source, err := os.ReadFile("interposer/libfence_fs.c")
+	if err != nil {
+		t.Fatalf("read interposer source: %v", err)
+	}
+	text := string(source)
+
+	for _, pattern := range []string{
+		`getenv\s*\(\s*"NOCKLOCK_PROXY_UNIX_SOCKET"\s*\)`,
+		`getenv\s*\(\s*"NOCKLOCK_PROXY_TCP_ADDR"\s*\)`,
+		`int\s+socket\s*\(\s*int\s+domain\s*,\s*int\s+type\s*,\s*int\s+protocol\s*\)`,
+		`real_socket\s*\(\s*AF_UNIX\s*,\s*type\s*,\s*0\s*\)`,
+		`int\s+connect\s*\(\s*int\s+fd\s*,\s*const\s+struct\s+sockaddr\s+\*\s*addr\s*,\s*socklen_t\s+len\s*\)`,
+		`report_blocked\s*\(\s*"\(network\)"\s*,\s*"connect"\s*,\s*"unexpected AF_INET/AF_INET6 proxy bridge target"\s*\)`,
+		`int\s+setsockopt\s*\(\s*int\s+fd\s*,\s*int\s+level\s*,\s*int\s+optname\s*,\s*const\s+void\s+\*\s*optval\s*,\s*socklen_t\s+optlen\s*\)`,
+		`bridge_fd_tracked\s*\(\s*fd\s*\)\s*&&\s*level\s*==\s*IPPROTO_TCP`,
+		`int\s+getsockname\s*\(\s*int\s+fd\s*,\s*struct\s+sockaddr\s+\*\s*addr\s*,\s*socklen_t\s+\*\s*len\s*\)`,
+		`int\s+getpeername\s*\(\s*int\s+fd\s*,\s*struct\s+sockaddr\s+\*\s*addr\s*,\s*socklen_t\s+\*\s*len\s*\)`,
+	} {
+		if !regexp.MustCompile(pattern).MatchString(text) {
+			t.Fatalf("libfence_fs.c missing proxy bridge pattern %q", pattern)
+		}
+	}
+}
+
 func TestInterposerSourceBypassesATEmptyPathForNonPathFileDescriptors(t *testing.T) {
 	source, err := os.ReadFile("interposer/libfence_fs.c")
 	if err != nil {

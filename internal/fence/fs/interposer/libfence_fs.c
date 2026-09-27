@@ -19,6 +19,9 @@
 #include <errno.h>
 #include <fcntl.h>
 #include <limits.h>
+#include <arpa/inet.h>
+#include <netinet/in.h>
+#include <netinet/tcp.h>
 #include <pthread.h>
 #include <stdarg.h>
 #include <stdint.h>
@@ -40,6 +43,10 @@
 
 #define MAX_PATHS 256
 #define FIELD_SEP '\x1f'
+#define MAX_TRACKED_FD 65536
+#ifndef SOCK_TYPE_MASK
+#define SOCK_TYPE_MASK 0xf
+#endif
 
 typedef struct {
     char root[PATH_MAX];
@@ -49,12 +56,17 @@ typedef struct {
     int  allow_count;
     char deny[MAX_PATHS][PATH_MAX];
     int  deny_count;
+    char proxy_unix_socket[PATH_MAX];
+    char proxy_tcp_host[INET6_ADDRSTRLEN];
+    unsigned short proxy_tcp_port;
+    int proxy_bridge_enabled;
     int  initialized;
     int  deny_all;  /* 1 = block everything (config error, fail closed) */
 } fence_config_t;
 
 static fence_config_t g_config;
 static pthread_once_t g_init_once = PTHREAD_ONCE_INIT;
+static unsigned char g_swapped_fd[MAX_TRACKED_FD];
 
 /* ------------------------------------------------------------------ */
 /* Real function pointers                                              */
@@ -70,6 +82,13 @@ typedef int    (*real_mkdir_t)(const char *, mode_t);
 typedef int    (*real_rmdir_t)(const char *);
 typedef ssize_t (*real_readlink_t)(const char *, char *, size_t);
 typedef char * (*real_realpath_t)(const char *, char *);
+typedef int    (*real_socket_t)(int, int, int);
+typedef int    (*real_connect_t)(int, const struct sockaddr *, socklen_t);
+typedef int    (*real_setsockopt_t)(int, int, int, const void *, socklen_t);
+typedef int    (*real_getsockopt_t)(int, int, int, void *, socklen_t *);
+typedef int    (*real_getsockname_t)(int, struct sockaddr *, socklen_t *);
+typedef int    (*real_getpeername_t)(int, struct sockaddr *, socklen_t *);
+typedef int    (*real_close_t)(int);
 
 /* 64-bit variants */
 typedef int    (*real_open64_t)(const char *, int, ...);
@@ -112,6 +131,13 @@ static real_mkdir_t    real_mkdir;
 static real_rmdir_t    real_rmdir;
 static real_readlink_t real_readlink;
 static real_realpath_t real_realpath;
+static real_socket_t   real_socket;
+static real_connect_t  real_connect;
+static real_setsockopt_t real_setsockopt;
+static real_getsockopt_t real_getsockopt;
+static real_getsockname_t real_getsockname;
+static real_getpeername_t real_getpeername;
+static real_close_t real_close;
 
 /* 64-bit variants */
 static real_open64_t   real_open64;
@@ -506,6 +532,13 @@ static void fence_init(void)
     real_rmdir    = (real_rmdir_t)dlsym(RTLD_NEXT, "rmdir");
     real_readlink = (real_readlink_t)dlsym(RTLD_NEXT, "readlink");
     real_realpath = (real_realpath_t)dlsym(RTLD_NEXT, "realpath");
+    real_socket   = (real_socket_t)dlsym(RTLD_NEXT, "socket");
+    real_connect  = (real_connect_t)dlsym(RTLD_NEXT, "connect");
+    real_setsockopt = (real_setsockopt_t)dlsym(RTLD_NEXT, "setsockopt");
+    real_getsockopt = (real_getsockopt_t)dlsym(RTLD_NEXT, "getsockopt");
+    real_getsockname = (real_getsockname_t)dlsym(RTLD_NEXT, "getsockname");
+    real_getpeername = (real_getpeername_t)dlsym(RTLD_NEXT, "getpeername");
+    real_close = (real_close_t)dlsym(RTLD_NEXT, "close");
 
     /* 64-bit variants (may be NULL on platforms that don't have them). */
     real_open64    = (real_open64_t)dlsym(RTLD_NEXT, "open64");
@@ -537,6 +570,47 @@ static void fence_init(void)
     /* chdir family */
     real_chdir     = (real_chdir_t)dlsym(RTLD_NEXT, "chdir");
     real_fchdir    = (real_fchdir_t)dlsym(RTLD_NEXT, "fchdir");
+
+    const char *proxy_socket = getenv("NOCKLOCK_PROXY_UNIX_SOCKET");
+    const char *proxy_addr = getenv("NOCKLOCK_PROXY_TCP_ADDR");
+    if (proxy_socket && proxy_socket[0] != '\0' && proxy_addr && proxy_addr[0] != '\0') {
+        char addrbuf[256];
+        const char *host = addrbuf;
+        const char *portstr = NULL;
+        size_t hostlen = 0;
+        unsigned long port = 0;
+
+        strncpy(g_config.proxy_unix_socket, proxy_socket, PATH_MAX - 1);
+        g_config.proxy_unix_socket[PATH_MAX - 1] = '\0';
+
+        strncpy(addrbuf, proxy_addr, sizeof(addrbuf) - 1);
+        addrbuf[sizeof(addrbuf) - 1] = '\0';
+        if (addrbuf[0] == '[') {
+            char *end = strchr(addrbuf, ']');
+            if (end && end[1] == ':') {
+                *end = '\0';
+                host = addrbuf + 1;
+                portstr = end + 2;
+            }
+        } else {
+            char *colon = strrchr(addrbuf, ':');
+            if (colon) {
+                *colon = '\0';
+                portstr = colon + 1;
+            }
+        }
+        if (portstr && portstr[0] != '\0') {
+            port = strtoul(portstr, NULL, 10);
+            hostlen = strlen(host);
+            if (hostlen > 0 && hostlen < sizeof(g_config.proxy_tcp_host) &&
+                port > 0 && port <= 65535) {
+                strncpy(g_config.proxy_tcp_host, host, sizeof(g_config.proxy_tcp_host) - 1);
+                g_config.proxy_tcp_host[sizeof(g_config.proxy_tcp_host) - 1] = '\0';
+                g_config.proxy_tcp_port = (unsigned short)port;
+                g_config.proxy_bridge_enabled = 1;
+            }
+        }
+    }
 
     /* Parse NOCKLOCK_FS_ALLOWED environment variable. */
     const char *env = getenv("NOCKLOCK_FS_ALLOWED");
@@ -2582,3 +2656,187 @@ int statx(int dirfd, const char *pathname, int flags,
     errno = ENOSYS; return -1;
 }
 #endif /* __linux__ && __NR_statx && STATX_BASIC_STATS */
+
+/* ------------------------------------------------------------------ */
+/* Network proxy AF_INET -> AF_UNIX bridge                             */
+/* ------------------------------------------------------------------ */
+
+static int bridge_fd_tracked(int fd)
+{
+    return fd >= 0 && fd < MAX_TRACKED_FD && g_swapped_fd[fd];
+}
+
+static int bridge_expected_v4(const struct sockaddr_in *addr)
+{
+    struct in_addr expected;
+
+    if (!g_config.proxy_bridge_enabled || !addr)
+        return 0;
+    if (inet_pton(AF_INET, g_config.proxy_tcp_host, &expected) != 1)
+        return 0;
+    return addr->sin_addr.s_addr == expected.s_addr &&
+           ntohs(addr->sin_port) == g_config.proxy_tcp_port;
+}
+
+static int bridge_expected_v6(const struct sockaddr_in6 *addr)
+{
+    struct in6_addr expected;
+
+    if (!g_config.proxy_bridge_enabled || !addr)
+        return 0;
+    if (inet_pton(AF_INET6, g_config.proxy_tcp_host, &expected) != 1)
+        return 0;
+    return memcmp(&addr->sin6_addr, &expected, sizeof(expected)) == 0 &&
+           ntohs(addr->sin6_port) == g_config.proxy_tcp_port;
+}
+
+static int bridge_connect_unix(int fd)
+{
+    struct sockaddr_un un;
+
+    if (!g_config.proxy_bridge_enabled || g_config.proxy_unix_socket[0] == '\0') {
+        errno = EPERM;
+        return -1;
+    }
+    if (strlen(g_config.proxy_unix_socket) >= sizeof(un.sun_path)) {
+        errno = ENAMETOOLONG;
+        return -1;
+    }
+    memset(&un, 0, sizeof(un));
+    un.sun_family = AF_UNIX;
+    strncpy(un.sun_path, g_config.proxy_unix_socket, sizeof(un.sun_path) - 1);
+    return real_connect(fd, (const struct sockaddr *)&un, sizeof(un));
+}
+
+static int bridge_fake_name(struct sockaddr *addr, socklen_t *len)
+{
+    if (!addr || !len) {
+        errno = EINVAL;
+        return -1;
+    }
+    if (strchr(g_config.proxy_tcp_host, ':')) {
+        struct sockaddr_in6 in6;
+        if (*len < (socklen_t)sizeof(in6)) {
+            errno = EINVAL;
+            return -1;
+        }
+        memset(&in6, 0, sizeof(in6));
+        in6.sin6_family = AF_INET6;
+        in6.sin6_port = htons(g_config.proxy_tcp_port);
+        if (inet_pton(AF_INET6, g_config.proxy_tcp_host, &in6.sin6_addr) != 1) {
+            errno = EINVAL;
+            return -1;
+        }
+        memcpy(addr, &in6, sizeof(in6));
+        *len = sizeof(in6);
+        return 0;
+    }
+
+    struct sockaddr_in in;
+    if (*len < (socklen_t)sizeof(in)) {
+        errno = EINVAL;
+        return -1;
+    }
+    memset(&in, 0, sizeof(in));
+    in.sin_family = AF_INET;
+    in.sin_port = htons(g_config.proxy_tcp_port);
+    if (inet_pton(AF_INET, g_config.proxy_tcp_host, &in.sin_addr) != 1) {
+        errno = EINVAL;
+        return -1;
+    }
+    memcpy(addr, &in, sizeof(in));
+    *len = sizeof(in);
+    return 0;
+}
+
+int socket(int domain, int type, int protocol)
+{
+    pthread_once(&g_init_once, fence_init);
+
+    if (g_config.proxy_bridge_enabled &&
+        (domain == AF_INET || domain == AF_INET6) &&
+        ((type & SOCK_TYPE_MASK) == SOCK_STREAM)) {
+        int fd = real_socket(AF_UNIX, type, 0);
+        if (fd >= 0 && fd < MAX_TRACKED_FD)
+            g_swapped_fd[fd] = 1;
+        return fd;
+    }
+    return real_socket(domain, type, protocol);
+}
+
+int connect(int fd, const struct sockaddr *addr, socklen_t len)
+{
+    pthread_once(&g_init_once, fence_init);
+
+    if (bridge_fd_tracked(fd)) {
+        if (addr && addr->sa_family == AF_INET &&
+            len >= (socklen_t)sizeof(struct sockaddr_in) &&
+            bridge_expected_v4((const struct sockaddr_in *)addr)) {
+            return bridge_connect_unix(fd);
+        }
+        if (addr && addr->sa_family == AF_INET6 &&
+            len >= (socklen_t)sizeof(struct sockaddr_in6) &&
+            bridge_expected_v6((const struct sockaddr_in6 *)addr)) {
+            return bridge_connect_unix(fd);
+        }
+        report_blocked("(network)", "connect", "unexpected AF_INET/AF_INET6 proxy bridge target");
+        errno = EPERM;
+        return -1;
+    }
+    return real_connect(fd, addr, len);
+}
+
+int setsockopt(int fd, int level, int optname, const void *optval, socklen_t optlen)
+{
+    pthread_once(&g_init_once, fence_init);
+
+    if (bridge_fd_tracked(fd) && level == IPPROTO_TCP) {
+        (void)optname;
+        (void)optval;
+        (void)optlen;
+        return 0;
+    }
+    return real_setsockopt(fd, level, optname, optval, optlen);
+}
+
+int getsockopt(int fd, int level, int optname, void *optval, socklen_t *optlen)
+{
+    pthread_once(&g_init_once, fence_init);
+
+    if (bridge_fd_tracked(fd) && level == IPPROTO_TCP) {
+        if (optval && optlen && *optlen >= (socklen_t)sizeof(int)) {
+            *(int *)optval = 1;
+            *optlen = sizeof(int);
+        }
+        (void)optname;
+        return 0;
+    }
+    return real_getsockopt(fd, level, optname, optval, optlen);
+}
+
+int getsockname(int fd, struct sockaddr *addr, socklen_t *len)
+{
+    pthread_once(&g_init_once, fence_init);
+
+    if (bridge_fd_tracked(fd))
+        return bridge_fake_name(addr, len);
+    return real_getsockname(fd, addr, len);
+}
+
+int getpeername(int fd, struct sockaddr *addr, socklen_t *len)
+{
+    pthread_once(&g_init_once, fence_init);
+
+    if (bridge_fd_tracked(fd))
+        return bridge_fake_name(addr, len);
+    return real_getpeername(fd, addr, len);
+}
+
+int close(int fd)
+{
+    pthread_once(&g_init_once, fence_init);
+
+    if (fd >= 0 && fd < MAX_TRACKED_FD)
+        g_swapped_fd[fd] = 0;
+    return real_close(fd);
+}

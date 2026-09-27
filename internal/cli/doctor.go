@@ -396,30 +396,25 @@ func sanityDoctorChecks(cfg *config.Config, caps doctorCapabilities) []doctorChe
 		})
 	}
 
-	// Inert-allowlist footgun: on Linux, plain `nocklock wrap` (the userspace
-	// proxy) with the network fence active (allow_all = false) AND the syscall
-	// fence on narrows the child to unix-only sockets (buildSyscallPolicy /
-	// networkFenceProxy). The proxy that enforces network.allow listens on TCP
-	// 127.0.0.1, which the child can no longer reach — so the posture collapses
-	// to no-IP-network and the curated domain allowlist is inert (the agent
-	// reaches NONE of the allowed domains). doctor works from config alone and
-	// cannot see the runtime --net-fence flag, so it warns whenever the config
-	// COULD hit this; the message names the `--net-fence=netns` escape, where the
-	// child keeps inet/inet6 and the kernel egress floor enforces the allowlist
-	// (N10710), so the footgun does NOT apply there.
+	// Linux proxy mode with the syscall fence relies on the LD_PRELOAD interposer
+	// to bridge the advertised loopback proxy address onto a Unix socket. If the
+	// filesystem interposer is disabled entirely, the child is still narrowed to
+	// unix-only sockets but has no bridge to the userspace proxy, so the allowlist
+	// becomes unreachable.
 	if caps.goos == "linux" &&
 		!cfg.Network.AllowAll &&
 		len(cfg.Network.Allow) > 0 &&
+		cfg.Filesystem.Root == "" &&
 		syscallEnforcementMode(cfg.Syscall.Enforcement) != syscallfence.ModeOff {
 		checks = append(checks, doctorCheck{
 			Group:    "Sanity",
-			Name:     "network-allowlist-inert-under-syscall-fence",
+			Name:     "network-proxy-bridge-requires-filesystem-interposer",
 			Severity: doctorWarning,
 			Status:   "warning",
 			Message: fmt.Sprintf(
-				"Network allowlist is inert on Linux under plain `nocklock wrap`: the syscall fence restricts the child to unix-domain sockets while the userspace network proxy is active, so the agent gets no IP network at all — your %d allowed domain(s) are not selectively reachable. (Under `nocklock wrap --net-fence=netns` the child keeps IP sockets and the kernel egress floor enforces the allowlist, so this does not apply.)",
+				"Network allowlist cannot be reached on Linux because the syscall fence restricts proxy-mode children to unix-domain sockets, but filesystem.root is empty so the LD_PRELOAD proxy bridge is disabled; your %d allowed domain(s) are not selectively reachable.",
 				len(cfg.Network.Allow)),
-			Fix: "wrap with --net-fence=netns for a kernel-enforced domain allowlist; or, for a userspace-bypassable allowlist under plain wrap, set [syscall] enforcement = \"off\"; otherwise plain wrap is no-network by design and network.allow is documentation-only",
+			Fix: "enable the Linux filesystem interposer with filesystem.root, use --net-fence=netns, or set [syscall] enforcement = \"off\" if you accept the proxy as a userspace boundary",
 		})
 	}
 	if len(cfg.Secrets.Block) == 0 {

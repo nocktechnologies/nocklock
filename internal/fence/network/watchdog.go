@@ -3,6 +3,7 @@ package network
 import (
 	"context"
 	"io"
+	"net"
 	"net/http"
 	"time"
 )
@@ -32,6 +33,35 @@ func NewProxyWatchdog(addr string, interval time.Duration, failThreshold int, on
 	transport := &http.Transport{Proxy: nil}
 	return &ProxyWatchdog{
 		addr:          addr,
+		interval:      interval,
+		failThreshold: failThreshold,
+		onFailure:     onFailure,
+		transport:     transport,
+		client: &http.Client{
+			Transport: transport,
+			Timeout:   500 * time.Millisecond,
+			CheckRedirect: func(*http.Request, []*http.Request) error {
+				return http.ErrUseLastResponse
+			},
+		},
+	}
+}
+
+// NewUnixProxyWatchdog creates a watchdog that probes the proxy health endpoint
+// through a Unix domain socket.
+func NewUnixProxyWatchdog(socketPath string, interval time.Duration, failThreshold int, onFailure func()) *ProxyWatchdog {
+	if failThreshold < 1 {
+		failThreshold = 1
+	}
+	transport := &http.Transport{
+		Proxy: nil,
+		DialContext: func(ctx context.Context, _, _ string) (net.Conn, error) {
+			var d net.Dialer
+			return d.DialContext(ctx, "unix", socketPath)
+		},
+	}
+	return &ProxyWatchdog{
+		addr:          "nocklock.local",
 		interval:      interval,
 		failThreshold: failThreshold,
 		onFailure:     onFailure,
