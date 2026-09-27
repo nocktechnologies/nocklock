@@ -117,12 +117,12 @@ func TestCheckInterposerBudget_AllowPathCapWithShim(t *testing.T) {
 	reserve := len(SelfProcFiles())
 	room := maxAllowPaths - reserve
 
-	fc := &FenceConfig{Root: "/root", Mode: "read-write", AllowPaths: fakePaths(room)}
+	fc := &FenceConfig{Root: "/root", Mode: "read-write", AllowPaths: paths("/p", room, "f")}
 	if err := CheckInterposerBudget(fc, reserve); err != nil {
 		t.Fatalf("CheckInterposerBudget with %d allow paths (exactly the reserved cap) should succeed: %v", room, err)
 	}
 
-	fc.AllowPaths = fakePaths(room + 1)
+	fc.AllowPaths = paths("/p", room+1, "f")
 	if err := CheckInterposerBudget(fc, reserve); err == nil {
 		t.Fatalf("CheckInterposerBudget with %d allow paths (one past the reserved cap) should fail closed with a config error", room+1)
 	}
@@ -138,15 +138,15 @@ func TestCheckInterposerBudget_CombinedCapWithShim(t *testing.T) {
 	fc := &FenceConfig{
 		Root:       "/root",
 		Mode:       "read-write",
-		AllowPaths: fakePaths(room - 2),
-		DenyPaths:  fakePaths(2),
+		AllowPaths: paths("/p", room-2, "a"),
+		DenyPaths:  paths("/p", 2, "d"),
 	}
 	if err := CheckInterposerBudget(fc, reserve); err != nil {
 		t.Fatalf("CheckInterposerBudget with %d allow + %d deny (exactly the combined cap) should succeed: %v",
 			len(fc.AllowPaths), len(fc.DenyPaths), err)
 	}
 
-	fc.DenyPaths = fakePaths(3)
+	fc.DenyPaths = paths("/p", 3, "d")
 	if err := CheckInterposerBudget(fc, reserve); err == nil {
 		t.Fatalf("CheckInterposerBudget with %d allow + %d deny (one past the combined cap) should fail closed, "+
 			"even though neither list alone reaches maxAllowPaths", len(fc.AllowPaths), len(fc.DenyPaths))
@@ -161,13 +161,13 @@ func TestCheckInterposerBudget_UserspaceOnly(t *testing.T) {
 	fc := &FenceConfig{
 		Root:       "/root",
 		Mode:       "read-write",
-		AllowPaths: fakePaths(maxAllowPaths),
+		AllowPaths: paths("/p", maxAllowPaths, "f"),
 	}
 	if err := CheckInterposerBudget(fc, 0); err != nil {
 		t.Fatalf("userspace-only fence with %d allow paths (the full interposer budget) must succeed: %v", maxAllowPaths, err)
 	}
 
-	fc.AllowPaths = fakePaths(maxAllowPaths + 1)
+	fc.AllowPaths = paths("/p", maxAllowPaths+1, "f")
 	if err := CheckInterposerBudget(fc, 0); err == nil {
 		t.Fatalf("userspace-only fence with %d allow paths (one past the interposer budget) must still fail closed", maxAllowPaths+1)
 	}
@@ -176,14 +176,14 @@ func TestCheckInterposerBudget_UserspaceOnly(t *testing.T) {
 	fc = &FenceConfig{
 		Root:       "/root",
 		Mode:       "read-write",
-		AllowPaths: fakePaths(combined - 2),
-		DenyPaths:  fakePaths(2),
+		AllowPaths: paths("/p", combined-2, "a"),
+		DenyPaths:  paths("/p", 2, "d"),
 	}
 	if err := CheckInterposerBudget(fc, 0); err != nil {
 		t.Fatalf("userspace-only fence with %d combined paths (exactly the combined budget) must succeed: %v", combined, err)
 	}
 
-	fc.DenyPaths = fakePaths(3)
+	fc.DenyPaths = paths("/p", 3, "d")
 	if err := CheckInterposerBudget(fc, 0); err == nil {
 		t.Fatalf("userspace-only fence with %d combined paths (one past the combined budget) must still fail closed", combined+1)
 	}
@@ -194,17 +194,6 @@ func TestCheckInterposerBudget_NilConfig(t *testing.T) {
 	if err := CheckInterposerBudget(nil, 3); err != nil {
 		t.Fatalf("nil FenceConfig should not error: %v", err)
 	}
-}
-
-// fakePaths returns n synthetic paths for budget tests. These are not real
-// filesystem paths — CheckInterposerBudget operates on already-resolved
-// FenceConfig, so no resolution is needed.
-func fakePaths(n int) []string {
-	out := make([]string, n)
-	for i := range out {
-		out[i] = fmt.Sprintf("/p/%d", i)
-	}
-	return out
 }
 
 // TestProcessConfig_NoCapOnConfig verifies that ProcessConfig itself no longer

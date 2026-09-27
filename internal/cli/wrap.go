@@ -955,8 +955,18 @@ func validateWrapRuntimeConfig(cfg *config.Config) error {
 		if !fsfence.IsSupported() {
 			return fmt.Errorf("filesystem fence configured but not supported on %s", runtime.GOOS)
 		}
-		if _, err := fsfence.ProcessConfig(cfg.Filesystem); err != nil {
+		fsCfg, err := fsfence.ProcessConfig(cfg.Filesystem)
+		if err != nil {
 			return fmt.Errorf("invalid filesystem fence config: %w", err)
+		}
+		// Floor check with reserve=0: catches configs that exceed the
+		// interposer's absolute budget regardless of shim engagement.
+		// The exact check (with the real reserve) runs later in wrap,
+		// after the ABI probe and syscall-fence decision are final.
+		if runtime.GOOS == "linux" {
+			if err := fsfence.CheckInterposerBudget(fsCfg, 0); err != nil {
+				return fmt.Errorf("invalid filesystem fence config: %w", err)
+			}
 		}
 	}
 
