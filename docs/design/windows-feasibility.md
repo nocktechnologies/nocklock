@@ -1483,15 +1483,22 @@ if (Get-Module -ListAvailable NtObjectManager) {
   "SETUP-FAULT: NtObjectManager absent inside container — Probe 10 not scored"
   return
 }
-# (a) re-container escape:
+# (a) re-container escape: this whole probe runs INSIDE the zero-capability
+# container, so — unlike the shared scaffold's outer (Medium-IL) profile creation —
+# this New-AppContainerProfile can legitimately return E_ACCESSDENIED (the same
+# CreateAppContainerProfile-in-a-restricted-context denial the "What breaks" section
+# documents). A denial here IS containment holding for (a), not a probe crash, so it
+# gets its own verdict rather than an unhandled throw. Same reason and cmdlet-spelling
+# caveat as the shared scaffold; teardown removes the profile by name if registered.
 $escMoniker = "agent-escape-$runId"
-# Register this profile too (same reason and cmdlet-spelling caveat as the shared
-# scaffold): teardown removes it by name, so setup must create it or the redirection
-# never happens and teardown removes nothing.
-New-AppContainerProfile -Name $escMoniker -DisplayName $escMoniker -Description $escMoniker | Out-Null
-$s2 = Get-NtSid -PackageName $escMoniker
-New-Win32Process -CommandLine 'curl.exe -sS -m 5 https://example.com/' `
-  -AppContainerSid $s2 -Capabilities (Get-NtSid -KnownSid CapabilityInternetClient)
+try {
+  New-AppContainerProfile -Name $escMoniker -DisplayName $escMoniker -Description $escMoniker -ErrorAction Stop | Out-Null
+  $s2 = Get-NtSid -PackageName $escMoniker
+  New-Win32Process -CommandLine 'curl.exe -sS -m 5 https://example.com/' `
+    -AppContainerSid $s2 -Capabilities (Get-NtSid -KnownSid CapabilityInternetClient)
+} catch {
+  "VERDICT(a): could not create the escape AppContainer profile from inside the container -> $($_.Exception.GetType().FullName): $($_.Exception.Message) — contained, unless a later run from a different context succeeds"
+}
 
 # (b) WMI broker escape — the out-of-process spawn from (c). Inspect the child's
 # TOKEN, not just whether it ran: a WMI child may be spawned by the broker under the
