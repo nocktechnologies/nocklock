@@ -36,6 +36,7 @@ const (
 	EventSessionStart         EventType = "session_start"
 	EventSessionEnd           EventType = "session_end"
 	EventConfigLoaded         EventType = "config_loaded"
+	EventConfigDigest         EventType = "config.digest"
 )
 
 // formatTimestampForChain formats a time.Time as UTC RFC3339 with exactly 9 fractional second digits and trailing Z.
@@ -68,6 +69,7 @@ type QueryOptions struct {
 	Limit      int // 0 = default (100)
 	Offset     int
 	Descending bool // if true, order by timestamp DESC
+	ByID       bool // if true, order by insertion ID instead of timestamp
 }
 
 // Stats holds aggregate counts for events.
@@ -679,10 +681,14 @@ func (l *Logger) Query(opts QueryOptions) ([]Event, error) {
 		args = append(args, formatTimestampForChain(*opts.Until))
 	}
 
+	orderBy := "timestamp"
+	if opts.ByID {
+		orderBy = "id"
+	}
 	if opts.Descending {
-		query += " ORDER BY timestamp DESC"
+		query += " ORDER BY " + orderBy + " DESC"
 	} else {
-		query += " ORDER BY timestamp ASC"
+		query += " ORDER BY " + orderBy + " ASC"
 	}
 
 	limit := opts.Limit

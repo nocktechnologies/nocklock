@@ -251,9 +251,16 @@ func runAuditVerify(ctx context.Context, w io.Writer, pubFlag string) error {
 	if err != nil {
 		return fmt.Errorf("verification failed: %w", err)
 	}
+	history, err := inspectConfigDigestHistory(logger)
+	if err != nil {
+		return fmt.Errorf("config digest verification failed: %w", err)
+	}
 
 	// Format and print output
-	return writeAuditVerifyResult(w, result)
+	if err := writeAuditVerifyResult(w, result); err != nil {
+		return err
+	}
+	return writeConfigDigestVerifyResult(w, history)
 }
 
 // resolveVerifyPublicKey returns the Ed25519 public key to verify against, or
