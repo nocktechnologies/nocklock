@@ -718,37 +718,79 @@ WMI-token escape) and Phase 1 on
 
 ## Probes to run on a real Windows box
 
-Run as a **standard (non-admin) user** unless a step says elevated. Nothing here
-runs on the Linux build host. **These run on a real Windows desktop, so no probe
-may write, delete, rename, or change registry/firewall/machine state outside its
-own probe root** — the exceptions are called out below and each is undone in
-teardown.
+**The desktop probe shell is elevated** (see
+[Elevation on the desktop](#elevation-on-the-desktop--corrected-premise)). Steps
+whose answer depends on running *non*-elevated go through the scaffold's
+limited-token task, and each probe names which token and which launcher it uses.
+Nothing here runs on the Linux build host. **These run on a real Windows desktop,
+so no probe may write, delete, rename, or change registry/firewall/machine state
+outside its own probe root** — the exceptions are called out below and each is
+undone in teardown.
 
 ### Probe classification
 
 Every probe is one of two classes. **DESKTOP-SAFE** probes create only inside the
 probe root, install nothing, change no machine-wide state except the
-AppContainer profile and loopback exemption (both torn down), and can be fully
-cleaned up by deleting the probe root and running the global teardown.
+AppContainer profiles, the loopback exemption, and the run's limited-token
+scheduled task (all torn down by exact name), and can be fully cleaned up by
+deleting the probe root and running the global teardown.
 **DISPOSABLE-BOX ONLY** probes install software, change machine or user-scope
 package state, need a reboot, or cannot be fully torn down — run them in Windows
 Sandbox or a throwaway VM, never on the desktop.
 
-| Probe | Class | Reason |
-|---|---|---|
-| 1 — zero-capability loopback | DESKTOP-SAFE | Listeners inside probe root; loopback exemption torn down |
-| 2 — exemption elevation | DESKTOP-SAFE | Read-only check of Probe 1's exemption |
-| 3 — AppContainer launch | DESKTOP-SAFE | Transient container process |
-| 4 — ACL grant and deny | DESKTOP-SAFE | ACLs and dirs under probe root |
-| 5 (a) — toolchain offline | DESKTOP-SAFE | Runs pre-installed tools; artifacts under probe root |
-| 5 (b) — toolchain network-fetch | DISPOSABLE-BOX ONLY | `npm install`, `pip install` write only into the probe root, but exercise the package-manager install path |
-| 6 — brokered egress † | DESKTOP-SAFE † | † The `Start-Process "https://…"` step opens the operator's real browser and is DISPOSABLE-BOX ONLY; the remaining steps (nslookup, BITS, Invoke-WebRequest, curl) are desktop-safe |
-| 7 — ETW file events ‡ | DESKTOP-SAFE ‡ | ‡ Non-elevated `logman create/stop` only; the "add user to Performance Log Users" retry is DISPOSABLE-BOX ONLY (persistent group membership change) |
-| 8 — packaging no-admin | DISPOSABLE-BOX ONLY | Installs user-scope packages (winget, scoop) |
-| 9 — fail-open firewall | DISPOSABLE-BOX ONLY | Disables the firewall — VM-only |
-| 10 — container escape | DESKTOP-SAFE | Container profiles and WMI child torn down |
-| 11 — named pipe | DESKTOP-SAFE | In-memory kernel object vanishes when process exits |
-| Box setup | DISPOSABLE-BOX ONLY | Installs Git, Node, Python via winget |
+"Launcher" below is the scaffold's in-memory `Add-Type` launcher
+([`NockProbe.AC`](#launcher-desktop-path-add-type-pinvoke)); "limited task" is the
+scaffold's [limited-token runner](#limited-token-runner-desktop); "elevated shell"
+is the SSH session itself.
+
+| Probe | Class | Reason | Desktop launcher / token |
+|---|---|---|---|
+| 1 — zero-capability loopback | DESKTOP-SAFE | Listeners inside probe root; loopback exemption torn down | Launcher from the elevated shell; the `LoopbackExempt -a` step via the **limited task** |
+| 2 — exemption elevation | DESKTOP-SAFE | Read-only check of Probe 1's exemption | No launch; scored from Probe 1's `VERDICT(1-exempt)` |
+| 3 — AppContainer launch | DESKTOP-SAFE | Transient container process; its own profile torn down | **Entirely in the limited task**, launcher loaded there |
+| 4 — ACL grant and deny | DESKTOP-SAFE | ACLs and dirs under probe root | Launcher from the elevated shell |
+| 5 (a) — toolchain offline | DESKTOP-SAFE | Runs pre-installed tools; artifacts under probe root | Launcher from the elevated shell |
+| 5 (b) — toolchain network-fetch | DISPOSABLE-BOX ONLY | `npm install`, `pip install` write only into the probe root, but exercise the package-manager install path | Not run on the desktop |
+| 6 — brokered egress † | DESKTOP-SAFE † | † The `Start-Process "https://…"` step opens the operator's real browser and is DISPOSABLE-BOX ONLY; the remaining steps (nslookup, BITS, Invoke-WebRequest, curl) are desktop-safe | Launcher from the elevated shell |
+| 7 — ETW file events ‡ | DESKTOP-SAFE ‡ | ‡ Non-elevated `logman create/stop` only; the "add user to Performance Log Users" retry is DISPOSABLE-BOX ONLY (persistent group membership change) | No launch |
+| 8 — packaging no-admin | DISPOSABLE-BOX ONLY | Installs user-scope packages (winget, scoop) | Not run on the desktop |
+| 9 — fail-open firewall | DISPOSABLE-BOX ONLY | Disables the firewall — VM-only | Not run on the desktop (the VM uses the same launcher) |
+| 10 — container escape | DESKTOP-SAFE | Container profiles and WMI child torn down | Launcher from the elevated shell *and* inside the container (10(a)); token read by the launcher's `TokenSummary` (10(b)) |
+| 11 — named pipe | DESKTOP-SAFE | Pipe server disposed in teardown | Launcher from the elevated shell; pipe server is in-box .NET |
+| Box setup | DISPOSABLE-BOX ONLY | Installs Git, Node, Python via winget | — |
+
+### Elevation on the desktop — corrected premise
+
+An earlier revision said "OpenSSH on Windows gives a non-elevated shell." **That
+is false on Kevin's desktop.** For a member of the Administrators group, an
+OpenSSH logon receives the *full* (unfiltered) token — UAC's split token applies
+to interactive logons, not to this one. Mira's read-only precheck on the desktop
+(2026-09-27 23:3xZ), verbatim:
+
+```
+ps=5.1.26100.9549 | ntobj=False | python=C:\Users\kkwil\AppData\Local\Programs\Python\Python312\python.exe | curl=C:\Windows\system32\curl.exe | elevated=True | loopbackexempt_count=0 | ports_in_use(8899,9999,9998)=0
+```
+
+Left uncorrected, `elevated=True` produces three wrong-reason results: Probe 1's
+"register the exemption non-elevated first" silently runs elevated, so Probe 2
+records "admin not required" for the wrong reason; and Probe 3's
+`findstr "High Mandatory"` precondition fails before any container launches.
+
+So: steps marked ELEVATED run directly in the SSH shell. Steps that must run
+non-elevated — Probe 1's `LoopbackExempt -a` and all of Probe 3 — run through
+**one** mechanism, a Scheduled Task registered for the same user with
+`-RunLevel Limited` and triggered with `schtasks /Run`, which runs under the
+filtered (Medium-IL, Administrators deny-only) token. A positive control proves
+that token before anything routed through it is scored. `runas
+/trustlevel:0x20000` is not used: this revision could not show it yields a
+Medium-IL, non-admin token without a password prompt.
+
+### Desktop BEFORE baseline
+
+The precheck above is the documented BEFORE state for the desktop run:
+**0 loopback exemptions, ports 8899/9999/9998 free, NtObjectManager absent,
+session elevated.** The scaffold re-measures the first two at the start of the
+run, and the global teardown asserts both are restored.
 
 On the desktop run, required tools (python, git, node, curl) must already be
 present. The shared scaffold checks with `Get-Command` and records
@@ -759,6 +801,11 @@ installs. Disposable-box probes run on a throwaway VM where the teardown is
 **Target shell: Windows PowerShell 5.1** (`powershell.exe`, not `pwsh`).
 Do not use PS 7-only constructs: trailing `&`, `&&`, `||`, ternary `? :`,
 null-coalescing `??`, `-Parallel`, `Split-Path -LeafBase`, or `Clean` blocks.
+The launcher's C# is compiled by PS 5.1's `Add-Type`, which uses the .NET
+Framework 4.x compiler (C# 5): no `$"…"` interpolation, `?.`, `out var`, or
+expression-bodied members. **Neither `pwsh` nor a Windows host was available to
+this revision**, so the PowerShell and C# below were hand-checked against PS 5.1
+/ C# 5 rules, not executed; the first desktop run is their first execution.
 
 **Shared scaffold — set once at the top of the run.** Everything a probe creates
 lives under a fresh, run-unique root (a GUID), and the AppContainer moniker
@@ -808,14 +855,26 @@ foreach ($probe in $requiredTools.Keys) {
   }
 }
 
-# --- NtObjectManager module ---
-if (Get-Module -ListAvailable NtObjectManager) {
-  Import-Module NtObjectManager
-} elseif ($Mode -eq 'DisposableBox') {
+# --- BEFORE baseline (documented desktop precheck: 0 exemptions, ports free) ---
+$probePorts = 8899, 9999, 9998
+function Get-ExemptCount { @(CheckNetIsolation.exe LoopbackExempt -s | Select-String -Pattern 'S-1-15-2-').Count }
+function Get-BusyPorts   { @(Get-NetTCPConnection -State Listen -LocalPort $probePorts -ErrorAction SilentlyContinue).Count }
+$baseExempt = Get-ExemptCount
+$basePorts  = Get-BusyPorts
+"BEFORE: loopbackexempt_count=$baseExempt ports_in_use(8899,9999,9998)=$basePorts (documented desktop baseline: 0, 0)"
+if ($basePorts -ne 0) {
+  # A foreign listener on a probe port would answer Probe 1's curls: a wrong-reason pass.
+  $setupFaults += 'Probe 1 requires ports 8899/9999/9998 free'
+  "SETUP-FAULT: a probe port is already listening — Probe 1 not scored"
+}
+
+# --- NtObjectManager: disposable box only, never on the desktop ---
+# The scripted steps use the Add-Type launcher below on BOTH boxes. On a throwaway
+# VM, NtObjectManager may be fetched into the probe root for interactive
+# cross-checks; the desktop run never loads or installs it (precheck: ntobj=False).
+if ($Mode -eq 'DisposableBox') {
   Save-Module -Name NtObjectManager -Path (Join-Path $probeRoot 'modules') -Force
   Import-Module (Join-Path $probeRoot 'modules\NtObjectManager')
-} else {
-  "SETUP-FAULT: NtObjectManager absent — run Install-Module NtObjectManager in a prior session"
 }
 
 # Denial helper used by every "MUST fail" step. It discriminates the HResult:
@@ -832,9 +891,12 @@ function Assert-AccessDenied {
   try { & $Action | Out-Null; "FAIL(no-error): $Label" }
   catch [System.UnauthorizedAccessException] { "PASS(denied): $Label" }
   catch {
-    $h = '0x{0:X8}' -f $_.Exception.HResult
+    # GetBaseException(): a denial from a .NET method call (e.g. a pipe Connect)
+    # arrives wrapped in PowerShell's MethodInvocationException.
+    $b = $_.Exception.GetBaseException()
+    $h = '0x{0:X8}' -f $b.HResult
     if ($h -eq '0x80070005') { "PASS(denied): $Label" }
-    else { "FAIL(wrong-error): $Label -> $($_.Exception.GetType().FullName) HResult=$h" }
+    else { "FAIL(wrong-error): $Label -> $($b.GetType().FullName) HResult=$h" }
   }
 }
 
@@ -865,17 +927,21 @@ function Stop-VerifiedProcess {
 }
 ```
 
-**Two things the probe root cannot contain** — both unavoidable, both covered
-only by the global teardown, never left behind:
+**Three things the probe root cannot contain** — all unavoidable, all removed by
+exact name in the global teardown, never left behind:
 
-- `CreateAppContainerProfile` (the scaffold's explicit `New-AppContainerProfile`
-  call below) materialises `%LOCALAPPDATA%\Packages\<moniker>\`, outside the root;
-  `Get-NtSid -PackageName` only derives the SID and creates nothing. The run-unique
-  (GUID) moniker keeps reruns from colliding; teardown removes the profile.
+- `CreateAppContainerProfile` (the launcher's `CreateProfile`) materialises
+  `%LOCALAPPDATA%\Packages\<moniker>\` and a per-user `AppContainer\Mappings`
+  registry key, outside the root. The run-unique (GUID) monikers —
+  `nocklock-probe-$runId`, Probe 3's `nocklock-p3-$runId`, Probe 10's
+  `agent-escape-$runId` — keep reruns from colliding; teardown deletes each.
 - The loopback exemption list is machine-wide; teardown clears the entry.
+- The limited-token scheduled task `nocklock-probe-limited-$runId`; teardown
+  stops and unregisters it by that exact name. (Task Scheduler's own history log
+  may record its runs; that is log content, not configuration, and is left as-is.)
 
-**Getting the scaffold *into* the container.** `New-Win32Process` launches a
-*fresh* process, so none of `$probeRoot`, `$moniker`, `$sid`, `$runId`, `$out`,
+**Getting the scaffold *into* the container.** The launcher starts a *fresh*
+process, so none of `$probeRoot`, `$moniker`, `$sid`, `$runId`, `$out`,
 or `Assert-AccessDenied` crosses into it — every "from INSIDE the container"
 snippet below assumes they have been re-established there. The launcher does this
 by writing a bootstrap `_inside.ps1` into `$probeRoot` (which it ACLs to the
@@ -895,8 +961,9 @@ them from `$probeRoot` the same way. Each inside-container step runs as:
 ```powershell
 # Quote the script path: $probeRoot can contain a space (C:\Users\John Doe\...),
 # which would otherwise split the command line and break every inside launch.
-New-Win32Process -CommandLine ('powershell -NoProfile -ExecutionPolicy Bypass -File "' +
-  (Join-Path $probeRoot '_inside.ps1') + '" -Phase <name>')
+# Zero capabilities (@()) unless a probe says otherwise; waits up to 5 min, returns the exit code.
+[NockProbe.AC]::Run($sid, @(), ('powershell -NoProfile -ExecutionPolicy Bypass -File "' +
+  (Join-Path $probeRoot '_inside.ps1') + '" -Phase <name>'), 300000)
 ```
 
 The `-Phase` argument selects which
@@ -904,7 +971,7 @@ body to run, so a probe that needs two container launches (Probe 4, `4a`/`4b`)
 picks its half unambiguously. Read the inside-container snippets as the *body* of
 that bootstrap, not as commands typed into the outer shell.
 
-Because `New-Win32Process` does not return the child's stdout, `_inside.ps1` tees
+Because the launcher returns only the exit code, not the child's stdout, `_inside.ps1` tees
 its verdict lines to `$out\_inside-<phase>.log` (`Start-Transcript` on entry, or
 `Out-File -Append` per line) and the outer session reads those logs to score each
 inside probe. Every "from INSIDE the container" verdict below — Probe 4's Phase 4a
@@ -941,47 +1008,315 @@ On the **desktop**, these tools must already be present. The shared scaffold's
 missing and also log the resolved path, so the environment stamps are already
 captured — no second `Get-Command` loop needed.
 
-**Elevation over SSH.** OpenSSH on Windows gives a non-elevated shell, and `runas`
-cannot accept a password on stdin. For the steps marked ELEVATED, either (a) run
-the OpenSSH service as `LocalSystem` and use `psexec -s -i`, (b) pre-create a
-Scheduled Task registered to run with highest privileges and trigger it with
-`schtasks /Run`, or (c) have Kevin approve the UAC prompt interactively at the
-console. Option (b) is the one to script.
+**Elevation.** The desktop SSH shell is already elevated — see
+[the corrected premise](#elevation-on-the-desktop--corrected-premise). Steps
+marked ELEVATED run in it directly; steps that must run non-elevated go through
+the [limited-token runner](#limited-token-runner-desktop).
 
-**Launcher prerequisite (probes 1, 3, 4, 5, 6, 9, 10).** These need a tool that
-creates an AppContainer profile with a chosen capability set and runs a command
-in it. Do **not** write one from scratch — use James Forshaw's
-[NtObjectManager](https://www.powershellgallery.com/packages/NtObjectManager)
-PowerShell module, loaded by the shared scaffold above (on the desktop it must
-be pre-installed; on a disposable box `Save-Module` fetches it into the probe
-root):
+#### Launcher (desktop path): Add-Type P/Invoke
+
+Probes 1, 3, 4, 5, 6, 9, 10 and 11 need a tool that creates an AppContainer
+profile with a chosen capability set and runs a command in it. NtObjectManager is
+**absent on the desktop** (precheck `ntobj=False`) and nothing is installed there,
+so the launcher is an in-memory `Add-Type` P/Invoke over the launch sequence in
+[(a)](#a-filesystem-confinement-for-a-child-process-tree). It is the path every
+scripted step uses on both boxes; NtObjectManager stays a disposable-box
+cross-check. It is throwaway probe scaffolding, not product code.
+
+`run-probe.ps1` writes two files into `$probeRoot` and grants the package SID
+read on both (as it does `_inside.ps1`), because Probe 10(a) loads the launcher
+*inside* the container. `_launcher.cs`:
+
+```csharp
+using System;
+using System.Runtime.InteropServices;
+using System.Security.Principal;
+using System.Text;
+
+namespace NockProbe {
+  public static class AC {
+    [StructLayout(LayoutKind.Sequential)]
+    struct SID_AND_ATTRIBUTES { public IntPtr Sid; public uint Attributes; }
+    [StructLayout(LayoutKind.Sequential)]
+    struct SECURITY_CAPABILITIES { public IntPtr AppContainerSid; public IntPtr Capabilities; public uint CapabilityCount; public uint Reserved; }
+    [StructLayout(LayoutKind.Sequential, CharSet = CharSet.Unicode)]
+    struct STARTUPINFO {
+      public int cb; public string lpReserved, lpDesktop, lpTitle;
+      public int dwX, dwY, dwXSize, dwYSize, dwXCountChars, dwYCountChars, dwFillAttribute, dwFlags;
+      public short wShowWindow, cbReserved2; public IntPtr lpReserved2, hStdInput, hStdOutput, hStdError;
+    }
+    [StructLayout(LayoutKind.Sequential)]
+    struct STARTUPINFOEX { public STARTUPINFO StartupInfo; public IntPtr lpAttributeList; }
+    [StructLayout(LayoutKind.Sequential)]
+    struct PROCESS_INFORMATION { public IntPtr hProcess, hThread; public int dwProcessId, dwThreadId; }
+
+    [DllImport("userenv.dll", CharSet = CharSet.Unicode)]
+    static extern int CreateAppContainerProfile(string name, string display, string desc, IntPtr caps, uint capCount, out IntPtr sid);
+    [DllImport("userenv.dll", CharSet = CharSet.Unicode)]
+    static extern int DeleteAppContainerProfile(string name);
+    [DllImport("advapi32.dll")] static extern IntPtr FreeSid(IntPtr sid);
+    [DllImport("advapi32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+    static extern bool ConvertStringSidToSid(string s, out IntPtr sid);
+    [DllImport("kernel32.dll")] static extern IntPtr LocalFree(IntPtr p);
+    [DllImport("kernel32.dll", SetLastError = true)]
+    static extern bool InitializeProcThreadAttributeList(IntPtr list, int count, int flags, ref IntPtr size);
+    [DllImport("kernel32.dll", SetLastError = true)]
+    static extern bool UpdateProcThreadAttribute(IntPtr list, uint flags, IntPtr attr, IntPtr value, IntPtr size, IntPtr prev, IntPtr retSize);
+    [DllImport("kernel32.dll")] static extern void DeleteProcThreadAttributeList(IntPtr list);
+    [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+    static extern bool CreateProcess(string app, StringBuilder cmd, IntPtr pa, IntPtr ta, bool inherit, uint flags,
+      IntPtr env, string cwd, ref STARTUPINFOEX si, out PROCESS_INFORMATION pi);
+    [DllImport("kernel32.dll", SetLastError = true)] static extern uint WaitForSingleObject(IntPtr h, uint ms);
+    [DllImport("kernel32.dll", SetLastError = true)] static extern bool GetExitCodeProcess(IntPtr h, out uint code);
+    [DllImport("kernel32.dll", SetLastError = true)] static extern bool TerminateProcess(IntPtr h, uint code);
+    [DllImport("kernel32.dll")] static extern bool CloseHandle(IntPtr h);
+    [DllImport("kernel32.dll", SetLastError = true)] static extern IntPtr OpenProcess(uint access, bool inherit, int pid);
+    [DllImport("advapi32.dll", SetLastError = true)] static extern bool OpenProcessToken(IntPtr proc, uint access, out IntPtr tok);
+    [DllImport("advapi32.dll", SetLastError = true)]
+    static extern bool GetTokenInformation(IntPtr tok, int cls, IntPtr buf, int len, out int retLen);
+
+    // Win32 failure -> HRESULT_FROM_WIN32 exception, so E_ACCESSDENIED surfaces as
+    // UnauthorizedAccessException with HResult 0x80070005 (callers use GetBaseException()).
+    static void Check(bool ok) {
+      if (!ok) Marshal.ThrowExceptionForHR(unchecked((int)0x80070000) | Marshal.GetLastWin32Error());
+    }
+
+    // CreateAppContainerProfile with no capabilities; returns the package SID string.
+    // Throws if the profile already exists: with a GUID moniker that is a bug, not a profile to adopt.
+    public static string CreateProfile(string name) {
+      IntPtr sid;
+      Marshal.ThrowExceptionForHR(CreateAppContainerProfile(name, name, name, IntPtr.Zero, 0, out sid));
+      try { return new SecurityIdentifier(sid).Value; } finally { FreeSid(sid); }
+    }
+
+    // DeleteAppContainerProfile; returns the HRESULT (teardown prints it, never throws).
+    public static int DeleteProfile(string name) { return DeleteAppContainerProfile(name); }
+
+    // Starts cmdLine as an AppContainer process for packageSid holding exactly capabilitySids
+    // (empty = zero capabilities), cwd = System32 (readable by ALL APPLICATION PACKAGES).
+    // Waits up to timeoutMs (then terminates it and throws) and returns the exit code.
+    public static int Run(string packageSid, string[] capabilitySids, string cmdLine, int timeoutMs) {
+      IntPtr acSid = IntPtr.Zero, caps = IntPtr.Zero, sc = IntPtr.Zero, list = IntPtr.Zero;
+      IntPtr[] capPtrs = new IntPtr[capabilitySids.Length];
+      bool listInit = false;
+      try {
+        Check(ConvertStringSidToSid(packageSid, out acSid));
+        int saSize = Marshal.SizeOf(typeof(SID_AND_ATTRIBUTES));
+        if (capabilitySids.Length > 0) {
+          caps = Marshal.AllocHGlobal(saSize * capabilitySids.Length);
+          for (int i = 0; i < capabilitySids.Length; i++) {
+            Check(ConvertStringSidToSid(capabilitySids[i], out capPtrs[i]));
+            SID_AND_ATTRIBUTES sa = new SID_AND_ATTRIBUTES();
+            sa.Sid = capPtrs[i]; sa.Attributes = 0x4;   // SE_GROUP_ENABLED
+            Marshal.StructureToPtr(sa, caps + i * saSize, false);
+          }
+        }
+        SECURITY_CAPABILITIES s = new SECURITY_CAPABILITIES();
+        s.AppContainerSid = acSid; s.Capabilities = caps; s.CapabilityCount = (uint)capabilitySids.Length;
+        sc = Marshal.AllocHGlobal(Marshal.SizeOf(typeof(SECURITY_CAPABILITIES)));
+        Marshal.StructureToPtr(s, sc, false);
+
+        IntPtr size = IntPtr.Zero;
+        InitializeProcThreadAttributeList(IntPtr.Zero, 1, 0, ref size);   // sizing call; fails by design
+        list = Marshal.AllocHGlobal(size);
+        Check(InitializeProcThreadAttributeList(list, 1, 0, ref size));
+        listInit = true;
+        Check(UpdateProcThreadAttribute(list, 0, (IntPtr)0x00020009,        // PROC_THREAD_ATTRIBUTE_SECURITY_CAPABILITIES
+          sc, (IntPtr)Marshal.SizeOf(typeof(SECURITY_CAPABILITIES)), IntPtr.Zero, IntPtr.Zero));
+
+        STARTUPINFOEX si = new STARTUPINFOEX();
+        si.StartupInfo.cb = Marshal.SizeOf(typeof(STARTUPINFOEX));
+        si.lpAttributeList = list;
+        PROCESS_INFORMATION pi;
+        Check(CreateProcess(null, new StringBuilder(cmdLine), IntPtr.Zero, IntPtr.Zero, false,
+          0x00080000 | 0x08000000,                                          // EXTENDED_STARTUPINFO_PRESENT | CREATE_NO_WINDOW
+          IntPtr.Zero, Environment.SystemDirectory, ref si, out pi));
+        try {
+          if (WaitForSingleObject(pi.hProcess, (uint)timeoutMs) != 0) {
+            TerminateProcess(pi.hProcess, 1);
+            throw new TimeoutException("container process exceeded " + timeoutMs + " ms and was terminated");
+          }
+          uint code;
+          Check(GetExitCodeProcess(pi.hProcess, out code));
+          return (int)code;
+        } finally { CloseHandle(pi.hThread); CloseHandle(pi.hProcess); }
+      } finally {
+        if (listInit) DeleteProcThreadAttributeList(list);
+        if (list != IntPtr.Zero) Marshal.FreeHGlobal(list);
+        if (sc != IntPtr.Zero) Marshal.FreeHGlobal(sc);
+        if (caps != IntPtr.Zero) Marshal.FreeHGlobal(caps);
+        foreach (IntPtr p in capPtrs) if (p != IntPtr.Zero) LocalFree(p);
+        if (acSid != IntPtr.Zero) LocalFree(acSid);
+      }
+    }
+
+    // A live process's token: AppContainer flag, package SID, integrity-level SID
+    // (S-1-16-4096 Low, -8192 Medium, -12288 High). Throws if it cannot be opened.
+    public static string TokenSummary(int pid) {
+      IntPtr h = OpenProcess(0x1000, false, pid);                         // PROCESS_QUERY_LIMITED_INFORMATION
+      Check(h != IntPtr.Zero);
+      IntPtr tok = IntPtr.Zero, buf = Marshal.AllocHGlobal(256);
+      try {
+        int len;
+        Check(OpenProcessToken(h, 0x0008, out tok));                       // TOKEN_QUERY
+        Check(GetTokenInformation(tok, 29, buf, 4, out len));             // TokenIsAppContainer
+        bool isAc = Marshal.ReadInt32(buf) != 0;
+        Check(GetTokenInformation(tok, 31, buf, 256, out len));           // TokenAppContainerSid
+        IntPtr pkg = Marshal.ReadIntPtr(buf);
+        string pkgSid = pkg == IntPtr.Zero ? "-" : new SecurityIdentifier(pkg).Value;
+        Check(GetTokenInformation(tok, 25, buf, 256, out len));           // TokenIntegrityLevel
+        string il = new SecurityIdentifier(Marshal.ReadIntPtr(buf)).Value;
+        return "AppContainer=" + isAc + " PackageSid=" + pkgSid + " IntegrityLevel=" + il;
+      } finally {
+        if (tok != IntPtr.Zero) CloseHandle(tok);
+        CloseHandle(h);
+        Marshal.FreeHGlobal(buf);
+      }
+    }
+  }
+}
+```
+
+`_launcher.ps1` loads it. PS 5.1's `Add-Type` compiles through CodeDom/`csc.exe`,
+which writes transient `.cs`/`.cmdline`/`.dll` files to `Path.GetTempPath()` (TMP,
+then TEMP) before loading the assembly from memory — so the compile is pointed at
+a scratch dir **inside the probe root**, and nothing lands outside it:
 
 ```powershell
-# Register the profile explicitly: deriving the SID does NOT create it, and the
-# %LOCALAPPDATA%\Packages\<moniker>\ redirection the probes rely on — plus anything
-# for teardown's Remove-AppContainerProfile to remove — only exists once the profile
-# is registered. Wraps CreateAppContainerProfile; the GUID moniker guarantees it does
-# not already exist. Resolve the exact cmdlet spelling on the box if the name differs
-# (the NtObjectManager verb may be New-NtAppContainerProfile).
-New-AppContainerProfile -Name $moniker -DisplayName $moniker -Description $moniker -ErrorAction Stop | Out-Null
-$sid = Get-NtSid -PackageName $moniker   # reused by Probes 4 and 11; persists for the run
-$sid.ToString()                          # record this SID string; the icacls probes need it
+# Dot-source: . (Join-Path $probeRoot '_launcher.ps1') -Scratch <dir under $probeRoot>
+param([Parameter(Mandatory = $true)][string]$Scratch)
+New-Item -ItemType Directory -Force -Path $Scratch | Out-Null
+$oldTmp = $env:TMP; $oldTemp = $env:TEMP
+$env:TMP = $Scratch; $env:TEMP = $Scratch
+try {
+  Add-Type -TypeDefinition (Get-Content -Raw (Join-Path $PSScriptRoot '_launcher.cs')) -ErrorAction Stop
+} finally {
+  $env:TMP = $oldTmp; $env:TEMP = $oldTemp
+}
+```
+
+Scaffold use, in the elevated shell:
+
+```powershell
+# A launcher that will not load or register the profile means no launcher probe can
+# run: stop here. The run's try/finally still runs the global teardown.
+try {
+  . (Join-Path $probeRoot '_launcher.ps1') -Scratch (Join-Path $probeRoot 'csc-tmp')
+  # Registers the profile (CreateAppContainerProfile): the %LOCALAPPDATA%\Packages\<moniker>\
+  # redirection the probes rely on, and what teardown's DeleteProfile removes.
+  $sid = [NockProbe.AC]::CreateProfile($moniker)   # SID string; reused by Probes 4, 10, 11
+} catch {
+  "SETUP-FAULT: launcher unavailable -> $($_.Exception.GetBaseException().Message); probes 1, 3, 4, 5, 6, 10, 11 not scored"
+  throw
+}
+$sid                                               # record this SID string; the icacls probes need it
 # One SID-writable drop dir, created and ACL'd from the OUTER shell (which holds
 # WRITE_DAC; the Low-IL container does not). Inside-container steps hand their verdict
 # logs and any value back out through it — every inside probe's `_inside-<phase>.log`
 # and Probe 10's WMI child PID (see the bootstrap note above):
 $out = New-Item -ItemType Directory -Force -Path (Join-Path $probeRoot 'out')
 icacls $out.FullName /grant "*${sid}:(OI)(CI)(M)"
-# zero-capability container:
-New-Win32Process -CommandLine 'cmd.exe' -AppContainerSid $sid
-# with a capability, for the contrast case:
-New-Win32Process -CommandLine 'cmd.exe' -AppContainerSid $sid `
-  -Capabilities (Get-NtSid -KnownSid CapabilityInternetClient)
+# zero-capability container — the default, and the study's pivot:
+[NockProbe.AC]::Run($sid, @(), 'cmd.exe /c exit 0', 30000)
+# one capability (internetClient, S-1-15-3-1), for the contrast case:
+[NockProbe.AC]::Run($sid, @('S-1-15-3-1'), 'cmd.exe /c exit 0', 30000)
 ```
 
-If the module is unavailable, a ~60-line C P/Invoke following the launch sequence
-in [(a)](#a-filesystem-confinement-for-a-child-process-tree) is the fallback.
-Either way it is throwaway probe scaffolding, not product code.
+Container launches from the elevated shell (Probes 1, 4, 5, 6, 10, 11) still
+yield a Low-IL AppContainer token; the parent's elevation is what Probe 3
+isolates, so only Probe 3 (and Probe 1's exemption step) is routed through the
+limited token.
+
+#### Limited-token runner (desktop)
+
+One Scheduled Task per run, registered for the current user with
+`-RunLevel Limited` and `-LogonType Interactive` (no stored password; Kevin must
+be logged on at the console, otherwise the task never starts and every routed
+step records SETUP-FAULT). Its action is fixed at registration with the absolute,
+quoted path of `_limited.ps1`; the phase to run is handed over in
+`limited\phase.txt`. A console window may flash briefly on the desktop when it
+runs.
+
+`_limited.ps1` (written into `$probeRoot` by `run-probe.ps1`):
+
+```powershell
+$probeRoot = $PSScriptRoot
+$runId     = (Split-Path -Leaf $probeRoot) -replace '^nocklock-probe-',''
+$moniker   = "nocklock-probe-$runId"
+$lim       = Join-Path $probeRoot 'limited'
+$phase     = (Get-Content (Join-Path $lim 'phase.txt') -ErrorAction Stop).Trim()
+$log       = Join-Path $lim "$phase.log"
+# This phase's OWN token, so each phase is scored against the token it actually ran under.
+whoami /groups | Out-File -FilePath (Join-Path $lim "$phase.token.txt") -Encoding utf8
+"PHASE $phase" | Out-File -FilePath $log -Encoding utf8
+try {
+  switch ($phase) {
+    'control' { }   # the whoami above is the whole positive control
+    'exempt'  {     # Probe 1's non-elevated exemption step
+      CheckNetIsolation.exe LoopbackExempt -a "-n=$moniker" 2>&1 | Out-File $log -Append -Encoding utf8
+      "exit=$LASTEXITCODE" | Out-File $log -Append -Encoding utf8
+    }
+    'probe3'  { <Probe 3 body, below> }
+  }
+} catch {
+  $e = $_.Exception.GetBaseException()
+  ('ERROR: HResult=0x{0:X8} {1}' -f $e.HResult, $e.Message) | Out-File $log -Append -Encoding utf8
+} finally {
+  # Completion sentinel, written LAST: the outer session never scores a half-written log.
+  Set-Content -Path (Join-Path $lim "$phase.done") -Value 'done'
+}
+```
+
+Scaffold, in the elevated shell — registration, the runner, and the positive
+control that must pass before anything routed through the task is scored:
+
+```powershell
+$taskName   = "nocklock-probe-limited-$runId"
+$limitedDir = Join-Path $probeRoot 'limited'
+New-Item -ItemType Directory -Path $limitedDir -ErrorAction Stop | Out-Null
+$action = New-ScheduledTaskAction -Execute 'powershell.exe' -Argument (
+  '-NoProfile -WindowStyle Hidden -ExecutionPolicy Bypass -File "' + (Join-Path $probeRoot '_limited.ps1') + '"')
+$principal = New-ScheduledTaskPrincipal -UserId ([Security.Principal.WindowsIdentity]::GetCurrent().Name) `
+  -LogonType Interactive -RunLevel Limited
+$taskCreated = $false
+Register-ScheduledTask -TaskName $taskName -Action $action -Principal $principal -ErrorAction Stop | Out-Null
+$taskCreated = $true
+
+# Runs one _limited.ps1 phase and returns its log lines ONLY if the phase completed
+# (.done present) AND its own token is proven limited: Medium Mandatory Level
+# (S-1-16-8192) present, High Mandatory Level (S-1-16-12288) absent. Otherwise returns
+# $null with the reason in $limitedFault; callers turn $null into SETUP-FAULT, never
+# into a scored result. `schtasks /Run` returns immediately, hence the bounded poll.
+function Invoke-LimitedPhase {
+  param([string]$Phase, [int]$TimeoutSec = 120)
+  $script:limitedFault = $null
+  $done  = Join-Path $limitedDir "$Phase.done"
+  $token = Join-Path $limitedDir "$Phase.token.txt"
+  Set-Content -Path (Join-Path $limitedDir 'phase.txt') -Value $Phase
+  schtasks /Run /TN $taskName | Out-Null
+  if ($LASTEXITCODE -ne 0) { $script:limitedFault = "schtasks /Run exit $LASTEXITCODE"; return $null }
+  for ($i = 0; $i -lt $TimeoutSec -and -not (Test-Path $done); $i++) { Start-Sleep 1 }
+  if (-not (Test-Path $done)) {
+    $script:limitedFault = "phase $Phase wrote no .done within $TimeoutSec s (task not started — console session logged off?)"
+    return $null
+  }
+  $medium = [bool](Select-String -Path $token -SimpleMatch 'S-1-16-8192' -ErrorAction SilentlyContinue)
+  $high   = [bool](Select-String -Path $token -SimpleMatch 'S-1-16-12288' -ErrorAction SilentlyContinue)
+  if (-not $medium -or $high) {
+    $script:limitedFault = "phase $Phase token not proven limited (Medium present=$medium, High present=$high)"
+    return $null
+  }
+  Get-Content (Join-Path $limitedDir "$Phase.log")
+}
+
+# POSITIVE CONTROL. limited\control.token.txt is kept verbatim as evidence (the
+# Administrators line should read deny-only); only the two Mandatory Level SIDs are scored.
+if (Invoke-LimitedPhase 'control') {
+  "LIMITED-TOKEN: PASS — task token is Medium IL with High absent"
+} else {
+  "LIMITED-TOKEN: FAIL — $limitedFault; Probe 1's exemption step and Probe 3 will record SETUP-FAULT"
+}
+```
 
 ### Probe 1: the pivot — zero-capability loopback
 
@@ -1014,12 +1349,37 @@ foreach ($port in @(8899, 9999)) {
   else     { "outside $port -> SETUP-FAULT (listener not ready after 10 s)" }
 }
 
-# terminal B - register the exemption NON-ELEVATED first and record the result
-CheckNetIsolation.exe LoopbackExempt -a -n=$moniker; "exit=$LASTEXITCODE"
-CheckNetIsolation.exe LoopbackExempt -s      # did the entry actually appear?
-# if it did not, repeat the -a in an ELEVATED shell and note that Probe 2 = "admin required"
+# terminal B - register the exemption NON-ELEVATED first, through the limited-token
+# task (the SSH shell is elevated, so running -a here would answer Probe 2 for the
+# wrong reason). Presence is read by this run's SID in `-s`. Every path sets
+# $verdict1x exactly once and prints it once.
+function Test-ExemptListed { [bool](CheckNetIsolation.exe LoopbackExempt -s | Select-String -SimpleMatch $sid) }
+$verdict1x   = $null
+$nonElevated = Invoke-LimitedPhase 'exempt'
+$limitedRc   = (@($nonElevated | Select-String -Pattern '^(exit=|ERROR:)') | ForEach-Object { $_.Line }) -join '; '
+if (-not $nonElevated) {
+  # Limited token not proven: register ELEVATED so the rest of Probe 1 can run, but
+  # Probe 2 is not scored.
+  CheckNetIsolation.exe LoopbackExempt -a "-n=$moniker" | Out-Null
+  if (Test-ExemptListed) {
+    $verdict1x = "VERDICT(1-exempt): SETUP-FAULT - limited token not proven ($limitedFault); exemption added ELEVATED, Probe 2 not scored"
+  } else {
+    $verdict1x = "VERDICT(1-exempt): SETUP-FAULT - limited token not proven ($limitedFault) and elevated -a did not list the entry; Probe 1 not scored"
+  }
+} elseif (Test-ExemptListed) {
+  $verdict1x = "VERDICT(1-exempt): NON-ELEVATED OK - limited-token -a listed the entry (Probe 2: admin not required) [$limitedRc]"
+} else {
+  CheckNetIsolation.exe LoopbackExempt -a "-n=$moniker" | Out-Null   # ELEVATED retry
+  if (Test-ExemptListed) {
+    $verdict1x = "VERDICT(1-exempt): ADMIN REQUIRED - limited-token -a did not list the entry, elevated -a did (Probe 2: admin required) [limited: $limitedRc]"
+  } else {
+    $verdict1x = "VERDICT(1-exempt): SETUP-FAULT - entry absent after limited AND elevated -a [limited: $limitedRc]; Probe 1 not scored"
+  }
+}
+$verdict1x
 
-# then, inside a ZERO-capability container. Capture the verbatim curl error text and
+# then, inside a ZERO-capability container (desktop path: the launcher from the
+# elevated shell, [NockProbe.AC]::Run($sid, @(), <_inside.ps1 -Phase 1>, ...)). Capture the verbatim curl error text and
 # exit code for each — the verdict is read from the recorded output, not inferred:
 curl.exe -sS -m 5 http://127.0.0.1:8899/ 2>&1; "8899 exit=$LASTEXITCODE"  # MUST succeed, or Phase 1 is dead
 curl.exe -sS -m 5 https://example.com/   2>&1; "example exit=$LASTEXITCODE"  # MUST fail (Block Outbound Default Rule)
@@ -1074,24 +1434,31 @@ Stop-VerifiedProcess -IdentityFile (Join-Path $out.FullName 'own-listener.txt')
 Never `Get-Job | Stop-Job` — that kills every job in the operator's session. The
 loopback exemption is machine-wide session state shared by every probe, so it is
 **left in place until the global teardown** removes it with
-`CheckNetIsolation.exe LoopbackExempt -d -n=$moniker`.
+`CheckNetIsolation.exe LoopbackExempt -d "-n=$moniker"`. The limited task that
+ran the `exempt` phase is shared with Probe 3 and likewise removed by the global
+teardown.
 
 | State touched | Detail |
 |---|---|
-| Creates | 2 outer jobs (`$job8899`, `$job9999`); 1 inside listener process (identity in `own-listener.txt`); loopback exemption (machine-wide, kept until global teardown) |
+| Creates | 2 outer jobs (`$job8899`, `$job9999`); 1 inside listener process (identity in `own-listener.txt`); loopback exemption (machine-wide, added by the limited task or the elevated retry, kept until global teardown); `limited\exempt.*` files under `$probeRoot` (one run of the scaffold's scheduled task) |
 | Removes | the 2 outer jobs (by handle); inside listener (by verified PID+StartTime+Path) |
-| Must never touch | other user jobs; loopback exemptions not created by this run |
+| Must never touch | other user jobs; loopback exemptions not created by this run; scheduled tasks other than `nocklock-probe-limited-$runId` |
 
 ### Probe 2: does the exemption need elevation?
 
-Probe 1 already records the non-elevated exit code; this probe confirms the entry
-is present within the session:
+Probe 1's `VERDICT(1-exempt)` line is Probe 2's answer, because only that step ran
+under a proven limited token: **NON-ELEVATED OK** scores "admin not required",
+**ADMIN REQUIRED** scores "admin required", and **SETUP-FAULT** leaves Probe 2
+unscored. Whether the elevated SSH shell can add the entry says nothing about the
+question — it is elevated. This probe then confirms the entry is present within
+the session:
 
 ```powershell
 CheckNetIsolation.exe LoopbackExempt -s      # entry present in this session?
 ```
 
-Report the non-elevated exit code from Probe 1 and whether `-s` listed the entry.
+Report Probe 1's `VERDICT(1-exempt)` line (it carries the limited-token exit code)
+and whether `-s` listed the entry.
 
 **Reboot durability is deliberately UNVERIFIED this run.** A reboot cannot sit
 inside the single `try/finally` that wraps the probe run, and this run does **not**
@@ -1114,23 +1481,57 @@ global teardown.
 
 ### Probe 3: AppContainer launch unelevated
 
-```cmd
-whoami /groups | findstr /i "High Mandatory"   :: expect NO match (not elevated)
-:: run the launcher; then inside the container:
-whoami /all
+**Desktop path: entirely in the limited task.** The SSH shell is elevated, so the
+old `whoami /groups | findstr "High Mandatory"` precondition would fail there before
+any launch. Instead the whole probe — loading the launcher, *creating its own
+profile*, and launching — runs as the `probe3` phase of `_limited.ps1`, whose token
+the runner has already proven Medium-IL with High absent. It uses its own moniker
+`nocklock-p3-$runId`, because the scaffold's profile was created elevated and
+creating one unelevated is part of the question (`CreateAppContainerProfile`
+documents `E_ACCESSDENIED`).
+
+The `probe3` body inside `_limited.ps1`:
+
+```powershell
+. (Join-Path $probeRoot '_launcher.ps1') -Scratch (Join-Path $lim 'csc-tmp')
+$sid3 = [NockProbe.AC]::CreateProfile("nocklock-p3-$runId")      # throws -> ERROR line (caught above)
+"profile=CREATED sid=$sid3" | Out-File $log -Append -Encoding utf8
+$d3 = New-Item -ItemType Directory -Path (Join-Path $probeRoot 'p3') -ErrorAction Stop
+icacls $d3.FullName /grant "*${sid3}:(OI)(CI)(M)" | Out-Null   # the limited token owns p3\, so it holds WRITE_DAC
+$rc = [NockProbe.AC]::Run($sid3, @(),
+  ('cmd.exe /c whoami /all > "' + (Join-Path $d3.FullName 'whoami-inside.txt') + '"'), 60000)
+"launch=OK exit=$rc" | Out-File $log -Append -Encoding utf8
 ```
 
-Confirm the token shows an AppContainer SID and Low integrity, from a
-non-elevated parent.
+Scored in the elevated shell, one verdict line:
 
-**Teardown.** None of its own — the container process exits and the profile is
-removed globally.
+```powershell
+$p3 = Invoke-LimitedPhase 'probe3'
+$w  = Get-Content (Join-Path $probeRoot 'p3\whoami-inside.txt') -ErrorAction SilentlyContinue
+if (-not $p3) {
+  "VERDICT(3): SETUP-FAULT - $limitedFault; not scored"
+} elseif ($p3 | Select-String -SimpleMatch 'ERROR: HResult=0x80070005') {
+  # CreateProfile or Run was DENIED under the limited token: the answer is "needs admin".
+  "VERDICT(3): FAILS UNELEVATED - $((@($p3 | Select-String -Pattern '^ERROR:') | ForEach-Object { $_.Line }) -join '; ')"
+} elseif (-not ($p3 | Select-String -SimpleMatch 'launch=OK')) {
+  # Any other failure (launcher did not compile, timeout, ...) is not a denial.
+  "VERDICT(3): INDETERMINATE - $((@($p3 | Select-String -Pattern '^ERROR:') | ForEach-Object { $_.Line }) -join '; ')"
+} elseif (($w | Select-String -SimpleMatch 'S-1-16-4096') -and ($w | Select-String -Pattern 'S-1-15-2-1\b')) {
+  "VERDICT(3): WORKS UNELEVATED - limited-token parent created the profile and launched a Low-IL AppContainer child"
+} else {
+  "VERDICT(3): INDETERMINATE - launched, but p3\whoami-inside.txt shows no Low IL (S-1-16-4096) plus ALL APPLICATION PACKAGES (S-1-15-2-1)"
+}
+```
+
+**Teardown.** The container process exits on its own; the global teardown deletes
+the `nocklock-p3-$runId` profile and the scheduled task by exact name; `p3\` and
+`limited\` go with `$probeRoot`.
 
 | State touched | Detail |
 |---|---|
-| Creates | transient container process |
-| Removes | nothing (profile removed globally) |
-| Must never touch | user token; system groups |
+| Creates | AppContainer profile `nocklock-p3-$runId` (per-user, outside the root); transient container process; `p3\` and `limited\probe3.*` under `$probeRoot`; one run of the scheduled task |
+| Removes | nothing itself (profile and task removed by the global teardown, by exact name) |
+| Must never touch | user token; system groups; the scaffold's `nocklock-probe-$runId` profile |
 
 ### Probe 4: ACL grant and the deny-default
 
@@ -1149,7 +1550,8 @@ has no `WRITE_DAC`, so an `icacls` grant or deny issued *inside* the container i
 silently a no-op — the ACE never lands, and the follow-up assertion passes or fails
 for the wrong reason. So this probe is two container launches with all ACL edits
 between them in the outer shell, and the DENY ACE is verified present before the
-inside read runs.
+inside read runs. **Desktop path:** both launches (`-Phase 4a`, `-Phase 4b`) use
+the launcher from the elevated shell, zero capabilities.
 
 **Step 1 — OUTER SHELL** (has WRITE_DAC): create the directories, grant the
 package SID on the project root, simulate the ALL APPLICATION PACKAGES read hole,
@@ -1261,7 +1663,9 @@ Probe 1's listener is a plain HTTP file server (`GET` only, no `CONNECT`), so
 pointing `HTTPS_PROXY` at it makes `git clone https://…` fail at the TLS
 tunnel — a proxy artefact, not a broken toolchain. Use NockLock's own
 re-resolving proxy (`internal/fence/network`) or another real forward proxy
-for part (b); do not reuse the Probe 1 file server.
+for part (b); do not reuse the Probe 1 file server. **Desktop path:** part (a)
+runs as an `_inside.ps1` phase through the launcher from the elevated shell, zero
+capabilities.
 
 ```powershell
 # (a) OFFLINE (DESKTOP-SAFE) — inside the container, no proxy needed.
@@ -1310,7 +1714,9 @@ Generalises the DNS question to the whole confused-deputy class. All from inside
 a **zero-capability** container, with no loopback exemption. The probe is
 **DESKTOP-SAFE** except for the `Start-Process` step, which is
 **DISPOSABLE-BOX ONLY** because it opens the operator's real browser (outside
-the container, with full network access) and teardown is manual.
+the container, with full network access) and teardown is manual. **Desktop
+path:** an `_inside.ps1` phase through the launcher from the elevated shell, zero
+capabilities, with the `Start-Process` line omitted.
 
 ```powershell
 # DESKTOP-SAFE steps:
@@ -1406,7 +1812,8 @@ to get wrong.
 > It disables the firewall, the single most dangerous action in this document.
 > Run it only on a disposable VM, and capture the prior per-profile state first so
 > it can be restored exactly (`set allprofiles state on` forces every profile on,
-> which is *not* necessarily the pre-probe state).
+> which is *not* necessarily the pre-probe state). **Desktop path: none — not run
+> on the desktop.** On the VM the container step uses the same launcher.
 
 ```powershell
 # ELEVATED, on a throwaway VM only.
@@ -1467,72 +1874,61 @@ leaks. The `wfpdiag` output is under `$probeRoot`.
 
 The escape question, and the WMI-token question from
 [(c)](#c-processsyscall-ish-limits). From inside a **zero-capability** container.
-Import NtObjectManager the same way the shared scaffold does — the pre-installed
-module on the desktop, the `$probeRoot\modules` copy only on a disposable box
-(the only mode that `Save-Module`s it there), otherwise SETUP-FAULT. Never
-`Install-Module` here (it mutates the user scope):
+**Desktop path:** the outer launch is the launcher from the elevated shell, zero
+capabilities; 10(a) then loads the *same* launcher inside the container (its
+`_launcher.*` files are granted read to the package SID, and its compile scratch
+goes to the SID-writable `$out`). NtObjectManager is not used — it is absent on
+the desktop, and nothing is installed there:
 
 ```powershell
-# Same rule as the shared scaffold: pre-installed module on the desktop; the
-# probe-root copy exists only in DisposableBox mode; otherwise SETUP-FAULT.
-if (Get-Module -ListAvailable NtObjectManager) {
-  Import-Module NtObjectManager
-} elseif (Test-Path (Join-Path $probeRoot 'modules\NtObjectManager')) {
-  Import-Module (Join-Path $probeRoot 'modules\NtObjectManager')
-} else {
-  "SETUP-FAULT: NtObjectManager absent inside container — Probe 10 not scored"
-  return
-}
 # (a) re-container escape: this whole probe runs INSIDE the zero-capability
-# container, so — unlike the shared scaffold's outer (Medium-IL) profile creation —
-# this New-AppContainerProfile can legitimately return E_ACCESSDENIED (the same
+# container, so — unlike the shared scaffold's outer profile creation — this
+# CreateProfile can legitimately return E_ACCESSDENIED (the same
 # CreateAppContainerProfile-in-a-restricted-context denial the "What breaks" section
-# documents). Each step gets its own try and its own verdict, so a launch or curl
-# failure is never misread as a profile denial; every path sets $verdictA exactly
-# once and prints it once. Same cmdlet-spelling caveat as the shared scaffold;
-# teardown removes the profile by name if registered.
+# documents). Each step gets its own try and its own verdict, so a launcher, launch,
+# or curl failure is never misread as a profile denial; every path sets $verdictA
+# exactly once and prints it once. Launcher exceptions arrive wrapped in PowerShell's
+# MethodInvocationException, so the HResult is read from GetBaseException().
+# Teardown removes the profile by name if registered.
 $escMoniker = "agent-escape-$runId"
 $verdictA = $null
 try {
-  New-AppContainerProfile -Name $escMoniker -DisplayName $escMoniker -Description $escMoniker -ErrorAction Stop | Out-Null
+  . (Join-Path $probeRoot '_launcher.ps1') -Scratch (Join-Path $out.FullName 'csc-tmp-10a')
 } catch {
-  $h = '0x{0:X8}' -f $_.Exception.HResult
-  if ($h -eq '0x80070005') {
-    $verdictA = "VERDICT(a): CONTAINED - escape profile creation denied (E_ACCESSDENIED)"
-  } else {
-    $verdictA = "VERDICT(a): INDETERMINATE - escape profile creation failed, not a denial -> $($_.Exception.GetType().FullName) HResult=$h $($_.Exception.Message)"
+  $verdictA = "VERDICT(a): INDETERMINATE - launcher did not load inside the container -> $($_.Exception.GetBaseException().Message)"
+}
+if (-not $verdictA) {
+  try {
+    $s2 = [NockProbe.AC]::CreateProfile($escMoniker)
+  } catch {
+    $e = $_.Exception.GetBaseException(); $h = '0x{0:X8}' -f $e.HResult
+    if ($h -eq '0x80070005') {
+      $verdictA = "VERDICT(a): CONTAINED - escape profile creation denied (E_ACCESSDENIED)"
+    } else {
+      $verdictA = "VERDICT(a): INDETERMINATE - escape profile creation failed, not a denial -> $($e.GetType().FullName) HResult=$h $($e.Message)"
+    }
   }
 }
 if (-not $verdictA) {
   try {
-    $s2 = Get-NtSid -PackageName $escMoniker
-    $escChild = New-Win32Process -CommandLine 'curl.exe -sS -m 5 https://example.com/' `
-      -AppContainerSid $s2 -Capabilities (Get-NtSid -KnownSid CapabilityInternetClient) -ErrorAction Stop
+    # Run waits for curl (its -m 5 bounds it) and returns curl's exit code.
+    $curlRc = [NockProbe.AC]::Run($s2, @('S-1-15-3-1'), 'curl.exe -sS -m 5 https://example.com/', 30000)
   } catch {
-    $h = '0x{0:X8}' -f $_.Exception.HResult
+    $e = $_.Exception.GetBaseException(); $h = '0x{0:X8}' -f $e.HResult
     if ($h -eq '0x80070005') {
       $verdictA = "VERDICT(a): CONTAINED - profile created, but launching into it was denied (E_ACCESSDENIED)"
     } else {
-      $verdictA = "VERDICT(a): INDETERMINATE - profile created, launch failed, not a denial -> $($_.Exception.GetType().FullName) HResult=$h $($_.Exception.Message)"
+      $verdictA = "VERDICT(a): INDETERMINATE - profile created, launch failed, not a denial -> $($e.GetType().FullName) HResult=$h $($e.Message)"
     }
   }
 }
 if (-not $verdictA) {
-  # New-Win32Process returns no stdout, so score curl by exit code, read through the
-  # process handle CreateProcess returned (curl's -m 5 bounds the wait). Resolve the
-  # NtProcess member spelling on the box if it differs.
-  try {
-    $escChild.Process.Wait() | Out-Null
-    $curlRc = $escChild.Process.ExitStatus
-    if ($curlRc -eq 0) {
-      $verdictA = "VERDICT(a): ESCAPED - re-contained child with internetClient reached https://example.com/ (curl exit 0)"
-    } else {
-      # The re-containment itself succeeded; only the network reach failed (or the
-      # host is offline). That is not containment, so it is never scored CONTAINED.
-      $verdictA = "VERDICT(a): INDETERMINATE - profile created and child launched, curl exited $curlRc"
-    }
-  } catch {
-    $verdictA = "VERDICT(a): INDETERMINATE - child launched, could not read curl's exit status -> $($_.Exception.Message)"
+  if ($curlRc -eq 0) {
+    $verdictA = "VERDICT(a): ESCAPED - re-contained child with internetClient reached https://example.com/ (curl exit 0)"
+  } else {
+    # The re-containment itself succeeded; only the network reach failed (or the
+    # host is offline). That is not containment, so it is never scored CONTAINED.
+    $verdictA = "VERDICT(a): INDETERMINATE - profile created and child launched, curl exited $curlRc"
   }
 }
 $verdictA
@@ -1545,8 +1941,8 @@ $verdictA
 # bootstrap — see the "Inside-variable bootstrap" note above):
 #
 # Spawn the child and hand its PID + spawn time OUT through the granted
-# drop dir. Do NOT call Get-NtToken here — if the child escaped to Medium IL,
-# this Low-IL process cannot open it, so Get-NtToken would THROW; a throw read
+# drop dir. Do NOT read the child's token here — if the child escaped to Medium IL,
+# this Low-IL process cannot open it, so TokenSummary would THROW; a throw read
 # as "contained" is the wrong-reason verdict this round removes. Keep the child
 # alive long enough for the outer session to inspect it across the manual
 # two-shell handoff (Start-Sleep, not `cmd /c timeout`, which needs a console
@@ -1571,18 +1967,19 @@ if ($wmiChild) {
   # Write ONLY ProcessId|spawn-ticks from inside, to a DISTINCT file. Reading
   # $wmiChild.StartTime/.Path here THROWS if the child escaped to Medium IL (a Low-IL
   # process cannot open a higher-IL one) — exactly the full-escape case 10(b) is
-  # trying to catch — so a throw would be misread as INDETERMINATE. The Medium-IL
-  # outer session below verifies the child and writes the canonical 'wmi-child.txt'
+  # trying to catch — so a throw would be misread as INDETERMINATE. The outer
+  # session below verifies the child and writes the canonical 'wmi-child.txt'
   # that teardown consumes.
   Set-Content -Path (Join-Path $out.FullName 'wmi-child-pid.txt') -Value ('{0}|{1}' -f $p.ProcessId, $spawnedAt)
 } else {
   Set-Content -Path (Join-Path $out.FullName 'wmi-child-pid.txt') -Value "EXITED:$($p.ProcessId)"
 }
 
-# OUTER SESSION (plain user, Medium IL): read the PID the inside session recorded,
-# prove it is still the probe's child, then capture identity and inspect the token
-# from HERE — a Medium-IL child IS openable from the outer session (see the inside
-# note above), so this discriminates the three cases.
+# OUTER SESSION (on the desktop, the elevated SSH shell — see the corrected
+# elevation premise): read the PID the inside session recorded, prove it is still
+# the probe's child, then capture identity and inspect the token from HERE with the
+# launcher's TokenSummary — a Medium- or High-IL child IS openable from the outer
+# session (see the inside note above), so this discriminates the three cases.
 $idFile = Join-Path $out.FullName 'wmi-child.txt'
 $raw = Get-Content (Join-Path $out.FullName 'wmi-child-pid.txt')
 if ($raw -like 'SPAWNFAIL:*') {
@@ -1603,8 +2000,8 @@ $notBefore = [long]$parts[1] - [TimeSpan]::TicksPerSecond
 $childTag  = "nocklock-wmi-child-$runId"
 # Three outcomes, never collapsed: OURS (tag and start time confirmed), REUSED (the
 # PID provably belongs to another process, or is gone), UNREADABLE (a process at or
-# after the spawn time that this Medium-IL session cannot fully read — the case where
-# the child may have run above Medium IL, so it must not read as a benign exit).
+# after the spawn time that this outer session cannot fully read — the case where
+# the child may have run above the outer session, so it must not read as a benign exit).
 $state = 'REUSED'
 $proc = Get-Process -Id $childPid -ErrorAction SilentlyContinue
 if ($proc) {
@@ -1634,24 +2031,24 @@ if ($state -ne 'OURS') {
 if ($state -eq 'REUSED') {
   "VERDICT(b): PID $childPid is no longer the probe's tagged child (exited or PID reused) — INDETERMINATE, re-run with a longer keepalive"
 } elseif ($state -eq 'UNREADABLE') {
-  "VERDICT(b): process at PID $childPid could not be fully read from the OUTER session (StartTime/Path/CommandLine) -> INDETERMINATE, treat as possible escape above Medium IL"
+  "VERDICT(b): process at PID $childPid could not be fully read from the OUTER session (StartTime/Path/CommandLine) -> INDETERMINATE, treat as possible escape above the outer session"
 } else {
   Set-Content -Path $idFile -Value ('{0}|{1}|{2}' -f $childPid, $childStart.ToString('o'), $childPath)
   try {
-    $tok = Get-NtToken -ProcessId $childPid
-    # Re-verify AFTER opening the token: if the PID changed hands in between, the
+    $tok = [NockProbe.AC]::TokenSummary($childPid)   # "AppContainer=<bool> PackageSid=<sid|-> IntegrityLevel=<sid>"
+    # Re-verify AFTER reading the token: if the PID changed hands in between, the
     # token belongs to another process and must not be scored.
     $again = Get-Process -Id $childPid -ErrorAction SilentlyContinue
     if (-not $again -or $again.StartTime -ne $childStart) {
       "VERDICT(b): child $childPid exited while its token was being opened — INDETERMINATE, re-run"
+    } elseif ($tok -like 'AppContainer=True *') {
+      "VERDICT(b): CONTAINED - WMI child kept an AppContainer token ($tok); only the job accounting leaked"
     } else {
-      "AppContainer=$($tok.AppContainer)  IntegrityLevel=$($tok.IntegrityLevel)  Package=$($tok.PackageName)"
-      # VERDICT: AppContainer=$false => WMI child ran under the plain user token
-      #          => FULL escape of the file AND network fence, and Phase 0 does not hold.
-      #          AppContainer=$true  => token inherited; only the job accounting leaked.
+      # Plain user token => FULL escape of the file AND network fence; Phase 0 does not hold.
+      "VERDICT(b): ESCAPED - WMI child runs outside the AppContainer ($tok)"
     }
   } catch {
-    # Even the outer Medium-IL session could not open it (e.g. it elevated further).
+    # Even the outer session could not open it (e.g. it runs as another principal).
     # This is its OWN verdict — never scored as "contained".
     "VERDICT(b): could not open child token from OUTER session -> INDETERMINATE, treat as possible escape ($($_.Exception.Message))"
   }
@@ -1661,7 +2058,9 @@ if ($state -eq 'REUSED') {
 Every 10(a) path prints exactly one `VERDICT(a)` line: CONTAINED only for an
 E_ACCESSDENIED profile-creation or launch denial; ESCAPED when the re-contained
 child reaches the internet; INDETERMINATE for anything else (including a curl
-that launched but failed), with the error or exit code printed.
+that launched but failed, or a launcher that would not load inside the
+container), with the error or exit code printed. Every 10(b) path likewise prints
+exactly one `VERDICT(b)` line: CONTAINED, ESCAPED, or INDETERMINATE.
 If (a) is ESCAPED, the network fence is escapable by construction and Phase 1
 does not hold. If (b)'s WMI child carries a
 non-AppContainer token, that is the more serious result: **Phase 0** does not hold
@@ -1690,24 +2089,43 @@ tracked by an identity file.
 
 The event listener depends on it.
 
-```powershell
-# OUTSIDE: create a pipe whose ACL grants the package SID ($sid from the launcher prereq)
-# (NtObjectManager: New-NtNamedPipeFile with an explicit SD granting $sid write)
+**Desktop path:** the pipe servers are in-box .NET Framework
+(`NamedPipeServerStream` with a `PipeSecurity`), not NtObjectManager's
+`New-NtNamedPipeFile`; the inside client is an `_inside.ps1` phase through the
+launcher from the elevated shell, zero capabilities.
 
-# INSIDE the container:
-[System.IO.Pipes.NamedPipeClientStream]::new('.','nocklock-probe-pipe','Out').Connect(5000)
+```powershell
+# OUTSIDE (elevated shell): two run-unique pipes — one granting the package SID
+# ($sid from the scaffold), one without that ACE as the negative control.
+function New-ProbePipe([string]$Name, [bool]$GrantSid) {
+  $ps = New-Object System.IO.Pipes.PipeSecurity
+  $ps.AddAccessRule((New-Object System.IO.Pipes.PipeAccessRule(
+    [Security.Principal.WindowsIdentity]::GetCurrent().User, 'FullControl', 'Allow')))
+  if ($GrantSid) {
+    $ps.AddAccessRule((New-Object System.IO.Pipes.PipeAccessRule(
+      (New-Object Security.Principal.SecurityIdentifier $sid), 'ReadWrite', 'Allow')))
+  }
+  New-Object System.IO.Pipes.NamedPipeServerStream($Name, 'In', 1, 'Byte', 'None', 0, 0, $ps)
+}
+$pipeGranted = New-ProbePipe "nocklock-probe-pipe-$runId" $true
+$pipeNoAce   = New-ProbePipe "nocklock-probe-pipe-noace-$runId" $false
+
+# INSIDE the container (names re-derived from $runId by the bootstrap):
+[System.IO.Pipes.NamedPipeClientStream]::new('.', "nocklock-probe-pipe-$runId", 'Out').Connect(5000)          # MUST succeed
+Assert-AccessDenied { [System.IO.Pipes.NamedPipeClientStream]::new('.', "nocklock-probe-pipe-noace-$runId", 'Out').Connect(5000) } 'pipe without the package-SID ACE'
 ```
 
 Confirm a package-SID-granted pipe is reachable from inside, and that one without
 the ACE is not.
 
-**Teardown.** The named pipe is an in-memory kernel object that vanishes when its
-creating process exits — close that process. No on-disk state.
+**Teardown.** The named pipes are in-memory kernel objects that vanish when their
+server handles close: the global teardown disposes `$pipeGranted` and `$pipeNoAce`.
+No on-disk state.
 
 | State touched | Detail |
 |---|---|
-| Creates | in-memory named pipe (kernel object); pipe server process |
-| Removes | pipe server process (pipe vanishes with it) |
+| Creates | two in-memory named pipes (kernel objects) held by the outer session |
+| Removes | both pipe server handles (global teardown; the pipes vanish with them) |
 | Must never touch | other named pipes; on-disk state |
 
 ### Global teardown and state listing
@@ -1717,19 +2135,27 @@ Run this last, unconditionally (wrap the whole probe run in `try { … } finally
 and prints a before/after state listing so nothing is left behind:
 
 ```powershell
-# --- BEFORE (also run this at the very start, to diff against) ---
+# --- BEFORE (also run this at the very start, to diff against). The scaffold has
+# already recorded $baseExempt / $basePorts; the documented desktop baseline is 0 / 0.
 CheckNetIsolation.exe LoopbackExempt -s
-Get-AppxPackage | Where-Object PackageFullName -like 'nocklock-probe*'   # or Get-NtSid check
 logman query -ets
 netsh advfirewall show allprofiles state
 Test-Path $probeRoot
 
-# --- TEARDOWN (desktop run — no package uninstalls) ---
-CheckNetIsolation.exe LoopbackExempt -d -n=$moniker           # machine-wide exemption (Probes 1-2)
-Remove-AppContainerProfile -Name $moniker 2>$null            # %LOCALAPPDATA%\Packages\<moniker>
-Remove-AppContainerProfile -Name "agent-escape-$runId" 2>$null  # Probe 10, if created
-# (Remove-AppContainerProfile wraps the DeleteAppContainerProfile API; resolve the
-#  exact cmdlet spelling on the box if the name differs.)
+# --- TEARDOWN (desktop run — no package uninstalls). Everything by EXACT name. ---
+$profileNames = @($moniker, "nocklock-p3-$runId", "agent-escape-$runId")   # scaffold, Probe 3, Probe 10
+if ($taskCreated) {                                        # the limited-token task: exact name, never a wildcard
+  Stop-ScheduledTask -TaskName $taskName -ErrorAction SilentlyContinue
+  Unregister-ScheduledTask -TaskName $taskName -Confirm:$false -ErrorAction SilentlyContinue
+}
+if ($pipeGranted) { $pipeGranted.Dispose() }               # Probe 11
+if ($pipeNoAce)   { $pipeNoAce.Dispose() }
+CheckNetIsolation.exe LoopbackExempt -d "-n=$moniker" | Out-Null   # machine-wide exemption (Probes 1-2)
+if ('NockProbe.AC' -as [type]) {                           # launcher loaded => profiles may exist
+  foreach ($n in $profileNames) {                          # DeleteAppContainerProfile; HRESULT printed, never thrown
+    'TEARDOWN: DeleteProfile {0} -> 0x{1:X8}' -f $n, [NockProbe.AC]::DeleteProfile($n)
+  }
+}
 if ($etwCreated) { logman stop $etwSession -ets 2>$null }  # only if THIS run created it
 # Reap spawned processes BEFORE deleting $probeRoot (identity files live there).
 foreach ($idFile in (Get-ChildItem -Path $probeRoot -Filter '*.txt' -Recurse -ErrorAction SilentlyContinue |
@@ -1739,11 +2165,30 @@ foreach ($idFile in (Get-ChildItem -Path $probeRoot -Filter '*.txt' -Recurse -Er
 # Probe 9 (VM only): restore firewall to the recorded per-profile state
 Remove-Item -Recurse -Force $probeRoot                     # everything else lived here
 
-# --- AFTER (must match BEFORE, minus this run's additions) ---
-CheckNetIsolation.exe LoopbackExempt -s
-logman query -ets
-Test-Path $probeRoot                                       # expect False
+# --- AFTER: ASSERT the BEFORE baseline is restored. One line per check; any
+# LEFTOVER line is a failed run, to be cleaned by hand using the name it prints.
+function Assert-Restored([string]$Label, [bool]$Ok) { if ($Ok) { "RESTORED: $Label" } else { "LEFTOVER: $Label" } }
+$mappings = 'HKCU:\Software\Classes\Local Settings\Software\Microsoft\Windows\CurrentVersion\AppContainer\Mappings'
+$leftMaps = @(Get-ChildItem $mappings -ErrorAction SilentlyContinue |
+  Where-Object { $profileNames -contains (Get-ItemProperty $_.PSPath -ErrorAction SilentlyContinue).Moniker })
+Assert-Restored "loopback exemptions back to BEFORE ($baseExempt)" ((Get-ExemptCount) -eq $baseExempt)
+if ($sid) {        # unset only if the scaffold stopped before the profile existed
+  Assert-Restored "this run's SID absent from LoopbackExempt -s" (-not (CheckNetIsolation.exe LoopbackExempt -s | Select-String -SimpleMatch $sid))
+}
+Assert-Restored "ports 8899/9999/9998 back to BEFORE ($basePorts listening)" ((Get-BusyPorts) -eq $basePorts)
+if ($taskName) {   # unset only if the scaffold stopped before registering the task
+  Assert-Restored "scheduled task $taskName absent" (-not (Get-ScheduledTask -TaskName $taskName -ErrorAction SilentlyContinue))
+}
+foreach ($n in $profileNames) {
+  Assert-Restored "AppContainer profile folder $n absent" (-not (Test-Path (Join-Path $env:LOCALAPPDATA "Packages\$n")))
+}
+Assert-Restored "AppContainer Mappings keys for this run's monikers absent" ($leftMaps.Count -eq 0)
+Assert-Restored "probe root $probeRoot absent" (-not (Test-Path $probeRoot))
+logman query -ets                                          # ETW: diff by eye against BEFORE
 ```
+
+On the desktop the expected AFTER is every line `RESTORED`, which restores the
+documented baseline: 0 loopback exemptions and ports 8899/9999/9998 free.
 
 Disposable-box probes (8, 9, and the disposable-box steps of 5b, 6, 7) run on a
 throwaway VM. Their teardown is "discard the box" — the VM is the cleanup.
