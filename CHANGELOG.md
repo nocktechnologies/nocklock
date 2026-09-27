@@ -4,6 +4,26 @@ All notable changes to NockLock will be documented in this file.
 
 ## [Unreleased]
 
+### Fixed
+
+- claude-code preset: Node runtime introspection no longer breaks under the
+  fence (#10757). With the broad `/proc/` grant removed in #115 (it exposed a
+  same-UID sibling's `/proc/<pid>/environ`), `process.memoryUsage()` threw
+  `EACCES` and `os.cpus()` silently returned an empty array — a throw can crash
+  the agent and 0 CPUs mis-sizes worker pools. The narrow reads Node needs are
+  now granted without any path to another process: the preset allows the
+  system-wide `/proc/cpuinfo`, `/proc/stat` and `/proc/meminfo`, and the wrapped
+  child's OWN `/proc/<pid>` is granted to both fences self-scoped. Because the
+  `__landlock-exec` shim execve's the child in place (its pid IS the child's),
+  the literal `/proc/self` Landlock rule binds to the child's own proc dir, and
+  the shim appends that same concrete `/proc/<pid>` to the interposer allowlist.
+  A sibling's `/proc/<pid>/environ` and `/cmdline` stay denied at the kernel
+  layer, proven by a `CGO_ENABLED=0` raw-syscall reader test that bypasses the
+  userspace interposer. Scope: the grant covers the wrapped child; a descendant
+  that execs under a different pid does not get its own `/proc/self` (Landlock is
+  inode-bound), and the interposer grant applies only when a kernel fence engages
+  the shim — always true for the hardened presets this targets.
+
 ## [0.5.0] - 2026-09-26
 
 ### Added

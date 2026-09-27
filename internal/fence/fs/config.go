@@ -209,6 +209,23 @@ func (fc *FenceConfig) Serialize(socketPath string) string {
 	return strings.Join(parts, fieldSep)
 }
 
+// AppendSerializedAllow returns serialized (a NOCKLOCK_FS_ALLOWED value from
+// Serialize) with one extra read-allow path appended in the interposer's wire
+// format (fieldSep + "+" + path), keeping the separator framing private to this
+// package. Callers use it to add a path known only after config load — see the
+// Landlock shim's allowSelfProcFS.
+//
+// Fails closed on a malformed path: a path containing the reserved separator
+// could inject extra allow/deny fields into the policy, so it is refused and
+// serialized is returned UNCHANGED (the grant is dropped, never smuggled in) —
+// the same invariant ProcessConfig enforces with validateNoSeparator.
+func AppendSerializedAllow(serialized, path string) string {
+	if strings.Contains(path, fieldSep) {
+		return serialized
+	}
+	return serialized + fieldSep + "+" + path
+}
+
 // ParseSerialized decodes a serialized fence config string back into a
 // SerializedConfig. Returns an error if fewer than 3 fields are present.
 func ParseSerialized(s string) (*SerializedConfig, error) {

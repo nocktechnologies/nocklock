@@ -284,3 +284,48 @@ func TestParseSerialized_TooFewFields(t *testing.T) {
 		t.Fatal("expected error for fewer than 3 fields")
 	}
 }
+
+func TestAppendSerializedAllow_AppendsReadAllowField(t *testing.T) {
+	fc := &FenceConfig{Root: "/root", Mode: "read-write", AllowPaths: []string{"/tmp"}}
+	base := fc.Serialize("/sock")
+
+	got := AppendSerializedAllow(base, "/proc/123")
+
+	sc, err := ParseSerialized(got)
+	if err != nil {
+		t.Fatalf("re-parse appended policy: %v", err)
+	}
+	found := false
+	for _, p := range sc.AllowPaths {
+		if p == "/proc/123" {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("appended allow path /proc/123 not present after round-trip; allow=%v", sc.AllowPaths)
+	}
+}
+
+// TestAppendSerializedAllow_RefusesSeparatorInjection is the fail-closed negative
+// control: a path carrying the reserved field separator must not smuggle extra
+// allow/deny fields into the serialized policy. The grant is dropped, not injected.
+func TestAppendSerializedAllow_RefusesSeparatorInjection(t *testing.T) {
+	fc := &FenceConfig{Root: "/root", Mode: "read-write"}
+	base := fc.Serialize("/sock")
+
+	injected := "/proc/1" + fieldSep + "-/etc"
+	got := AppendSerializedAllow(base, injected)
+
+	if got != base {
+		t.Fatalf("separator-bearing path must be refused (returned unchanged), got %q", got)
+	}
+	sc, err := ParseSerialized(got)
+	if err != nil {
+		t.Fatalf("parse: %v", err)
+	}
+	for _, d := range sc.DenyPaths {
+		if d == "/etc" {
+			t.Fatalf("injected deny field /etc leaked into policy: deny=%v", sc.DenyPaths)
+		}
+	}
+}

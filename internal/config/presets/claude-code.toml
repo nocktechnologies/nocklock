@@ -10,6 +10,14 @@ allow = [
     "~/.claude/",
     "~/.cache/",
     "/tmp/",
+    # Node runtime introspection: os.cpus() reads these system-wide,
+    # process-independent files (read-only, never a path to another process);
+    # without them it silently returns an empty array and mis-sizes worker pools.
+    # The child's own /proc/<pid> (for process.memoryUsage) is granted in code,
+    # not here — config resolution would follow /proc/self to the wrapper's pid.
+    "/proc/cpuinfo",
+    "/proc/stat",
+    "/proc/meminfo",
 ]
 deny = [
     "~/.ssh/",
