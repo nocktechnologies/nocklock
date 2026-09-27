@@ -273,7 +273,9 @@ func TestRulesFromConfigLimitsRegularFileRights(t *testing.T) {
 // TestRulesFromConfigGrantsFenceRootAsOneHierarchy is the acceptance test for
 // "the agent can create entries directly in the fence root", on a FRESH root -
 // one with no audit state inside it, which is the default. See
-// TestRulesFromConfigProtectedSubdirWithholdsRootGrant for the legacy shape. Landlock checks
+// TestRulesFromConfigProtectedSubdirWithholdsRootGrant for the legacy shape.
+//
+// Landlock checks
 // MAKE_REG/MAKE_DIR/REMOVE_FILE/REMOVE_DIR against the DIRECTORY that holds the
 // entry, so a ruleset that granted only the root's existing children (what
 // earlier rounds did, to keep the in-root audit directory ungranted) denied
@@ -363,7 +365,8 @@ func TestRulesFromConfigRootGrantCoversNockConfigDir(t *testing.T) {
 }
 
 // TestRulesFromConfigRejectsDenyInsideGrantedRoot codifies the second accepted
-// consequence, again for a FRESH root: with the root granted as one hierarchy, a filesystem.deny path
+// consequence, again for a FRESH root: with the root granted as one hierarchy,
+// a filesystem.deny path
 // INSIDE the root can no longer be enforced by Landlock, and rule generation
 // fails closed rather than shipping a fence that ignores the deny. Before the
 // root was granted, such a deny worked only when the path did not yet exist.
@@ -512,6 +515,33 @@ func TestRulesFromConfigProtectedSubdirRefusesWhenUnresolvable(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "protected root subdirectory") {
 		t.Fatalf("expected a protected-subdirectory error, got: %v", err)
+	}
+}
+
+// TestRulesFromConfigRefusesProtectedSubdirBelowDirectChild closes a hole that
+// would fail SILENTLY. Skipping one entry protects only that entry, so if the
+// protected directory sits deeper than a direct child, the child above it gets
+// granted and Landlock's ancestor walk reaches the protected directory anyway.
+// It comes up when filesystem.root is an ancestor of the project holding the
+// audit trail. Refusing is the only honest answer: a ruleset that looks like it
+// protects the audit log but does not is worse than one that will not build.
+func TestRulesFromConfigRefusesProtectedSubdirBelowDirectChild(t *testing.T) {
+	root := resolvedTempDir(t)
+	audit := filepath.Join(root, "project", ".nock")
+	if err := os.MkdirAll(audit, 0o700); err != nil {
+		t.Fatalf("mkdir nested audit dir: %v", err)
+	}
+
+	_, err := RulesFromConfig(&fsfence.FenceConfig{
+		Root:                root,
+		Mode:                "read-write",
+		ProtectedRootSubdir: audit,
+	}, nil, 5)
+	if err == nil {
+		t.Fatal("expected a protected directory below a direct child to be refused, not silently exposed")
+	}
+	if !strings.Contains(err.Error(), "not a direct child") {
+		t.Fatalf("expected a direct-child error, got: %v", err)
 	}
 }
 

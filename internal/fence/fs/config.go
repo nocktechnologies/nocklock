@@ -39,6 +39,15 @@ type FenceConfig struct {
 	// granting Root would grant this directory too. Leave it empty whenever the
 	// audit state lives outside Root, which is the default, and the root is
 	// granted as one hierarchy.
+	//
+	// It must be a DIRECT child of Root: skipping one entry protects only that
+	// entry, so a directory further down would be reached through the grant on
+	// the child above it. Rule generation refuses rather than pretend otherwise.
+	//
+	// Landlock-only. It shapes the kernel ruleset and is deliberately absent
+	// from Serialize, because the LD_PRELOAD interposer and the macOS Seatbelt
+	// profile express the same protection through DenyPaths, which they can
+	// enforce directly.
 	ProtectedRootSubdir string
 }
 

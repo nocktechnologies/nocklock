@@ -324,9 +324,21 @@ func rootRules(root, protectedSubdir, access string, abi int) ([]PathRule, error
 		// downgrade to granting the whole root, which would expose it.
 		return nil, fmt.Errorf("resolve protected root subdirectory %q: %w", protectedSubdir, err)
 	}
-	entries, err := os.ReadDir(root)
+	// Skipping one entry only protects a DIRECT child. If the protected
+	// directory sits deeper, the child on the path to it gets granted and the
+	// ancestor walk reaches the protected directory anyway — silently, which is
+	// the worst outcome. Refuse instead of pretending to protect it. This
+	// happens when filesystem.root is an ancestor of the project directory
+	// holding the audit trail.
+	if filepath.Dir(protected) != cleanRoot {
+		return nil, fmt.Errorf(
+			"cannot protect %q inside Landlock root %q: it is not a direct child, and Landlock grants a whole hierarchy, so granting %q would grant it too; "+
+				"set filesystem.root to the directory that holds the audit trail, or move the audit trail out of the root",
+			protected, cleanRoot, filepath.Dir(protected))
+	}
+	entries, err := os.ReadDir(cleanRoot)
 	if err != nil {
-		return nil, fmt.Errorf("read Landlock root %q: %w", root, err)
+		return nil, fmt.Errorf("read Landlock root %q: %w", cleanRoot, err)
 	}
 
 	paths := make([]string, 0, len(entries))

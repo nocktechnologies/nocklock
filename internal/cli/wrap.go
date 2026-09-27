@@ -280,21 +280,19 @@ var wrapCmd = &cobra.Command{
 				return fmt.Errorf("invalid filesystem fence config: %w", err)
 			}
 			if fsCfg != nil {
-				// A legacy in-project audit directory inside the fence root has
-				// to stay unwritable, which costs the root-mutation grant (see
-				// fs.FenceConfig.ProtectedRootSubdir). Decide it by asking where
-				// the audit directory actually is rather than by whether the log
-				// is "legacy": filesystem.root and the project root can differ,
-				// and an in-project audit dir OUTSIDE filesystem.root needs no
+				// An audit directory inside the fence root has to stay
+				// unwritable, which costs the root-mutation grant (see
+				// fs.FenceConfig.ProtectedRootSubdir). The question is only
+				// where the audit directory actually is -- not whether the log
+				// is "legacy" -- because filesystem.root and the project root
+				// can differ, and an audit dir outside filesystem.root needs no
 				// protection and must not cost the grant.
-				if auditDir := config.LegacyAuditDirFor(dbPath, projectRoot); auditDir != "" {
-					if pathIsWithinDir(auditDir, fsCfg.Root) {
-						fsCfg.ProtectedRootSubdir = auditDir
-						fmt.Fprintf(os.Stderr,
-							"NockLock: the audit trail is inside the fence root (%s), so the agent cannot create or remove entries directly in %s.\n"+
-								"NockLock: everything inside existing subdirectories still works. Run 'nocklock state migrate' to move the audit trail out and lift the restriction.\n",
-							auditDir, fsCfg.Root)
-					}
+				if auditDir := filepath.Dir(dbPath); pathIsWithinDir(auditDir, fsCfg.Root) {
+					fsCfg.ProtectedRootSubdir = auditDir
+					fmt.Fprintf(os.Stderr,
+						"NockLock: the audit trail is inside the fence root (%s), so the agent cannot create or remove entries directly in %s.\n"+
+							"NockLock: work inside existing subdirectories is unaffected. To lift the restriction, move %s (events.db, its -wal/-shm sidecars and chain-anchor.json together) outside the fence root while no session is running; 'nocklock state migrate' will do it for you in a later release.\n",
+						auditDir, fsCfg.Root, auditDir)
 				}
 				switch runtime.GOOS {
 				case "linux":

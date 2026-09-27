@@ -62,39 +62,36 @@ func ResolveDBPath(cfg *Config, configPath string) (dbPath string, projectRoot s
 		legacyExists = true
 	}
 
+	// Exactly one authoritative log per root. Two of them is an operator-visible
+	// state, not a race, so name the way out instead of picking a side: choosing
+	// silently would let a stale or tampered chain shadow the real one.
+	//
+	// The legacy branch computes the state path WITHOUT creating or validating
+	// the directory: a project whose log stays in .nock never writes a byte
+	// there, and hard-failing it over the trust checks on a directory it does
+	// not use would refuse to run for no reason. Lstat resolves intermediate
+	// symlinks itself, so an unresolved path still detects an existing log.
+	if legacyExists {
+		stateDB, dirErr := AuditStateDir(projectRoot)
+		if dirErr == nil {
+			stateDB = filepath.Join(stateDB, filepath.Base(configured))
+			if _, statErr := os.Lstat(stateDB); statErr == nil {
+				return "", projectRoot, fmt.Errorf(
+					"two event logs found: %s (inside the project) and %s. "+
+						"NockLock will not guess which audit chain is authoritative. "+
+						"Verify each one, then move the one you are discarding aside "+
+						"(its -wal/-shm sidecars and chain anchor travel with it)",
+					legacyDB, stateDB)
+			}
+		}
+		return legacyDB, projectRoot, nil
+	}
+
 	stateDir, err := EnsureAuditStateDir(projectRoot)
 	if err != nil {
 		return "", projectRoot, err
 	}
-	stateDB := filepath.Join(stateDir, filepath.Base(configured))
-
-	// Exactly one authoritative log per root. Two of them is an operator-visible
-	// state, not a race, so name the way out instead of picking a side: choosing
-	// silently would let a stale or tampered chain shadow the real one.
-	if legacyExists {
-		if _, statErr := os.Lstat(stateDB); statErr == nil {
-			return "", projectRoot, fmt.Errorf(
-				"two event logs found: %s (inside the project) and %s. "+
-					"NockLock will not guess which audit chain is authoritative. "+
-					"Verify each one, then move the one you are discarding aside "+
-					"(its -wal/-shm sidecars and chain anchor travel with it)",
-				legacyDB, stateDB)
-		}
-		return legacyDB, projectRoot, nil
-	}
-	return stateDB, projectRoot, nil
-}
-
-// LegacyAuditDirFor returns the in-project audit directory that dbPath belongs
-// to, or "" when the log already lives outside the project. It is what tells the
-// filesystem fence whether a directory inside the root has to stay unwritable.
-func LegacyAuditDirFor(dbPath, projectRoot string) string {
-	dir := filepath.Dir(dbPath)
-	rel, err := filepath.Rel(projectRoot, dir)
-	if err != nil || rel == ".." || strings.HasPrefix(rel, ".."+string(os.PathSeparator)) {
-		return ""
-	}
-	return dir
+	return filepath.Join(stateDir, filepath.Base(configured)), projectRoot, nil
 }
 
 // Config is the top-level NockLock configuration.
@@ -295,7 +292,9 @@ func validateAuditDBLocation(cfg *Config, configPath string) error {
 	projectRoot := filepath.Dir(filepath.Dir(configPath))
 	absRoot, err := filepath.Abs(projectRoot)
 	if err != nil {
-		return nil
+		// Fences fail closed: an unresolvable project root means the check
+		// cannot be made, not that the path is fine.
+		return fmt.Errorf("logging.db %q cannot be checked: the project root %q could not be resolved: %w", db, projectRoot, err)
 	}
 	if withinDir(absRoot, db) {
 		return nil
@@ -321,11 +320,39 @@ func withinDir(dir, path string) bool {
 	return rel == "." || (rel != ".." && !strings.HasPrefix(rel, ".."+string(os.PathSeparator)))
 }
 
-// resolveExisting canonicalizes path as far as it exists, so a comparison is not
-// defeated by /tmp and /var being symlinks into /private on macOS.
+// resolveExisting canonicalizes path by resolving symlinks in its deepest
+// EXISTING ancestor and re-appending the components that do not exist yet.
+//
+// Resolving only whole existing paths is not enough, and getting this wrong is a
+// macOS-only bug: /tmp, /var and the default TMPDIR are system symlinks into
+// /private, so a project directory resolves to /private/var/... while a
+// logging.db underneath it that has not been created yet does not resolve at
+// all. Comparing one against the other then says the path is outside the project
+// when it is plainly inside it.
 func resolveExisting(path string) string {
-	if resolved, err := filepath.EvalSymlinks(path); err == nil {
+	cleaned := filepath.Clean(path)
+	if resolved, err := filepath.EvalSymlinks(cleaned); err == nil {
 		return resolved
 	}
-	return filepath.Clean(path)
+	tail := []string{filepath.Base(cleaned)}
+	for dir := filepath.Dir(cleaned); ; {
+		if resolved, err := filepath.EvalSymlinks(dir); err == nil {
+			parts := append([]string{resolved}, reverseTail(tail)...)
+			return filepath.Join(parts...)
+		}
+		parent := filepath.Dir(dir)
+		if parent == dir {
+			return cleaned
+		}
+		tail = append(tail, filepath.Base(dir))
+		dir = parent
+	}
+}
+
+func reverseTail(in []string) []string {
+	out := make([]string, len(in))
+	for i, v := range in {
+		out[len(in)-1-i] = v
+	}
+	return out
 }

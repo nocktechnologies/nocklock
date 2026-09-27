@@ -424,8 +424,10 @@ that has to either fully succeed or not start, and a half-finished move leaves a
 chain that still verifies while missing its most recent entries. The trade is
 that while the log sits inside the fence root, the agent cannot create or remove
 entries directly in the root — everything inside existing subdirectories still
-works, and `nocklock wrap` prints one line saying so. `nocklock state migrate`
-will move it when you want the restriction lifted.
+works, and `nocklock wrap` says so on stderr each run. To lift the restriction,
+move the audit directory (`events.db`, its `-wal`/`-shm` sidecars and
+`chain-anchor.json` together) outside the fence root while no session is
+running; `nocklock state migrate` will do that for you in a later release.
 
 `logging.db` set to a relative path keeps only its filename and goes to the
 audit state directory. An absolute path is accepted only inside your project or

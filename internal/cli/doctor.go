@@ -603,8 +603,8 @@ func auditStateInsideGrantCheck(cfg *config.Config, configPath string) (doctorCh
 }
 
 // auditStateUnavailableCheck reports a CRITICAL when the event log's location
-// cannot be resolved at all — an unusable audit state directory, or a legacy
-// in-project log that cannot be migrated. doctorActivityCheck deliberately
+// cannot be resolved at all — an unusable audit state directory, or two
+// competing event logs for one project. doctorActivityCheck deliberately
 // stays quiet about every failure (it reports activity, not health), so without
 // this the operator would see an empty activity summary and no reason for it,
 // while `wrap` refuses to start for a cause doctor never named.

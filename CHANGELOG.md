@@ -53,9 +53,10 @@ All notable changes to NockLock will be documented in this file.
   still verifies while missing its most recent rows. While the log sits inside
   the fence root, the fence withholds the root grant and falls back to granting
   each existing child, so work inside existing subdirectories is unaffected but
-  creates directly in the root stay denied. `nocklock wrap` prints one line
-  saying so and naming `nocklock state migrate`, which will move it on request.
-  Two logs for one root is still refused rather than silently reconciled.
+  creates directly in the root stay denied. `nocklock wrap` says so on stderr
+  and names the manual move that lifts it; `nocklock state migrate` will
+  automate that in a later release. Two logs for one root is still refused
+  rather than silently reconciled.
 - `logging.db` now has one contract for absolute paths instead of two: a path
   outside both the project and the audit state directory is rejected when the
   config loads, with an error naming the setting. `logging.db` is a setting a

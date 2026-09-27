@@ -34,10 +34,7 @@ import (
 // This mirrors logging.DefaultSigningKeyPath, which already keeps the Ed25519
 // signing key under $XDG_CONFIG_HOME for the same reason.
 func EnsureAuditStateDir(projectRoot string) (string, error) {
-	base, owned, err := auditStateBase()
-	if err != nil {
-		return "", err
-	}
+	base, owned := auditStateLayout(projectRoot)
 	// The base may not exist yet ($XDG_STATE_HOME on a fresh account, or
 	// ~/.local/state). Create it with ordinary directory permissions: it is not
 	// NockLock's directory and forcing 0700 on a user's ~/.local would be
@@ -54,7 +51,7 @@ func EnsureAuditStateDir(projectRoot string) (string, error) {
 	if err != nil {
 		return "", fmt.Errorf("cannot resolve the audit state root %s: %w", base, err)
 	}
-	for _, component := range append(owned, projectStateKey(projectRoot)) {
+	for _, component := range owned {
 		dir = filepath.Join(dir, component)
 		if err := ensureTrustedDir(dir); err != nil {
 			return "", err
@@ -106,15 +103,11 @@ func ensureTrustedDir(dir string) error {
 // the side effect of creating a directory. Use EnsureAuditStateDir to obtain a
 // directory that is ready to write to.
 func AuditStateDir(projectRoot string) (string, error) {
-	base, owned, err := auditStateBase()
-	if err != nil {
-		return "", err
-	}
-	parts := append([]string{base}, owned...)
-	return filepath.Join(append(parts, projectStateKey(projectRoot))...), nil
+	base, owned := auditStateLayout(projectRoot)
+	return filepath.Join(base, filepath.Join(owned...)), nil
 }
 
-// auditStateBase splits the audit state location into a BASE that NockLock only
+// auditStateLayout splits the audit state location into a BASE that NockLock only
 // reaches through, and the components BELOW it that NockLock owns and therefore
 // validates strictly (see ensureTrustedDir). Ownership is the reason for the
 // split: $XDG_STATE_HOME and ~/.local/state belong to the user's wider setup and
@@ -133,14 +126,15 @@ func AuditStateDir(projectRoot string) (string, error) {
 // presets, and an audit state directory inside a Landlock-granted tree makes its
 // own deny unenforceable and aborts rule generation. /var/tmp also survives a
 // reboot on most systems, which /tmp does not.
-func auditStateBase() (base string, owned []string, err error) {
+func auditStateLayout(projectRoot string) (base string, owned []string) {
+	key := projectStateKey(projectRoot)
 	if x := os.Getenv("XDG_STATE_HOME"); x != "" {
-		return x, []string{"nocklock"}, nil
+		return x, []string{"nocklock", key}
 	}
-	if home, homeErr := os.UserHomeDir(); homeErr == nil && home != "" {
-		return filepath.Join(home, ".local", "state"), []string{"nocklock"}, nil
+	if home, err := os.UserHomeDir(); err == nil && home != "" {
+		return filepath.Join(home, ".local", "state"), []string{"nocklock", key}
 	}
-	return "/var/tmp", []string{fmt.Sprintf("nocklock-state-%d", os.Geteuid()), "nocklock"}, nil
+	return "/var/tmp", []string{fmt.Sprintf("nocklock-state-%d", os.Geteuid()), "nocklock", key}
 }
 
 // projectStateKey names a project's audit state directory: a SHA-256 prefix of

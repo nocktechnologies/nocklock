@@ -11,11 +11,11 @@ import (
 
 const legacyAnchorName = "chain-anchor" + ".json"
 
-// TestResolveDBPathLeavesUnrelatedProjectFilesAlone is a negative control for
-// the migration. The default logging.db is the bare name "events.db", so a
-// project that happens to own a file by that name at its root must NOT have it
-// relocated into NockLock's state directory. Only the conventional
-// <root>/.nock location is ever migrated from.
+// TestResolveDBPathLeavesUnrelatedProjectFilesAlone: the default logging.db is
+// the bare name "events.db", so a project that happens to own a file by that
+// name at its root must not have it mistaken for NockLock's own audit log. Only
+// the conventional <root>/.nock location counts as a legacy log. The project's
+// files are left untouched, and the resolved log still points at the state dir.
 func TestResolveDBPathLeavesUnrelatedProjectFilesAlone(t *testing.T) {
 	projectRoot, configPath := writeProjectConfig(t, `db = "events.db"`)
 	stray := filepath.Join(projectRoot, "events.db")
@@ -32,13 +32,20 @@ func TestResolveDBPathLeavesUnrelatedProjectFilesAlone(t *testing.T) {
 	if err != nil {
 		t.Fatalf("load config: %v", err)
 	}
-	if _, _, err := config.ResolveDBPath(cfg, configPath); err != nil {
+	dbPath, _, err := config.ResolveDBPath(cfg, configPath)
+	if err != nil {
 		t.Fatalf("ResolveDBPath: %v", err)
 	}
+	if dbPath == stray {
+		t.Fatalf("a project file at %s was adopted as the audit log", stray)
+	}
+	if rel, relErr := filepath.Rel(projectRoot, dbPath); relErr == nil && !strings.HasPrefix(rel, "..") {
+		t.Fatalf("event log %q resolved inside the project %q; it should be in the audit state dir", dbPath, projectRoot)
+	}
 
-	data, err := os.ReadFile(stray)
-	if err != nil {
-		t.Fatalf("project file %s was moved out of the project: %v", stray, err)
+	data, readErr := os.ReadFile(stray)
+	if readErr != nil {
+		t.Fatalf("project file %s was moved out of the project: %v", stray, readErr)
 	}
 	if string(data) != strayContent {
 		t.Fatalf("project file content = %q, want %q", data, strayContent)

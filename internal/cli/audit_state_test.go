@@ -38,7 +38,13 @@ func TestMain(m *testing.M) {
 // the audit state root is isolated from the developer's real one.
 func writeProjectConfig(t *testing.T, dbLine string) (projectRoot, configPath string) {
 	t.Helper()
-	projectRoot = t.TempDir()
+	// Resolve the temp root: on macOS it lives under /var/folders/..., and /var
+	// is a system symlink into /private, so an unresolved root would not match
+	// the paths NockLock resolves.
+	var err error
+	if projectRoot, err = filepath.EvalSymlinks(t.TempDir()); err != nil {
+		t.Fatalf("resolve temp dir: %v", err)
+	}
 	t.Setenv("XDG_STATE_HOME", t.TempDir())
 	nockDir := filepath.Join(projectRoot, config.Dir)
 	if err := os.MkdirAll(nockDir, 0o700); err != nil {
@@ -173,12 +179,12 @@ func TestLegacyAuditChainKeepsWorkingInPlace(t *testing.T) {
 		t.Fatalf("event log = %q, want the legacy in-project log %q left exactly where it is", dbPath, legacyDB)
 	}
 
-	migrated, err := logging.NewLogger(dbPath, projectRoot)
+	reopened, err := logging.NewLogger(dbPath, projectRoot)
 	if err != nil {
 		t.Fatalf("reopen legacy event log: %v", err)
 	}
-	defer migrated.Close()
-	after, err := migrated.VerifyChain()
+	defer reopened.Close()
+	after, err := reopened.VerifyChain()
 	if err != nil {
 		t.Fatalf("verify legacy chain after resolve: %v", err)
 	}
@@ -211,9 +217,12 @@ func TestLegacyAuditDirCostsTheRootMutationGrant(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ResolveDBPath: %v", err)
 	}
-	auditDir := config.LegacyAuditDirFor(dbPath, gotRoot)
-	if auditDir == "" {
-		t.Fatalf("legacy audit dir not detected for %q under %q", dbPath, gotRoot)
+	if dbPath != legacyDB {
+		t.Fatalf("event log = %q, want the legacy in-project log %q", dbPath, legacyDB)
+	}
+	auditDir := filepath.Dir(dbPath)
+	if !pathIsWithinDir(auditDir, gotRoot) {
+		t.Fatalf("audit dir %q is not inside the project root %q", auditDir, gotRoot)
 	}
 
 	spec, err := landlock.RulesFromConfig(&fsfence.FenceConfig{
