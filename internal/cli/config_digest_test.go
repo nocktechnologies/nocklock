@@ -7,7 +7,10 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"reflect"
+	"slices"
 	"strings"
+	"sync"
 	"testing"
 
 	"github.com/nocktechnologies/nocklock/internal/config"
@@ -28,7 +31,7 @@ func TestWrapRecordsUnchangedConfigDigestWithoutWarning(t *testing.T) {
 		stderr := captureStderr(t, func() {
 			cmd := &cobra.Command{}
 			cmd.SetContext(context.Background())
-			runErr = wrapCmd.RunE(cmd, []string{"--", "/bin/true"})
+			runErr = wrapCmd.RunE(cmd, []string{"--", "/usr/bin/true"})
 		})
 		if runErr != nil {
 			t.Fatalf("wrap: %v", runErr)
@@ -66,12 +69,12 @@ func TestConfigDigestCanonicalizesPolicyAndExcludesCloudAPIKey(t *testing.T) {
 	cfg := config.DefaultConfig()
 	cfg.Network.Allow = []string{"b.example", "a.example"}
 	cfg.Cloud.APIKey = "must-not-be-recorded"
-	first, err := newConfigDigestRecord(&cfg, configPath, filepath.Join(project, "events.db"))
+	first, err := newConfigDigestRecord(&cfg, configPath, filepath.Join(project, "events.db"), "proxy")
 	if err != nil {
 		t.Fatal(err)
 	}
 	cfg.Network.Allow = []string{"a.example", "b.example"}
-	second, err := newConfigDigestRecord(&cfg, configPath, filepath.Join(project, "events.db"))
+	second, err := newConfigDigestRecord(&cfg, configPath, filepath.Join(project, "events.db"), "proxy")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -81,6 +84,100 @@ func TestConfigDigestCanonicalizesPolicyAndExcludesCloudAPIKey(t *testing.T) {
 	if bytes.Contains(first.Policy, []byte(cfg.Cloud.APIKey)) {
 		t.Fatalf("canonical policy leaked cloud.api_key: %s", first.Policy)
 	}
+}
+
+var configDigestPolicyFields = map[string]string{
+	"ProfileName":                   "profile",
+	"Project.Name":                  "project.name",
+	"Project.Root":                  "project.root",
+	"Filesystem.Root":               "filesystem.root",
+	"Filesystem.Mode":               "filesystem.mode",
+	"Filesystem.LinuxEnforcement":   "filesystem.linux_enforcement",
+	"Filesystem.Allow":              "filesystem.allow",
+	"Filesystem.AllowRW":            "filesystem.allow_rw",
+	"Filesystem.Deny":               "filesystem.deny",
+	"Filesystem.MacOSAllowUnfenced": "filesystem.macos_allow_unfenced",
+	"Filesystem.Hardened":           "filesystem.hardened",
+	"Network.Allow":                 "network.allow",
+	"Network.AllowAll":              "network.allow_all",
+	"Network.AllowPrivateRanges":    "network.allow_private_ranges",
+	"Secrets.Pass":                  "secrets.pass",
+	"Secrets.Block":                 "secrets.block",
+	"Secrets.ScanEnv":               "secrets.scan_env",
+	"Secrets.ScanPaths":             "secrets.scan_paths",
+	"Secrets.ScanEnvAllow":          "secrets.scan_env_allow",
+	"Syscall.Enforcement":           "syscall.enforcement",
+	"Syscall.AllowNamespaces":       "syscall.allow_namespaces",
+	"Syscall.SocketFamilies":        "syscall.socket_families",
+	"Syscall.ExtraDeny":             "syscall.extra_deny",
+	"Logging.DB":                    "logging.db",
+	"Logging.Level":                 "logging.level",
+	"Cloud.Enabled":                 "cloud.enabled",
+	"Cloud.Endpoint":                "cloud.endpoint",
+}
+
+// configDigestNotSecurityRelevantFields requires an explicit decision for any
+// future config field that does not belong in the digest.
+var configDigestNotSecurityRelevantFields = map[string]struct{}{
+	"Cloud.APIKey": {}, // A credential, never policy data; including it would leak a secret into the audit log.
+}
+
+func TestConfigDigestCoversTopLevelConfigFields(t *testing.T) {
+	cfg := config.DefaultConfig()
+	record, err := newConfigDigestRecord(&cfg, filepath.Join(t.TempDir(), config.Dir, config.File), filepath.Join(t.TempDir(), "events.db"), "proxy")
+	if err != nil {
+		t.Fatal(err)
+	}
+	fieldPaths := configDigestFieldPaths(reflect.TypeFor[config.Config](), "")
+	for _, fieldPath := range fieldPaths {
+		if policyPath, covered := configDigestPolicyFields[fieldPath]; covered {
+			if !jsonPathPresent(record.Policy, policyPath) {
+				t.Errorf("config field %s is mapped to missing policy field %q", fieldPath, policyPath)
+			}
+			continue
+		}
+		if _, excluded := configDigestNotSecurityRelevantFields[fieldPath]; !excluded {
+			t.Errorf("config field %s is neither canonicalized nor explicitly marked not security-relevant", fieldPath)
+		}
+	}
+	for fieldName := range configDigestPolicyFields {
+		if !slices.Contains(fieldPaths, fieldName) {
+			t.Errorf("stale canonical policy mapping for removed config field %s", fieldName)
+		}
+	}
+}
+
+func configDigestFieldPaths(configType reflect.Type, prefix string) []string {
+	var paths []string
+	for i := 0; i < configType.NumField(); i++ {
+		field := configType.Field(i)
+		path := field.Name
+		if prefix != "" {
+			path = prefix + "." + path
+		}
+		if field.Type.Kind() == reflect.Struct {
+			paths = append(paths, configDigestFieldPaths(field.Type, path)...)
+			continue
+		}
+		paths = append(paths, path)
+	}
+	return paths
+}
+
+func jsonPathPresent(document json.RawMessage, path string) bool {
+	current := document
+	for _, field := range strings.Split(path, ".") {
+		var object map[string]json.RawMessage
+		if err := json.Unmarshal(current, &object); err != nil {
+			return false
+		}
+		value, found := object[field]
+		if !found {
+			return false
+		}
+		current = value
+	}
+	return true
 }
 
 func TestConfigDigestResolvesFilesystemPolicyPaths(t *testing.T) {
@@ -101,7 +198,7 @@ func TestConfigDigestResolvesFilesystemPolicyPaths(t *testing.T) {
 	cfg := config.DefaultConfig()
 	cfg.Filesystem.Root = rootLink
 	cfg.Filesystem.AllowRW = []string{filepath.Join(rootLink, "scratch")}
-	record, err := newConfigDigestRecord(&cfg, filepath.Join(project, config.Dir, config.File), filepath.Join(project, "events.db"))
+	record, err := newConfigDigestRecord(&cfg, filepath.Join(project, config.Dir, config.File), filepath.Join(project, "events.db"), "proxy")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -114,10 +211,14 @@ func TestConfigDigestResolvesFilesystemPolicyPaths(t *testing.T) {
 	if err := json.Unmarshal(record.Policy, &policy); err != nil {
 		t.Fatal(err)
 	}
-	if policy.Filesystem.Root != root {
-		t.Fatalf("canonical filesystem root = %q, want %q", policy.Filesystem.Root, root)
+	wantRoot, err := filepath.EvalSymlinks(root)
+	if err != nil {
+		t.Fatal(err)
 	}
-	if got, want := policy.Filesystem.AllowRW, []string{filepath.Join(root, "scratch")}; len(got) != 1 || got[0] != want[0] {
+	if policy.Filesystem.Root != wantRoot {
+		t.Fatalf("canonical filesystem root = %q, want %q", policy.Filesystem.Root, wantRoot)
+	}
+	if got, want := policy.Filesystem.AllowRW, []string{filepath.Join(wantRoot, "scratch")}; len(got) != 1 || got[0] != want[0] {
 		t.Fatalf("canonical filesystem allow_rw = %q, want %q", got, want)
 	}
 }
@@ -146,12 +247,12 @@ func TestConfigDigestAllowRWChangeWarnsAndStaysSigned(t *testing.T) {
 	cfg := config.DefaultConfig()
 	cfg.Project.Root = "."
 	cfg.Filesystem.Root = project
-	if err := recordConfigDigest(logger, &cfg, configPath, dbPath, "first", io.Discard); err != nil {
+	if err := recordConfigDigest(logger, &cfg, configPath, dbPath, "first", "proxy", io.Discard); err != nil {
 		t.Fatalf("first config digest: %v", err)
 	}
 	cfg.Filesystem.AllowRW = []string{"scratch"}
 	var warning strings.Builder
-	if err := recordConfigDigest(logger, &cfg, configPath, dbPath, "second", &warning); err != nil {
+	if err := recordConfigDigest(logger, &cfg, configPath, dbPath, "second", "proxy", &warning); err != nil {
 		t.Fatalf("changed config digest: %v", err)
 	}
 	if !strings.Contains(warning.String(), "filesystem.allow_rw") {
@@ -178,6 +279,99 @@ func TestConfigDigestAllowRWChangeWarnsAndStaysSigned(t *testing.T) {
 	}
 }
 
+func TestConfigDigestNetworkFenceModeChangesAndWarns(t *testing.T) {
+	project, configPath := writeProjectConfig(t, `db = "events.db"`)
+	dbPath := resolvedAuditDB(t, project)
+	logger, err := logging.NewLogger(dbPath, project)
+	if err != nil {
+		t.Fatalf("NewLogger: %v", err)
+	}
+	defer logger.Close()
+	cfg, err := config.Load(configPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if err := recordConfigDigest(logger, cfg, configPath, dbPath, "proxy", "proxy", io.Discard); err != nil {
+		t.Fatalf("record proxy digest: %v", err)
+	}
+	var warning strings.Builder
+	if err := recordConfigDigest(logger, cfg, configPath, dbPath, "netns", "netns", &warning); err != nil {
+		t.Fatalf("record netns digest: %v", err)
+	}
+	if !strings.Contains(warning.String(), "network.mode") {
+		t.Fatalf("net-fence warning did not name the changed field:\n%s", warning.String())
+	}
+
+	records := digestRecords(t, dbPath, project)
+	if len(records) != 2 || records[0].Digest == records[1].Digest {
+		t.Fatalf("network fence mode did not change the digest: %+v", records)
+	}
+}
+
+func TestConfigDigestPredecessorsFollowCommittedOrder(t *testing.T) {
+	project, configPath := writeProjectConfig(t, `db = "events.db"`)
+	dbPath := resolvedAuditDB(t, project)
+	logger, err := logging.NewLogger(dbPath, project)
+	if err != nil {
+		t.Fatalf("NewLogger: %v", err)
+	}
+	cfg, err := config.Load(configPath)
+	if err != nil {
+		logger.Close()
+		t.Fatal(err)
+	}
+	if err := recordConfigDigest(logger, cfg, configPath, dbPath, "baseline", "proxy", io.Discard); err != nil {
+		logger.Close()
+		t.Fatal(err)
+	}
+	if err := logger.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	const writers = 8
+	start := make(chan struct{})
+	errs := make(chan error, writers)
+	var wg sync.WaitGroup
+	for i := 0; i < writers; i++ {
+		cfgCopy := *cfg
+		cfgCopy.Network.Allow = []string{string(rune('a'+i)) + ".example"}
+		wg.Add(1)
+		go func(sessionID string, current config.Config) {
+			defer wg.Done()
+			<-start
+			concurrentLogger, err := logging.NewLogger(dbPath, project)
+			if err != nil {
+				errs <- err
+				return
+			}
+			err = recordConfigDigest(concurrentLogger, &current, configPath, dbPath, sessionID, "proxy", io.Discard)
+			if closeErr := concurrentLogger.Close(); err == nil {
+				err = closeErr
+			}
+			errs <- err
+		}(string(rune('a'+i)), cfgCopy)
+	}
+	close(start)
+	wg.Wait()
+	close(errs)
+	for err := range errs {
+		if err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	records := digestRecords(t, dbPath, project)
+	if len(records) != writers+1 {
+		t.Fatalf("config.digest rows = %d, want %d", len(records), writers+1)
+	}
+	for i := 1; i < len(records); i++ {
+		if records[i].PreviousDigest != records[i-1].Digest {
+			t.Fatalf("record %d previous_digest = %q, want committed predecessor %q", i, records[i].PreviousDigest, records[i-1].Digest)
+		}
+	}
+}
+
 func TestRunAuditVerifyReportsDigestHistory(t *testing.T) {
 	project, configPath := writeProjectConfig(t, `db = "events.db"`)
 	withWorkingDir(t, project)
@@ -190,14 +384,14 @@ func TestRunAuditVerifyReportsDigestHistory(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewLogger: %v", err)
 	}
-	if err := recordConfigDigest(logger, cfg, configPath, dbPath, "one", io.Discard); err != nil {
+	if err := recordConfigDigest(logger, cfg, configPath, dbPath, "one", "proxy", io.Discard); err != nil {
 		t.Fatal(err)
 	}
 	if err := logger.Log(logging.Event{EventType: logging.EventSessionStart, Category: "session", Detail: "first", SessionID: "one"}); err != nil {
 		t.Fatal(err)
 	}
 	cfg.Filesystem.AllowRW = []string{"scratch"}
-	if err := recordConfigDigest(logger, cfg, configPath, dbPath, "two", io.Discard); err != nil {
+	if err := recordConfigDigest(logger, cfg, configPath, dbPath, "two", "proxy", io.Discard); err != nil {
 		t.Fatal(err)
 	}
 	if err := logger.Log(logging.Event{EventType: logging.EventSessionStart, Category: "session", Detail: "second", SessionID: "two"}); err != nil {
@@ -216,13 +410,60 @@ func TestRunAuditVerifyReportsDigestHistory(t *testing.T) {
 	}
 }
 
-func TestRunAuditVerifyRejectsSessionWithoutConfigDigest(t *testing.T) {
-	project, _ := writeProjectConfig(t, `db = "events.db"`)
+func TestRunAuditVerifyTreatsPreAdoptionSessionsAsLegacy(t *testing.T) {
+	project, configPath := writeProjectConfig(t, `db = "events.db"`)
 	withWorkingDir(t, project)
 	dbPath := resolvedAuditDB(t, project)
 	logger, err := logging.NewLogger(dbPath, project)
 	if err != nil {
 		t.Fatalf("NewLogger: %v", err)
+	}
+	if err := logger.Log(logging.Event{EventType: logging.EventSessionStart, Category: "session", Detail: "legacy", SessionID: "legacy"}); err != nil {
+		logger.Close()
+		t.Fatal(err)
+	}
+	cfg, err := config.Load(configPath)
+	if err != nil {
+		logger.Close()
+		t.Fatal(err)
+	}
+	if err := recordConfigDigest(logger, cfg, configPath, dbPath, "post-adoption", "proxy", io.Discard); err != nil {
+		logger.Close()
+		t.Fatal(err)
+	}
+	if err := logger.Log(logging.Event{EventType: logging.EventSessionStart, Category: "session", Detail: "post-adoption", SessionID: "post-adoption"}); err != nil {
+		logger.Close()
+		t.Fatal(err)
+	}
+	if err := logger.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	var output strings.Builder
+	if err := runAuditVerify(context.Background(), &output, ""); err != nil {
+		t.Fatalf("runAuditVerify rejected a pre-adoption session: %v\n%s", err, output.String())
+	}
+	if !strings.Contains(output.String(), "1 legacy session(s)") {
+		t.Fatalf("legacy sessions were not counted:\n%s", output.String())
+	}
+}
+
+func TestRunAuditVerifyRejectsSessionWithoutConfigDigest(t *testing.T) {
+	project, configPath := writeProjectConfig(t, `db = "events.db"`)
+	withWorkingDir(t, project)
+	dbPath := resolvedAuditDB(t, project)
+	logger, err := logging.NewLogger(dbPath, project)
+	if err != nil {
+		t.Fatalf("NewLogger: %v", err)
+	}
+	cfg, err := config.Load(configPath)
+	if err != nil {
+		logger.Close()
+		t.Fatal(err)
+	}
+	if err := recordConfigDigest(logger, cfg, configPath, dbPath, "adoption", "proxy", io.Discard); err != nil {
+		logger.Close()
+		t.Fatal(err)
 	}
 	if err := logger.Log(logging.Event{EventType: logging.EventSessionStart, Category: "session", Detail: "start", SessionID: "missing-digest"}); err != nil {
 		t.Fatal(err)
@@ -238,6 +479,197 @@ func TestRunAuditVerifyRejectsSessionWithoutConfigDigest(t *testing.T) {
 	}
 	if !strings.Contains(output.String(), "CONFIG DIGEST: INCOMPLETE") || !strings.Contains(output.String(), "missing-digest") {
 		t.Fatalf("missing config.digest was not reported:\n%s", output.String())
+	}
+}
+
+func TestRunAuditVerifyRejectsPostAdoptionStartReusingLegacyID(t *testing.T) {
+	project, configPath := writeProjectConfig(t, `db = "events.db"`)
+	withWorkingDir(t, project)
+	dbPath := resolvedAuditDB(t, project)
+	logger, err := logging.NewLogger(dbPath, project)
+	if err != nil {
+		t.Fatalf("NewLogger: %v", err)
+	}
+	if err := logger.Log(logging.Event{EventType: logging.EventSecretPassed, Category: "secret", Detail: "legacy event", SessionID: "reused"}); err != nil {
+		logger.Close()
+		t.Fatal(err)
+	}
+	cfg, err := config.Load(configPath)
+	if err != nil {
+		logger.Close()
+		t.Fatal(err)
+	}
+	if err := recordConfigDigest(logger, cfg, configPath, dbPath, "adoption", "proxy", io.Discard); err != nil {
+		logger.Close()
+		t.Fatal(err)
+	}
+	if err := logger.Log(logging.Event{EventType: logging.EventSessionStart, Category: "session", Detail: "post-adoption start", SessionID: "reused"}); err != nil {
+		logger.Close()
+		t.Fatal(err)
+	}
+	if err := logger.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	var output strings.Builder
+	err = runAuditVerify(context.Background(), &output, "")
+	if err == nil {
+		t.Fatalf("runAuditVerify accepted a post-adoption start with a reused legacy ID:\n%s", output.String())
+	}
+	if !strings.Contains(output.String(), "CONFIG DIGEST: INCOMPLETE") || !strings.Contains(output.String(), "reused") {
+		t.Fatalf("reused session ID was not reported as missing:\n%s", output.String())
+	}
+}
+
+func TestRunAuditVerifyRequiresOneDigestPerSessionStart(t *testing.T) {
+	project, configPath := writeProjectConfig(t, `db = "events.db"`)
+	withWorkingDir(t, project)
+	dbPath := resolvedAuditDB(t, project)
+	logger, err := logging.NewLogger(dbPath, project)
+	if err != nil {
+		t.Fatalf("NewLogger: %v", err)
+	}
+	cfg, err := config.Load(configPath)
+	if err != nil {
+		logger.Close()
+		t.Fatal(err)
+	}
+	if err := recordConfigDigest(logger, cfg, configPath, dbPath, "reused", "proxy", io.Discard); err != nil {
+		logger.Close()
+		t.Fatal(err)
+	}
+	if err := logger.Log(logging.Event{EventType: logging.EventSessionStart, Category: "session", Detail: "first", SessionID: "reused"}); err != nil {
+		logger.Close()
+		t.Fatal(err)
+	}
+	if err := logger.Log(logging.Event{EventType: logging.EventSessionStart, Category: "session", Detail: "second", SessionID: "reused"}); err != nil {
+		logger.Close()
+		t.Fatal(err)
+	}
+	if err := logger.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	var output strings.Builder
+	err = runAuditVerify(context.Background(), &output, "")
+	if err == nil || !strings.Contains(output.String(), "CONFIG DIGEST: INCOMPLETE") || !strings.Contains(output.String(), "reused") {
+		t.Fatalf("runAuditVerify accepted two session starts with one digest: %v\n%s", err, output.String())
+	}
+}
+
+func TestRunAuditVerifyAllowsLegacySessionToFinishAfterAdoption(t *testing.T) {
+	project, configPath := writeProjectConfig(t, `db = "events.db"`)
+	withWorkingDir(t, project)
+	dbPath := resolvedAuditDB(t, project)
+	logger, err := logging.NewLogger(dbPath, project)
+	if err != nil {
+		t.Fatalf("NewLogger: %v", err)
+	}
+	if err := logger.Log(logging.Event{EventType: logging.EventSessionStart, Category: "session", Detail: "legacy start", SessionID: "legacy"}); err != nil {
+		logger.Close()
+		t.Fatal(err)
+	}
+	cfg, err := config.Load(configPath)
+	if err != nil {
+		logger.Close()
+		t.Fatal(err)
+	}
+	if err := recordConfigDigest(logger, cfg, configPath, dbPath, "post-adoption", "proxy", io.Discard); err != nil {
+		logger.Close()
+		t.Fatal(err)
+	}
+	if err := logger.Log(logging.Event{EventType: logging.EventSessionEnd, Category: "session", Detail: "legacy end", SessionID: "legacy"}); err != nil {
+		logger.Close()
+		t.Fatal(err)
+	}
+	if err := logger.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	var output strings.Builder
+	if err := runAuditVerify(context.Background(), &output, ""); err != nil {
+		t.Fatalf("runAuditVerify rejected a legacy session that finished after adoption: %v\n%s", err, output.String())
+	}
+	if !strings.Contains(output.String(), "1 legacy session(s)") {
+		t.Fatalf("legacy session was not counted:\n%s", output.String())
+	}
+}
+
+func TestRunAuditVerifyRejectsInvalidConfigDigest(t *testing.T) {
+	project, configPath := writeProjectConfig(t, `db = "events.db"`)
+	withWorkingDir(t, project)
+	dbPath := resolvedAuditDB(t, project)
+	logger, err := logging.NewLogger(dbPath, project)
+	if err != nil {
+		t.Fatalf("NewLogger: %v", err)
+	}
+	cfg, err := config.Load(configPath)
+	if err != nil {
+		logger.Close()
+		t.Fatal(err)
+	}
+	record, err := newConfigDigestRecord(cfg, configPath, dbPath, "proxy")
+	if err != nil {
+		logger.Close()
+		t.Fatal(err)
+	}
+	record.Digest = strings.Repeat("0", len(record.Digest))
+	detail, err := json.Marshal(record)
+	if err != nil {
+		logger.Close()
+		t.Fatal(err)
+	}
+	if err := logger.Log(logging.Event{EventType: logging.EventConfigDigest, Category: "config", Detail: string(detail), SessionID: "invalid"}); err != nil {
+		logger.Close()
+		t.Fatal(err)
+	}
+	if err := logger.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	var output strings.Builder
+	err = runAuditVerify(context.Background(), &output, "")
+	if err == nil || !strings.Contains(err.Error(), "digest does not match canonical policy") {
+		t.Fatalf("runAuditVerify accepted an invalid config digest: %v\n%s", err, output.String())
+	}
+}
+
+func TestRunAuditVerifyRejectsInvalidConfigDigestPredecessor(t *testing.T) {
+	project, configPath := writeProjectConfig(t, `db = "events.db"`)
+	withWorkingDir(t, project)
+	dbPath := resolvedAuditDB(t, project)
+	logger, err := logging.NewLogger(dbPath, project)
+	if err != nil {
+		t.Fatalf("NewLogger: %v", err)
+	}
+	cfg, err := config.Load(configPath)
+	if err != nil {
+		logger.Close()
+		t.Fatal(err)
+	}
+	record, err := newConfigDigestRecord(cfg, configPath, dbPath, "proxy")
+	if err != nil {
+		logger.Close()
+		t.Fatal(err)
+	}
+	record.PreviousDigest = "unexpected"
+	detail, err := json.Marshal(record)
+	if err != nil {
+		logger.Close()
+		t.Fatal(err)
+	}
+	if err := logger.Log(logging.Event{EventType: logging.EventConfigDigest, Category: "config", Detail: string(detail), SessionID: "invalid"}); err != nil {
+		logger.Close()
+		t.Fatal(err)
+	}
+	if err := logger.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	var output strings.Builder
+	err = runAuditVerify(context.Background(), &output, "")
+	if err == nil || !strings.Contains(err.Error(), "predecessor before the first digest") {
+		t.Fatalf("runAuditVerify accepted an invalid config digest predecessor: %v\n%s", err, output.String())
 	}
 }
 

@@ -33,34 +33,44 @@ type configDigestRecord struct {
 // recordConfigDigest appends the current effective policy to the audit chain
 // before the child starts. A changed policy is advisory, but an unrecordable
 // policy is a fail-closed launch error.
-func recordConfigDigest(logger *logging.Logger, cfg *config.Config, configPath, dbPath, sessionID string, stderr io.Writer) error {
-	record, err := newConfigDigestRecord(cfg, configPath, dbPath)
+func recordConfigDigest(logger *logging.Logger, cfg *config.Config, configPath, dbPath, sessionID, networkFenceMode string, stderr io.Writer) error {
+	record, err := newConfigDigestRecord(cfg, configPath, dbPath, networkFenceMode)
 	if err != nil {
 		return err
 	}
 
-	previous, err := latestConfigDigest(logger)
-	if err != nil {
-		return err
-	}
-	if previous != nil {
-		record.PreviousDigest = previous.Digest
-	}
+	previousEvent, err := logger.LogAfterLatest(logging.EventConfigDigest, func(event *logging.Event) (logging.Event, error) {
+		if event != nil {
+			previous, err := decodeConfigDigest(event)
+			if err != nil {
+				return logging.Event{}, err
+			}
+			record.PreviousDigest = previous.Digest
+		}
 
-	detail, err := json.Marshal(record)
+		detail, err := json.Marshal(record)
+		if err != nil {
+			return logging.Event{}, fmt.Errorf("serialize config digest: %w", err)
+		}
+		return logging.Event{
+			Timestamp: time.Now(),
+			EventType: logging.EventConfigDigest,
+			Category:  "config",
+			Detail:    string(detail),
+			SessionID: sessionID,
+		}, nil
+	})
 	if err != nil {
-		return fmt.Errorf("serialize config digest: %w", err)
-	}
-	if err := logger.Log(logging.Event{
-		Timestamp: time.Now(),
-		EventType: logging.EventConfigDigest,
-		Category:  "config",
-		Detail:    string(detail),
-		SessionID: sessionID,
-	}); err != nil {
 		return fmt.Errorf("append config.digest audit row: %w", err)
 	}
 
+	var previous *configDigestRecord
+	if previousEvent != nil {
+		previous, err = decodeConfigDigest(previousEvent)
+		if err != nil {
+			return fmt.Errorf("decode committed predecessor: %w", err)
+		}
+	}
 	if previous != nil && previous.Digest != record.Digest {
 		fields := changedConfigPolicyFields(previous.Policy, record.Policy)
 		if len(fields) == 0 {
@@ -76,8 +86,8 @@ func recordConfigDigest(logger *logging.Logger, cfg *config.Config, configPath, 
 	return nil
 }
 
-func newConfigDigestRecord(cfg *config.Config, configPath, dbPath string) (configDigestRecord, error) {
-	policy, err := canonicalPolicy(cfg, configPath, dbPath)
+func newConfigDigestRecord(cfg *config.Config, configPath, dbPath, networkFenceMode string) (configDigestRecord, error) {
+	policy, err := canonicalPolicy(cfg, configPath, dbPath, networkFenceMode)
 	if err != nil {
 		return configDigestRecord{}, fmt.Errorf("serialize canonical config policy: %w", err)
 	}
@@ -103,7 +113,7 @@ func newConfigDigestRecord(cfg *config.Config, configPath, dbPath string) (confi
 // canonicalPolicy serializes the resolved security and audit policy in stable
 // key order. cloud.api_key is deliberately absent: a policy audit record must
 // never copy a credential into the event database.
-func canonicalPolicy(cfg *config.Config, configPath, dbPath string) (json.RawMessage, error) {
+func canonicalPolicy(cfg *config.Config, configPath, dbPath, networkFenceMode string) (json.RawMessage, error) {
 	projectRoot := filepath.Dir(filepath.Dir(configPath))
 	if abs, err := filepath.Abs(projectRoot); err == nil {
 		projectRoot = abs
@@ -137,6 +147,7 @@ func canonicalPolicy(cfg *config.Config, configPath, dbPath string) (json.RawMes
 		},
 		"filesystem": filesystem,
 		"network": map[string]any{
+			"mode":                 networkFenceMode,
 			"allow":                canonicalStrings(cfg.Network.Allow),
 			"allow_all":            cfg.Network.AllowAll,
 			"allow_private_ranges": cfg.Network.AllowPrivateRanges,
@@ -191,29 +202,33 @@ func canonicalStrings(values []string) []string {
 	return slices.Compact(out)
 }
 
-func latestConfigDigest(logger *logging.Logger) (*configDigestRecord, error) {
-	eventType := logging.EventConfigDigest
-	events, err := logger.Query(logging.QueryOptions{EventType: &eventType, Descending: true, ByID: true, Limit: 1})
-	if err != nil {
-		return nil, fmt.Errorf("read previous config.digest audit row: %w", err)
-	}
-	if len(events) == 0 {
-		return nil, nil
-	}
+func decodeConfigDigest(event *logging.Event) (*configDigestRecord, error) {
 	var record configDigestRecord
-	if err := json.Unmarshal([]byte(events[0].Detail), &record); err != nil {
+	if err := json.Unmarshal([]byte(event.Detail), &record); err != nil {
 		return nil, fmt.Errorf("decode previous config.digest audit row: %w", err)
 	}
-	if record.Digest == "" {
-		return nil, fmt.Errorf("decode previous config.digest audit row: digest is empty")
+	if err := validateConfigDigestRecord(record); err != nil {
+		return nil, fmt.Errorf("decode previous config.digest audit row: %w", err)
 	}
 	return &record, nil
+}
+
+func validateConfigDigestRecord(record configDigestRecord) error {
+	if record.Digest == "" {
+		return fmt.Errorf("digest is empty")
+	}
+	sum := sha256.Sum256(record.Policy)
+	if record.Digest != hex.EncodeToString(sum[:]) {
+		return fmt.Errorf("digest does not match canonical policy")
+	}
+	return nil
 }
 
 type configDigestHistory struct {
 	Rows            int
 	Changes         int
 	LastChange      *time.Time
+	LegacySessions  int
 	MissingSessions []string
 }
 
@@ -224,41 +239,81 @@ func inspectConfigDigestHistory(logger *logging.Logger) (configDigestHistory, er
 	}
 
 	history := configDigestHistory{}
-	nonDigestEvents := make(map[string]int)
-	digestEvents := make(map[string]int)
+	pendingDigests := make(map[string]int)
+	activeDigestSessions := make(map[string]bool)
+	legacyStarts := make(map[string]bool)
+	legacySessions := make(map[string]bool)
+	missingSessions := make(map[string]bool)
 	var previousDigest string
 	for _, event := range events {
-		if event.EventType != logging.EventConfigDigest {
-			// Administrative audit rows have no session ID. They are part of
-			// the chain, but cannot be missing a per-wrap config.digest row.
-			if event.SessionID != "" {
-				nonDigestEvents[event.SessionID]++
+		switch event.EventType {
+		case logging.EventConfigDigest:
+			record, err := decodeConfigDigest(&event)
+			if err != nil {
+				return configDigestHistory{}, fmt.Errorf("decode config.digest audit row %d: %w", event.ID, err)
 			}
-			continue
-		}
+			if previousDigest == "" {
+				if record.PreviousDigest != "" {
+					return configDigestHistory{}, fmt.Errorf("config.digest audit row %d has a predecessor before the first digest", event.ID)
+				}
+			} else if record.PreviousDigest != previousDigest {
+				return configDigestHistory{}, fmt.Errorf("config.digest audit row %d predecessor does not match the previous digest", event.ID)
+			}
+			if event.SessionID != "" {
+				pendingDigests[event.SessionID]++
+			}
+			history.Rows++
+			if previousDigest != "" && previousDigest != record.Digest {
+				history.Changes++
+				changedAt := event.Timestamp
+				history.LastChange = &changedAt
+			}
+			previousDigest = record.Digest
 
-		var record configDigestRecord
-		if err := json.Unmarshal([]byte(event.Detail), &record); err != nil {
-			return configDigestHistory{}, fmt.Errorf("decode config.digest audit row %d: %w", event.ID, err)
+		case logging.EventSessionStart:
+			if event.SessionID == "" {
+				continue
+			}
+			if history.Rows == 0 {
+				legacyStarts[event.SessionID] = true
+				legacySessions[event.SessionID] = true
+				continue
+			}
+			if pendingDigests[event.SessionID] == 0 {
+				activeDigestSessions[event.SessionID] = false
+				missingSessions[event.SessionID] = true
+				continue
+			}
+			pendingDigests[event.SessionID]--
+			activeDigestSessions[event.SessionID] = true
+
+		default:
+			if event.SessionID == "" {
+				continue
+			}
+			if history.Rows == 0 {
+				legacySessions[event.SessionID] = true
+				continue
+			}
+			if activeDigestSessions[event.SessionID] {
+				if event.EventType == logging.EventSessionEnd {
+					delete(activeDigestSessions, event.SessionID)
+				}
+				continue
+			}
+			if legacyStarts[event.SessionID] {
+				legacySessions[event.SessionID] = true
+				if event.EventType == logging.EventSessionEnd {
+					delete(legacyStarts, event.SessionID)
+				}
+				continue
+			}
+			missingSessions[event.SessionID] = true
 		}
-		if record.Digest == "" {
-			return configDigestHistory{}, fmt.Errorf("decode config.digest audit row %d: digest is empty", event.ID)
-		}
-		if event.SessionID != "" {
-			digestEvents[event.SessionID]++
-		}
-		history.Rows++
-		if previousDigest != "" && previousDigest != record.Digest {
-			history.Changes++
-			changedAt := event.Timestamp
-			history.LastChange = &changedAt
-		}
-		previousDigest = record.Digest
 	}
-	for sessionID := range nonDigestEvents {
-		if digestEvents[sessionID] == 0 {
-			history.MissingSessions = append(history.MissingSessions, sessionID)
-		}
+	history.LegacySessions = len(legacySessions)
+	for sessionID := range missingSessions {
+		history.MissingSessions = append(history.MissingSessions, sessionID)
 	}
 	sort.Strings(history.MissingSessions)
 	return history, nil
@@ -284,7 +339,7 @@ func writeConfigDigestVerifyResult(w io.Writer, history configDigestHistory) err
 	if history.LastChange != nil {
 		lastChange = history.LastChange.UTC().Format(time.RFC3339)
 	}
-	fmt.Fprintf(w, "Config digest history: %d row(s), %d change(s), last change: %s\n", history.Rows, history.Changes, lastChange)
+	fmt.Fprintf(w, "Config digest history: %d row(s), %d change(s), %d legacy session(s), last change: %s\n", history.Rows, history.Changes, history.LegacySessions, lastChange)
 	if len(history.MissingSessions) == 0 {
 		return nil
 	}

@@ -172,6 +172,11 @@ All notable changes to NockLock will be documented in this file.
 
 ### Fixed
 
+- `verify --audit` now treats sessions that started before the first
+  `config.digest` row as legacy (and reports their count), while still
+  rejecting a post-adoption session without a digest. The signed canonical
+  policy now records the resolved network-fence mode, and each digest records
+  its committed predecessor atomically.
 - `ResolveDBPath` now resolves the audit state root once and carries that
   canonical path through its candidate scan and final directory setup, so a
   retargeted state-root symlink cannot make it inspect one audit location and
