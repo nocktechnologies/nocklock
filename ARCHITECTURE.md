@@ -183,8 +183,8 @@ after validation. Validation and use are therefore not atomic (N10717).
 
 The static malicious-repo case: a checkout that commits an event log, or any
 ancestor of it, as a symlink. This still matters after the log moved out of the
-project, because an absolute `logging.db` can point back into the checkout and
-a committed `<root>/.nock/events.db` is migrated out of it on first use.
+project: an absolute `logging.db` may point back into the checkout, and a
+committed `<root>/.nock/events.db` is adopted as the project's audit log.
 Rejected: a symlink at the final component (`lstat` plus `O_NOFOLLOW`, N8614, including a real DB replaced by
 a symlink between sessions), and an ancestor that escapes both the project root and its audit
 state directory, dangles, loops or cannot be canonicalized (`resolveDeepestExisting`, N10714).

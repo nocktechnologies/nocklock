@@ -155,8 +155,10 @@ socket_families = [
 # ($XDG_STATE_HOME/nocklock/<project>), keeping only the filename. The fence
 # grants the project root to the agent so it can create files there, and
 # Landlock cannot exclude a path beneath a granted directory - so an event log
-# stored in the project would be editable by the agent it records. An absolute
-# path is used verbatim.
+# stored in the project would be editable by the agent it records. An existing
+# .nock/events.db is left where it is and keeps being used; that costs the
+# root-create grant until you run 'nocklock state migrate'. An absolute path is
+# allowed only inside the project or the audit state directory.
 db = "events.db"
 level = "info"
 

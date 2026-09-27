@@ -406,22 +406,32 @@ nocklock wrap -- your-custom-agent               # Anything
 
 Every fence decision is recorded in an SQLite event log.
 
-The log does **not** live in your project. It lives in NockLock's audit state
-directory, `$XDG_STATE_HOME/nocklock/<project-key>/` (or
+For a NEW project the log does **not** live in your project. It lives in
+NockLock's audit state directory,
+`$XDG_STATE_HOME/nocklock/<project-key>/` (or
 `~/.local/state/nocklock/<project-key>/`), where `<project-key>` is derived from
 the project's path. The chain anchor sits beside it.
 
 That is a security boundary, not a preference. The fence grants your project
 root to the agent so it can create and delete files there, and Landlock cannot
 exclude a path underneath a granted directory — an event log stored in the
-project would be editable by the very agent it records. A `logging.db` you set
-to a relative path keeps only its filename and goes here; an absolute path is
-used verbatim, and `nocklock doctor` warns if it lands back inside
-`filesystem.root`.
+project would be editable by the very agent it records.
 
-A log written by an earlier NockLock at `.nock/events.db` is moved here the
-first time a command runs, together with its chain anchor, so an existing audit
-chain keeps verifying.
+If you already have a log at `.nock/events.db`, NockLock keeps using it there.
+It will not move an existing audit chain for you: relocating a live SQLite
+database, its write-ahead-log sidecars and its chain anchor is one operation
+that has to either fully succeed or not start, and a half-finished move leaves a
+chain that still verifies while missing its most recent entries. The trade is
+that while the log sits inside the fence root, the agent cannot create or remove
+entries directly in the root — everything inside existing subdirectories still
+works, and `nocklock wrap` prints one line saying so. `nocklock state migrate`
+will move it when you want the restriction lifted.
+
+`logging.db` set to a relative path keeps only its filename and goes to the
+audit state directory. An absolute path is accepted only inside your project or
+that directory; anywhere else is rejected when the config loads, because
+`logging.db` is a setting a repository can ship. `nocklock doctor` warns if an
+absolute path lands back inside `filesystem.root`, where the agent can reach it.
 
 Query it with `nocklock log`:
 
