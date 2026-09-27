@@ -13,11 +13,26 @@ allow = [
     # Standard system read-only paths. Without these the child cannot even
     # resolve its dynamic loader or exec /bin/echo — Landlock and the
     # interposer deny every path outside the root and this allow list. Writable
-    # device nodes (/dev/null, /dev/tty) are granted as a baseline in the fence
-    # rules, not here (allow entries are read-only). /lib, /lib64, /bin and
-    # /sbin are symlinks into /usr on usr-merged distros but real directories on
-    # musl/Alpine and some embedded systems, where the loader and /bin/sh live
-    # outside /usr — grant them so exec works there too.
+    # device nodes (/dev/null, /dev/tty) and the readable entropy devices are
+    # granted as a baseline in the fence rules, not here (allow entries are
+    # read-only, and the baseline covers every device the child needs — see
+    # baselineDeviceNodes). /lib, /lib64, /bin and /sbin are symlinks into /usr
+    # on usr-merged distros but real directories on musl/Alpine and some embedded
+    # systems, where the loader and /bin/sh live outside /usr — grant them so
+    # exec works there too.
+    #
+    # NOT granted, deliberately (N10748 round 2, Gander both lenses + probe):
+    #   - "/proc/" exposed /proc/<pid>/environ and cmdline of every same-UID
+    #     process, so a wrapped agent could read API keys out of the user's other
+    #     shells (yama ptrace_scope does not gate the READ). node startup and
+    #     `git status` run without it, so it is pure exposure — dropped.
+    #   - "/dev/" made same-user pty slaves (/dev/pts/N) and /dev/shm readable,
+    #     letting a wrapped child read another terminal's input. The five baseline
+    #     device nodes are granted individually, so the directory grant is not
+    #     needed; dropped. A child that truly needs its own /proc/<pid> cannot be
+    #     served by a "/proc/self/" narrowing (the Landlock rule binds the
+    #     wrapper's pid dir, not the child's) — that would require a private pid
+    #     namespace, not an allow entry.
     "/usr/",
     "/lib/",
     "/lib64/",
