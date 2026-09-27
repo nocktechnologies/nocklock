@@ -65,6 +65,7 @@ func TestClaudeCodePresetGrantsProcSystemFiles(t *testing.T) {
 // unconditionally by TestClaudeCodePresetGrantsProcSystemFiles above.
 func TestWrapClaudeCodePresetNodeRuntimeIntrospection(t *testing.T) {
 	bin := nocklockBinary(t)
+	requireInterposerBeside(t, bin)
 	node := requireNode(t)
 
 	projectDir := t.TempDir()
@@ -106,6 +107,7 @@ func TestWrapClaudeCodePresetNodeRuntimeIntrospection(t *testing.T) {
 // /usr grant. Self-skips without the binary, hard-fails under NOCKLOCK_AUDIT_REQUIRE=1.
 func TestWrapClaudeCodePresetBlocksSiblingProcEnviron(t *testing.T) {
 	bin := nocklockBinary(t)
+	requireInterposerBeside(t, bin)
 
 	projectDir := t.TempDir()
 	writeProcTestConfig(t, projectDir, "/proc/cpuinfo", "/proc/stat", "/proc/meminfo")
@@ -168,6 +170,7 @@ func TestWrapClaudeCodePresetBlocksSiblingProcEnviron(t *testing.T) {
 // any level).
 func TestWrapClaudeCodePresetBlocksDescendantParentProcEnviron(t *testing.T) {
 	bin := nocklockBinary(t)
+	requireInterposerBeside(t, bin)
 
 	projectDir := t.TempDir()
 	writeProcTestConfig(t, projectDir, "/proc/cpuinfo", "/proc/stat", "/proc/meminfo")
@@ -180,13 +183,22 @@ func TestWrapClaudeCodePresetBlocksDescendantParentProcEnviron(t *testing.T) {
 	if err != nil {
 		t.Fatalf("wrap descendant-proc reader failed: %v\n%s", err, out)
 	}
-	got := string(out)
+	lines := strings.Split(strings.TrimSpace(string(out)), "\n")
 
-	if !strings.Contains(got, "READ ") || !strings.Contains(got, "/stat") {
+	hasResult := func(verb, suffix string) bool {
+		for _, line := range lines {
+			if strings.HasPrefix(line, verb+" ") && strings.HasSuffix(line, suffix) {
+				return true
+			}
+		}
+		return false
+	}
+
+	if !hasResult("READ", "/stat") {
 		t.Errorf("expected the grandchild to READ the wrapped parent's granted stat file, but it did not\n%s", out)
 	}
 	for _, denied := range []string{"environ", "cmdline"} {
-		if !strings.Contains(got, "DENIED ") || !strings.Contains(got, "/"+denied) {
+		if !hasResult("DENIED", "/"+denied) {
 			t.Errorf("expected the grandchild to be DENIED the wrapped parent's %q (Landlock), but it was not\n%s", denied, out)
 		}
 	}
@@ -208,16 +220,13 @@ func requireNode(t *testing.T) string {
 	return node
 }
 
-// writeProcTestConfig writes a .nock/config.toml carrying the claude-code
-// enforcement posture (Landlock + seccomp required, hardened interposer) that
-// grants the given filesystem allow paths. Network is disabled (allow_all) so
-// the test needs no proxy or egress; the filesystem fence is the subject.
+// writeProcTestConfig writes a .nock/config.toml (via the shared
+// writeTestConfig helper) carrying the claude-code enforcement posture
+// (Landlock + seccomp required, hardened interposer) that grants the given
+// filesystem allow paths. Network is disabled (allow_all) so the test needs
+// no proxy or egress; the filesystem fence is the subject.
 func writeProcTestConfig(t *testing.T, projectDir string, allowPaths ...string) {
 	t.Helper()
-	nockDir := filepath.Join(projectDir, ".nock")
-	if err := os.MkdirAll(nockDir, 0o755); err != nil {
-		t.Fatalf("create .nock dir: %v", err)
-	}
 	quoted := make([]string, len(allowPaths))
 	for i, p := range allowPaths {
 		quoted[i] = strconv.Quote(p)
@@ -239,9 +248,7 @@ allow_all = true
 [syscall]
 enforcement = "required"
 `
-	if err := os.WriteFile(filepath.Join(nockDir, "config.toml"), []byte(cfg), 0o644); err != nil {
-		t.Fatalf("write config.toml: %v", err)
-	}
+	writeTestConfig(t, projectDir, cfg)
 }
 
 // buildProcReader compiles a static (CGO_ENABLED=0) helper into the project root
@@ -250,11 +257,11 @@ enforcement = "required"
 // Building it INTO projectDir makes it an existing root child, which Landlock
 // grants execute at ruleset-build time.
 //
-// Two invocation modes beyond the plain "read every argv path" default:
-//   - "--descendant <name>...": re-execs itself as "--child <name>...", so the
-//     read happens from a grandchild-of-wrap's perspective.
-//   - "--child <name>...": reads /proc/<ppid>/<name> for each name — its
-//     PARENT's (the wrapped process's) own proc entries, not its own.
+// One invocation mode beyond the plain "read every argv path" default:
+// "--descendant <name>...", which resolves each name against the CALLER's
+// own pid (its own /proc/<pid>/<name>) and re-execs itself with those
+// resolved paths in the default mode — so the actual read happens from a
+// grandchild-of-wrap's perspective, against its PARENT's proc entries.
 func buildProcReader(t *testing.T, projectDir string) string {
 	t.Helper()
 	src := `package main
@@ -277,25 +284,23 @@ func readAndPrint(p string) {
 
 func main() {
 	args := os.Args[1:]
-	switch {
-	case len(args) > 0 && args[0] == "--descendant":
+	if len(args) > 0 && args[0] == "--descendant" {
 		self, err := os.Executable()
 		if err != nil {
 			fmt.Println("ERROR", err)
 			return
 		}
-		child := exec.Command(self, append([]string{"--child"}, args[1:]...)...)
-		out, _ := child.CombinedOutput()
+		pid := os.Getpid()
+		resolved := make([]string, len(args)-1)
+		for i, name := range args[1:] {
+			resolved[i] = filepath.Join("/proc", strconv.Itoa(pid), name)
+		}
+		out, _ := exec.Command(self, resolved...).CombinedOutput()
 		os.Stdout.Write(out)
-	case len(args) > 0 && args[0] == "--child":
-		ppid := os.Getppid()
-		for _, name := range args[1:] {
-			readAndPrint(filepath.Join("/proc", strconv.Itoa(ppid), name))
-		}
-	default:
-		for _, p := range args {
-			readAndPrint(p)
-		}
+		return
+	}
+	for _, p := range args {
+		readAndPrint(p)
 	}
 }
 `

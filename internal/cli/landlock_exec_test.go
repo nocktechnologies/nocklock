@@ -3,6 +3,7 @@ package cli
 import (
 	"fmt"
 	"os"
+	"slices"
 	"strings"
 	"testing"
 
@@ -23,22 +24,24 @@ func TestAllowSelfProcFS_GrantsFilesNotDirectory(t *testing.T) {
 		t.Fatalf("allowSelfProcFS changed env length: got %d entries, want 1", len(got))
 	}
 	_, val, _ := strings.Cut(got[0], "=")
+	sc, err := fsfence.ParseSerialized(val)
+	if err != nil {
+		t.Fatalf("ParseSerialized(%q): %v", val, err)
+	}
 
 	pid := os.Getpid()
 	for _, f := range fsfence.SelfProcFiles {
-		want := "+" + fmt.Sprintf("/proc/%d/%s", pid, f)
-		if !strings.Contains(val, want) {
-			t.Errorf("allowSelfProcFS: serialized value missing %q; got %q", want, val)
+		want := fmt.Sprintf("/proc/%d/%s", pid, f)
+		if !slices.Contains(sc.AllowPaths, want) {
+			t.Errorf("allowSelfProcFS: allow paths missing %q; got %v", want, sc.AllowPaths)
 		}
 	}
 
 	// The bare directory entry (with no file suffix) must never appear — that
 	// is the whole-subtree grant this fix removes.
-	dirEntry := fmt.Sprintf("+/proc/%d", pid)
-	for _, field := range strings.Split(val, "\x1f") {
-		if field == dirEntry {
-			t.Errorf("allowSelfProcFS must not grant the bare /proc/<pid> directory, got field %q in %q", field, val)
-		}
+	dirEntry := fmt.Sprintf("/proc/%d", pid)
+	if slices.Contains(sc.AllowPaths, dirEntry) {
+		t.Errorf("allowSelfProcFS must not grant the bare /proc/<pid> directory, got %q in %v", dirEntry, sc.AllowPaths)
 	}
 }
 
