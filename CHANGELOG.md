@@ -4,6 +4,17 @@ All notable changes to NockLock will be documented in this file.
 
 ## [Unreleased]
 
+### Breaking
+
+- Fresh projects now keep audit state outside the project in
+  `$XDG_STATE_HOME/nocklock` (or `~/.local/state/nocklock`). As a result,
+  NockLock refuses to start when a `filesystem.deny` path is inside
+  `filesystem.root`; move the denied path outside the root. It also refuses to
+  start when `filesystem.root` is `$HOME` or another ancestor of the audit
+  state directory; narrow `filesystem.root` to the project. If more than one
+  audit chain exists for a project, NockLock refuses to guess which chain to
+  use.
+
 ### Added
 
 - Linux `filesystem.allow_rw` entries grant explicit read-write access while
@@ -14,6 +25,11 @@ All notable changes to NockLock will be documented in this file.
 
 ### Changed
 
+- macOS Seatbelt root-write confinement no longer grants the fenced child
+  write access to NockLock's audit state directory. The unfenced parent alone
+  writes the event database, SQLite sidecars, and chain anchor; a macOS
+  enforcement test now proves child truncate and rename attempts are denied
+  while a wrapped session still produces a verifiable audit chain.
 - New projects keep their audit trail outside the project, so the fenced agent
   can finally use its own project root (N10749). Two requirements had been in
   direct conflict: the agent must be able to create and remove files directly in
@@ -158,6 +174,10 @@ All notable changes to NockLock will be documented in this file.
 
 ### Fixed
 
+- `ResolveDBPath` now resolves the audit state root once and carries that
+  canonical path through its candidate scan and final directory setup, so a
+  retargeted state-root symlink cannot make it inspect one audit location and
+  return another.
 - claude-code preset now runs real programs under the strongest non-root fence
   (N10748, parts b+c). Two field-reported breakages are closed: (1) writes to
   `/dev/null` and `/dev/tty` are permitted and `/dev/zero` is readable, so `git`

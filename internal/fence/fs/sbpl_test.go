@@ -124,17 +124,13 @@ func TestGenerateProfileAndCountReportsDistinctCanonicalPaths(t *testing.T) {
 // emitted after the grants so a sensitive child of root remains blocked.
 func TestGenerateWriteConfinementProfile_EmitsRootAndRuntimeAllows(t *testing.T) {
 	root := t.TempDir()
-	stateDir := filepath.Join(root, ".nock")
-	if err := os.Mkdir(stateDir, 0700); err != nil {
-		t.Fatal(err)
-	}
 	sensitive := filepath.Join(root, "private-key")
 	if err := os.Mkdir(sensitive, 0700); err != nil {
 		t.Fatal(err)
 	}
 
 	profile, count, err := GenerateWriteConfinementProfile(
-		[]string{sensitive}, root, "read-write", stateDir, false,
+		[]string{sensitive}, root, "read-write", false,
 	)
 	if err != nil {
 		t.Fatalf("GenerateWriteConfinementProfile: %v", err)
@@ -157,7 +153,7 @@ func TestGenerateWriteConfinementProfile_EmitsRootAndRuntimeAllows(t *testing.T)
 	if err != nil {
 		t.Fatalf("UserCacheDir: %v", err)
 	}
-	for _, path := range []string{root, stateDir, os.TempDir(), cacheDir, "/private/tmp"} {
+	for _, path := range []string{root, os.TempDir(), cacheDir, "/private/tmp"} {
 		canonical, err := canonicalizeForProfile(path)
 		if err != nil {
 			t.Fatalf("canonicalize %q: %v", path, err)
@@ -190,14 +186,10 @@ func TestGenerateWriteConfinementProfile_EmitsRootAndRuntimeAllows(t *testing.T)
 
 func TestGenerateWriteConfinementProfile_ReadOnlyOmitsRootWriteAllow(t *testing.T) {
 	root := t.TempDir()
-	stateDir := filepath.Join(root, ".nock")
-	if err := os.Mkdir(stateDir, 0700); err != nil {
-		t.Fatal(err)
-	}
 	sensitive := t.TempDir()
 
 	profile, _, err := GenerateWriteConfinementProfile(
-		[]string{sensitive}, root, "read-only", stateDir, false,
+		[]string{sensitive}, root, "read-only", false,
 	)
 	if err != nil {
 		t.Fatalf("GenerateWriteConfinementProfile: %v", err)
@@ -211,6 +203,39 @@ func TestGenerateWriteConfinementProfile_ReadOnlyOmitsRootWriteAllow(t *testing.
 	}
 }
 
+func TestGenerateWriteConfinementProfile_DoesNotGrantAuditState(t *testing.T) {
+	root := t.TempDir()
+	home, err := os.UserHomeDir()
+	if err != nil {
+		t.Fatalf("UserHomeDir: %v", err)
+	}
+	// Do not use t.TempDir: the write-confinement profile necessarily allows
+	// the runtime temp directory, so a test state directory there would not
+	// prove that an ordinary audit state path is absent from the write grant.
+	auditState := filepath.Join(home, ".nocklock-audit-state-test")
+
+	profile, _, err := GenerateWriteConfinementProfile([]string{auditState}, root, "read-write", false)
+	if err != nil {
+		t.Fatalf("GenerateWriteConfinementProfile: %v", err)
+	}
+	canonicalState, err := canonicalizeForProfile(auditState)
+	if err != nil {
+		t.Fatalf("canonicalize audit state: %v", err)
+	}
+	allowStart := strings.Index(profile, "(allow file-write*")
+	denyStart := strings.Index(profile, ";; Sensitive paths")
+	if allowStart < 0 || denyStart < 0 || allowStart >= denyStart {
+		t.Fatalf("profile lacks a write-allow section before the sensitive deny:\n%s", profile)
+	}
+	writeAllow := profile[allowStart:denyStart]
+	if strings.Contains(writeAllow, sbplString(canonicalState)) {
+		t.Fatalf("write confinement grants the audit state directory %q:\n%s", canonicalState, profile)
+	}
+	if !strings.Contains(profile, "(subpath "+sbplString(canonicalState)+")") {
+		t.Fatalf("profile must explicitly deny the sensitive audit state directory %q:\n%s", canonicalState, profile)
+	}
+}
+
 func TestGenerateWriteConfinementProfile_CanonicalizesRoot(t *testing.T) {
 	base := t.TempDir()
 	realRoot := filepath.Join(base, "real-root")
@@ -221,12 +246,7 @@ func TestGenerateWriteConfinementProfile_CanonicalizesRoot(t *testing.T) {
 	if err := os.Symlink(realRoot, link); err != nil {
 		t.Skipf("symlink unsupported: %v", err)
 	}
-	stateDir := filepath.Join(realRoot, ".nock")
-	if err := os.Mkdir(stateDir, 0700); err != nil {
-		t.Fatal(err)
-	}
-
-	profile, _, err := GenerateWriteConfinementProfile([]string{t.TempDir()}, link, "read-write", stateDir, false)
+	profile, _, err := GenerateWriteConfinementProfile([]string{t.TempDir()}, link, "read-write", false)
 	if err != nil {
 		t.Fatalf("GenerateWriteConfinementProfile: %v", err)
 	}

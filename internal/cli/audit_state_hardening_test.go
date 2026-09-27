@@ -771,3 +771,45 @@ func TestResolveDBPathAbsoluteInStateDirRejectsSymlinkedComponentStayingInside(t
 		t.Fatalf("expected a symlink refusal, got: %v", err)
 	}
 }
+
+// TestResolveDBPathAbsoluteInStateDirRejectsSymlinkedComponentThroughSymlinkedStateRoot
+// is the negative control for WHICH spelling of the audit state directory the
+// nested-component walk is taken relative to. With XDG_STATE_HOME symlinked,
+// the configured path and the RESOLVED state directory share no prefix, so
+// taking the components relative to the resolved spelling would climb out and
+// fall back to the canonical pair -- and the canonical path has already
+// replaced the symlinked component with its target, so the link is never
+// Lstat'd and the symlink refusal quietly stops applying to nested components.
+// Neither the symlinked-root tests nor the symlinked-component tests catch that
+// on their own; only both shapes at once do.
+func TestResolveDBPathAbsoluteInStateDirRejectsSymlinkedComponentThroughSymlinkedStateRoot(t *testing.T) {
+	projectRoot, configPath := writeProjectConfig(t, `db = "events.db"`)
+	auditDir := symlinkedAuditStateDir(t, projectRoot, trustedStateRoot(t))
+	stateDir, err := config.EnsureAuditStateDir(projectRoot)
+	if err != nil {
+		t.Fatalf("EnsureAuditStateDir: %v", err)
+	}
+	real := filepath.Join(stateDir, "real")
+	if err := os.Mkdir(real, 0o700); err != nil {
+		t.Fatalf("mkdir real: %v", err)
+	}
+	if err := os.Symlink(real, filepath.Join(stateDir, "sub")); err != nil {
+		t.Skipf("symlinks unsupported: %v", err)
+	}
+
+	cfg, err := config.Load(configPath)
+	if err != nil {
+		t.Fatalf("load config: %v", err)
+	}
+	// Spelled through the symlinked XDG_STATE_HOME, deliberately not through
+	// the resolved root: that is the spelling an operator's config carries.
+	cfg.Logging.DB = filepath.Join(auditDir, "sub", "events.db")
+
+	dbPath, _, err := config.ResolveDBPath(cfg, configPath)
+	if err == nil {
+		t.Fatalf("expected a symlinked component reached through a symlinked state root to be refused, got %q", dbPath)
+	}
+	if !strings.Contains(err.Error(), "symlink") {
+		t.Fatalf("expected a symlink refusal, got: %v", err)
+	}
+}

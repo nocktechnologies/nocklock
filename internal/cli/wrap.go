@@ -391,16 +391,11 @@ var wrapCmd = &cobra.Command{
 						break
 					}
 					sensitive := append(defaultSensitive, fsCfg.DenyPaths...)
-					// The Seatbelt profile grants WRITE to the audit state
-					// directory, so it has to be the directory the log is
-					// actually in. Hardcoding <project>/.nock granted the child
-					// write access to the project's .nock even in read-only
-					// mode -- where the root itself is NOT granted -- which,
-					// once the log moved out, bought nothing but the ability to
-					// rewrite the fence's own config.toml.
-					stateDir := filepath.Dir(dbPath)
+					// The audit state is written only by this unfenced parent. It
+					// is already included in sensitive through egressChildDenyPaths,
+					// so never grant its directory to the fenced child.
 					profile, pathCount, err := fsfence.GenerateWriteConfinementProfile(
-						sensitive, fsCfg.Root, fsCfg.Mode, stateDir, cfg.Filesystem.Hardened,
+						sensitive, fsCfg.Root, fsCfg.Mode, cfg.Filesystem.Hardened,
 					)
 					if err != nil {
 						if setupErr := degradeOrRefuse("profile generation failed", err); setupErr != nil {
