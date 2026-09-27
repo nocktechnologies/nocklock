@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -259,5 +260,25 @@ func TestSelectOffAllowlistNetworkTargetSkipsAllowedHosts(t *testing.T) {
 	}
 	if !strings.Contains(target, "nocklock-verify-canary.test") {
 		t.Fatalf("target = %q, want .test fallback", target)
+	}
+}
+
+func TestPathWithinAnyResolvesSymlinkedRoots(t *testing.T) {
+	real := t.TempDir()
+	link := filepath.Join(t.TempDir(), "link")
+	if err := os.Symlink(real, link); err != nil {
+		t.Skipf("symlinks unavailable: %v", err)
+	}
+	file := filepath.Join(real, "canary.txt")
+	if err := os.WriteFile(file, []byte("x"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	// Like macOS /tmp -> /private/tmp: an existing path resolves through the
+	// link, so a root given in its symlinked form must still contain it.
+	if !pathWithinAny(file, []string{link}) {
+		t.Fatalf("%q should be within symlinked root %q", file, link)
+	}
+	if pathWithinAny(file, []string{t.TempDir()}) {
+		t.Fatalf("%q must not be within an unrelated root", file)
 	}
 }

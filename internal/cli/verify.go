@@ -829,6 +829,12 @@ func pathWithinAny(path string, roots []string) bool {
 		if root == "" {
 			continue
 		}
+		// Resolve the root the same way as the path: on macOS /tmp and /var are
+		// symlinks into /private, so an unresolved root misses its own files.
+		root = filepath.Clean(root)
+		if resolved, err := filepath.EvalSymlinks(root); err == nil {
+			root = resolved
+		}
 		if clean == root {
 			return true
 		}
