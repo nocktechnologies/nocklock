@@ -148,26 +148,73 @@ func TestWrapClaudeCodePresetDeniesSiblingProcExposure(t *testing.T) {
 		t.Skipf("%s; skipping (readErr=%v)", msg, lastErr)
 	}
 
-	// NEGATIVE: one wrapped child tries to cat both files. The fence denies both
-	// reads, so nothing lands on stdout. We assert on CONTENT — neither marker may
-	// appear in anything the child emitted — which catches a leak even if a read
-	// were only partially blocked or its error masked. (Exit code is not the
-	// signal: `cat` always exits non-zero because environ stays ptrace-denied, so
-	// the cmdline half is what a "/proc/" regression would leak into stdout here.)
+	// Build a static Go reader inside the fence root. It issues the open/read
+	// syscalls itself, so LD_PRELOAD cannot manufacture this denial: EACCES proves
+	// the kernel Landlock policy blocks the sibling environ read.
 	repo, err := os.MkdirTemp(mustGetwd(t), "preset-proc-neg-")
 	if err != nil {
 		t.Fatalf("mkdir repo: %v", err)
 	}
 	t.Cleanup(func() { _ = os.RemoveAll(repo) })
+	readerSource := filepath.Join(repo, "proc-reader.go")
+	readerBinary := filepath.Join(repo, "proc-reader")
+	const readerProgram = `package main
 
+import (
+	"errors"
+	"fmt"
+	"io/fs"
+	"os"
+	"syscall"
+)
+
+func main() {
+	fd, err := syscall.Open(os.Args[1], syscall.O_RDONLY, 0)
+	if errors.Is(err, fs.ErrPermission) {
+		fmt.Println("DENIED")
+		return
+	}
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "open: %v\n", err)
+		os.Exit(2)
+	}
+	defer syscall.Close(fd)
+	buf := make([]byte, 1<<20)
+	n, err := syscall.Read(fd, buf)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "read: %v\n", err)
+		os.Exit(2)
+	}
+	os.Stdout.Write(buf[:n])
+	os.Exit(1)
+}
+`
+	if err := os.WriteFile(readerSource, []byte(readerProgram), 0o600); err != nil {
+		t.Fatalf("write raw-syscall reader: %v", err)
+	}
+	build := exec.Command("go", "build", "-o", readerBinary, readerSource)
+	build.Env = append(os.Environ(), "CGO_ENABLED=0")
+	if out, err := build.CombinedOutput(); err != nil {
+		t.Fatalf("build static raw-syscall reader: %v\n%s", err, out)
+	}
+
+	// NEGATIVE: the static reader must report a kernel denial for environ. The
+	// shell then reads cmdline as a regression control: re-granting broad /proc
+	// access leaks its marker and fails even on hosts where ptrace also protects
+	// environ. Assert on content so a masked command status cannot make this green.
 	startupMarker := "NOCKLOCK_PRESET_TEST_STARTED_" + strconv.FormatInt(time.Now().UnixNano(), 36)
 	cmd := exec.Command(bin, "wrap", "--profile", "claude-code", "--",
-		"/bin/sh", "-c", "echo "+startupMarker+"; cat "+environPath+" "+cmdlinePath)
+		"/bin/sh", "-c", `echo "$1"; "$2" "$3"; cat "$4"`,
+		"preset-proc-test", startupMarker, readerBinary, environPath, cmdlinePath)
 	cmd.Dir = repo
 	out, _ := cmd.CombinedOutput()
 	if !bytes.Contains(out, []byte(startupMarker)) {
 		t.Fatalf("wrapped child did not emit its startup marker — the negative assertion would be vacuous; output:\n%s", out)
 	}
+	if !bytes.Contains(out, []byte("DENIED")) {
+		t.Fatalf("static raw-syscall reader did not print DENIED for sibling environ — Landlock enforcement was not proved; output:\n%s", out)
+	}
+	t.Log("raw-syscall sibling environ control: DENIED")
 	for _, m := range []string{envMarker, argMarker} {
 		if bytes.Contains(out, []byte(m)) {
 			t.Fatalf("wrapped child leaked the sibling's %q marker — the preset must deny /proc/<pid> reads; output:\n%s", m, out)
