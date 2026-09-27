@@ -21,10 +21,15 @@ import (
 // covers every config nocklock init writes, so ordinary projects relocate with
 // no config change.
 //
-// An ABSOLUTE logging.db is honored exactly as written. It is an explicit
-// operator choice and the escape hatch for anyone who needs the log in a
-// specific place; pointing it back inside filesystem.root re-exposes it to the
-// child, which 'nocklock doctor' warns about.
+// An ABSOLUTE logging.db is returned exactly as written, and is the one way to
+// override the location. It is not a free-form escape hatch: the event logger
+// independently refuses a database that resolves outside both the project and
+// its audit state directory (logging.validatePath), so an absolute path is
+// useful mainly for pinning the log inside the project — which re-exposes it to
+// the fenced child, and which 'nocklock doctor' warns about. That containment
+// rule predates this function and is deliberately not relaxed here: logging.db
+// comes from a file a repository can ship, so widening it would let a hostile
+// checkout aim a SQLite write at any path the user can touch.
 //
 // A log left inside a project by an older NockLock is moved into the state
 // directory on first use (migrateLegacyAuditState), so an existing audit chain
@@ -45,7 +50,7 @@ func ResolveDBPath(cfg *Config, configPath string) (dbPath string, projectRoot s
 		return configured, projectRoot, nil
 	}
 
-	stateDir, err := AuditStateDir(projectRoot)
+	stateDir, err := EnsureAuditStateDir(projectRoot)
 	if err != nil {
 		return "", projectRoot, err
 	}
@@ -54,9 +59,9 @@ func ResolveDBPath(cfg *Config, configPath string) (dbPath string, projectRoot s
 	// Look for a legacy log both where this config points and at the
 	// conventional .nock location, so a config that never set logging.db still
 	// finds the chain an older NockLock wrote to <root>/.nock/events.db.
-	legacy := []string{filepath.Join(projectRoot, configured)}
-	if conventional := filepath.Join(projectRoot, Dir, filepath.Base(configured)); conventional != legacy[0] {
-		legacy = append(legacy, conventional)
+	legacy := []string{
+		filepath.Join(projectRoot, configured),
+		filepath.Join(projectRoot, Dir, filepath.Base(configured)),
 	}
 	if err := migrateLegacyAuditState(dbPath, legacy); err != nil {
 		return "", projectRoot, err

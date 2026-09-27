@@ -599,11 +599,15 @@ func runProbeUnderWrap(ctx context.Context, cfg *config.Config, configPath, fenc
 	cfgCopy.Logging.DB = filepath.Join(tmpNock, "events.db")
 	cfgCopy.Cloud.APIKey = ""
 	// Keep the probe's audit state inside the scratch tree, which
-	// createScratchOutside already placed outside every configured grant. The
-	// probe runs a real `wrap`, and a relative logging.db resolves into
-	// $XDG_STATE_HOME (config.AuditStateDir) — inheriting the caller's would
-	// scatter throwaway probe logs through the developer's real audit state and
-	// leave them behind when the scratch is cleaned up.
+	// createScratchOutside already placed outside every configured grant.
+	//
+	// Belt and braces: the probe config above pins logging.db to an ABSOLUTE
+	// path in the scratch, and config.ResolveDBPath returns absolute paths
+	// verbatim, so today nothing here consults $XDG_STATE_HOME. This keeps the
+	// isolation from depending on that one line staying absolute — a relative
+	// logging.db resolves into $XDG_STATE_HOME, and inheriting the caller's
+	// would scatter throwaway probe logs through the developer's real audit
+	// state and leave them behind when the scratch is cleaned up.
 	probeStateHome := filepath.Join(tmp, "state")
 	if err := os.MkdirAll(probeStateHome, 0o700); err != nil {
 		return probeResult{Fence: fence}, err

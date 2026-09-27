@@ -35,10 +35,10 @@ func TestWrapClaudeCodePresetDeviceAndSystemPaths(t *testing.T) {
 	bin := nocklockBinary(t)
 	requireInterposerBeside(t, bin)
 
-	// The preset grants /tmp read-only, so a root UNDER /tmp collides with the
-	// audit-dir deny (assertDenyPathsEnforceable). Real deployments root at a
-	// project dir elsewhere; place this repo under the test's working directory,
-	// which is the package dir, not /tmp.
+	// Keep the repo out of /tmp, which the preset grants read-only: nesting the
+	// fence root inside another granted tree is not how real deployments are
+	// laid out, and it muddies which grant a result came from. Place it under
+	// the test's working directory, which is the package dir.
 	repo, err := os.MkdirTemp(mustGetwd(t), "preset-e2e-")
 	if err != nil {
 		t.Fatalf("mkdir repo: %v", err)
@@ -177,7 +177,7 @@ func TestWrapClaudeCodePresetDeniesSiblingProcExposure(t *testing.T) {
 
 // requirePresetUnprivileged skips (or, under strict-required mode, fails) when
 // the test runs as root: the claude-code preset is the strongest NON-root fence,
-// and a root child under /tmp collides with the audit-dir deny.
+// so running it as root would not measure what it claims to measure.
 func requirePresetUnprivileged(t *testing.T) {
 	t.Helper()
 	if os.Geteuid() != 0 {

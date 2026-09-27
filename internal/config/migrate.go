@@ -7,12 +7,6 @@ import (
 	"path/filepath"
 )
 
-// auditSidecarSuffixes are the SQLite companions of an event log. The logger
-// runs in WAL mode (PRAGMA journal_mode=WAL), so committed rows can still live
-// in events.db-wal: moving the main file without its sidecars silently drops
-// the tail of the hash chain.
-var auditSidecarSuffixes = []string{"", "-wal", "-shm", "-journal"}
-
 // migrateLegacyAuditState relocates a pre-existing in-project audit trail to
 // newDB's directory, once, on first use after the upgrade that moved audit state
 // out of the fence root (see AuditStateDir).
@@ -37,10 +31,14 @@ func migrateLegacyAuditState(newDB string, legacyCandidates []string) error {
 			return fmt.Errorf("refusing to migrate the event log at %s: path is a symlink", legacyDB)
 		}
 		if _, err := os.Lstat(newDB); err == nil {
+			// Name a recovery step the operator can actually take. Every audit
+			// command resolves through here, so telling them to run one of those
+			// commands would just reproduce this error.
 			return fmt.Errorf(
 				"two event logs found: %s (legacy, inside the project) and %s (current). "+
-					"NockLock will not guess which audit chain is authoritative — verify both with "+
-					"'nocklock verify --audit', then delete the one you are discarding",
+					"NockLock will not guess which audit chain is authoritative. "+
+					"Move one aside (its -wal/-shm sidecars and chain-anchor.json travel with it), "+
+					"then rerun: with a single log in place the usual commands work again",
 				legacyDB, newDB)
 		}
 		return moveAuditArtifacts(legacyDB, newDB)
@@ -52,14 +50,23 @@ func migrateLegacyAuditState(newDB string, legacyCandidates []string) error {
 // anchor that sits beside it. The anchor must travel with the log or
 // 'nocklock verify --against-anchor' loses the baseline it compares against.
 func moveAuditArtifacts(legacyDB, newDB string) error {
-	for _, suffix := range auditSidecarSuffixes {
+	// The logger runs in WAL mode (PRAGMA journal_mode=WAL), so committed rows
+	// can still live in events.db-wal: moving the main file without its SQLite
+	// sidecars silently drops the tail of the hash chain.
+	for _, suffix := range []string{"", "-wal", "-shm", "-journal"} {
 		if err := moveIfPresent(legacyDB+suffix, newDB+suffix); err != nil {
 			return err
 		}
 	}
+	// Keep this name in step with logging.DefaultAnchorPath, which computes the
+	// same <db-dir>/chain-anchor.json. It is repeated rather than called because
+	// internal/logging imports this package, so the dependency cannot run the
+	// other way. Renaming the anchor there without changing it here would still
+	// compile and would silently stop migrating anchors.
+	const anchorName = "chain-anchor.json"
 	return moveIfPresent(
-		filepath.Join(filepath.Dir(legacyDB), "chain-anchor.json"),
-		filepath.Join(filepath.Dir(newDB), "chain-anchor.json"),
+		filepath.Join(filepath.Dir(legacyDB), anchorName),
+		filepath.Join(filepath.Dir(newDB), anchorName),
 	)
 }
 

@@ -205,7 +205,7 @@ func TestResolveDBPathRefusesTwoAuditChains(t *testing.T) {
 	if err != nil {
 		t.Fatalf("load config: %v", err)
 	}
-	stateDir, err := config.AuditStateDir(projectRoot)
+	stateDir, err := config.EnsureAuditStateDir(projectRoot)
 	if err != nil {
 		t.Fatalf("AuditStateDir: %v", err)
 	}

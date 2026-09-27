@@ -148,6 +148,9 @@ func runDoctor(caps doctorCapabilities) doctorReport {
 		Message:  fmt.Sprintf("Config loaded from %s", configPath),
 	})
 
+	if check, ok := auditStateUnavailableCheck(cfg, configPath); ok {
+		checks = append(checks, check)
+	}
 	checks = append(checks, filesystemDoctorCheck(cfg, caps))
 	checks = append(checks, syscallDoctorCheck(cfg, caps))
 	checks = append(checks, networkDoctorCheck(cfg, caps))
@@ -542,6 +545,23 @@ func doctorSymbol(severity doctorSeverity) string {
 	}
 }
 
+// auditStateUnavailableCheck reports a CRITICAL when the event log's location
+// cannot be resolved at all — an unusable audit state directory, or a legacy
+// in-project log that cannot be migrated. doctorActivityCheck deliberately
+// stays quiet about every failure (it reports activity, not health), so without
+// this the operator would see an empty activity summary and no reason for it,
+// while `wrap` refuses to start for a cause doctor never named.
+func auditStateUnavailableCheck(cfg *config.Config, configPath string) (doctorCheck, bool) {
+	if _, _, err := config.ResolveDBPath(cfg, configPath); err != nil {
+		return doctorCriticalCheck(
+			"Config", "audit-state", "unavailable",
+			fmt.Sprintf("The event log location cannot be resolved: %v", err),
+			"fix the audit state directory, then rerun nocklock doctor",
+		), true
+	}
+	return doctorCheck{}, false
+}
+
 // auditLogInsideFenceRootCheck warns when an ABSOLUTE logging.db points back
 // inside filesystem.root. A relative logging.db resolves into the audit state
 // directory outside the project (config.ResolveDBPath), which is what keeps the
@@ -568,12 +588,11 @@ func auditLogInsideFenceRootCheck(cfg *config.Config) (doctorCheck, bool) {
 	if err != nil {
 		return doctorCheck{}, false
 	}
-	root = resolvePathBestEffort(root)
-	db = resolvePathBestEffort(db)
-	rel, err := filepath.Rel(root, db)
-	if err != nil || rel == ".." || strings.HasPrefix(rel, ".."+string(os.PathSeparator)) {
+	if !pathIsWithinDir(db, root) {
 		return doctorCheck{}, false
 	}
+	root = resolvePathBestEffort(root)
+	db = resolvePathBestEffort(db)
 	return doctorCheck{
 		Group:    "Sanity",
 		Name:     "audit-log-inside-root",

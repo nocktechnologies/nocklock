@@ -217,10 +217,7 @@ func validatePath(dbPath, projectRoot string) error {
 		if err != nil {
 			resolvedRoot = filepath.Clean(projectRoot)
 		}
-		// Compare at component boundaries: rel is ".." or "../…" only when
-		// resolvedPath is outside root. A bare strings.HasPrefix(rel, "..") would
-		// also reject an in-root child literally named "..evil".
-		if !pathContains(resolvedRoot, resolvedPath) && !inAuditStateDir(projectRoot, resolvedPath) {
+		if !pathContains(resolvedRoot, resolvedPath) && !inEnsureAuditStateDir(projectRoot, resolvedPath) {
 			return fmt.Errorf("DB path %q resolves outside both project root %q and its audit state directory", dbPath, projectRoot)
 		}
 	}
@@ -242,8 +239,8 @@ func pathContains(root, path string) bool {
 // inAuditStateDir reports whether path lies in the audit state directory that
 // belongs to projectRoot. The directory is computed, never created, so a
 // validation call has no side effects.
-func inAuditStateDir(projectRoot, path string) bool {
-	stateDir, err := config.AuditStateDirPath(projectRoot)
+func inEnsureAuditStateDir(projectRoot, path string) bool {
+	stateDir, err := config.AuditStateDir(projectRoot)
 	if err != nil {
 		return false
 	}

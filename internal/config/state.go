@@ -8,11 +8,11 @@ import (
 	"path/filepath"
 )
 
-// AuditStateDir returns the directory holding NockLock's own audit state for the
-// project rooted at projectRoot: the event log and its SQLite sidecars, the
-// chain anchor, and the per-session egress decision logs. It is created 0700 on
-// first use and named for a SHA-256 prefix of the project root's real path, so
-// two projects never share audit state.
+// EnsureAuditStateDir returns the directory holding NockLock's own audit state
+// for the project rooted at projectRoot: the event log and its SQLite sidecars,
+// the chain anchor, and the per-session egress decision logs. It is created
+// 0700 on first use and named for a SHA-256 prefix of the project root's real
+// path, so two projects never share audit state.
 //
 // The directory deliberately sits OUTSIDE the project, under
 // $XDG_STATE_HOME/nocklock/ (or ~/.local/state/nocklock/). That is a security
@@ -32,8 +32,8 @@ import (
 //
 // This mirrors logging.DefaultSigningKeyPath, which already keeps the Ed25519
 // signing key under $XDG_CONFIG_HOME for the same reason.
-func AuditStateDir(projectRoot string) (string, error) {
-	dir, err := AuditStateDirPath(projectRoot)
+func EnsureAuditStateDir(projectRoot string) (string, error) {
+	dir, err := AuditStateDir(projectRoot)
 	if err != nil {
 		return "", err
 	}
@@ -54,15 +54,18 @@ func AuditStateDir(projectRoot string) (string, error) {
 	if perm := info.Mode().Perm(); perm&0o077 != 0 {
 		return "", fmt.Errorf("refusing to use the audit state directory %s: mode %04o is group- or world-accessible; run 'chmod 700 %s'", dir, perm, dir)
 	}
+	if err := validateStateDirOwner(info); err != nil {
+		return "", fmt.Errorf("refusing to use the audit state directory %s: %w", dir, err)
+	}
 	return dir, nil
 }
 
-// AuditStateDirPath computes the audit state directory for projectRoot WITHOUT
+// AuditStateDir computes the audit state directory for projectRoot WITHOUT
 // creating or validating it. Use it where the location is only being compared
 // against — notably the event logger's containment check, which must not have
-// the side effect of creating a directory. Use AuditStateDir to obtain a
+// the side effect of creating a directory. Use EnsureAuditStateDir to obtain a
 // directory that is ready to write to.
-func AuditStateDirPath(projectRoot string) (string, error) {
+func AuditStateDir(projectRoot string) (string, error) {
 	base := os.Getenv("XDG_STATE_HOME")
 	if base == "" {
 		home, err := os.UserHomeDir()
