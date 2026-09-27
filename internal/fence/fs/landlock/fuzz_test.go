@@ -79,6 +79,11 @@ func FuzzRulesFromConfigContainment(f *testing.F) {
 			Mode: "read-write",
 		}, nil, abi); err == nil {
 			for _, rule := range spec.Paths {
+				// The curated baseline device nodes (/dev/null etc.) are granted
+				// outside any root by design; every OTHER grant must be contained.
+				if IsBaselineDeviceNode(rule.Path) {
+					continue
+				}
 				if !pathInsideRoot(resolvedRoot, rule.Path) {
 					t.Errorf("RulesFromConfig emitted a grant OUTSIDE the root: rule %q not inside %q "+
 						"(leaf=%q escape=%t) — fence FAILS OPEN", rule.Path, resolvedRoot, leaf, escape)

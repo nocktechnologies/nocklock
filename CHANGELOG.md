@@ -13,16 +13,63 @@ All notable changes to NockLock will be documented in this file.
   the agent and 0 CPUs mis-sizes worker pools. The narrow reads Node needs are
   now granted without any path to another process: the preset allows the
   system-wide `/proc/cpuinfo`, `/proc/stat` and `/proc/meminfo`, and the wrapped
-  child's OWN `/proc/<pid>` is granted to both fences self-scoped. Because the
+  child's OWN `/proc/<pid>/{stat,status,statm}` — the three files, never the
+  whole directory — is granted to both fences self-scoped. Because the
   `__landlock-exec` shim execve's the child in place (its pid IS the child's),
-  the literal `/proc/self` Landlock rule binds to the child's own proc dir, and
-  the shim appends that same concrete `/proc/<pid>` to the interposer allowlist.
-  A sibling's `/proc/<pid>/environ` and `/cmdline` stay denied at the kernel
-  layer, proven by a `CGO_ENABLED=0` raw-syscall reader test that bypasses the
-  userspace interposer. Scope: the grant covers the wrapped child; a descendant
-  that execs under a different pid does not get its own `/proc/self` (Landlock is
-  inode-bound), and the interposer grant applies only when a kernel fence engages
-  the shim — always true for the hardened presets this targets.
+  the literal `/proc/self/{stat,status,statm}` Landlock rules bind to the
+  child's own proc dir, and the shim appends the same concrete
+  `/proc/<pid>/{stat,status,statm}` files to the interposer allowlist. Round 2
+  (Gander): granting the whole `/proc/self` directory bound Landlock to the
+  child's `/proc/<pid>` dir inode, and a descendant inherits that rule — so a
+  grandchild could read the wrapped child's own `environ`/`cmdline`/`mem`, the
+  sibling leak #115 removed reopened one level down. Narrowing to the three
+  files closes it: a descendant that inherits the rule can read only those
+  files' identical inodes, never `environ`/`cmdline`/`mem`/`maps`/`fd`, proven
+  by a negative-control test where a grandchild is denied its wrapped parent's
+  `environ`. A sibling's `/proc/<pid>/environ` and `/cmdline` stay denied at the
+  kernel layer too, proven by a `CGO_ENABLED=0` raw-syscall reader test that
+  bypasses the userspace interposer. The Go-side filesystem config now also
+  reserves headroom below the interposer's 256-entry allow cap for these
+  injected self-proc grants and fails closed with a clear config error instead
+  of silently tripping the interposer's own cap at runtime.
+- claude-code preset now runs real programs under the strongest non-root fence
+  (N10748, parts b+c). Two field-reported breakages are closed: (1) writes to
+  `/dev/null` and `/dev/tty` are permitted and `/dev/zero` is readable, so `git`
+  and shells work — the Landlock ruleset (`baselineDeviceRules`) and the
+  LD_PRELOAD interposer both grant these standard character devices as a
+  baseline, independent of the allow list, since the fence otherwise grants a
+  regular file read+execute only (the baseline also grants `/dev/urandom` and
+  `/dev/random` readable, the entropy sources musl and older TLS stacks read
+  directly). This baseline device set applies to **every** config, not only the
+  claude-code preset — by design: any fenced program needs these nodes. (2) The
+  preset's filesystem allow list now includes the standard system read paths
+  (`/usr`, `/lib`, `/lib64`, `/bin`, `/sbin`, `/etc`, `/sys`), without which the
+  child could not resolve its dynamic loader or exec `/bin/echo` — `/lib*`,
+  `/bin` and `/sbin` cover non-usr-merged distros (musl/Alpine) where the loader
+  lives outside `/usr`. An explicit `deny` of a baseline device still wins.
+- claude-code preset no longer grants `/proc/` or `/dev/` as directory-wide read
+  paths (N10748 round 2). `/proc/` let a wrapped child read every same-UID
+  process's `/proc/<pid>/cmdline`, `stat`, `status` and `comm` — process
+  enumeration and secrets passed on a command line (`--token=…`); `/dev/` made
+  same-user pty slaves (`/dev/pts/N`) and `/dev/shm` readable, so a wrapped agent
+  could read another terminal's input. Neither is needed as a Landlock read
+  grant: node startup, `git status` and a pty-attached shell run without them
+  (the workloads probed), and the specific device nodes the child does need are
+  granted individually by `baselineDeviceNodes`. (Measured on the fleet
+  host: with `/proc/` granted, a wrapped child read a sibling's `cmdline`, `stat`,
+  `status` and `comm` but NOT its `environ` or `maps` — a split a path-based
+  grant cannot produce, so the live secrets exposure was `cmdline` (argv), which
+  the ptrace-gated `environ`/`maps` already blocked for an unrelated sibling. The
+  removal closes the world-readable `/proc/<pid>` files and denies the child its
+  own and its descendants' `environ` as well.) A child that genuinely needed its
+  own `/proc/<pid>` could not be served by a `/proc/self/` allow entry — a
+  Landlock rule on `/proc/self` binds the wrapper's pid dir at ruleset-build time,
+  not the child's — so that would require a private pid namespace, not an allow
+  entry. The network half of N10748 — letting the wrapped agent reach the
+  allowlisted proxy while the syscall fence keeps direct-IP egress blocked — is
+  tracked separately (N10753); no standard client speaks a unix-socket HTTP
+  proxy, so it needs an interposer socket()/connect() translation that is a
+  distinct design decision.
 
 ## [0.5.0] - 2026-09-26
 
