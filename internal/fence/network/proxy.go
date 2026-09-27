@@ -8,12 +8,16 @@ import (
 	"net"
 	"net/http"
 	"net/url"
+	"os"
+	"path/filepath"
 	"sync/atomic"
 	"time"
 
 	"github.com/nocktechnologies/nocklock/internal/config"
 	"github.com/nocktechnologies/nocklock/internal/logging"
 )
+
+const unixSocketPathLimit = 108
 
 // cgnat is the IANA Shared Address Space (RFC 6598) — 100.64.0.0/10.
 // Carrier-grade NAT addresses are not routable on the public internet and
@@ -128,6 +132,8 @@ type DialFunc func(ctx context.Context, network, addr string) (net.Conn, error)
 type ProxyServer struct {
 	listener           net.Listener
 	listenAddr         string
+	advertisedAddr     string
+	unixSocketPath     string
 	allowList          []string
 	allowAll           bool
 	allowPrivateRanges bool
@@ -212,6 +218,7 @@ func (p *ProxyServer) Start() (string, error) {
 		return "", fmt.Errorf("network fence: failed to bind proxy: %w", err)
 	}
 	p.listener = ln
+	p.advertisedAddr = ln.Addr().String()
 	p.degraded.Store(false)
 
 	p.server = &http.Server{
@@ -224,7 +231,7 @@ func (p *ProxyServer) Start() (string, error) {
 
 	go p.server.Serve(ln) //nolint:errcheck // Serve returns ErrServerClosed on Stop()
 
-	addr := ln.Addr().String()
+	addr := p.advertisedAddr
 	if p.logger != nil {
 		_ = p.logger.Log(logging.Event{
 			Timestamp: time.Now(),
@@ -236,6 +243,69 @@ func (p *ProxyServer) Start() (string, error) {
 		})
 	}
 	return addr, nil
+}
+
+// StartUnix binds the proxy to a Unix domain socket while advertising a loopback
+// HTTP proxy address to clients. The loopback address is an interposer token:
+// the fenced child cannot open AF_INET sockets, and libfence_fs rewrites
+// connects to advertisedAddr onto unixSocketPath.
+func (p *ProxyServer) StartUnix(unixSocketPath, advertisedAddr string) (string, error) {
+	if p.listener != nil {
+		return "", fmt.Errorf("proxy already started at %s", p.listener.Addr())
+	}
+	if unixSocketPath == "" {
+		return "", fmt.Errorf("unix proxy socket path is empty")
+	}
+	if len(unixSocketPath) >= unixSocketPathLimit {
+		return "", fmt.Errorf("unix proxy socket path is %d bytes; must be shorter than %d bytes for sockaddr_un.sun_path", len(unixSocketPath), unixSocketPathLimit)
+	}
+	if advertisedAddr == "" {
+		return "", fmt.Errorf("advertised proxy address is empty")
+	}
+	if err := os.MkdirAll(filepath.Dir(unixSocketPath), 0o700); err != nil {
+		p.MarkDegraded("unix socket directory failure")
+		return "", fmt.Errorf("network fence: failed to create unix proxy socket directory: %w", err)
+	}
+	if err := os.Remove(unixSocketPath); err != nil && !os.IsNotExist(err) {
+		p.MarkDegraded("stale unix socket cleanup failure")
+		return "", fmt.Errorf("network fence: failed to remove stale unix proxy socket: %w", err)
+	}
+	ln, err := net.Listen("unix", unixSocketPath)
+	if err != nil {
+		p.MarkDegraded("unix bind failure")
+		return "", fmt.Errorf("network fence: failed to bind unix proxy socket: %w", err)
+	}
+	if err := os.Chmod(unixSocketPath, 0o600); err != nil {
+		_ = ln.Close()
+		p.MarkDegraded("unix socket chmod failure")
+		return "", fmt.Errorf("network fence: failed to restrict unix proxy socket permissions: %w", err)
+	}
+	p.listener = ln
+	p.unixSocketPath = unixSocketPath
+	p.advertisedAddr = advertisedAddr
+	p.degraded.Store(false)
+
+	p.server = &http.Server{
+		Handler:           p,
+		ReadHeaderTimeout: 30 * time.Second,
+		ReadTimeout:       5 * time.Minute,
+		WriteTimeout:      5 * time.Minute,
+		MaxHeaderBytes:    1 << 20,
+	}
+
+	go p.server.Serve(ln) //nolint:errcheck // Serve returns ErrServerClosed on Stop()
+
+	if p.logger != nil {
+		_ = p.logger.Log(logging.Event{
+			Timestamp: time.Now(),
+			EventType: logging.EventProxyStart,
+			Category:  "network",
+			Detail:    fmt.Sprintf("addr=%s unix_socket=%s", advertisedAddr, unixSocketPath),
+			Blocked:   false,
+			SessionID: p.sessionID,
+		})
+	}
+	return advertisedAddr, nil
 }
 
 // Stop shuts down the proxy server gracefully.
@@ -259,6 +329,11 @@ func (p *ProxyServer) Stop() error {
 	// Clear server and listener so Addr() returns "" and Stop() is idempotent.
 	p.server = nil
 	p.listener = nil
+	if p.unixSocketPath != "" {
+		_ = os.Remove(p.unixSocketPath)
+		p.unixSocketPath = ""
+	}
+	p.advertisedAddr = ""
 	p.degraded.Store(true)
 
 	if p.logger != nil {
@@ -313,6 +388,9 @@ func (p *ProxyServer) Addr() string {
 	if p.listener == nil {
 		return ""
 	}
+	if p.advertisedAddr != "" {
+		return p.advertisedAddr
+	}
 	return p.listener.Addr().String()
 }
 
@@ -347,6 +425,75 @@ func WaitForProxyReady(ctx context.Context, addr string, timeout time.Duration) 
 
 	for {
 		req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
+		if err != nil {
+			return fmt.Errorf("cannot build proxy health request: %w", err)
+		}
+
+		resp, err := client.Do(req)
+		if err == nil {
+			_, _ = io.Copy(io.Discard, resp.Body)
+			_ = resp.Body.Close()
+			if resp.StatusCode == http.StatusOK {
+				return nil
+			}
+			lastErr = fmt.Errorf("health endpoint returned %s", resp.Status)
+		} else {
+			lastErr = err
+		}
+
+		timer := time.NewTimer(backoff)
+		select {
+		case <-ctx.Done():
+			timer.Stop()
+			if lastErr != nil {
+				return fmt.Errorf("proxy did not become ready within %s: %w", timeout, lastErr)
+			}
+			return fmt.Errorf("proxy did not become ready within %s", timeout)
+		case <-timer.C:
+		}
+
+		if backoff < maxBackoff {
+			backoff *= 2
+			if backoff > maxBackoff {
+				backoff = maxBackoff
+			}
+		}
+	}
+}
+
+// WaitForProxyReadyUnix polls the proxy health endpoint over unixSocketPath
+// until it is ready or the timeout expires.
+func WaitForProxyReadyUnix(ctx context.Context, unixSocketPath string, timeout time.Duration) error {
+	if unixSocketPath == "" {
+		return fmt.Errorf("proxy unix socket path is empty")
+	}
+	if timeout <= 0 {
+		return fmt.Errorf("proxy readiness timeout must be positive")
+	}
+
+	ctx, cancel := context.WithTimeout(ctx, timeout)
+	defer cancel()
+
+	transport := &http.Transport{
+		Proxy: nil,
+		DialContext: func(ctx context.Context, _, _ string) (net.Conn, error) {
+			var d net.Dialer
+			return d.DialContext(ctx, "unix", unixSocketPath)
+		},
+	}
+	defer transport.CloseIdleConnections()
+
+	client := &http.Client{
+		Transport: transport,
+		Timeout:   500 * time.Millisecond,
+	}
+
+	backoff := 25 * time.Millisecond
+	const maxBackoff = 500 * time.Millisecond
+	var lastErr error
+
+	for {
+		req, err := http.NewRequestWithContext(ctx, http.MethodGet, "http://nocklock.local"+ProxyHealthPath, nil)
 		if err != nil {
 			return fmt.Errorf("cannot build proxy health request: %w", err)
 		}

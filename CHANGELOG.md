@@ -76,6 +76,13 @@ All notable changes to NockLock will be documented in this file.
     by Landlock, and rule generation is refused rather than shipping a fence
     that ignores the deny. Deny paths outside the root — including every entry
     in the shipped defaults and presets — are unaffected.
+- Linux userspace proxy mode now bridges syscall-fenced children to the
+  allowlist proxy without granting IP sockets (N10753). When the syscall fence
+  narrows proxy-mode children to Unix sockets, `wrap` serves the HTTP(S) proxy on
+  a Unix domain socket and the LD_PRELOAD interposer rewrites only the configured
+  loopback proxy connect to that socket; unexpected AF_INET/AF_INET6 connects
+  fail closed. The probe and captured Node/undici output live under
+  `docs/probes/n10753/`.
 
 ### Fixed
 

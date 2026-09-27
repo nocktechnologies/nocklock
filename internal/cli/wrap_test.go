@@ -65,6 +65,15 @@ func TestRemoveEnvVarsExactKeyWithoutEquals(t *testing.T) {
 	}
 }
 
+func TestValidateUnixProxySocketPathRejectsLongPath(t *testing.T) {
+	path := "/" + strings.Repeat("a", 108)
+
+	if err := validateUnixProxySocketPath(path); err == nil ||
+		!strings.Contains(err.Error(), "sockaddr_un.sun_path") {
+		t.Fatalf("validateUnixProxySocketPath() error = %v, want sockaddr_un.sun_path limit", err)
+	}
+}
+
 // fsAllowedEntries returns every NOCKLOCK_FS_ALLOWED=... entry in env, in order.
 func fsAllowedEntries(env []string) []string {
 	var out []string
