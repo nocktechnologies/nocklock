@@ -267,16 +267,28 @@ func buildProcReader(t *testing.T, projectDir string) string {
 	src := `package main
 
 import (
+	"errors"
 	"fmt"
+	"io/fs"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"strconv"
 )
 
+// readAndPrint reports DENIED only for an actual permission error (Landlock's
+// EACCES/EPERM). Anything else (ENOENT, a process-exit race, EMFILE, a
+// malformed path) is a test-infrastructure problem, not a fence decision, so
+// it is reported as ERROR and made fatal — a negative control must prove the
+// SPECIFIC denial it claims, not just "any error happened".
 func readAndPrint(p string) {
 	if _, err := os.ReadFile(p); err != nil {
-		fmt.Println("DENIED", p)
+		if errors.Is(err, fs.ErrPermission) {
+			fmt.Println("DENIED", p)
+			return
+		}
+		fmt.Println("ERROR", p, err)
+		os.Exit(1)
 	} else {
 		fmt.Println("READ", p)
 	}
@@ -288,15 +300,18 @@ func main() {
 		self, err := os.Executable()
 		if err != nil {
 			fmt.Println("ERROR", err)
-			return
+			os.Exit(1)
 		}
 		pid := os.Getpid()
 		resolved := make([]string, len(args)-1)
 		for i, name := range args[1:] {
 			resolved[i] = filepath.Join("/proc", strconv.Itoa(pid), name)
 		}
-		out, _ := exec.Command(self, resolved...).CombinedOutput()
+		out, err := exec.Command(self, resolved...).CombinedOutput()
 		os.Stdout.Write(out)
+		if err != nil {
+			os.Exit(1)
+		}
 		return
 	}
 	for _, p := range args {
