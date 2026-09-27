@@ -147,6 +147,9 @@ func ProcessConfig(cfg config.FilesystemConfig) (*FenceConfig, error) {
 	}
 	allowRWPaths := make([]string, 0, len(cfg.AllowRW))
 	for _, p := range cfg.AllowRW {
+		if strings.TrimSpace(p) == "" {
+			return nil, fmt.Errorf("read-write allow path must not be empty")
+		}
 		resolved, err := resolvePath(p)
 		if err != nil {
 			return nil, fmt.Errorf("cannot resolve read-write allow path %q: %w", p, err)

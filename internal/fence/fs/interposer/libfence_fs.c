@@ -461,7 +461,15 @@ static int check_path(const char *resolved, int is_write,
         }
     }
 
-    /* 2. Check root — if path starts with root, ALLOW (respect mode). */
+    /* 2. Check read-write allow list. It may deliberately carve a writable
+     * descendant out of a read-only root. Deny entries above still win. */
+    for (int i = 0; i < g_config.allow_rw_count; i++) {
+        if (path_starts_with(resolved, g_config.allow_rw[i])) {
+            return 0;
+        }
+    }
+
+    /* 3. Check root — if path starts with root, ALLOW (respect mode). */
     if (path_starts_with(resolved, g_config.root)) {
         if (is_write && !g_config.mode_rw) {
             snprintf(reason_out, reason_len,
@@ -469,13 +477,6 @@ static int check_path(const char *resolved, int is_write,
             return -1;
         }
         return 0; /* Allowed. */
-    }
-
-    /* 3. Check read-write allow list. */
-    for (int i = 0; i < g_config.allow_rw_count; i++) {
-        if (path_starts_with(resolved, g_config.allow_rw[i])) {
-            return 0;
-        }
     }
 
     /* 4. Check allow list — if path starts with any allow entry, reads only. */
@@ -623,6 +624,12 @@ static void fence_init(void)
             g_config.allow[g_config.allow_count][PATH_MAX - 1] = '\0';
             g_config.allow_count++;
         } else if (f[0] == '*') {
+            if (f[1] == '\0') {
+                g_config.deny_all = 1;
+                g_config.initialized = 1;
+                free(envbuf);
+                return;
+            }
             if (g_config.allow_count + g_config.allow_rw_count >= MAX_PATHS) {
                 /* Too many allow paths — fail closed. */
                 g_config.deny_all = 1;

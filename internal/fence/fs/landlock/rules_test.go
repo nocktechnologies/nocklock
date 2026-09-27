@@ -335,6 +335,22 @@ func TestRulesFromConfigRejectsDenyPathInsideAllow(t *testing.T) {
 	}
 }
 
+func TestRulesFromConfigRejectsDenyPathInsideAllowRW(t *testing.T) {
+	root := t.TempDir()
+	allowRW := t.TempDir()
+	deny := filepath.Join(allowRW, "protected")
+
+	_, err := RulesFromConfig(&fsfence.FenceConfig{
+		Root:         root,
+		Mode:         "read-only",
+		AllowRWPaths: []string{allowRW},
+		DenyPaths:    []string{deny},
+	}, nil, 5)
+	if err == nil || !strings.Contains(err.Error(), "cannot be enforced by Landlock") {
+		t.Fatalf("deny path inside allow_rw error = %v, want Landlock enforcement rejection", err)
+	}
+}
+
 // A deny path that does not overlap any granted tree needs no Landlock rule:
 // Landlock denies everything not explicitly allowed, so the config is valid.
 func TestRulesFromConfigAllowsNonOverlappingDenyPath(t *testing.T) {

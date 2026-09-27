@@ -578,34 +578,65 @@ func verifyCheckFromProbe(fence string, result probeResult, err error) verifyChe
 
 func runProbeUnderWrap(ctx context.Context, cfg *config.Config, configPath, fence string, extraEnv map[string]string) (probeResult, error) {
 	projectRoot := filepath.Dir(filepath.Dir(configPath))
-	tmp, cleanup, ok := createScratchOutside(filesystemAllowedRoots(cfg, projectRoot))
+	forbidden := filesystemAllowedRoots(cfg, projectRoot)
+	for _, deny := range cfg.Filesystem.Deny {
+		forbidden = append(forbidden, absConfigPath(projectRoot, deny))
+	}
+	tmp, cleanup, ok := createScratchOutside(forbidden)
 	if !ok {
 		return probeResult{Fence: fence}, fmt.Errorf("could not create verification scratch directory outside configured filesystem grants")
 	}
 	defer cleanup()
-	tmpNock := filepath.Join(tmp, config.Dir)
+	tmpWork := filepath.Join(tmp, "work")
+	tmpNock := filepath.Join(tmpWork, config.Dir)
 	if err := os.MkdirAll(tmpNock, 0o755); err != nil {
 		return probeResult{Fence: fence}, err
 	}
 	cfgCopy := *cfg
 	absolutizeConfigPaths(&cfgCopy, projectRoot)
-	cfgCopy.Logging.DB = filepath.Join(tmp, config.Dir, "events.db")
+	cfgCopy.Logging.DB = filepath.Join(tmpNock, "events.db")
 	cfgCopy.Cloud.APIKey = ""
 	exe, err := os.Executable()
 	if err != nil {
 		return probeResult{Fence: fence}, err
 	}
-	// The temporary config lives outside every configured grant. Keep the
-	// probe executable itself readable/executable so Landlock can launch it.
-	cfgCopy.Filesystem.Allow = append(cfgCopy.Filesystem.Allow, exe)
+	// Run a private copy from the invocation scratch directory. Granting the
+	// installed executable would conflict with a deny that contains it and can
+	// also widen the policy being verified.
+	probeBin := filepath.Join(tmp, "bin")
+	if err := os.Mkdir(probeBin, 0o755); err != nil {
+		return probeResult{Fence: fence}, err
+	}
+	probeExe := filepath.Join(probeBin, "nocklock-probe")
+	exeData, err := os.ReadFile(exe)
+	if err != nil {
+		return probeResult{Fence: fence}, fmt.Errorf("read verification executable: %w", err)
+	}
+	if err := os.WriteFile(probeExe, exeData, 0o700); err != nil {
+		return probeResult{Fence: fence}, fmt.Errorf("copy verification executable: %w", err)
+	}
+	cfgCopy.Filesystem.Allow = append(cfgCopy.Filesystem.Allow, probeBin)
+	if cfgCopy.Filesystem.Root != "" {
+		libPath, err := verifyFilesystemBackend()
+		if err != nil {
+			return probeResult{Fence: fence}, err
+		}
+		libData, err := os.ReadFile(libPath)
+		if err != nil {
+			return probeResult{Fence: fence}, fmt.Errorf("read filesystem fence library: %w", err)
+		}
+		if err := os.WriteFile(filepath.Join(probeBin, "libfence_fs.so"), libData, 0o700); err != nil {
+			return probeResult{Fence: fence}, fmt.Errorf("copy filesystem fence library: %w", err)
+		}
+	}
 	tmpConfig := filepath.Join(tmpNock, config.File)
 	if err := writeConfigTOML(tmpConfig, &cfgCopy); err != nil {
 		return probeResult{Fence: fence}, err
 	}
 	childCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
 	defer cancel()
-	cmd := exec.CommandContext(childCtx, exe, "wrap", "--", exe, "__probe", fence)
-	cmd.Dir = tmp
+	cmd := exec.CommandContext(childCtx, probeExe, "wrap", "--", probeExe, "__probe", fence)
+	cmd.Dir = tmpWork
 	cmd.Env = envWithOverrides(os.Environ(), extraEnv)
 	var stdout, stderr bytes.Buffer
 	cmd.Stdout = &stdout
@@ -677,30 +708,48 @@ func createFilesystemCanary(cfg *config.Config, projectRoot string) (string, str
 }
 
 func createCanaryOutside(roots []string) (string, string, func(), bool) {
-	dir, cleanup, ok := createScratchOutside(roots)
-	if !ok {
-		return "", "", nil, false
-	}
-	path := filepath.Join(dir, "canary.txt")
-	token := randomHex(16)
-	if err := os.WriteFile(path, []byte(token+"\n"), 0o600); err != nil {
-		cleanup()
-		return "", "", nil, false
-	}
-	if data, err := os.ReadFile(path); err != nil || strings.TrimSpace(string(data)) != token {
-		cleanup()
-		return "", "", nil, false
-	}
-	return path, token, cleanup, true
-}
-
-func createScratchOutside(roots []string) (string, func(), bool) {
-	for _, base := range []string{"/var/tmp", "/dev/shm", os.TempDir()} {
+	for _, base := range verifyScratchBases {
 		if base == "" || pathWithinAny(base, roots) {
 			continue
 		}
 		dir, err := os.MkdirTemp(base, "nocklock-verify-*")
 		if err != nil {
+			continue
+		}
+		cleanup := func() { os.RemoveAll(dir) }
+		if pathWithinAny(dir, roots) {
+			cleanup()
+			continue
+		}
+		path := filepath.Join(dir, "canary.txt")
+		token := randomHex(16)
+		if err := verifyWriteFile(path, []byte(token+"\n"), 0o600); err != nil {
+			cleanup()
+			continue
+		}
+		if data, err := os.ReadFile(path); err != nil || strings.TrimSpace(string(data)) != token {
+			cleanup()
+			continue
+		}
+		return path, token, cleanup, true
+	}
+	return "", "", nil, false
+}
+
+var verifyScratchBases = []string{"/var/tmp", "/dev/shm", os.TempDir()}
+var verifyWriteFile = os.WriteFile
+
+func createScratchOutside(roots []string) (string, func(), bool) {
+	for _, base := range verifyScratchBases {
+		if base == "" || pathWithinAny(base, roots) {
+			continue
+		}
+		dir, err := os.MkdirTemp(base, "nocklock-verify-*")
+		if err != nil {
+			continue
+		}
+		if pathWithinAny(dir, roots) {
+			os.RemoveAll(dir)
 			continue
 		}
 		return dir, func() { os.RemoveAll(dir) }, true

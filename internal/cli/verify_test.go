@@ -3,6 +3,7 @@ package cli
 import (
 	"context"
 	"errors"
+	"os"
 	"strings"
 	"testing"
 	"time"
@@ -188,6 +189,34 @@ func TestCreateScratchOutsideAvoidsGrantedTmp(t *testing.T) {
 	defer cleanup()
 	if pathWithinAny(scratch, filesystemAllowedRoots(&cfg, root)) {
 		t.Fatalf("scratch directory %q is inside a granted filesystem path", scratch)
+	}
+}
+
+func TestCreateCanaryOutsideFallsBackAfterWriteFailure(t *testing.T) {
+	first, second := t.TempDir(), t.TempDir()
+	origBases, origWrite := verifyScratchBases, verifyWriteFile
+	verifyScratchBases = []string{first, second}
+	verifyWriteFile = func(path string, data []byte, mode os.FileMode) error {
+		if pathWithinAny(path, []string{first}) {
+			return errors.New("injected write failure")
+		}
+		return os.WriteFile(path, data, mode)
+	}
+	defer func() {
+		verifyScratchBases, verifyWriteFile = origBases, origWrite
+	}()
+
+	path, _, cleanup, ok := createCanaryOutside(nil)
+	if !ok {
+		t.Fatal("expected fallback scratch base to succeed")
+	}
+	defer cleanup()
+	if !pathWithinAny(path, []string{second}) {
+		t.Fatalf("canary path = %q, want fallback under %q", path, second)
+	}
+	entries, err := os.ReadDir(first)
+	if err != nil || len(entries) != 0 {
+		t.Fatalf("failed scratch directory was not cleaned up: entries=%v err=%v", entries, err)
 	}
 }
 

@@ -152,6 +152,16 @@ func TestProcessConfig_DefaultMode(t *testing.T) {
 	}
 }
 
+func TestProcessConfigRejectsEmptyAllowRW(t *testing.T) {
+	_, err := ProcessConfig(config.FilesystemConfig{
+		Root:    t.TempDir(),
+		AllowRW: []string{""},
+	})
+	if err == nil || !strings.Contains(err.Error(), "must not be empty") {
+		t.Fatalf("empty allow_rw error = %v, want rejection", err)
+	}
+}
+
 func TestProcessConfig_SymlinkedRoot(t *testing.T) {
 	// Create a real directory.
 	realDir := t.TempDir()

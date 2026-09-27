@@ -133,6 +133,14 @@ func Validate(cfg *Config) []ValidationError {
 
 	// filesystem.allow_rw entries must not contain path traversal.
 	for _, p := range cfg.Filesystem.AllowRW {
+		if strings.TrimSpace(p) == "" {
+			errs = append(errs, ValidationError{
+				Field:    "filesystem.allow_rw",
+				Message:  "entries must not be empty",
+				Severity: "error",
+			})
+			continue
+		}
 		if containsTraversal(p) {
 			errs = append(errs, ValidationError{
 				Field:    "filesystem.allow_rw",
