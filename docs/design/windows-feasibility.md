@@ -734,7 +734,9 @@ writing a bootstrap `_inside.ps1` into `$probeRoot` (which it ACLs to the packag
 SID, like any other granted path) that re-declares the paths and defines
 `Assert-AccessDenied`, then running each inside-container step as
 `New-Win32Process -CommandLine "powershell -NoProfile -ExecutionPolicy Bypass
--File $probeRoot\_inside.ps1"`. Read the inside-container snippets as the *body* of
+-File $probeRoot\_inside.ps1 -Phase <name>"`. The `-Phase` argument selects which
+body to run, so a probe that needs two container launches (Probe 4, `4a`/`4b`)
+picks its half unambiguously. Read the inside-container snippets as the *body* of
 that bootstrap, not as commands typed into the outer shell.
 
 **Probe 9 is deferred and VM/throwaway-only. Do not run it on Kevin's desktop** —
@@ -774,6 +776,11 @@ shared scaffold above (no user-scope install to clean up):
 ```powershell
 $sid = Get-NtSid -PackageName $moniker   # reused by Probes 4 and 11; persists for the run
 $sid.ToString()                          # record this SID string; the icacls probes need it
+# One SID-writable drop dir, created and ACL'd from the OUTER shell (which holds
+# WRITE_DAC; the Low-IL container does not). Inside-container steps that must hand a
+# value back out to the outer session use it — e.g. Probe 10's WMI child PID:
+$out = New-Item -ItemType Directory -Force -Path (Join-Path $probeRoot 'out')
+icacls $out.FullName /grant "*${sid}:(OI)(CI)(M)"
 # zero-capability container:
 New-Win32Process -CommandLine 'cmd.exe' -AppContainerSid $sid
 # with a capability, for the contrast case:
@@ -794,62 +801,79 @@ is a Phase 2 property, not something this probe can confirm — see
 before Probe 2's persistence checks.
 
 ```powershell
-# terminal A - a listener OUTSIDE any container (serves from the probe root)
-python -m http.server 8899 --bind 127.0.0.1 --directory $probeRoot
+# terminal A - two listeners OUTSIDE any container (both serve from the probe root).
+# 8899 is the primary target; 9999 is a SECOND real listener so the unrelated-port
+# check below has something to reach — without it, curl to 9999 fails with
+# "connection refused" no matter what the loopback policy does, which is the exact
+# wrong-reason verdict this round removes.
+Start-Job { python -m http.server 8899 --bind 127.0.0.1 --directory $using:probeRoot }
+Start-Job { python -m http.server 9999 --bind 127.0.0.1 --directory $using:probeRoot }
+
+# terminal A - POSITIVE CONTROLS from OUTSIDE the container: both listeners MUST be
+# reachable here, proving they are live before the inside verdict is read. Record the
+# exit codes; the inside verdict is only meaningful while these are green.
+curl.exe -sS -m 5 -o NUL -w 'outside 8899 -> %{http_code}\n' http://127.0.0.1:8899/; "8899 outside exit=$LASTEXITCODE"
+curl.exe -sS -m 5 -o NUL -w 'outside 9999 -> %{http_code}\n' http://127.0.0.1:9999/; "9999 outside exit=$LASTEXITCODE"
 
 # terminal B - register the exemption NON-ELEVATED first and record the result
 CheckNetIsolation.exe LoopbackExempt -a -n=$moniker; "exit=$LASTEXITCODE"
 CheckNetIsolation.exe LoopbackExempt -s      # did the entry actually appear?
 # if it did not, repeat the -a in an ELEVATED shell and note that Probe 2 = "admin required"
 
-# then, inside a ZERO-capability container:
-curl.exe -sS -m 5 http://127.0.0.1:8899/   # MUST succeed, or Phase 1 is dead
-curl.exe -sS -m 5 https://example.com/     # MUST fail (Block Outbound Default Rule)
-curl.exe -sS -m 5 http://127.0.0.1:9999/   # unrelated loopback port: EXPECTED reachable
-python -m http.server 9998 --bind 127.0.0.1 --directory $probeRoot  # agent binds its own listener
+# then, inside a ZERO-capability container. Capture the verbatim curl error text and
+# exit code for each — the verdict is read from the recorded output, not inferred:
+curl.exe -sS -m 5 http://127.0.0.1:8899/ 2>&1; "8899 exit=$LASTEXITCODE"  # MUST succeed, or Phase 1 is dead
+curl.exe -sS -m 5 https://example.com/   2>&1; "example exit=$LASTEXITCODE"  # MUST fail (Block Outbound Default Rule)
+curl.exe -sS -m 5 http://127.0.0.1:9999/ 2>&1; "9999 exit=$LASTEXITCODE"  # unrelated loopback port: EXPECTED reachable
+python -m http.server 9998 --bind 127.0.0.1 --directory $probeRoot &      # agent binds its own listener
 ```
 
-The first two must hold. The last two are the all-loopback blast-radius check:
-because the exemption is per-identity, not per-port
-([(b)](#b-network-egress-floor)), the *expectation* is that the unrelated port is
-reachable and the agent can bind its own `127.0.0.1` listener — this probe
-confirms it rather than treating it as open. If either comes back *unreachable*,
-that is the surprising result worth flagging (it would mean loopback is narrower
-than the per-identity model predicts). Report each separately.
+The first two must hold. The unrelated-port check (9999) is the all-loopback
+blast-radius test: because the exemption is per-identity, not per-port
+([(b)](#b-network-egress-floor)), the *expectation* is that a **live** unrelated
+port is reachable. Read its verdict against the outside positive control, not from
+the error class — an AppContainer block may fail `connect()` fast (WSAEACCES)
+rather than blackhole, so "slow ⇒ blocked, fast ⇒ refused" is not reliable on
+Windows. Instead:
+
+- outside control on 9999 succeeded **and** inside curl succeeded → reachable, per-identity model holds.
+- outside control succeeded **and** inside curl failed → the listener is live, so the failure is the fence: loopback is narrower than the per-identity model predicts. **Flag it**, and record the verbatim curl error and exit code for the report.
+- outside control on 9999 *failed* → the listener never came up: this is a **setup fault**, not a verdict — restart the 9999 job and rerun, do not score it.
+
+The agent's own `127.0.0.1:9998` listener is a separate blast-radius check. To
+confirm reachability rather than just that `bind()` succeeded, connect to it from
+OUTSIDE the container (`curl.exe -sS -m 5 http://127.0.0.1:9998/`); if you only
+observe that the bind did not fail, say so — bind-success alone is the weaker claim.
 
 If the first `curl` fails, the recommendation's Phase 1 is dead and Phase 2
 becomes mandatory — report immediately, do not run the rest.
 
-**Teardown.** Stop both `python` listeners (`Ctrl-C` / kill the jobs). The
-loopback exemption is **left in place for Probe 2** (which tests whether it
-survives a reboot) and is removed only by the global teardown's
+**Teardown.** Stop all three `python` listeners — the two outside jobs (8899, 9999)
+via `Get-Job | Stop-Job; Get-Job | Remove-Job` and the inside 9998 process. The
+loopback exemption is machine-wide session state shared by every probe, so it is
+**left in place until the global teardown** removes it with
 `CheckNetIsolation.exe LoopbackExempt -d -n=$moniker`.
 
 ### Probe 2: does the exemption need elevation?
 
-Probe 1 already records the non-elevated exit code. This probe covers durability.
-**Run its reboot step last** — after Probes 3–11, just before the global teardown —
-so the single `try/finally` run is not interrupted mid-session; only Probe 1
-(which registers the exemption) must precede it. Rebooting mid-run would force a
-re-scaffold with a fresh `$stamp`/`$moniker`, orphaning the pre-reboot profile and
-the machine-wide exemption on the very desktop the preamble says must be left
-clean.
+Probe 1 already records the non-elevated exit code; this probe confirms the entry
+is present within the session:
 
 ```powershell
-CheckNetIsolation.exe LoopbackExempt -s      # before reboot: note the entry
+CheckNetIsolation.exe LoopbackExempt -s      # entry present in this session?
 ```
 
-Then **reboot the desktop at a convenient time** — do not script a bare
-`Restart-Computer` in an unattended run; it will drop unsaved work. Reboot
-manually (or `Restart-Computer -Confirm` interactively), and after it comes back:
+Report the non-elevated exit code from Probe 1 and whether `-s` listed the entry.
 
-```powershell
-CheckNetIsolation.exe LoopbackExempt -s      # after reboot: entry still present?
-```
-
-Report the non-elevated exit code from Probe 1, whether `-s` listed the entry,
-and whether it survived the reboot. ("Survives a Windows Update" is an
-observation to make over time, not a command to run.)
+**Reboot durability is deliberately UNVERIFIED this run.** A reboot cannot sit
+inside the single `try/finally` that wraps the probe run, and this run does **not**
+reboot Kevin's desktop. Verifying that the exemption (and the AppContainer profile)
+survive a reboot would be a **separate, optional script, not part of this run**: it
+would first write a recovery manifest recording `$stamp`/`$moniker`/`$probeRoot` so
+a fresh post-reboot session can find and clean the pre-reboot state, then reboot,
+then re-check `LoopbackExempt -s`, then run its own post-reboot cleanup. Until that
+script is run, reboot survival (and "survives a Windows Update") stays an open item
+in the UNVERIFIED table, not a scored result.
 
 **Teardown.** None of its own — the exemption it inspects is removed by the
 global teardown.
@@ -875,7 +899,15 @@ deny-target sentinel is a *fake* home inside the probe root — never the real
 `$env:USERPROFILE`** — so no probe can touch a real key, and its "MUST fail" read
 cannot pass merely because the file is absent.
 
+**Every ACL change runs from the OUTER user shell.** A Low-IL AppContainer process
+has no `WRITE_DAC`, so an `icacls` grant or deny issued *inside* the container is
+silently a no-op — the ACE never lands, and the follow-up assertion passes or fails
+for the wrong reason. So this probe is two container launches with all ACL edits
+between them in the outer shell, and the DENY ACE is verified present before the
+inside read runs.
+
 ```powershell
+# ===== OUTER SHELL: setup and all grants (has WRITE_DAC) =====
 $project = New-Item -ItemType Directory -Force -Path (Join-Path $probeRoot 'project')
 $other   = New-Item -ItemType Directory -Force -Path (Join-Path $probeRoot 'other-project')
 $fakeHome = New-Item -ItemType Directory -Force -Path (Join-Path $probeRoot 'home\.ssh')
@@ -892,26 +924,37 @@ icacls $project.FullName /grant "*${sid}:(OI)(CI)(M)"
 $nock = New-Item -ItemType Directory -Force -Path (Join-Path $project.FullName '.nock')
 icacls $nock.FullName                       # inspect: inherited ACE present?
 icacls $nock.FullName /inheritance:r /remove "*${sid}"
+# ALL APPLICATION PACKAGES read hole — simulate the standing read hole (no DENY yet):
+icacls $fakeHome /grant "*S-1-15-2-1:(OI)(CI)(R)"
 
-# ALL APPLICATION PACKAGES read hole, then the explicit DENY that closes it —
-# tested on the fake home, not a system path, so it is fully self-contained:
-icacls $fakeHome /grant "*S-1-15-2-1:(OI)(CI)(R)"   # simulate the standing read hole
-
-# from INSIDE the container (run each line in the launched AppContainer):
+# ===== LAUNCH 1 (Phase 4a): hole is OPEN — run these INSIDE the container =====
 Set-Content (Join-Path $project.FullName 'write-test.txt') 'ok'        # MUST succeed
 Assert-AccessDenied { Set-Content (Join-Path $nock.FullName 'tamper.txt') 'bad' } 'audit tamper-resistance'
 Assert-AccessDenied { Set-Content (Join-Path $other.FullName 'leak.txt') 'bad' }  'cross-project isolation'
 Get-Content $sentinel   # EXPECTED TO SUCCEED once - the ALL APPLICATION PACKAGES read hole is open
-# now add the explicit DENY and confirm it closes:
+
+# ===== OUTER SHELL: add the explicit DENY, then GATE on it existing =====
 icacls $fakeHome /deny "*${sid}:(OI)(CI)(R)"
+# The deny ACE MUST be present before the inside read runs; otherwise a missing ACE
+# makes the inside Get-Content succeed and Assert-AccessDenied reports FAIL(no-error)
+# — the exact wrong-reason verdict this round removes. Gate, do not merely print:
+$acl = icacls $fakeHome 2>&1
+$denyAce = $acl | Where-Object { $_ -match [regex]::Escape($sid.ToString()) -and $_ -match '\(DENY\)' }
+if ($denyAce) {
+  "PASS(setup): deny ACE present for $sid — running Phase 4b"
+} else {
+  "FAIL(setup): deny ACE absent for $sid — Phase 4b NOT RUN (do not score the close)"
+}
+
+# ===== LAUNCH 2 (Phase 4b): only if the gate passed — run INSIDE the container =====
 Assert-AccessDenied { Get-Content $sentinel } 'explicit DENY closes the read hole'
 ```
 
 The point is the last pair: confirm the standing ALL APPLICATION PACKAGES read
-hole is open (the sentinel reads), then confirm an explicit DENY ACE closes it
-where NockLock needs it to. `Assert-AccessDenied` makes each "MUST fail" a
-*specific* access-denied assertion (E_ACCESSDENIED `0x80070005`) — a not-found
-result is scored `FAIL`, which is exactly the wrong-reason pass this round removes.
+hole is open (Phase 4a reads the sentinel), then confirm an explicit DENY ACE
+closes it (Phase 4b). `Assert-AccessDenied` makes each "MUST fail" a *specific*
+access-denied assertion (E_ACCESSDENIED `0x80070005`) — a not-found result is
+scored `FAIL`, which is exactly the wrong-reason pass this round removes.
 
 **Teardown.** All artifacts are under `$probeRoot` and go with the global
 `Remove-Item`. (For a system path you would `icacls … /remove:d`; here the DENY
@@ -1074,28 +1117,54 @@ $s2 = Get-NtSid -PackageName $escMoniker
 New-Win32Process -CommandLine 'curl.exe -sS -m 5 https://example.com/' `
   -AppContainerSid $s2 -Capabilities (Get-NtSid -KnownSid CapabilityInternetClient)
 
-# (b) WMI broker escape — the out-of-process spawn from (c). Inspect the TOKEN,
-# not just whether curl ran: a WMI child may be spawned by the broker under the
+# (b) WMI broker escape — the out-of-process spawn from (c). Inspect the child's
+# TOKEN, not just whether it ran: a WMI child may be spawned by the broker under the
 # plain user token, which would be a FULL escape of the fence.
+#
+# INSIDE the container: spawn the child and hand its PID OUT through the granted drop
+# dir. Do NOT call Get-NtToken here — if the child escaped to Medium IL, this Low-IL
+# process cannot open it, so Get-NtToken would THROW; a throw read as "contained" is
+# the wrong-reason verdict this round removes. Keep the child alive long enough for
+# the outer session to inspect it across the manual two-shell handoff (Start-Sleep,
+# not `cmd /c timeout`, which needs a console and dies immediately when spawned via
+# Win32_Process.Create with no stdin). 180s leaves ample room for the shell switch:
 $p = Invoke-CimMethod -ClassName Win32_Process -MethodName Create `
-  -Arguments @{CommandLine='cmd.exe /c timeout /t 30'}
-$tok = Get-NtToken -ProcessId $p.ProcessId
-"AppContainer=$($tok.AppContainer)  IntegrityLevel=$($tok.IntegrityLevel)  Package=$($tok.PackageName)"
-# VERDICT: AppContainer=$false  =>  WMI child ran under the plain user token
-#          => FULL escape of the file AND network fence, and Phase 0 does not hold.
-#          AppContainer=$true   =>  token inherited; only the job accounting leaked.
+  -Arguments @{CommandLine='powershell -NoProfile -Command "Start-Sleep 180"'}
+Set-Content -Path (Join-Path $out.FullName 'wmi-child-pid.txt') -Value $p.ProcessId
+
+# OUTER SESSION (plain user, Medium IL): read the PID and inspect the child's token.
+# A Medium-IL child IS openable from here, so this discriminates the three cases:
+$childPid = [int](Get-Content (Join-Path $out.FullName 'wmi-child-pid.txt'))
+if (-not (Get-Process -Id $childPid -ErrorAction SilentlyContinue)) {
+  "VERDICT(b): child $childPid already exited — INDETERMINATE, re-run with a longer keepalive"
+} else {
+  try {
+    $tok = Get-NtToken -ProcessId $childPid
+    "AppContainer=$($tok.AppContainer)  IntegrityLevel=$($tok.IntegrityLevel)  Package=$($tok.PackageName)"
+    # VERDICT: AppContainer=$false => WMI child ran under the plain user token
+    #          => FULL escape of the file AND network fence, and Phase 0 does not hold.
+    #          AppContainer=$true  => token inherited; only the job accounting leaked.
+  } catch {
+    # Even the outer Medium-IL session could not open it (e.g. it elevated further).
+    # This is its OWN verdict — never scored as "contained".
+    "VERDICT(b): could not open child token from OUTER session -> INDETERMINATE, treat as possible escape ($($_.Exception.Message))"
+  }
+}
 ```
 
 If (a) spawns a process that reaches the internet, the network fence is escapable
 by construction and Phase 1 does not hold. If (b)'s WMI child carries a
 non-AppContainer token, that is the more serious result: **Phase 0** does not hold
-and WMI must be blocked with the child-process policy. This is as important as
-Probe 1; run them together.
+and WMI must be blocked with the child-process policy. If (b) is INDETERMINATE
+(child exited early, or even the outer session cannot open it), it is reported as
+its own verdict and never counted as contained. This is as important as Probe 1;
+run them together.
 
 **Teardown.** The escape container profile is removed by the global teardown below
 (`$escMoniker` is assigned inside the container block, so cleanup belongs in the
-outer session — same pattern as Probe 3). Kill any lingering `timeout`/`curl`
-children here.
+outer session — same pattern as Probe 3). Kill the keepalive child (the
+`Start-Sleep` PowerShell spawned by (b), tracked by the PID in `$out`) and any
+lingering `curl` child here.
 
 ### Probe 11: named pipe into the container
 
@@ -1137,7 +1206,10 @@ Remove-AppContainerProfile -Name "agent-escape-$stamp" 2>$null  # Probe 10, if c
 # (Remove-AppContainerProfile wraps the DeleteAppContainerProfile API; resolve the
 #  exact cmdlet spelling on the box if the name differs.)
 logman stop nocklock-fileprobe -ets 2>$null                # Probe 7 session, if it leaked
-# Probe 8 (only packages this run installed): winget uninstall / scoop uninstall
+winget uninstall --id sharkdp.fd 2>$null                   # Probe 8, if installed (not in Box setup)
+scoop uninstall ripgrep 2>$null                            # Probe 8, if installed (not in Box setup)
+# (substitute the exact ids you installed in Probe 8; both are unconditional removes
+#  because neither ships in Box setup. The winget list / scoop list diff below records them.)
 # Probe 9 (VM only): restore firewall to the recorded per-profile state
 Remove-Item -Recurse -Force $probeRoot                     # everything else lived here
 
@@ -1156,7 +1228,7 @@ should decide whether to keep or remove it.
 | # | Claim needing verification | Blocks |
 |---|---|---|
 | 1 | Zero-capability container can reach loopback when exempted | **Phase 1 entirely** |
-| 2 | Loopback exemption registration needs elevation | Phase 1 install UX |
+| 2 | Loopback exemption registration needs elevation; and whether the exemption survives a reboot (reboot durability deliberately not run this round — see Probe 2) | Phase 1 install UX |
 | 3 | AppContainer launch works unelevated end to end | Phase 0 |
 | 4 | Package-SID ACLs grant/deny as the intersection rule implies | Phase 0 |
 | 5 | git/node/python/npm/MSVC survive a regular AppContainer | Phase 0 scope |
