@@ -461,6 +461,22 @@ static int check_path(const char *resolved, int is_write,
         }
     }
 
+    /* 1b. Standard character devices every program needs. /dev/null and
+     * /dev/tty accept reads and writes (git, shells and echo write to them
+     * constantly); /dev/zero is read-only. Permitted unconditionally —
+     * independent of the allow list, which would otherwise restrict them to
+     * reads — but AFTER the deny list, so an explicit deny still wins. Mirrors
+     * the baseline device grants in the Landlock ruleset
+     * (baselineDeviceRules in internal/fence/fs/landlock/rules.go). */
+    if (strcmp(resolved, "/dev/null") == 0 || strcmp(resolved, "/dev/tty") == 0) {
+        return 0; /* read + write */
+    }
+    if ((strcmp(resolved, "/dev/zero") == 0 ||
+         strcmp(resolved, "/dev/urandom") == 0 ||
+         strcmp(resolved, "/dev/random") == 0) && !is_write) {
+        return 0; /* read only */
+    }
+
     /* 2. Check read-write allow list. It may deliberately carve a writable
      * descendant out of a read-only root. Deny entries above still win. */
     for (int i = 0; i < g_config.allow_rw_count; i++) {
