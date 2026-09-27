@@ -92,20 +92,28 @@ All notable changes to NockLock will be documented in this file.
   while the in-project candidates were, so on platforms where a temp root
   reaches its real location through a symlink, the same file could be named
   with a different spelling than the other candidates, or fail to collapse
-  with one that reached it another way.
+  with one that reached it another way. The existence and symlink checks
+  still run against each candidate's original, uncanonicalized path first —
+  de-duplicating by canonical form before that check would let a symlink
+  planted at one candidate hide behind another candidate's real file whenever
+  the two happened to resolve to the same target.
 - An absolute `logging.db` now joins the same candidate scan as the
   conventional `.nock` path, the hand-written relative path and the state-dir
   path, instead of being returned before any of them were even looked at. A
   legacy chain already sitting in the state dir is refused rather than
   silently abandoned when logging.db is reconfigured to an absolute path.
+  (Known gap: an absolute path that itself resolves inside the audit state
+  directory still skips the state-root/ownership checks below, exactly as it
+  did before this change — tracked as follow-up, not fixed in this round.)
 - The configured state root (`XDG_STATE_HOME`, or the `~/.local/state`
   fallback) is now itself checked before anything is created beneath it: it
   must be owned by the current user and not group- or world-writable, or
-  `nocklock` refuses to start and names the path and the fix (chmod it, or
-  unset `XDG_STATE_HOME`). The `/var/tmp` per-uid fallback used when no home
-  directory is available is unaffected — it is a shared system directory by
-  design, and only the per-uid component NockLock creates under it is held to
-  this rule.
+  `nocklock` refuses to start and names the path and the fix (`chmod` for a
+  permissive mode, `chown` for a foreign owner — the message no longer
+  suggests one for the other's problem). The `/var/tmp` per-uid fallback used
+  when no home directory is available is unaffected — it is a shared system
+  directory by design, and only the per-uid component NockLock creates under
+  it is held to this rule.
 - Linux userspace proxy mode now bridges syscall-fenced children to the
   allowlist proxy without granting IP sockets (N10753). When the syscall fence
   narrows proxy-mode children to Unix sockets, `wrap` serves the HTTP(S) proxy on

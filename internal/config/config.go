@@ -124,39 +124,33 @@ func ResolveDBPath(cfg *Config, configPath string) (dbPath string, projectRoot s
 		candidates = append(candidates, configured)
 	}
 
-	// Canonicalize every candidate (resolving symlinks on its existing parent,
-	// keeping the leaf) before de-duplicating or naming it in the error below.
-	// A symlinked ancestor -- macOS routes TMPDIR and /var through /private,
-	// for instance -- would otherwise make the same file look like two
-	// different chains, because the .nock candidates are reached through the
-	// already-resolved project root while the state-dir candidate is not.
-	//
-	// This canonicalization must not feed the existence/symlink scan below:
-	// resolveExisting follows a symlink LEAF too, which would turn a symlink
-	// planted at a candidate path (pointing anywhere the invoking user can
-	// write) into that target's path before the symlink check ever saw it.
-	// Lstat has to see each candidate exactly as configured.
-	type dbCandidate struct{ raw, canon string }
+	// Every candidate is Lstat'd on its ORIGINAL, uncanonicalized spelling: a
+	// symlink planted directly at a candidate path must be caught regardless
+	// of where it points, even when its target happens to canonicalize to the
+	// same file another candidate already reaches directly. De-duplicating
+	// candidates before this scan -- by their canonical form -- would let a
+	// planted symlink whose target coincides with an earlier real candidate
+	// skip the Lstat/symlink check entirely, silently defeating both the
+	// symlink refusal and the multi-chain refusal below. So dedup happens
+	// AFTER each candidate has individually passed the symlink check, keyed by
+	// the canonical form each one resolves to -- which is also what goes into
+	// the error message, so a symlinked ancestor (macOS routes TMPDIR and /var
+	// through /private, for instance) cannot make the same file look like two
+	// chains or get named inconsistently with another candidate that reached
+	// it a different way.
+	canonOf := make(map[string]string, len(candidates))
+	rawSeen := make(map[string]bool, len(candidates))
+	var existing []string
 	seenCanon := make(map[string]bool, len(candidates))
-	scan := make([]dbCandidate, 0, len(candidates))
 	for _, raw := range candidates {
-		canon := resolveExisting(raw)
-		if seenCanon[canon] {
+		if rawSeen[raw] {
 			continue
 		}
-		seenCanon[canon] = true
-		scan = append(scan, dbCandidate{raw: raw, canon: canon})
-	}
-	if stateDB != "" {
-		stateDB = resolveExisting(stateDB)
-	}
-	if absoluteConfigured != "" {
-		absoluteConfigured = resolveExisting(absoluteConfigured)
-	}
+		rawSeen[raw] = true
+		canon := resolveExisting(raw)
+		canonOf[raw] = canon
 
-	var existing []string
-	for _, candidate := range scan {
-		info, statErr := os.Lstat(candidate.raw)
+		info, statErr := os.Lstat(raw)
 		if statErr != nil {
 			// Only "not there" means not there. A permission error, an I/O
 			// error or a symlink loop would otherwise read as absence, and wrap
@@ -165,12 +159,21 @@ func ResolveDBPath(cfg *Config, configPath string) (dbPath string, projectRoot s
 			if errors.Is(statErr, os.ErrNotExist) {
 				continue
 			}
-			return "", projectRoot, fmt.Errorf("cannot determine whether an event log exists at %s: %w", candidate.raw, statErr)
+			return "", projectRoot, fmt.Errorf("cannot determine whether an event log exists at %s: %w", raw, statErr)
 		}
 		if info.Mode()&os.ModeSymlink != 0 {
-			return "", projectRoot, fmt.Errorf("refusing to use the event log at %s: path is a symlink", candidate.raw)
+			return "", projectRoot, fmt.Errorf("refusing to use the event log at %s: path is a symlink", raw)
 		}
-		existing = append(existing, candidate.canon)
+		if !seenCanon[canon] {
+			seenCanon[canon] = true
+			existing = append(existing, canon)
+		}
+	}
+	if stateDB != "" {
+		stateDB = canonOf[stateDB]
+	}
+	if absoluteConfigured != "" {
+		absoluteConfigured = canonOf[absoluteConfigured]
 	}
 
 	// The explicit absolute destination always counts, even when nothing has

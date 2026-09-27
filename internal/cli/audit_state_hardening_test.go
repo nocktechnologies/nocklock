@@ -267,6 +267,42 @@ func TestResolveDBPathRejectsSymlinkedConventionalLog(t *testing.T) {
 	}
 }
 
+// TestResolveDBPathRejectsSymlinkedStateDirCandidateCoincidingWithConventional
+// covers the specific shape the plain single-candidate symlink test above
+// cannot: a symlink planted at a LATER candidate (here, the state-dir one)
+// whose target canonicalizes to the SAME file an EARLIER candidate (the
+// conventional one) already reaches directly. Deduplicating candidates by
+// canonical form before running the symlink check on each of them would drop
+// this state-dir candidate from the scan entirely -- its own Lstat, and the
+// refusal it should trigger, would never run -- because its canonical form
+// looks like a duplicate of the conventional candidate already accepted.
+func TestResolveDBPathRejectsSymlinkedStateDirCandidateCoincidingWithConventional(t *testing.T) {
+	projectRoot, configPath := writeProjectConfig(t, `db = "events.db"`)
+	conventional := filepath.Join(projectRoot, config.Dir, "events.db")
+	if err := os.WriteFile(conventional, []byte("real chain"), 0o600); err != nil {
+		t.Fatalf("write conventional log: %v", err)
+	}
+
+	stateDir, err := config.EnsureAuditStateDir(projectRoot)
+	if err != nil {
+		t.Fatalf("EnsureAuditStateDir: %v", err)
+	}
+	relocated := filepath.Join(stateDir, "events.db")
+	if err := os.Symlink(conventional, relocated); err != nil {
+		t.Skipf("symlinks unsupported: %v", err)
+	}
+
+	cfg, err := config.Load(configPath)
+	if err != nil {
+		t.Fatalf("load config: %v", err)
+	}
+	if _, _, err := config.ResolveDBPath(cfg, configPath); err == nil {
+		t.Fatal("expected a symlinked state-dir candidate to be refused even though it coincides with a real candidate")
+	} else if !strings.Contains(err.Error(), "symlink") {
+		t.Fatalf("expected a symlink error, got: %v", err)
+	}
+}
+
 // TestResolveDBPathCanonicalizesSymlinkedStateDirCandidate reproduces, without
 // depending on any one platform's temp-dir layout, the shape of the macOS CI
 // failure that motivated canonicalizing every ResolveDBPath candidate: the

@@ -5,6 +5,7 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"io/fs"
 	"os"
 	"path/filepath"
 )
@@ -99,15 +100,32 @@ func ensureTrustedDir(dir string) error {
 	if !info.IsDir() {
 		return fmt.Errorf("refusing to use the audit state directory %s: not a directory", dir)
 	}
-	// Group/world WRITE is the one that matters: it is what lets another user
-	// replace the event log or swap the directory. Read access is not ideal but
-	// does not compromise the chain, and being strict about it breaks inherited
-	// 0750 layouts for no security gain.
+	if err := checkDirPermissions(dir, info); err != nil {
+		return fmt.Errorf("refusing to use the audit state directory %s: %w", dir, err)
+	}
+	return nil
+}
+
+// checkDirPermissions requires info to describe a directory NockLock can
+// trust: not group- or world-writable, and owned by the current user. Shared
+// by ensureTrustedDir (a directory NockLock creates and owns) and
+// validateStateRootBase (a directory NockLock only reaches through, whose
+// symlink-ness and directory-ness the caller has already confirmed another
+// way) -- the mode and ownership rule is the same either way, only the
+// wrapping error and its suggested fix differ per caller.
+//
+// Group/world WRITE is the one mode bit that matters: it is what lets another
+// user replace the event log or swap the directory. Read access is not ideal
+// but does not compromise the chain, and being strict about it breaks
+// inherited 0750 layouts for no security gain. The two checks name their own
+// fix, since group/world-write is fixed with chmod while a foreign owner
+// needs chown (or root) -- chmod cannot change ownership.
+func checkDirPermissions(dir string, info fs.FileInfo) error {
 	if perm := info.Mode().Perm(); perm&0o022 != 0 {
-		return fmt.Errorf("refusing to use the audit state directory %s: mode %04o is group- or world-writable; run 'chmod 700 %s'", dir, perm, dir)
+		return fmt.Errorf("mode %04o is group- or world-writable; run 'chmod go-w %s'", perm, dir)
 	}
 	if err := validateStateDirOwner(info); err != nil {
-		return fmt.Errorf("refusing to use the audit state directory %s: %w", dir, err)
+		return fmt.Errorf("%w; chown the directory to the current user", err)
 	}
 	return nil
 }
@@ -126,8 +144,8 @@ func AuditStateDir(projectRoot string) (string, error) {
 // or the ~/.local/state fallback -- to be owned by the current user and not
 // group- or world-writable before NockLock creates or trusts anything beneath
 // it. Unlike ensureTrustedDir's components, NockLock does not own this
-// directory and must not create or chmod it; refusing with a clear fix is the
-// only option when it fails the check.
+// directory: fixing it (or repointing NockLock elsewhere) is the operator's
+// job, not something NockLock does on its own.
 //
 // The caller has already run this exact path through os.MkdirAll (confirming
 // it exists as a directory) and filepath.EvalSymlinks (resolving it), so
@@ -138,17 +156,8 @@ func validateStateRootBase(dir string) error {
 	if err != nil {
 		return fmt.Errorf("cannot stat the state root %s: %w", dir, err)
 	}
-	if perm := info.Mode().Perm(); perm&0o022 != 0 {
-		return fmt.Errorf(
-			"refusing to use the state root %s: mode %04o is group- or world-writable; "+
-				"run 'chmod go-w %s' or unset XDG_STATE_HOME to use a trusted location",
-			dir, perm, dir)
-	}
-	if err := validateStateDirOwner(info); err != nil {
-		return fmt.Errorf(
-			"refusing to use the state root %s: %w; chmod the directory to the correct owner "+
-				"or unset XDG_STATE_HOME to use a trusted location",
-			dir, err)
+	if err := checkDirPermissions(dir, info); err != nil {
+		return fmt.Errorf("refusing to use the state root %s: %w, or point NockLock at a different one via XDG_STATE_HOME", dir, err)
 	}
 	return nil
 }
