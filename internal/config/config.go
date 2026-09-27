@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 
 	"github.com/BurntSushi/toml"
 )
@@ -12,34 +13,32 @@ import (
 // ResolveDBPath returns the absolute path to the event log database and the
 // project root directory, given a config and the path it was loaded from.
 //
-// A RELATIVE logging.db resolves into the project's audit state directory
-// OUTSIDE the project (AuditStateDir), keeping only its filename — NOT against
-// the project root. An event log inside the fence root cannot be protected from
-// the fenced child once the root itself is granted, and the root must be granted
-// for the child to create and remove entries in its own project; AuditStateDir
-// explains why Landlock offers no third option. Relative is the default and
-// covers every config nocklock init writes, so ordinary projects relocate with
-// no config change.
+// There are two outcomes, and which one applies depends on what is already on
+// disk. NockLock never moves an audit chain to change the answer.
 //
-// An ABSOLUTE logging.db is returned exactly as written, and is the one way to
-// override the location. It is not a free-form escape hatch: the event logger
-// independently refuses a database that resolves outside both the project and
-// its audit state directory (logging.validatePath), so an absolute path is
-// useful mainly for pinning the log inside the project — which re-exposes it to
-// the fenced child, and which 'nocklock doctor' warns about. That containment
-// rule predates this function and is deliberately not relaxed here: logging.db
-// comes from a file a repository can ship, so widening it would let a hostile
-// checkout aim a SQLite write at any path the user can touch.
+// LEGACY ROOT — a log already exists at <projectRoot>/.nock/<name>. That file
+// stays exactly where it is and keeps being used. An existing audit chain is the
+// one thing here that must not be touched by an upgrade: relocating it means
+// moving a live SQLite database, its WAL sidecars and its chain anchor
+// together, and a half-finished move produces a chain that verifies while
+// missing its tail. The cost is that the fence cannot grant the project root for
+// creates while the log sits inside it (see fs.FenceConfig.ProtectedRootSubdir),
+// which wrap reports on stderr.
 //
-// A log left inside a project by an older NockLock is moved into the state
-// directory on first use (migrateLegacyAuditState), so an existing audit chain
-// keeps verifying across the upgrade.
+// NEW ROOT — no legacy log. The log lives in the project's audit state directory
+// OUTSIDE the project (AuditStateDir), keeping only the configured filename.
+// Nothing NockLock owns is then inside the fence root, which is what lets the
+// root be granted so the agent can create and remove files in its own project.
+//
+// An ABSOLUTE logging.db is returned as written. Validate rejects one that
+// points outside the project and its audit state directory, so the check
+// happens at config load with a clear error rather than here.
 //
 // Note that projectRoot (the directory holding .nock/config.toml) and
-// filesystem.root need not be the same directory. The relocation is keyed on
-// projectRoot because that is what identifies the project; when filesystem.root
-// points somewhere else, the state directory is outside both, which is the
-// property that matters.
+// filesystem.root need not be the same directory. The choice above is keyed on
+// projectRoot because that is what identifies the project; whether the root may
+// be granted is decided separately, by asking whether the audit directory
+// actually falls inside filesystem.root.
 func ResolveDBPath(cfg *Config, configPath string) (dbPath string, projectRoot string, err error) {
 	configured := cfg.Logging.DB
 	if configured == "" {
@@ -50,24 +49,52 @@ func ResolveDBPath(cfg *Config, configPath string) (dbPath string, projectRoot s
 		return configured, projectRoot, nil
 	}
 
+	// Only the conventional <projectRoot>/.nock location counts as a legacy log.
+	// The default logging.db is now the bare name "events.db", so treating the
+	// configured relative path as a candidate would make <projectRoot>/events.db
+	// -- plausibly a file the project owns -- look like NockLock's own state.
+	legacyDB := filepath.Join(projectRoot, Dir, filepath.Base(configured))
+	legacyExists := false
+	if info, statErr := os.Lstat(legacyDB); statErr == nil {
+		if info.Mode()&os.ModeSymlink != 0 {
+			return "", projectRoot, fmt.Errorf("refusing to use the event log at %s: path is a symlink", legacyDB)
+		}
+		legacyExists = true
+	}
+
 	stateDir, err := EnsureAuditStateDir(projectRoot)
 	if err != nil {
 		return "", projectRoot, err
 	}
-	dbPath = filepath.Join(stateDir, filepath.Base(configured))
+	stateDB := filepath.Join(stateDir, filepath.Base(configured))
 
-	// Migrate ONLY from the conventional <root>/.nock location. Every config
-	// NockLock has ever written put the log there, and restricting the search to
-	// that directory is what stops migration from swallowing an unrelated
-	// project file: the default logging.db is now the bare name "events.db", so
-	// honoring the configured relative path here would make <root>/events.db --
-	// plausibly a file the project owns -- a migration candidate and move it out
-	// of the repository. A log kept somewhere else by hand stays where it is.
-	legacyDB := filepath.Join(projectRoot, Dir, filepath.Base(configured))
-	if err := migrateLegacyAuditState(dbPath, legacyDB); err != nil {
-		return "", projectRoot, err
+	// Exactly one authoritative log per root. Two of them is an operator-visible
+	// state, not a race, so name the way out instead of picking a side: choosing
+	// silently would let a stale or tampered chain shadow the real one.
+	if legacyExists {
+		if _, statErr := os.Lstat(stateDB); statErr == nil {
+			return "", projectRoot, fmt.Errorf(
+				"two event logs found: %s (inside the project) and %s. "+
+					"NockLock will not guess which audit chain is authoritative. "+
+					"Verify each one, then move the one you are discarding aside "+
+					"(its -wal/-shm sidecars and chain anchor travel with it)",
+				legacyDB, stateDB)
+		}
+		return legacyDB, projectRoot, nil
 	}
-	return dbPath, projectRoot, nil
+	return stateDB, projectRoot, nil
+}
+
+// LegacyAuditDirFor returns the in-project audit directory that dbPath belongs
+// to, or "" when the log already lives outside the project. It is what tells the
+// filesystem fence whether a directory inside the root has to stay unwritable.
+func LegacyAuditDirFor(dbPath, projectRoot string) string {
+	dir := filepath.Dir(dbPath)
+	rel, err := filepath.Rel(projectRoot, dir)
+	if err != nil || rel == ".." || strings.HasPrefix(rel, ".."+string(os.PathSeparator)) {
+		return ""
+	}
+	return dir
 }
 
 // Config is the top-level NockLock configuration.
@@ -241,6 +268,64 @@ func loadIntoWithMetadata(cfg *Config, path string) (toml.MetaData, error) {
 			}
 		}
 	}
+	if err := validateAuditDBLocation(cfg, path); err != nil {
+		return toml.MetaData{}, fmt.Errorf("invalid config at %s: %w", path, err)
+	}
 
 	return md, nil
+}
+
+// validateAuditDBLocation rejects an absolute logging.db that points outside
+// both the project and its audit state directory.
+//
+// logging.db comes from a file a repository can ship, so an unrestricted
+// absolute path would let a hostile checkout aim a SQLite database at any path
+// the invoking user can write. Something has always refused those paths; the
+// point of doing it HERE is that the operator gets one clear error at config
+// load naming the setting, instead of a failure from deep inside the event
+// logger at the moment the fence starts.
+//
+// Relative paths need no check: they are resolved into the audit state
+// directory or the project's own .nock, never anywhere else (ResolveDBPath).
+func validateAuditDBLocation(cfg *Config, configPath string) error {
+	db := strings.TrimSpace(cfg.Logging.DB)
+	if db == "" || !filepath.IsAbs(db) {
+		return nil
+	}
+	projectRoot := filepath.Dir(filepath.Dir(configPath))
+	absRoot, err := filepath.Abs(projectRoot)
+	if err != nil {
+		return nil
+	}
+	if withinDir(absRoot, db) {
+		return nil
+	}
+	stateDir, err := AuditStateDir(absRoot)
+	if err == nil && withinDir(stateDir, db) {
+		return nil
+	}
+	return fmt.Errorf(
+		"logging.db %q is an absolute path outside both the project (%s) and NockLock's audit state directory. "+
+			"Use a relative name such as \"events.db\" to keep the event log in the audit state directory, "+
+			"which is where it belongs and where the fenced agent cannot reach it",
+		db, absRoot)
+}
+
+// withinDir reports whether path is dir or lies beneath it, comparing at
+// component boundaries so a sibling named like dir plus a suffix does not match.
+func withinDir(dir, path string) bool {
+	rel, err := filepath.Rel(resolveExisting(dir), resolveExisting(path))
+	if err != nil {
+		return false
+	}
+	return rel == "." || (rel != ".." && !strings.HasPrefix(rel, ".."+string(os.PathSeparator)))
+}
+
+// resolveExisting canonicalizes path as far as it exists, so a comparison is not
+// defeated by /tmp and /var being symlinks into /private on macOS.
+func resolveExisting(path string) string {
+	if resolved, err := filepath.EvalSymlinks(path); err == nil {
+		return resolved
+	}
+	return filepath.Clean(path)
 }

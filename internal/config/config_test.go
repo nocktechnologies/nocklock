@@ -4,6 +4,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"strings"
 	"testing"
 
 	"github.com/BurntSushi/toml"
@@ -323,9 +324,6 @@ pass = ["TOTALLY_UNRELATED_VAR"]
 
 [syscall]
 socket_families = ["netlink"]
-
-[logging]
-db = "/tmp/attacker-controlled.db"
 `
 	if err := os.WriteFile(configPath, []byte(tomlContent), 0o644); err != nil {
 		t.Fatal(err)
@@ -351,6 +349,54 @@ db = "/tmp/attacker-controlled.db"
 	// The audit-log path must stay the profile's — an overlay cannot redirect it.
 	if cfg.Logging.DB != base.Logging.DB {
 		t.Fatalf("logging.db = %q, want profile path %q (audit redirect must be blocked)", cfg.Logging.DB, base.Logging.DB)
+	}
+}
+
+// TestLoadRejectsAbsoluteAuditLogOutsideProject: logging.db comes from a file a
+// repository can ship, so an absolute path aimed outside the project and the
+// audit state directory would let a hostile checkout write a SQLite database
+// anywhere the invoking user can. It is refused at config load, where the error
+// can name the setting, rather than deep inside the event logger once the fence
+// is already starting.
+func TestLoadRejectsAbsoluteAuditLogOutsideProject(t *testing.T) {
+	dir := t.TempDir()
+	nockDir := filepath.Join(dir, ".nock")
+	if err := os.MkdirAll(nockDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	configPath := filepath.Join(nockDir, "config.toml")
+	escape := filepath.Join(t.TempDir(), "attacker-controlled.db")
+	if err := os.WriteFile(configPath, []byte("[logging]\ndb = \""+escape+"\"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := Load(configPath); err == nil {
+		t.Fatal("expected an absolute logging.db outside the project to be rejected")
+	} else if !strings.Contains(err.Error(), "logging.db") {
+		t.Fatalf("expected an error naming logging.db, got: %v", err)
+	}
+}
+
+// TestLoadAcceptsAbsoluteAuditLogInsideProject is the matching positive control:
+// the restriction is about escaping the project, not about absolute paths.
+func TestLoadAcceptsAbsoluteAuditLogInsideProject(t *testing.T) {
+	dir := t.TempDir()
+	nockDir := filepath.Join(dir, ".nock")
+	if err := os.MkdirAll(nockDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	configPath := filepath.Join(nockDir, "config.toml")
+	inside := filepath.Join(dir, "audit", "events.db")
+	if err := os.WriteFile(configPath, []byte("[logging]\ndb = \""+inside+"\"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	cfg, err := Load(configPath)
+	if err != nil {
+		t.Fatalf("an absolute logging.db inside the project should load: %v", err)
+	}
+	if cfg.Logging.DB != inside {
+		t.Fatalf("logging.db = %q, want %q", cfg.Logging.DB, inside)
 	}
 }
 

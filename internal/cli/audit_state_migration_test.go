@@ -8,6 +8,8 @@ import (
 	"testing"
 
 	"github.com/nocktechnologies/nocklock/internal/config"
+	fsfence "github.com/nocktechnologies/nocklock/internal/fence/fs"
+	"github.com/nocktechnologies/nocklock/internal/fence/fs/landlock"
 	"github.com/nocktechnologies/nocklock/internal/logging"
 )
 
@@ -79,21 +81,17 @@ func TestResolveDBPathRelocatesRelativeLogOutsideProject(t *testing.T) {
 	}
 }
 
-// TestResolveDBPathHonorsAbsoluteLog checks the operator escape hatch: an
-// absolute logging.db is used verbatim, never rewritten into the state dir.
-func TestResolveDBPathHonorsAbsoluteLog(t *testing.T) {
-	want := filepath.Join(t.TempDir(), "custom", "audit.db")
-	_, configPath := writeProjectConfig(t, `db = "`+want+`"`)
-	cfg, err := config.Load(configPath)
-	if err != nil {
-		t.Fatalf("load config: %v", err)
-	}
-	dbPath, _, err := config.ResolveDBPath(cfg, configPath)
-	if err != nil {
-		t.Fatalf("ResolveDBPath: %v", err)
-	}
-	if dbPath != want {
-		t.Fatalf("event log = %q, want the configured absolute path %q", dbPath, want)
+// TestLoadRejectsAbsoluteAuditLogEscapingProject: an absolute logging.db is
+// only honored inside the project or the audit state directory. Anywhere else is
+// refused at config load, so a repository cannot ship a config that aims a
+// SQLite write at an arbitrary path.
+func TestLoadRejectsAbsoluteAuditLogEscapingProject(t *testing.T) {
+	escape := filepath.Join(t.TempDir(), "custom", "audit.db")
+	_, configPath := writeProjectConfig(t, `db = "`+escape+`"`)
+	if _, err := config.Load(configPath); err == nil {
+		t.Fatal("expected an absolute logging.db outside the project to be rejected")
+	} else if !strings.Contains(err.Error(), "logging.db") {
+		t.Fatalf("expected an error naming logging.db, got: %v", err)
 	}
 }
 
@@ -127,14 +125,17 @@ func TestResolveDBPathSeparatesProjects(t *testing.T) {
 	}
 }
 
-// TestMigratedLegacyAuditChainStillVerifies is acceptance item (c): an audit
-// chain an older NockLock wrote to <root>/.nock/events.db keeps verifying after
-// it is relocated, and nothing is left behind inside the project.
-func TestMigratedLegacyAuditChainStillVerifies(t *testing.T) {
+// TestLegacyAuditChainKeepsWorkingInPlace is acceptance item (c) under the
+// no-migration contract: a chain an older NockLock wrote to
+// <root>/.nock/events.db keeps being used and keeps verifying, and NockLock does
+// NOT move it. Relocating a live SQLite database, its WAL sidecars and its chain
+// anchor together is exactly the operation that can half-succeed and leave a
+// chain that verifies while missing its tail, so an existing audit trail is left
+// alone and the fence gives up the root-mutation grant instead.
+func TestLegacyAuditChainKeepsWorkingInPlace(t *testing.T) {
 	projectRoot, configPath := writeProjectConfig(t, `db = ".nock/events.db"`)
 	legacyDB := filepath.Join(projectRoot, config.Dir, "events.db")
 
-	// Build a real hash chain at the legacy in-project location.
 	legacyLogger, err := logging.NewLogger(legacyDB, projectRoot)
 	if err != nil {
 		t.Fatalf("open legacy event log: %v", err)
@@ -154,7 +155,7 @@ func TestMigratedLegacyAuditChainStillVerifies(t *testing.T) {
 		t.Fatalf("verify legacy chain: %v", err)
 	}
 	if !before.Intact {
-		t.Fatalf("legacy chain not intact before migration: %s", before.BrokenReason)
+		t.Fatalf("legacy chain not intact to begin with: %s", before.BrokenReason)
 	}
 	if err := legacyLogger.Close(); err != nil {
 		t.Fatalf("close legacy event log: %v", err)
@@ -168,31 +169,78 @@ func TestMigratedLegacyAuditChainStillVerifies(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ResolveDBPath: %v", err)
 	}
-
-	if _, err := os.Lstat(legacyDB); !os.IsNotExist(err) {
-		t.Fatalf("legacy event log still inside the project at %s (err=%v); it must MOVE, not be copied, or the agent can still reach it", legacyDB, err)
-	}
-	if _, err := os.Stat(dbPath); err != nil {
-		t.Fatalf("relocated event log missing at %s: %v", dbPath, err)
+	if dbPath != legacyDB {
+		t.Fatalf("event log = %q, want the legacy in-project log %q left exactly where it is", dbPath, legacyDB)
 	}
 
 	migrated, err := logging.NewLogger(dbPath, projectRoot)
 	if err != nil {
-		t.Fatalf("open relocated event log: %v", err)
+		t.Fatalf("reopen legacy event log: %v", err)
 	}
 	defer migrated.Close()
 	after, err := migrated.VerifyChain()
 	if err != nil {
-		t.Fatalf("verify relocated chain: %v", err)
+		t.Fatalf("verify legacy chain after resolve: %v", err)
 	}
 	if !after.Intact {
-		t.Fatalf("relocated chain not intact: %s", after.BrokenReason)
+		t.Fatalf("legacy chain not intact: %s", after.BrokenReason)
 	}
-	if after.EntriesVerified != before.EntriesVerified {
-		t.Fatalf("relocated chain has %d entries, want %d — the migration dropped rows", after.EntriesVerified, before.EntriesVerified)
+	if after.EntriesVerified != before.EntriesVerified || after.HeadHash != before.HeadHash {
+		t.Fatalf("legacy chain changed: %d/%q -> %d/%q", before.EntriesVerified, before.HeadHash, after.EntriesVerified, after.HeadHash)
 	}
-	if after.HeadHash != before.HeadHash {
-		t.Fatalf("chain head changed across the migration: %q -> %q", before.HeadHash, after.HeadHash)
+}
+
+// TestLegacyAuditDirCostsTheRootMutationGrant is the other half of the
+// trade-off: while the audit trail sits inside the fence root, the root must NOT
+// be granted, because Landlock cannot exclude a directory beneath a granted one.
+func TestLegacyAuditDirCostsTheRootMutationGrant(t *testing.T) {
+	projectRoot, configPath := writeProjectConfig(t, `db = ".nock/events.db"`)
+	legacyDB := filepath.Join(projectRoot, config.Dir, "events.db")
+	if err := os.WriteFile(legacyDB, []byte("legacy chain"), 0o600); err != nil {
+		t.Fatalf("write legacy log: %v", err)
+	}
+	if err := os.Mkdir(filepath.Join(projectRoot, "src"), 0o755); err != nil {
+		t.Fatalf("mkdir src: %v", err)
+	}
+
+	cfg, err := config.Load(configPath)
+	if err != nil {
+		t.Fatalf("load config: %v", err)
+	}
+	dbPath, gotRoot, err := config.ResolveDBPath(cfg, configPath)
+	if err != nil {
+		t.Fatalf("ResolveDBPath: %v", err)
+	}
+	auditDir := config.LegacyAuditDirFor(dbPath, gotRoot)
+	if auditDir == "" {
+		t.Fatalf("legacy audit dir not detected for %q under %q", dbPath, gotRoot)
+	}
+
+	spec, err := landlock.RulesFromConfig(&fsfence.FenceConfig{
+		Root:                projectRoot,
+		Mode:                "read-write",
+		ProtectedRootSubdir: auditDir,
+	}, nil, 5)
+	if err != nil {
+		t.Fatalf("RulesFromConfig: %v", err)
+	}
+	for _, rule := range spec.Paths {
+		if rule.Path == projectRoot {
+			t.Fatalf("fence root %q was granted while the audit trail is inside it: %+v", projectRoot, rule)
+		}
+		if rule.Path == auditDir || strings.HasPrefix(rule.Path, auditDir+string(os.PathSeparator)) {
+			t.Fatalf("audit path %q was granted: %+v", rule.Path, spec.Paths)
+		}
+	}
+	// Existing children are still granted, so the agent keeps working inside them.
+	var sawSrc bool
+	for _, rule := range spec.Paths {
+		if rule.Path == filepath.Join(projectRoot, "src") {
+			sawSrc = true
+		}
+	}
+	if !sawSrc {
+		t.Fatalf("root child src was not granted: %+v", spec.Paths)
 	}
 }
 

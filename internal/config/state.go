@@ -3,6 +3,7 @@ package config
 import (
 	"crypto/sha256"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -33,31 +34,70 @@ import (
 // This mirrors logging.DefaultSigningKeyPath, which already keeps the Ed25519
 // signing key under $XDG_CONFIG_HOME for the same reason.
 func EnsureAuditStateDir(projectRoot string) (string, error) {
-	dir, err := AuditStateDir(projectRoot)
+	base, owned, err := auditStateBase()
 	if err != nil {
 		return "", err
 	}
-	if err := os.MkdirAll(dir, 0o700); err != nil {
-		return "", fmt.Errorf("cannot create the audit state directory %s: %w", dir, err)
+	// The base may not exist yet ($XDG_STATE_HOME on a fresh account, or
+	// ~/.local/state). Create it with ordinary directory permissions: it is not
+	// NockLock's directory and forcing 0700 on a user's ~/.local would be
+	// overreach.
+	if err := os.MkdirAll(base, 0o755); err != nil {
+		return "", fmt.Errorf("cannot create the audit state root %s: %w", base, err)
 	}
-	// A pre-existing directory keeps whatever mode it already had, so verify it
-	// rather than trusting MkdirAll. A group- or world-writable audit directory
-	// lets another local user replace the event log wholesale, which no
-	// per-file mode on events.db can prevent. Fail closed.
-	info, err := os.Stat(dir)
+	// Resolve the state ROOT once, and only here. Symlinks above the root are
+	// the platform's business: on macOS /tmp, /var and the default TMPDIR
+	// (/var/folders/...) are system links into /private, so refusing symlink
+	// components outright would reject ordinary paths. Everything NockLock
+	// creates BELOW the resolved root is held to the strict rule instead.
+	dir, err := filepath.EvalSymlinks(base)
 	if err != nil {
-		return "", fmt.Errorf("cannot stat the audit state directory %s: %w", dir, err)
+		return "", fmt.Errorf("cannot resolve the audit state root %s: %w", base, err)
 	}
-	if !info.IsDir() {
-		return "", fmt.Errorf("refusing to use the audit state directory %s: not a directory", dir)
-	}
-	if perm := info.Mode().Perm(); perm&0o077 != 0 {
-		return "", fmt.Errorf("refusing to use the audit state directory %s: mode %04o is group- or world-accessible; run 'chmod 700 %s'", dir, perm, dir)
-	}
-	if err := validateStateDirOwner(info); err != nil {
-		return "", fmt.Errorf("refusing to use the audit state directory %s: %w", dir, err)
+	for _, component := range append(owned, projectStateKey(projectRoot)) {
+		dir = filepath.Join(dir, component)
+		if err := ensureTrustedDir(dir); err != nil {
+			return "", err
+		}
 	}
 	return dir, nil
+}
+
+// ensureTrustedDir creates dir 0700 if it is missing and, either way, verifies
+// that NockLock can trust it: a real directory, not a symlink, owned by the
+// current user, and not group- or world-writable.
+//
+// Checking only the leaf is not enough, which is why the caller walks every
+// component it owns. A trusted directory reached through an untrusted parent is
+// not trusted: whoever can write the parent can rename the leaf away and put
+// their own directory there, and no mode on the event log prevents it. Lstat
+// rather than Stat so a symlink is caught instead of followed — a symlink here
+// would hand the audit trail to whatever it points at.
+func ensureTrustedDir(dir string) error {
+	if err := os.Mkdir(dir, 0o700); err != nil && !errors.Is(err, os.ErrExist) {
+		return fmt.Errorf("cannot create the audit state directory %s: %w", dir, err)
+	}
+	info, err := os.Lstat(dir)
+	if err != nil {
+		return fmt.Errorf("cannot stat the audit state directory %s: %w", dir, err)
+	}
+	if info.Mode()&os.ModeSymlink != 0 {
+		return fmt.Errorf("refusing to use the audit state directory %s: path is a symlink", dir)
+	}
+	if !info.IsDir() {
+		return fmt.Errorf("refusing to use the audit state directory %s: not a directory", dir)
+	}
+	// Group/world WRITE is the one that matters: it is what lets another user
+	// replace the event log or swap the directory. Read access is not ideal but
+	// does not compromise the chain, and being strict about it breaks inherited
+	// 0750 layouts for no security gain.
+	if perm := info.Mode().Perm(); perm&0o022 != 0 {
+		return fmt.Errorf("refusing to use the audit state directory %s: mode %04o is group- or world-writable; run 'chmod 700 %s'", dir, perm, dir)
+	}
+	if err := validateStateDirOwner(info); err != nil {
+		return fmt.Errorf("refusing to use the audit state directory %s: %w", dir, err)
+	}
+	return nil
 }
 
 // AuditStateDir computes the audit state directory for projectRoot WITHOUT
@@ -66,37 +106,41 @@ func EnsureAuditStateDir(projectRoot string) (string, error) {
 // the side effect of creating a directory. Use EnsureAuditStateDir to obtain a
 // directory that is ready to write to.
 func AuditStateDir(projectRoot string) (string, error) {
-	base, err := auditStateBase()
+	base, owned, err := auditStateBase()
 	if err != nil {
 		return "", err
 	}
-	return filepath.Join(base, "nocklock", projectStateKey(projectRoot)), nil
+	parts := append([]string{base}, owned...)
+	return filepath.Join(append(parts, projectStateKey(projectRoot))...), nil
 }
 
-// auditStateBase picks the directory that holds every project's audit state:
-// $XDG_STATE_HOME, else ~/.local/state, else a per-uid directory under
-// os.TempDir()'s durable sibling /var/tmp.
+// auditStateBase splits the audit state location into a BASE that NockLock only
+// reaches through, and the components BELOW it that NockLock owns and therefore
+// validates strictly (see ensureTrustedDir). Ownership is the reason for the
+// split: $XDG_STATE_HOME and ~/.local/state belong to the user's wider setup and
+// /var/tmp is a 1777 system directory, so holding any of them to "0700, owned by
+// me" would reject perfectly normal machines.
 //
-// The last fallback exists because wrap REFUSES TO START when the event log
+// The /var/tmp fallback exists because wrap REFUSES TO START when the event log
 // cannot be opened, and a home directory is not guaranteed: containers with no
 // passwd entry for the uid, and CI steps that run with HOME unset, both reach
-// it. Before the audit state moved out of the project, those environments
-// worked without a home directory at all, so erroring here would break them.
+// it. Those environments needed no home directory before the audit state moved
+// out of the project, so erroring here would break them. The per-uid directory
+// under /var/tmp is NockLock's own, so it is one of the validated components
+// rather than part of the base.
 //
-// It is /var/tmp rather than /tmp deliberately: /tmp is granted read-only by
-// the shipped presets, and an audit state directory inside a Landlock-granted
-// tree makes its own deny unenforceable and aborts rule generation. /var/tmp
-// also survives a reboot on most systems, which /tmp does not. Both are
-// world-writable, which is why EnsureAuditStateDir checks the mode and the
-// owner of the directory it gets back.
-func auditStateBase() (string, error) {
+// It is /var/tmp rather than /tmp deliberately: /tmp is granted by the shipped
+// presets, and an audit state directory inside a Landlock-granted tree makes its
+// own deny unenforceable and aborts rule generation. /var/tmp also survives a
+// reboot on most systems, which /tmp does not.
+func auditStateBase() (base string, owned []string, err error) {
 	if x := os.Getenv("XDG_STATE_HOME"); x != "" {
-		return x, nil
+		return x, []string{"nocklock"}, nil
 	}
-	if home, err := os.UserHomeDir(); err == nil && home != "" {
-		return filepath.Join(home, ".local", "state"), nil
+	if home, homeErr := os.UserHomeDir(); homeErr == nil && home != "" {
+		return filepath.Join(home, ".local", "state"), []string{"nocklock"}, nil
 	}
-	return filepath.Join("/var/tmp", fmt.Sprintf("nocklock-state-%d", os.Geteuid())), nil
+	return "/var/tmp", []string{fmt.Sprintf("nocklock-state-%d", os.Geteuid()), "nocklock"}, nil
 }
 
 // projectStateKey names a project's audit state directory: a SHA-256 prefix of

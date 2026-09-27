@@ -25,6 +25,21 @@ type FenceConfig struct {
 	AllowPaths   []string
 	AllowRWPaths []string
 	DenyPaths    []string
+
+	// ProtectedRootSubdir, when set, is a directory INSIDE Root that must not
+	// become writable — in practice a legacy in-project audit directory. It
+	// changes how the root is granted: instead of one rule on Root, the fence
+	// grants each of Root's existing children and skips this one, so the child
+	// keeps its existing access but cannot create or remove entries directly in
+	// Root itself.
+	//
+	// That trade is forced, not chosen. Landlock resolves an access by walking
+	// UPWARD from the accessed file and allowing as soon as any ancestor rule
+	// grants it, so a rule on Root cannot be narrowed by a rule underneath it:
+	// granting Root would grant this directory too. Leave it empty whenever the
+	// audit state lives outside Root, which is the default, and the root is
+	// granted as one hierarchy.
+	ProtectedRootSubdir string
 }
 
 // SerializedConfig is the parsed representation of a serialized fence

@@ -280,6 +280,22 @@ var wrapCmd = &cobra.Command{
 				return fmt.Errorf("invalid filesystem fence config: %w", err)
 			}
 			if fsCfg != nil {
+				// A legacy in-project audit directory inside the fence root has
+				// to stay unwritable, which costs the root-mutation grant (see
+				// fs.FenceConfig.ProtectedRootSubdir). Decide it by asking where
+				// the audit directory actually is rather than by whether the log
+				// is "legacy": filesystem.root and the project root can differ,
+				// and an in-project audit dir OUTSIDE filesystem.root needs no
+				// protection and must not cost the grant.
+				if auditDir := config.LegacyAuditDirFor(dbPath, projectRoot); auditDir != "" {
+					if pathIsWithinDir(auditDir, fsCfg.Root) {
+						fsCfg.ProtectedRootSubdir = auditDir
+						fmt.Fprintf(os.Stderr,
+							"NockLock: the audit trail is inside the fence root (%s), so the agent cannot create or remove entries directly in %s.\n"+
+								"NockLock: everything inside existing subdirectories still works. Run 'nocklock state migrate' to move the audit trail out and lift the restriction.\n",
+							auditDir, fsCfg.Root)
+					}
+				}
 				switch runtime.GOOS {
 				case "linux":
 					// Look for the shared library next to the nocklock binary or in standard paths.

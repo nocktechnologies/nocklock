@@ -271,7 +271,9 @@ func TestRulesFromConfigLimitsRegularFileRights(t *testing.T) {
 }
 
 // TestRulesFromConfigGrantsFenceRootAsOneHierarchy is the acceptance test for
-// "the agent can create entries directly in the fence root". Landlock checks
+// "the agent can create entries directly in the fence root", on a FRESH root -
+// one with no audit state inside it, which is the default. See
+// TestRulesFromConfigProtectedSubdirWithholdsRootGrant for the legacy shape. Landlock checks
 // MAKE_REG/MAKE_DIR/REMOVE_FILE/REMOVE_DIR against the DIRECTORY that holds the
 // entry, so a ruleset that granted only the root's existing children (what
 // earlier rounds did, to keep the in-root audit directory ungranted) denied
@@ -320,8 +322,8 @@ func TestRulesFromConfigGrantsFenceRootAsOneHierarchy(t *testing.T) {
 }
 
 // TestRulesFromConfigRootGrantCoversNockConfigDir codifies an ACCEPTED
-// CONSEQUENCE of granting the fence root, so it is a decision on the record
-// rather than a surprise.
+// CONSEQUENCE of granting the fence root on a FRESH root, so it is a decision on
+// the record rather than a surprise.
 //
 // <root>/.nock/config.toml is the fence's own config, and it falls inside the
 // root grant. No Landlock ruleset can exclude it: the kernel walks upward from
@@ -361,7 +363,7 @@ func TestRulesFromConfigRootGrantCoversNockConfigDir(t *testing.T) {
 }
 
 // TestRulesFromConfigRejectsDenyInsideGrantedRoot codifies the second accepted
-// consequence: with the root granted as one hierarchy, a filesystem.deny path
+// consequence, again for a FRESH root: with the root granted as one hierarchy, a filesystem.deny path
 // INSIDE the root can no longer be enforced by Landlock, and rule generation
 // fails closed rather than shipping a fence that ignores the deny. Before the
 // root was granted, such a deny worked only when the path did not yet exist.
@@ -422,6 +424,94 @@ func TestRulesFromConfigRootChildSymlinkGrantsNothingOutsideRoot(t *testing.T) {
 		if !pathInsideRoot(root, rule.Path) {
 			t.Fatalf("rule %q lies outside the fence root %q: %+v", rule.Path, root, spec.Paths)
 		}
+	}
+}
+
+// TestRulesFromConfigProtectedSubdirWithholdsRootGrant is the LEGACY shape: a
+// root that still holds its audit trail. The protected directory gets no grant,
+// AND the root itself gets none either - asserted as the ABSENCE of a root rule,
+// because a root rule is exactly what would reach the protected directory by
+// ancestor walk. The root's other children stay granted, so the agent keeps
+// working everywhere it worked before.
+func TestRulesFromConfigProtectedSubdirWithholdsRootGrant(t *testing.T) {
+	root := resolvedTempDir(t)
+	audit := filepath.Join(root, ".nock")
+	if err := os.Mkdir(audit, 0o700); err != nil {
+		t.Fatalf("mkdir audit dir: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(audit, "events.db"), []byte("chain"), 0o600); err != nil {
+		t.Fatalf("write audit db: %v", err)
+	}
+	src := filepath.Join(root, "src")
+	if err := os.Mkdir(src, 0o755); err != nil {
+		t.Fatalf("mkdir src: %v", err)
+	}
+
+	spec, err := RulesFromConfig(&fsfence.FenceConfig{
+		Root:                root,
+		Mode:                "read-write",
+		ProtectedRootSubdir: audit,
+	}, nil, 5)
+	if err != nil {
+		t.Fatalf("RulesFromConfig failed: %v", err)
+	}
+
+	if rule, ok := findPathRule(spec.Paths, root); ok {
+		t.Fatalf("root %q was granted while the audit trail is inside it; MAKE_REG on the root would reach %q: %+v", root, audit, rule)
+	}
+	for _, rule := range spec.Paths {
+		if rule.Path == audit || strings.HasPrefix(rule.Path, audit+string(os.PathSeparator)) {
+			t.Fatalf("protected audit path %q was granted: %+v", rule.Path, spec.Paths)
+		}
+	}
+	if _, ok := findPathRule(spec.Paths, src); !ok {
+		t.Fatalf("root child %q lost its grant: %+v", src, spec.Paths)
+	}
+}
+
+// TestRulesFromConfigProtectedSubdirRejectsChildSymlinkOutsideRoot keeps the
+// escape check the per-child enumeration needs. Child rules resolve symlinks, so
+// a child pointing outside the root would otherwise produce a real grant on the
+// target. The single-rule fresh-root path cannot hit this, which is why the
+// guard lives with the legacy shape.
+func TestRulesFromConfigProtectedSubdirRejectsChildSymlinkOutsideRoot(t *testing.T) {
+	root := resolvedTempDir(t)
+	audit := filepath.Join(root, ".nock")
+	if err := os.Mkdir(audit, 0o700); err != nil {
+		t.Fatalf("mkdir audit dir: %v", err)
+	}
+	if err := os.Symlink(resolvedTempDir(t), filepath.Join(root, "loot")); err != nil {
+		t.Skipf("symlinks unsupported: %v", err)
+	}
+
+	_, err := RulesFromConfig(&fsfence.FenceConfig{
+		Root:                root,
+		Mode:                "read-write",
+		ProtectedRootSubdir: audit,
+	}, nil, 5)
+	if err == nil {
+		t.Fatal("expected a root child symlinked outside the root to be rejected")
+	}
+	if !strings.Contains(err.Error(), "resolves outside Landlock root") {
+		t.Fatalf("expected an outside-root symlink error, got: %v", err)
+	}
+}
+
+// TestRulesFromConfigProtectedSubdirRefusesWhenUnresolvable: if the protected
+// directory cannot be resolved, refuse rather than fall through to granting the
+// whole root, which would expose the very directory being protected.
+func TestRulesFromConfigProtectedSubdirRefusesWhenUnresolvable(t *testing.T) {
+	root := resolvedTempDir(t)
+	_, err := RulesFromConfig(&fsfence.FenceConfig{
+		Root:                root,
+		Mode:                "read-write",
+		ProtectedRootSubdir: filepath.Join(root, "does-not-resolve"),
+	}, nil, 5)
+	if err == nil {
+		t.Fatal("expected an unresolvable protected subdirectory to be rejected, not silently ignored")
+	}
+	if !strings.Contains(err.Error(), "protected root subdirectory") {
+		t.Fatalf("expected a protected-subdirectory error, got: %v", err)
 	}
 }
 
