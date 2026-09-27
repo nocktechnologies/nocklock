@@ -24,6 +24,24 @@ All notable changes to NockLock will be documented in this file.
   inode-bound), and the interposer grant applies only when a kernel fence engages
   the shim — always true for the hardened presets this targets.
 
+### Documentation
+
+- Accepted-limitation record for grandchild procfs reads (#10764, follow-up to
+  #10757, ADR-005). A Node subprocess spawned by the wrapped Node agent (an MCP
+  server or tool that execs under a new pid) still throws `EACCES` on
+  `process.memoryUsage()`, because the `/proc/self` grant is Landlock
+  inode-bound to the directly wrapped child. Every path to reach grandchildren
+  was assessed and rejected: the broad `/proc/` grant re-opens the #115 sibling
+  `/proc/<pid>/environ` leak; a userspace interposer grant can never widen what
+  the kernel Landlock policy denies (rulesets only intersect); and a per-process
+  PID namespace + fresh `/proc` mount requires forking (abandoning the in-place
+  `execve` that makes the #10757 grant correct), a `CLONE_NEWUSER` that hands the
+  tree the namespaced-root surface `allow_namespaces=false` exists to deny, and
+  the privileged-helper lifecycle of ADR-004 — and does not even start
+  unprivileged on an `apparmor_restrict_unprivileged_userns=1` host.
+  `os.cpus()` is unaffected tree-wide. A regression test pins the grant to the
+  single read-only `/proc/self` entry so this cannot be "fixed" by widening it.
+
 ## [0.5.0] - 2026-09-26
 
 ### Added

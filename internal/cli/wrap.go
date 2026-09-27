@@ -1045,7 +1045,9 @@ func resolvePathBestEffort(p string) string {
 // cover a descendant that later execs under a DIFFERENT pid; such a grandchild's
 // own /proc/self stays denied. Fixing that without re-granting the broad /proc
 // tree #115 removed needs a pid namespace + fresh proc mount, which the syscall
-// fence's allow_namespaces=false posture precludes — out of scope here.)
+// fence's allow_namespaces=false posture precludes — an ACCEPTED limitation,
+// assessed and recorded in ADR-005. The single-entry grant is pinned by
+// TestLandlockProcSelfAllowPathsStaysNarrow so it cannot be widened silently.)
 func landlockProcSelfAllowPaths() []landlock.AllowPath {
 	return []landlock.AllowPath{{Path: "/proc/self", Access: landlock.AccessReadOnly}}
 }

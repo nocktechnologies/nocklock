@@ -12,6 +12,7 @@ import (
 	"testing"
 
 	"github.com/nocktechnologies/nocklock/internal/config"
+	"github.com/nocktechnologies/nocklock/internal/fence/fs/landlock"
 )
 
 // TestClaudeCodePresetGrantsProcSystemFiles is the UNCONDITIONAL guard for the
@@ -43,6 +44,26 @@ func TestClaudeCodePresetGrantsProcSystemFiles(t *testing.T) {
 		if allow[forbidden] {
 			t.Errorf("claude-code preset filesystem.allow must not contain %q — it re-opens the sibling /proc/<pid>/environ path (#115) or binds to the wrapper's pid", forbidden)
 		}
+	}
+}
+
+// TestLandlockProcSelfAllowPathsStaysNarrow pins the accepted #10764 limitation:
+// the in-code /proc/self grant covers ONLY the directly wrapped child (Landlock is
+// inode-bound), and it must NOT be widened to reach grandchildren. The one path
+// that would reach them — the broad "/proc/" tree — re-opens the sibling
+// /proc/<pid>/environ leak #115 removed (see ADR-005). This asserts the grant is
+// exactly one entry, the literal "/proc/self", read-only, so a future "fix" for
+// grandchild process.memoryUsage() cannot silently re-open that hole here.
+func TestLandlockProcSelfAllowPathsStaysNarrow(t *testing.T) {
+	got := landlockProcSelfAllowPaths()
+	if len(got) != 1 {
+		t.Fatalf("landlockProcSelfAllowPaths() returned %d entries, want exactly 1 (#10764/#115): %+v", len(got), got)
+	}
+	if got[0].Path != "/proc/self" {
+		t.Errorf("grant path = %q, want the literal %q (resolving the symlink binds to the wrapper's pid; a broader path re-opens the #115 sibling leak)", got[0].Path, "/proc/self")
+	}
+	if got[0].Access != landlock.AccessReadOnly {
+		t.Errorf("grant access = %q, want %q — the child never writes its own procfs", got[0].Access, landlock.AccessReadOnly)
 	}
 }
 
