@@ -411,6 +411,125 @@ func TestResolveDBPathAbsoluteConfiguredWithNoConflict(t *testing.T) {
 	}
 }
 
+func TestResolveDBPathRenamedLogStillFindsDefaultChain(t *testing.T) {
+	tests := []struct {
+		name       string
+		configured func(string) string
+		legacy     bool
+	}{
+		{
+			name: "absolute in-project path",
+			configured: func(projectRoot string) string {
+				return filepath.Join(projectRoot, "audit", "new.db")
+			},
+		},
+		{
+			name: "relative in-project path",
+			configured: func(string) string {
+				return filepath.Join("audit", "new.db")
+			},
+		},
+		{
+			name: "legacy default chain",
+			configured: func(string) string {
+				return filepath.Join("audit", "new.db")
+			},
+			legacy: true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			projectRoot, configPath := writeProjectConfig(t, `db = "events.db"`)
+			cfg, err := config.Load(configPath)
+			if err != nil {
+				t.Fatalf("load config: %v", err)
+			}
+
+			var existing string
+			if tt.legacy {
+				existing = filepath.Join(projectRoot, config.Dir, "events.db")
+			} else {
+				stateDir, err := config.EnsureAuditStateDir(projectRoot)
+				if err != nil {
+					t.Fatalf("EnsureAuditStateDir: %v", err)
+				}
+				existing = filepath.Join(stateDir, "events.db")
+			}
+			if err := os.WriteFile(existing, []byte("default chain"), 0o600); err != nil {
+				t.Fatalf("write default chain: %v", err)
+			}
+
+			cfg.Logging.DB = tt.configured(projectRoot)
+			configured := cfg.Logging.DB
+			if !filepath.IsAbs(configured) {
+				stateDir, err := config.AuditStateDir(projectRoot)
+				if err != nil {
+					t.Fatalf("AuditStateDir: %v", err)
+				}
+				configured = filepath.Join(stateDir, filepath.Base(configured))
+			}
+			_, _, err = config.ResolveDBPath(cfg, configPath)
+			if err == nil {
+				t.Fatal("expected a renamed logging.db to be refused while the default chain exists")
+			}
+			if !strings.Contains(err.Error(), "event logs found") {
+				t.Fatalf("expected an event-logs-found error, got: %v", err)
+			}
+			if !strings.Contains(err.Error(), existing) || !strings.Contains(err.Error(), configured) {
+				t.Fatalf("expected the error to name the default chain %q and configured path %q, got: %v", existing, configured, err)
+			}
+		})
+	}
+}
+
+func TestResolveDBPathDefaultCandidatesDoNotSelfConflict(t *testing.T) {
+	projectRoot, configPath := writeProjectConfig(t, `db = "events.db"`)
+	stateDir, err := config.EnsureAuditStateDir(projectRoot)
+	if err != nil {
+		t.Fatalf("EnsureAuditStateDir: %v", err)
+	}
+	existing := filepath.Join(stateDir, "events.db")
+	if err := os.WriteFile(existing, []byte("default chain"), 0o600); err != nil {
+		t.Fatalf("write default chain: %v", err)
+	}
+
+	cfg, err := config.Load(configPath)
+	if err != nil {
+		t.Fatalf("load config: %v", err)
+	}
+	dbPath, _, err := config.ResolveDBPath(cfg, configPath)
+	if err != nil {
+		t.Fatalf("ResolveDBPath: %v", err)
+	}
+	if dbPath != existing {
+		t.Fatalf("event log = %q, want existing default chain %q", dbPath, existing)
+	}
+}
+
+func TestResolveDBPathAdoptsExistingRenamedRelativeLogWithoutDefaultChain(t *testing.T) {
+	projectRoot, configPath := writeProjectConfig(t, `db = "audit/new.db"`)
+	existing := filepath.Join(projectRoot, "audit", "new.db")
+	if err := os.MkdirAll(filepath.Dir(existing), 0o755); err != nil {
+		t.Fatalf("mkdir audit dir: %v", err)
+	}
+	if err := os.WriteFile(existing, []byte("renamed chain"), 0o600); err != nil {
+		t.Fatalf("write renamed chain: %v", err)
+	}
+
+	cfg, err := config.Load(configPath)
+	if err != nil {
+		t.Fatalf("load config: %v", err)
+	}
+	dbPath, _, err := config.ResolveDBPath(cfg, configPath)
+	if err != nil {
+		t.Fatalf("ResolveDBPath: %v", err)
+	}
+	if dbPath != existing {
+		t.Fatalf("event log = %q, want existing renamed chain %q", dbPath, existing)
+	}
+}
+
 // TestResolveDBPathAbsoluteStateDirRequiresTrustedRoot pins that spelling an
 // audit-state path absolutely cannot bypass the trust checks used for the same
 // destination when logging.db is relative.

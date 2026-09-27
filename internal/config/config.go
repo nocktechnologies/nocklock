@@ -46,9 +46,11 @@ import (
 // actually falls inside filesystem.root.
 func ResolveDBPath(cfg *Config, configPath string) (dbPath string, projectRoot string, err error) {
 	configured := cfg.Logging.DB
+	defaultDB := DefaultConfig().Logging.DB
 	if configured == "" {
-		configured = DefaultConfig().Logging.DB
+		configured = defaultDB
 	}
+	defaultBase := filepath.Base(defaultDB)
 	// Absolutize the project root before anything is derived from it. With
 	// `wrap --profile X` and no config file, loadWrapConfig hands us the
 	// sentinel "embedded profile X", and plain relative config paths reach here
@@ -70,7 +72,8 @@ func ResolveDBPath(cfg *Config, configPath string) (dbPath string, projectRoot s
 	// relative: an older NockLock could have written it to the conventional spot
 	// regardless of what the CURRENT config says.
 	conventional := filepath.Join(projectRoot, Dir, filepath.Base(configured))
-	candidates := []string{conventional}
+	defaultConventional := filepath.Join(projectRoot, Dir, defaultBase)
+	candidates := []string{conventional, defaultConventional}
 	// A relative logging.db that contains a separator is a PATH the operator
 	// wrote by hand, and before the relocation it named a real in-project log,
 	// so honor it. A bare filename is deliberately NOT probed: it is what this
@@ -78,6 +81,7 @@ func ResolveDBPath(cfg *Config, configPath string) (dbPath string, projectRoot s
 	// <root>/<bare name>, and a file sitting there belongs to the project. This
 	// only applies when configured is itself relative: an absolute path is
 	// handled as its own candidate below, not folded into this one.
+	relativeConfigured := ""
 	if !isAbs {
 		if cleaned := filepath.Clean(configured); cleaned != filepath.Base(cleaned) {
 			joined := filepath.Join(projectRoot, cleaned)
@@ -94,6 +98,7 @@ func ResolveDBPath(cfg *Config, configPath string) (dbPath string, projectRoot s
 			if joined != conventional {
 				candidates = append(candidates, joined)
 			}
+			relativeConfigured = joined
 		}
 	}
 
@@ -107,9 +112,11 @@ func ResolveDBPath(cfg *Config, configPath string) (dbPath string, projectRoot s
 	// through EnsureAuditStateDir, whenever this candidate is the one actually
 	// selected.
 	stateDB := ""
+	defaultStateDB := ""
 	if stateDir, dirErr := AuditStateDir(projectRoot); dirErr == nil {
 		stateDB = filepath.Join(stateDir, filepath.Base(configured))
-		candidates = append(candidates, stateDB)
+		defaultStateDB = filepath.Join(stateDir, defaultBase)
+		candidates = append(candidates, stateDB, defaultStateDB)
 	}
 
 	// An absolute logging.db joins the SAME scan as everything above it,
@@ -175,11 +182,21 @@ func ResolveDBPath(cfg *Config, configPath string) (dbPath string, projectRoot s
 	if absoluteConfigured != "" {
 		absoluteConfigured = canonOf[absoluteConfigured]
 	}
+	if relativeConfigured != "" {
+		relativeConfigured = canonOf[relativeConfigured]
+	}
 
 	// The explicit absolute destination always counts, even when nothing has
 	// been written there yet: see the comment above candidates' construction.
 	if absoluteConfigured != "" && !slices.Contains(existing, absoluteConfigured) {
 		existing = append(existing, absoluteConfigured)
+	}
+	// A renamed relative logging.db selects a new state-dir destination even
+	// when it does not exist yet. If the default-name chain still exists, count
+	// both paths and refuse instead of silently abandoning the old chain.
+	if !isAbs && stateDB != "" && filepath.Base(configured) != defaultBase &&
+		!slices.Contains(existing, relativeConfigured) && !slices.Contains(existing, stateDB) {
+		existing = append(existing, stateDB)
 	}
 
 	// Exactly one authoritative log per root. More than one is an
