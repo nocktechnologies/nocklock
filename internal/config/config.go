@@ -62,11 +62,15 @@ func ResolveDBPath(cfg *Config, configPath string) (dbPath string, projectRoot s
 		projectRoot = abs
 	}
 	stateBase, stateOwned, checkStateBase := auditStateLayout(projectRoot)
-	stateBase, err = resolveAuditStateRoot(stateBase)
-	if err != nil {
-		return "", projectRoot, err
+	resolvedStateBase := resolveExisting(stateBase)
+	stateBaseAvailable := false
+	if info, statErr := os.Stat(stateBase); statErr == nil && info.IsDir() {
+		if resolved, resolveErr := evalAuditStateRoot(stateBase); resolveErr == nil {
+			resolvedStateBase = resolved
+			stateBaseAvailable = true
+		}
 	}
-	stateDir := filepath.Join(stateBase, filepath.Join(stateOwned...))
+	stateDir := filepath.Join(resolvedStateBase, filepath.Join(stateOwned...))
 
 	isAbs := filepath.IsAbs(configured)
 
@@ -110,12 +114,15 @@ func ResolveDBPath(cfg *Config, configPath string) (dbPath string, projectRoot s
 
 	// The relocated (state-dir) path only competes with an in-project
 	// candidate; with none present, that path is the DESTINATION for a fresh
-	// chain below, not a second chain to reconcile. It is computed from the
-	// state root resolved once above, but the audit directory is not created or
-	// validated until it is selected below.
+	// chain below, not a second chain to reconcile. The state root is inspected
+	// read-only here: an absent or unusable root means its candidates cannot be
+	// inspected, so they are omitted rather than blocking an in-project chain.
+	// Creation and trust validation happen only if this destination is selected.
 	stateDB := filepath.Join(stateDir, filepath.Base(configured))
 	defaultStateDB := filepath.Join(stateDir, defaultBase)
-	candidates = append(candidates, stateDB, defaultStateDB)
+	if stateBaseAvailable {
+		candidates = append(candidates, stateDB, defaultStateDB)
+	}
 
 	// An absolute logging.db joins the SAME scan as everything above it,
 	// instead of being returned before any of it is even looked at: unlike the
@@ -175,7 +182,9 @@ func ResolveDBPath(cfg *Config, configPath string) (dbPath string, projectRoot s
 		}
 	}
 	if stateDB != "" {
-		stateDB = canonOf[stateDB]
+		if canon, ok := canonOf[stateDB]; ok {
+			stateDB = canon
+		}
 	}
 	if absoluteConfigured != "" {
 		absoluteConfigured = canonOf[absoluteConfigured]
@@ -192,7 +201,7 @@ func ResolveDBPath(cfg *Config, configPath string) (dbPath string, projectRoot s
 	// A renamed relative logging.db selects a new state-dir destination even
 	// when it does not exist yet. If the default-name chain still exists, count
 	// both paths and refuse instead of silently abandoning the old chain.
-	if !isAbs && stateDB != "" && filepath.Base(configured) != defaultBase &&
+	if !isAbs && stateBaseAvailable && stateDB != "" && filepath.Base(configured) != defaultBase &&
 		!slices.Contains(existing, relativeConfigured) && !slices.Contains(existing, stateDB) {
 		existing = append(existing, stateDB)
 	}
@@ -208,12 +217,22 @@ func ResolveDBPath(cfg *Config, configPath string) (dbPath string, projectRoot s
 				"(their -wal/-shm sidecars and chain anchors travel with them)",
 			len(existing), strings.Join(existing, ", "))
 	}
+	ensureSelectedStateDir := func() (string, error) {
+		createdBase, createErr := resolveAuditStateRoot(stateBase)
+		if createErr != nil {
+			return "", createErr
+		}
+		if createdBase != resolvedStateBase {
+			return "", fmt.Errorf("audit state root changed while resolving: scanned %s, now %s", resolvedStateBase, createdBase)
+		}
+		return ensureAuditStateDirAt(createdBase, stateOwned, checkStateBase)
+	}
 	// An absolute logging.db is used as written once nothing else conflicts.
 	// When its canonical path is inside the canonical audit state directory,
 	// apply the same state-root trust checks as the relative/default route.
 	if absoluteConfigured != "" {
 		if stateDB != "" && withinDir(filepath.Dir(stateDB), absoluteConfigured) {
-			if _, err := ensureAuditStateDirAt(stateBase, stateOwned, checkStateBase); err != nil {
+			if _, err := ensureSelectedStateDir(); err != nil {
 				return "", projectRoot, err
 			}
 		}
@@ -227,7 +246,7 @@ func ResolveDBPath(cfg *Config, configPath string) (dbPath string, projectRoot s
 		return existing[0], projectRoot, nil
 	}
 
-	stateDir, err = ensureAuditStateDirAt(stateBase, stateOwned, checkStateBase)
+	stateDir, err = ensureSelectedStateDir()
 	if err != nil {
 		return "", projectRoot, err
 	}

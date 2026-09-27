@@ -172,15 +172,67 @@ func TestResolveDBPathKeepsUsingItsFirstResolvedStateRoot(t *testing.T) {
 	t.Cleanup(func() { evalAuditStateRoot = originalEval })
 
 	cfg := DefaultConfig()
-	got, _, err := ResolveDBPath(&cfg, configPath)
+	if _, _, err := ResolveDBPath(&cfg, configPath); err == nil {
+		t.Fatal("expected a state root retargeted after the scan to be refused")
+	} else if !strings.Contains(err.Error(), "changed while resolving") {
+		t.Fatalf("expected a state-root-change error, got: %v", err)
+	}
+	if calls != 2 {
+		t.Fatalf("state root resolved %d times, want scan plus verification", calls)
+	}
+}
+
+func TestResolveDBPathLegacyLogIgnoresUnavailableStateRoot(t *testing.T) {
+	projectRoot := resolvedTempDir(t)
+	configPath := filepath.Join(projectRoot, Dir, File)
+	legacyDir := filepath.Join(projectRoot, Dir)
+	if err := os.MkdirAll(legacyDir, 0o700); err != nil {
+		t.Fatalf("mkdir legacy directory: %v", err)
+	}
+	want := filepath.Join(legacyDir, DefaultConfig().Logging.DB)
+	if err := os.WriteFile(want, []byte("existing chain"), 0o600); err != nil {
+		t.Fatalf("write legacy log: %v", err)
+	}
+
+	stateParent := resolvedTempDir(t)
+	stateBase := filepath.Join(stateParent, "not-a-directory")
+	if err := os.WriteFile(stateBase, []byte("occupied"), 0o600); err != nil {
+		t.Fatalf("write state-base blocker: %v", err)
+	}
+	t.Setenv("XDG_STATE_HOME", stateBase)
+
+	got, _, err := ResolveDBPath(&Config{}, configPath)
+	if err != nil {
+		t.Fatalf("ResolveDBPath refused an in-project log over an unused state root: %v", err)
+	}
+	if got != want {
+		t.Fatalf("event log = %q, want legacy log %q", got, want)
+	}
+	info, err := os.Lstat(stateBase)
+	if err != nil {
+		t.Fatalf("lstat state-base blocker: %v", err)
+	}
+	if !info.Mode().IsRegular() {
+		t.Fatalf("unused state base changed from a file: mode %v", info.Mode())
+	}
+}
+
+func TestResolveDBPathFreshAccountCreatesStateRoot(t *testing.T) {
+	projectRoot := resolvedTempDir(t)
+	configPath := filepath.Join(projectRoot, Dir, File)
+	stateBase := filepath.Join(resolvedTempDir(t), "new", "state")
+	t.Setenv("XDG_STATE_HOME", stateBase)
+
+	got, _, err := ResolveDBPath(&Config{}, configPath)
 	if err != nil {
 		t.Fatalf("ResolveDBPath: %v", err)
 	}
-	if got != want {
-		t.Fatalf("event log = %q, want existing chain under first resolved state root %q", got, want)
+	resolvedBase, err := filepath.EvalSymlinks(stateBase)
+	if err != nil {
+		t.Fatalf("fresh state root was not created: %v", err)
 	}
-	if calls != 1 {
-		t.Fatalf("state root resolved %d times, want once", calls)
+	if !strings.HasPrefix(got, resolvedBase+string(os.PathSeparator)) {
+		t.Fatalf("event log %q is not under resolved state root %q", got, resolvedBase)
 	}
 }
 
