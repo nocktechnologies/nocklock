@@ -19,7 +19,15 @@ import (
 // would scatter test audit chains through the developer's actual
 // ~/.local/state/nocklock and leave them behind.
 func TestMain(m *testing.M) {
-	stateHome, err := os.MkdirTemp("", "nocklock-cli-test-state")
+	workDir, err := os.Getwd()
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "locate test working directory: %v\n", err)
+		os.Exit(1)
+	}
+	// The claude-code preset grants /tmp, so placing the audit-state deny under
+	// os.TempDir makes that deny unenforceable. Keep it beside the test projects
+	// in the package working directory instead.
+	stateHome, err := os.MkdirTemp(workDir, "nocklock-cli-test-state")
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "create test audit state root: %v\n", err)
 		os.Exit(1)

@@ -46,9 +46,11 @@ import (
 // actually falls inside filesystem.root.
 func ResolveDBPath(cfg *Config, configPath string) (dbPath string, projectRoot string, err error) {
 	configured := cfg.Logging.DB
+	defaultDB := DefaultConfig().Logging.DB
 	if configured == "" {
-		configured = DefaultConfig().Logging.DB
+		configured = defaultDB
 	}
+	defaultBase := filepath.Base(defaultDB)
 	// Absolutize the project root before anything is derived from it. With
 	// `wrap --profile X` and no config file, loadWrapConfig hands us the
 	// sentinel "embedded profile X", and plain relative config paths reach here
@@ -70,7 +72,8 @@ func ResolveDBPath(cfg *Config, configPath string) (dbPath string, projectRoot s
 	// relative: an older NockLock could have written it to the conventional spot
 	// regardless of what the CURRENT config says.
 	conventional := filepath.Join(projectRoot, Dir, filepath.Base(configured))
-	candidates := []string{conventional}
+	defaultConventional := filepath.Join(projectRoot, Dir, defaultBase)
+	candidates := []string{conventional, defaultConventional}
 	// A relative logging.db that contains a separator is a PATH the operator
 	// wrote by hand, and before the relocation it named a real in-project log,
 	// so honor it. A bare filename is deliberately NOT probed: it is what this
@@ -78,6 +81,7 @@ func ResolveDBPath(cfg *Config, configPath string) (dbPath string, projectRoot s
 	// <root>/<bare name>, and a file sitting there belongs to the project. This
 	// only applies when configured is itself relative: an absolute path is
 	// handled as its own candidate below, not folded into this one.
+	relativeConfigured := ""
 	if !isAbs {
 		if cleaned := filepath.Clean(configured); cleaned != filepath.Base(cleaned) {
 			joined := filepath.Join(projectRoot, cleaned)
@@ -94,6 +98,7 @@ func ResolveDBPath(cfg *Config, configPath string) (dbPath string, projectRoot s
 			if joined != conventional {
 				candidates = append(candidates, joined)
 			}
+			relativeConfigured = joined
 		}
 	}
 
@@ -107,9 +112,11 @@ func ResolveDBPath(cfg *Config, configPath string) (dbPath string, projectRoot s
 	// through EnsureAuditStateDir, whenever this candidate is the one actually
 	// selected.
 	stateDB := ""
+	defaultStateDB := ""
 	if stateDir, dirErr := AuditStateDir(projectRoot); dirErr == nil {
 		stateDB = filepath.Join(stateDir, filepath.Base(configured))
-		candidates = append(candidates, stateDB)
+		defaultStateDB = filepath.Join(stateDir, defaultBase)
+		candidates = append(candidates, stateDB, defaultStateDB)
 	}
 
 	// An absolute logging.db joins the SAME scan as everything above it,
@@ -175,11 +182,21 @@ func ResolveDBPath(cfg *Config, configPath string) (dbPath string, projectRoot s
 	if absoluteConfigured != "" {
 		absoluteConfigured = canonOf[absoluteConfigured]
 	}
+	if relativeConfigured != "" {
+		relativeConfigured = canonOf[relativeConfigured]
+	}
 
 	// The explicit absolute destination always counts, even when nothing has
 	// been written there yet: see the comment above candidates' construction.
 	if absoluteConfigured != "" && !slices.Contains(existing, absoluteConfigured) {
 		existing = append(existing, absoluteConfigured)
+	}
+	// A renamed relative logging.db selects a new state-dir destination even
+	// when it does not exist yet. If the default-name chain still exists, count
+	// both paths and refuse instead of silently abandoning the old chain.
+	if !isAbs && stateDB != "" && filepath.Base(configured) != defaultBase &&
+		!slices.Contains(existing, relativeConfigured) && !slices.Contains(existing, stateDB) {
+		existing = append(existing, stateDB)
 	}
 
 	// Exactly one authoritative log per root. More than one is an
@@ -193,45 +210,12 @@ func ResolveDBPath(cfg *Config, configPath string) (dbPath string, projectRoot s
 				"(their -wal/-shm sidecars and chain anchors travel with them)",
 			len(existing), strings.Join(existing, ", "))
 	}
-	// An absolute logging.db is used as written, once nothing else conflicts.
-	// Validate/validateAuditDBLocation already confined it to the project or
-	// the audit state directory. A path inside the PROJECT carries no
-	// NockLock-owned trust checks -- the project is the operator's. But a path
-	// that lands inside NockLock's OWN audit state directory must clear the
-	// same trust chain the relative route clears through EnsureAuditStateDir:
-	// the state-root ownership/permission check, and the per-component
-	// 0700/owner/symlink checks on every directory NockLock owns beneath it --
-	// including any nested deeper than the fixed nocklock/<hash> the relative
-	// route walks. Without this, an absolute path resolving into the state dir
-	// would be the one remaining route into a directory NockLock trusts with
-	// the audit chain that skipped those checks entirely.
+	// An absolute logging.db is used as written once nothing else conflicts.
+	// When its canonical path is inside the canonical audit state directory,
+	// apply the same state-root trust checks as the relative/default route.
 	if absoluteConfigured != "" {
-		auditDir, dirErr := AuditStateDir(projectRoot)
-		if dirErr != nil {
-			// Fail closed: not knowing where the audit state directory is means
-			// the containment check cannot be made, not that the path is safe.
-			return "", projectRoot, fmt.Errorf("cannot locate the audit state directory to check logging.db %q: %w", configured, dirErr)
-		}
-		if withinDir(auditDir, absoluteConfigured) {
-			stateDir, ensErr := EnsureAuditStateDir(projectRoot)
-			if ensErr != nil {
-				return "", projectRoot, ensErr
-			}
-			// EnsureAuditStateDir already validated stateDir itself
-			// (nocklock/<hash>). Walk each component the absolute path nests
-			// below it, holding every one to the same trust rule rather than
-			// capping how deep the path may go -- validateAuditDBLocation
-			// permits arbitrary nesting, so rejecting a depth here would refuse
-			// configs it accepts.
-			rel, relErr := filepath.Rel(stateDir, filepath.Dir(absoluteConfigured))
-			if relErr != nil {
-				return "", projectRoot, fmt.Errorf("cannot check the audit state directory holding logging.db %q: %w", configured, relErr)
-			}
-			var nested []string
-			if rel != "." {
-				nested = strings.Split(rel, string(os.PathSeparator))
-			}
-			if _, err := ensureTrustedComponents(stateDir, nested); err != nil {
+		if stateDB != "" && withinDir(filepath.Dir(stateDB), absoluteConfigured) {
+			if _, err := EnsureAuditStateDir(projectRoot); err != nil {
 				return "", projectRoot, err
 			}
 		}

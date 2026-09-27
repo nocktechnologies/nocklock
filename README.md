@@ -429,11 +429,17 @@ move the audit directory (`events.db`, its `-wal`/`-shm` sidecars and
 `chain-anchor.json` together) outside the fence root while no session is
 running; `nocklock state migrate` will do that for you in a later release.
 
-`logging.db` set to a relative path keeps only its filename and goes to the
-audit state directory. An absolute path is accepted only inside your project or
-that directory; anywhere else is rejected when the config loads, because
-`logging.db` is a setting a repository can ship. `nocklock doctor` warns if an
-absolute path lands back inside `filesystem.root`, where the agent can reach it.
+`logging.db` set to a relative path uses its filename in the audit state
+directory, except that an existing log at the explicitly configured in-project
+path is retained for compatibility. An absolute path is accepted only inside
+your project or the audit state directory; anywhere else is rejected when the
+config loads, because `logging.db` is a setting a repository can ship. Changing
+the filename does not hide an existing default-name chain: if both the old
+default location and the newly configured destination are candidates, NockLock
+refuses to guess which chain is authoritative and names both paths. Likewise,
+an existing legacy `.nock/events.db` remains visible after a rename.
+`nocklock doctor` warns if an absolute path lands back inside
+`filesystem.root`, where the agent can reach it.
 
 Query it with `nocklock log`:
 
