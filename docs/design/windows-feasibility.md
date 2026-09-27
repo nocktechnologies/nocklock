@@ -735,6 +735,11 @@ $probeRoot = Join-Path $env:TEMP "nocklock-probe-$stamp"
 $moniker   = "nocklock-probe-$stamp"
 New-Item -ItemType Directory -Force -Path $probeRoot | Out-Null
 
+# --- Run mode (-Mode Desktop|DisposableBox, default Desktop) ---
+# Desktop: NOTHING is downloaded or installed; absent prerequisites = SETUP-FAULT.
+# DisposableBox: may Save-Module, bootstrap NuGet, and fetch software.
+if (-not $Mode) { $Mode = 'Desktop' }
+
 # --- Tool prerequisites (desktop run) ---
 # On the desktop, required tools must already be present. Each probe declares
 # which commands it needs; a missing command records SETUP-FAULT for that probe
@@ -763,17 +768,14 @@ foreach ($probe in $requiredTools.Keys) {
 }
 
 # --- NtObjectManager module ---
-# Desktop run: the module and the NuGet provider must already be present.
-# Disposable-box run: Save-Module into the probe root (may pull NuGet).
 if (Get-Module -ListAvailable NtObjectManager) {
   Import-Module NtObjectManager
-} elseif (Get-PackageProvider NuGet -ErrorAction SilentlyContinue) {
-  Save-Module -Name NtObjectManager -Path (Join-Path $probeRoot 'modules')
+} elseif ($Mode -eq 'DisposableBox') {
+  Save-Module -Name NtObjectManager -Path (Join-Path $probeRoot 'modules') -Force
   Import-Module (Join-Path $probeRoot 'modules\NtObjectManager')
 } else {
-  "SETUP-FAULT: NtObjectManager module and NuGet provider both absent"
-  "  Desktop: Install-Module NtObjectManager in a prior session"
-  "  Disposable box: Save-Module will pull NuGet automatically"
+  "SETUP-FAULT: NtObjectManager module absent (Desktop mode — install it manually first)"
+  "  Run: Install-Module NtObjectManager   in a prior session, then re-run"
 }
 
 # Denial helper used by every "MUST fail" step. It discriminates the HResult:
@@ -1077,38 +1079,45 @@ for the wrong reason. So this probe is two container launches with all ACL edits
 between them in the outer shell, and the DENY ACE is verified present before the
 inside read runs.
 
+**Step 1 — OUTER SHELL** (has WRITE_DAC): create the directories, grant the
+package SID on the project root, simulate the ALL APPLICATION PACKAGES read hole,
+and verify the sentinel exists before any container launch:
+
 ```powershell
-# ===== OUTER SHELL: setup and all grants (has WRITE_DAC) =====
-$project = New-Item -ItemType Directory -Force -Path (Join-Path $probeRoot 'project')
-$other   = New-Item -ItemType Directory -Force -Path (Join-Path $probeRoot 'other-project')
+$project  = New-Item -ItemType Directory -Force -Path (Join-Path $probeRoot 'project')
+$other    = New-Item -ItemType Directory -Force -Path (Join-Path $probeRoot 'other-project')
 $fakeHome = New-Item -ItemType Directory -Force -Path (Join-Path $probeRoot 'home\.ssh')
 $sentinel = Join-Path $fakeHome 'id_rsa'
-Set-Content -Path $sentinel -Value 'FAKE-not-a-real-key'   # sentinel, inside the root
-# $sid comes from the launcher prerequisite; it stringifies to the SID in the icacls calls below
+Set-Content -Path $sentinel -Value 'FAKE-not-a-real-key'
 
-# Negative control: the sentinel must READ from OUTSIDE the container, so that a
-# later denial is a real deny and not a missing file.
 if (Test-Path $sentinel) { "PASS(control): sentinel readable outside" } else { "FAIL(control): sentinel missing" }
 
 icacls $project.FullName /grant "*${sid}:(OI)(CI)(M)"
-# inheritance check: does the (OI)(CI) grant above reach a .nock INSIDE the root?
 $nock = New-Item -ItemType Directory -Force -Path (Join-Path $project.FullName '.nock')
 icacls $nock.FullName                       # inspect: inherited ACE present?
 icacls $nock.FullName /inheritance:r /remove "*${sid}"
-# ALL APPLICATION PACKAGES read hole — simulate the standing read hole (no DENY yet):
 icacls $fakeHome /grant "*S-1-15-2-1:(OI)(CI)(R)"
+```
 
-# ===== LAUNCH 1 (Phase 4a): hole is OPEN — run these INSIDE the container =====
+**Step 2 — INSIDE the container (Phase 4a):** the read hole is still open, so the
+sentinel is readable. The project write and audit/cross-project denials are also
+tested here:
+
+```powershell
 Set-Content (Join-Path $project.FullName 'write-test.txt') 'ok'        # MUST succeed
 Assert-AccessDenied { Set-Content (Join-Path $nock.FullName 'tamper.txt') 'bad' } 'audit tamper-resistance'
 Assert-AccessDenied { Set-Content (Join-Path $other.FullName 'leak.txt') 'bad' }  'cross-project isolation'
-Get-Content $sentinel   # EXPECTED TO SUCCEED once - the ALL APPLICATION PACKAGES read hole is open
+Get-Content $sentinel   # EXPECTED TO SUCCEED — the ALL APPLICATION PACKAGES read hole is open
+```
 
-# ===== OUTER SHELL: add the explicit DENY, then GATE on it existing =====
+**Step 3 — OUTER SHELL** (has WRITE_DAC): apply the explicit DENY ACE, then gate
+on it existing. The deny ACE MUST be present before Phase 4b runs; otherwise the
+inside `Get-Content` succeeds and `Assert-AccessDenied` reports `FAIL(no-error)` —
+the exact wrong-reason verdict a Low-IL container produces when `icacls /deny` is
+run from *inside* (no `WRITE_DAC`, so the ACE silently never lands):
+
+```powershell
 icacls $fakeHome /deny "*${sid}:(OI)(CI)(R)"
-# The deny ACE MUST be present before the inside read runs; otherwise a missing ACE
-# makes the inside Get-Content succeed and Assert-AccessDenied reports FAIL(no-error)
-# — the exact wrong-reason verdict this round removes. Gate, do not merely print:
 $acl = icacls $fakeHome 2>&1
 $denyAce = $acl | Where-Object { $_ -match [regex]::Escape($sid.ToString()) -and $_ -match '\(DENY\)' }
 if ($denyAce) {
@@ -1116,8 +1125,12 @@ if ($denyAce) {
 } else {
   "FAIL(setup): deny ACE absent for $sid — Phase 4b NOT RUN (do not score the close)"
 }
+```
 
-# ===== LAUNCH 2 (Phase 4b): only if the gate passed — run INSIDE the container =====
+**Step 4 — INSIDE the container (Phase 4b):** only if the gate passed. A fresh
+container launch confirms the explicit DENY closes the read hole:
+
+```powershell
 Assert-AccessDenied { Get-Content $sentinel } 'explicit DENY closes the read hole'
 ```
 
@@ -1205,7 +1218,7 @@ the container, with full network access) and teardown is manual.
 # DESKTOP-SAFE steps:
 nslookup example.com                                   # DNS Client service
 Resolve-DnsName example.com
-Start-BitsTransfer -Source https://example.com/ -Destination (Join-Path $probeRoot 'bits.out')
+Start-BitsTransfer -Source https://example.com/ -Destination (Join-Path $probeRoot 'bits.out')   # synchronous (no -Asynchronous flag) — completes or fails before the script continues, so no BITS job outlives this call
 Invoke-WebRequest https://example.com/ -UseBasicParsing
 curl.exe -sS -m 5 https://example.com/                 # control: MUST fail
 # DISPOSABLE-BOX ONLY — opens the operator's real browser:
@@ -1235,9 +1248,13 @@ Users" retry is **DISPOSABLE-BOX ONLY** — group membership is a persistent
 machine change the teardown cannot undo.
 
 ```powershell
-# DESKTOP-SAFE: non-elevated attempt
-logman create trace nocklock-fileprobe -p Microsoft-Windows-Kernel-File -o (Join-Path $probeRoot 'f.etl') -ets
-logman stop nocklock-fileprobe -ets
+# DESKTOP-SAFE: non-elevated attempt — run-unique session name so teardown
+# never touches a session belonging to a concurrent run or another user.
+$etwSession = "nocklock-fileprobe-$stamp"
+$etwCreated = $false
+logman create trace $etwSession -p Microsoft-Windows-Kernel-File -o (Join-Path $probeRoot 'f.etl') -ets
+if ($LASTEXITCODE -eq 0) { $etwCreated = $true }
+logman stop $etwSession -ets
 ```
 
 Run non-elevated first. If it succeeds, file-event logging is Phase 0 material.
@@ -1246,16 +1263,15 @@ Log Users* (persistent group membership change) and retry, then retry elevated.
 If the non-elevated attempt fails on the desktop, record the result and stop —
 the answer is that file-event logging is Phase 2.
 
-**Teardown.** The trace session (`nocklock-fileprobe`) is machine state and leaks
-if `stop` is skipped; the global teardown force-stops it
-(`logman stop nocklock-fileprobe -ets` guarded by `logman query -ets`). The `.etl`
-file is under `$probeRoot`. On the disposable box, group membership changes go
-with the box.
+**Teardown.** The trace session (`nocklock-fileprobe-$stamp`, run-unique) is
+machine state and leaks if `stop` is skipped; the global teardown stops it only
+if `$etwCreated` is true. The `.etl` file is under `$probeRoot`. On the disposable
+box, group membership changes go with the box.
 
 | State touched | Detail |
 |---|---|
-| Creates | ETW trace session `nocklock-fileprobe` (machine state); `.etl` file under `$probeRoot` |
-| Removes | the trace session (`logman stop`); `.etl` removed globally with `$probeRoot` |
+| Creates | ETW trace session `nocklock-fileprobe-$stamp` (machine state, run-unique); `.etl` file under `$probeRoot` |
+| Removes | the trace session (only if this run created it); `.etl` removed globally with `$probeRoot` |
 | Must never touch | other ETW sessions; Performance Log Users group membership (desktop run) |
 
 ### Probe 8: packaging no-admin
@@ -1416,8 +1432,8 @@ run them together.
 (`$escMoniker` is assigned inside the container block, so cleanup belongs in the
 outer session — same pattern as Probe 3). Kill the keepalive child by verified
 identity (PID + StartTime + Path from `wmi-child.txt`); a missing or mismatched
-process means already gone — skip it. Any lingering `curl` child from (a) is
-reaped the same way by the global teardown's PID loop.
+process means already gone — skip it. The `curl` child from (a) has a 5-second
+timeout (`-m 5`) and self-terminates; it is not tracked by an identity file.
 
 | State touched | Detail |
 |---|---|
@@ -1469,7 +1485,7 @@ Remove-AppContainerProfile -Name $moniker 2>$null            # %LOCALAPPDATA%\Pa
 Remove-AppContainerProfile -Name "agent-escape-$stamp" 2>$null  # Probe 10, if created
 # (Remove-AppContainerProfile wraps the DeleteAppContainerProfile API; resolve the
 #  exact cmdlet spelling on the box if the name differs.)
-logman stop nocklock-fileprobe -ets 2>$null                # Probe 7 session, if it leaked
+if ($etwCreated) { logman stop $etwSession -ets 2>$null }  # only if THIS run created it
 # Reap spawned processes BEFORE deleting $probeRoot (identity files live there).
 foreach ($idFile in (Get-ChildItem -Path $probeRoot -Filter '*.txt' -Recurse -ErrorAction SilentlyContinue |
     Where-Object { $_.Name -match '(own-listener|wmi-child)\.txt$' })) {
