@@ -42,8 +42,9 @@ var statusCmd = &cobra.Command{
 		// Filesystem fence status
 		if cfg.Filesystem.Root != "" {
 			allowCount := len(cfg.Filesystem.Allow)
+			allowRWCount := len(cfg.Filesystem.AllowRW)
 			denyCount := len(cfg.Filesystem.Deny)
-			fmt.Printf("Filesystem fence: active (allow %d, deny %d)\n", allowCount, denyCount)
+			fmt.Printf("Filesystem fence: active (allow %d read-only, %d read-write, deny %d)\n", allowCount, allowRWCount, denyCount)
 		} else {
 			fmt.Println("Filesystem fence: not configured")
 		}

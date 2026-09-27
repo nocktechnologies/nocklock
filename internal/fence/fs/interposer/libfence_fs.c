@@ -47,6 +47,8 @@ typedef struct {
     char socket_path[PATH_MAX];
     char allow[MAX_PATHS][PATH_MAX];
     int  allow_count;
+    char allow_rw[MAX_PATHS][PATH_MAX];
+    int  allow_rw_count;
     char deny[MAX_PATHS][PATH_MAX];
     int  deny_count;
     int  initialized;
@@ -469,7 +471,14 @@ static int check_path(const char *resolved, int is_write,
         return 0; /* Allowed. */
     }
 
-    /* 3. Check allow list — if path starts with any allow entry, reads only. */
+    /* 3. Check read-write allow list. */
+    for (int i = 0; i < g_config.allow_rw_count; i++) {
+        if (path_starts_with(resolved, g_config.allow_rw[i])) {
+            return 0;
+        }
+    }
+
+    /* 4. Check allow list — if path starts with any allow entry, reads only. */
     for (int i = 0; i < g_config.allow_count; i++) {
         if (path_starts_with(resolved, g_config.allow[i])) {
             if (is_write) {
@@ -482,7 +491,7 @@ static int check_path(const char *resolved, int is_write,
         }
     }
 
-    /* 4. Default: BLOCK. */
+    /* 5. Default: BLOCK. */
     snprintf(reason_out, reason_len, "outside allowed directory");
     return -1;
 }
@@ -592,13 +601,14 @@ static void fence_init(void)
     strncpy(g_config.socket_path, fields[2], PATH_MAX - 1);
     g_config.socket_path[PATH_MAX - 1] = '\0';
 
-    /* Fields 3+: +allow / -deny paths. */
+    /* Fields 3+: +read-only allow / *read-write allow / -deny paths. */
     g_config.allow_count = 0;
+    g_config.allow_rw_count = 0;
     g_config.deny_count = 0;
     for (int i = 3; i < field_count; i++) {
         char *f = fields[i];
         if (f[0] == '+') {
-            if (g_config.allow_count >= MAX_PATHS) {
+            if (g_config.allow_count + g_config.allow_rw_count >= MAX_PATHS) {
                 /*
                  * Too many allow paths — fail closed. We cannot silently
                  * drop paths because deny rules (parsed after allow) could
@@ -612,6 +622,17 @@ static void fence_init(void)
             strncpy(g_config.allow[g_config.allow_count], f + 1, PATH_MAX - 1);
             g_config.allow[g_config.allow_count][PATH_MAX - 1] = '\0';
             g_config.allow_count++;
+        } else if (f[0] == '*') {
+            if (g_config.allow_count + g_config.allow_rw_count >= MAX_PATHS) {
+                /* Too many allow paths — fail closed. */
+                g_config.deny_all = 1;
+                g_config.initialized = 1;
+                free(envbuf);
+                return;
+            }
+            strncpy(g_config.allow_rw[g_config.allow_rw_count], f + 1, PATH_MAX - 1);
+            g_config.allow_rw[g_config.allow_rw_count][PATH_MAX - 1] = '\0';
+            g_config.allow_rw_count++;
         } else if (f[0] == '-') {
             if (g_config.deny_count >= MAX_PATHS) {
                 /*

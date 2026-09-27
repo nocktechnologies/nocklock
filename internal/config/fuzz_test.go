@@ -153,6 +153,9 @@ func assertOverlayNotWidened(t *testing.T, base, ov *Config) {
 	if !isSubset(ov.Filesystem.Allow, base.Filesystem.Allow) {
 		t.Fatalf("overlay widened filesystem.allow beyond base: got %v, base %v", ov.Filesystem.Allow, base.Filesystem.Allow)
 	}
+	if !isSubset(ov.Filesystem.AllowRW, base.Filesystem.AllowRW) {
+		t.Fatalf("overlay widened filesystem.allow_rw beyond base: got %v, base %v", ov.Filesystem.AllowRW, base.Filesystem.AllowRW)
+	}
 
 	// Denylists can only grow: the base denies must all survive.
 	if !isSubset(base.Filesystem.Deny, ov.Filesystem.Deny) {

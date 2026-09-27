@@ -119,6 +119,38 @@ func TestRulesFromConfigKeepsAllowPathsReadOnlyWhenRootIsReadWrite(t *testing.T)
 	}
 }
 
+func TestRulesFromConfigMapsAllowRWPathsReadWrite(t *testing.T) {
+	root := t.TempDir()
+	readOnly := filepath.Join(t.TempDir(), "readonly")
+	readWrite := filepath.Join(t.TempDir(), "readwrite")
+	for _, path := range []string{readOnly, readWrite} {
+		if err := os.Mkdir(path, 0o755); err != nil {
+			t.Fatalf("mkdir %q: %v", path, err)
+		}
+	}
+
+	spec, err := RulesFromConfig(&fsfence.FenceConfig{
+		Root:         root,
+		Mode:         "read-only",
+		AllowPaths:   []string{readOnly},
+		AllowRWPaths: []string{readWrite},
+	}, nil, 5)
+	if err != nil {
+		t.Fatalf("RulesFromConfig failed: %v", err)
+	}
+
+	rules := make(map[string]PathRule, len(spec.Paths))
+	for _, rule := range spec.Paths {
+		rules[rule.Path] = rule
+	}
+	if rule := rules[readOnly]; rule.Access != AccessReadOnly || rule.Rights&writeRights != 0 {
+		t.Fatalf("read-only allow rule = %+v, want no write rights", rule)
+	}
+	if rule := rules[readWrite]; rule.Access != AccessReadWrite || rule.Rights&writeRights == 0 {
+		t.Fatalf("read-write allow rule = %+v, want write rights", rule)
+	}
+}
+
 func TestRulesFromConfigLimitsRegularFileRights(t *testing.T) {
 	root := t.TempDir()
 	allowedPath := filepath.Join(root, "allowed.txt")

@@ -47,6 +47,7 @@ type FilesystemConfig struct {
 	Mode             string   `toml:"mode"`
 	LinuxEnforcement string   `toml:"linux_enforcement"`
 	Allow            []string `toml:"allow"`
+	AllowRW          []string `toml:"allow_rw"`
 	Deny             []string `toml:"deny"`
 	// MacOSAllowUnfenced is a temporary macOS-only escape hatch. When true,
 	// wrap records a DEGRADED fence state and starts the child only if Seatbelt

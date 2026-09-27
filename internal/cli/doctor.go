@@ -544,7 +544,9 @@ func doctorCriticalCheck(group, name, status, message, fix string) doctorCheck {
 }
 
 func hasBroadFilesystemAllow(cfg *config.Config) bool {
-	for _, allow := range cfg.Filesystem.Allow {
+	allows := append([]string(nil), cfg.Filesystem.Allow...)
+	allows = append(allows, cfg.Filesystem.AllowRW...)
+	for _, allow := range allows {
 		switch strings.TrimSpace(allow) {
 		case ".", "./", "/", "*":
 			return true
