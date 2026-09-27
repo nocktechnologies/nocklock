@@ -774,8 +774,7 @@ if (Get-Module -ListAvailable NtObjectManager) {
   Save-Module -Name NtObjectManager -Path (Join-Path $probeRoot 'modules') -Force
   Import-Module (Join-Path $probeRoot 'modules\NtObjectManager')
 } else {
-  "SETUP-FAULT: NtObjectManager module absent (Desktop mode — install it manually first)"
-  "  Run: Install-Module NtObjectManager   in a prior session, then re-run"
+  "SETUP-FAULT: NtObjectManager absent — run Install-Module NtObjectManager in a prior session"
 }
 
 # Denial helper used by every "MUST fail" step. It discriminates the HResult:
@@ -1218,7 +1217,7 @@ the container, with full network access) and teardown is manual.
 # DESKTOP-SAFE steps:
 nslookup example.com                                   # DNS Client service
 Resolve-DnsName example.com
-Start-BitsTransfer -Source https://example.com/ -Destination (Join-Path $probeRoot 'bits.out')   # synchronous (no -Asynchronous flag) — completes or fails before the script continues, so no BITS job outlives this call
+Start-BitsTransfer -Source https://example.com/ -Destination (Join-Path $probeRoot 'bits.out')   # synchronous — no BITS job outlives this call
 Invoke-WebRequest https://example.com/ -UseBasicParsing
 curl.exe -sS -m 5 https://example.com/                 # control: MUST fail
 # DISPOSABLE-BOX ONLY — opens the operator's real browser:
