@@ -963,7 +963,7 @@ root):
 # is registered. Wraps CreateAppContainerProfile; the GUID moniker guarantees it does
 # not already exist. Resolve the exact cmdlet spelling on the box if the name differs
 # (the NtObjectManager verb may be New-NtAppContainerProfile).
-New-AppContainerProfile -Name $moniker -DisplayName $moniker -Description $moniker | Out-Null
+New-AppContainerProfile -Name $moniker -DisplayName $moniker -Description $moniker -ErrorAction Stop | Out-Null
 $sid = Get-NtSid -PackageName $moniker   # reused by Probes 4 and 11; persists for the run
 $sid.ToString()                          # record this SID string; the icacls probes need it
 # One SID-writable drop dir, created and ACL'd from the OUTER shell (which holds
