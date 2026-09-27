@@ -12,10 +12,14 @@ All notable changes to NockLock will be documented in this file.
   and shells work — the Landlock ruleset (`baselineDeviceRules`) and the
   LD_PRELOAD interposer both grant these standard character devices as a
   baseline, independent of the allow list, since the fence otherwise grants a
-  regular file read+execute only; and (2) the preset's filesystem allow list now
-  includes the standard system read paths (`/usr`, `/etc`, `/proc`, `/dev`,
-  `/sys`), without which the child could not resolve its dynamic loader or exec
-  `/bin/echo`. An explicit `deny` of a baseline device still wins. The network
+  regular file read+execute only (the baseline also grants `/dev/urandom` and
+  `/dev/random` readable, the entropy sources musl and older TLS stacks read
+  directly); and (2) the preset's filesystem allow list now includes the
+  standard system read paths (`/usr`, `/lib`, `/lib64`, `/bin`, `/sbin`, `/etc`,
+  `/proc`, `/dev`, `/sys`), without which the child could not resolve its
+  dynamic loader or exec `/bin/echo` — `/lib*`, `/bin` and `/sbin` cover
+  non-usr-merged distros (musl/Alpine) where the loader lives outside `/usr`.
+  An explicit `deny` of a baseline device still wins. The network
   half of N10748 — letting the wrapped agent reach the allowlisted proxy while
   the syscall fence keeps direct-IP egress blocked — is tracked separately; no
   standard client speaks a unix-socket HTTP proxy, so it needs an interposer

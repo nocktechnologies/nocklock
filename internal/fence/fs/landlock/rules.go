@@ -192,12 +192,16 @@ type baselineDeviceNode struct {
 }
 
 // baselineDeviceNodes is the curated set of world-accessible character devices
-// every program needs: /dev/null and /dev/tty writable, /dev/zero readable.
-// The interposer (check_path in libfence_fs.c) applies the identical set.
+// every program needs: /dev/null and /dev/tty writable, and /dev/zero,
+// /dev/urandom and /dev/random readable (the entropy sources musl and older
+// TLS stacks read directly when getrandom(2) is unavailable). The interposer
+// (check_path in libfence_fs.c) applies the identical set.
 var baselineDeviceNodes = []baselineDeviceNode{
 	{"/dev/null", AccessReadWrite, RightReadFile | RightWriteFile | RightIOCTLDev},
 	{"/dev/tty", AccessReadWrite, RightReadFile | RightWriteFile | RightIOCTLDev},
 	{"/dev/zero", AccessReadOnly, RightReadFile},
+	{"/dev/urandom", AccessReadOnly, RightReadFile},
+	{"/dev/random", AccessReadOnly, RightReadFile},
 }
 
 // IsBaselineDeviceNode reports whether path is one of the curated device nodes

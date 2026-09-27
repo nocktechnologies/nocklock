@@ -14,8 +14,15 @@ allow = [
     # resolve its dynamic loader or exec /bin/echo — Landlock and the
     # interposer deny every path outside the root and this allow list. Writable
     # device nodes (/dev/null, /dev/tty) are granted as a baseline in the fence
-    # rules, not here (allow entries are read-only).
+    # rules, not here (allow entries are read-only). /lib, /lib64, /bin and
+    # /sbin are symlinks into /usr on usr-merged distros but real directories on
+    # musl/Alpine and some embedded systems, where the loader and /bin/sh live
+    # outside /usr — grant them so exec works there too.
     "/usr/",
+    "/lib/",
+    "/lib64/",
+    "/bin/",
+    "/sbin/",
     "/etc/",
     "/proc/",
     "/dev/",

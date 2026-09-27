@@ -115,8 +115,10 @@ func TestInterposerSourceAllowsBaselineDeviceNodes(t *testing.T) {
 	text := string(source)
 
 	for _, pattern := range []string{
+		// /dev/null and /dev/tty are read+write (no !is_write guard).
 		`(?s)strcmp\s*\(\s*resolved\s*,\s*"/dev/null"\s*\)\s*==\s*0\s*\|\|\s*strcmp\s*\(\s*resolved\s*,\s*"/dev/tty"\s*\)\s*==\s*0.*?return\s+0`,
-		`(?s)strcmp\s*\(\s*resolved\s*,\s*"/dev/zero"\s*\)\s*==\s*0\s*&&\s*!is_write.*?return\s+0`,
+		// /dev/zero, /dev/urandom and /dev/random are read-only (gated by !is_write).
+		`(?s)strcmp\s*\(\s*resolved\s*,\s*"/dev/zero"\s*\)\s*==\s*0.*?strcmp\s*\(\s*resolved\s*,\s*"/dev/urandom"\s*\)\s*==\s*0.*?strcmp\s*\(\s*resolved\s*,\s*"/dev/random"\s*\)\s*==\s*0.*?!is_write.*?return\s+0`,
 	} {
 		if !regexp.MustCompile(pattern).MatchString(text) {
 			t.Fatalf("libfence_fs.c missing baseline device-node pattern %q", pattern)

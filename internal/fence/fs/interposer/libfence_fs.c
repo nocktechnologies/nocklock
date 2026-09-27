@@ -469,7 +469,9 @@ static int check_path(const char *resolved, int is_write,
     if (strcmp(resolved, "/dev/null") == 0 || strcmp(resolved, "/dev/tty") == 0) {
         return 0; /* read + write */
     }
-    if (strcmp(resolved, "/dev/zero") == 0 && !is_write) {
+    if ((strcmp(resolved, "/dev/zero") == 0 ||
+         strcmp(resolved, "/dev/urandom") == 0 ||
+         strcmp(resolved, "/dev/random") == 0) && !is_write) {
         return 0; /* read only */
     }
 
