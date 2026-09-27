@@ -1560,6 +1560,12 @@ $childTag  = "nocklock-wmi-child-$runId"
 $spawnedAt = (Get-Date).ToUniversalTime().Ticks
 $p = Invoke-CimMethod -ClassName Win32_Process -MethodName Create `
   -Arguments @{CommandLine=('powershell -NoProfile -Command "Start-Sleep 180 # ' + $childTag + '"')}
+# A refused spawn returns ProcessId 0, and Get-Process -Id 0 is the Idle process —
+# record it distinctly so it never reaches the outer identity checks.
+if ($p.ReturnValue -ne 0 -or -not $p.ProcessId) {
+  Set-Content -Path (Join-Path $out.FullName 'wmi-child-pid.txt') -Value "SPAWNFAIL:$($p.ReturnValue)"
+  return
+}
 $wmiChild = Get-Process -Id $p.ProcessId -ErrorAction SilentlyContinue
 if ($wmiChild) {
   # Write ONLY ProcessId|spawn-ticks from inside, to a DISTINCT file. Reading
@@ -1579,6 +1585,10 @@ if ($wmiChild) {
 # note above), so this discriminates the three cases.
 $idFile = Join-Path $out.FullName 'wmi-child.txt'
 $raw = Get-Content (Join-Path $out.FullName 'wmi-child-pid.txt')
+if ($raw -like 'SPAWNFAIL:*') {
+  "VERDICT(b): WMI refused the spawn (Win32_Process.Create ReturnValue $($raw -replace '^SPAWNFAIL:','')) — INDETERMINATE, not scored"
+  return
+}
 if ($raw -like 'EXITED:*') {
   Set-Content -Path $idFile -Value $raw
   "VERDICT(b): child exited before identity capture — INDETERMINATE"
