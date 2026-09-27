@@ -152,7 +152,7 @@ func TestRulesFromConfigMapsAllowRWPathsReadWrite(t *testing.T) {
 }
 
 func TestRulesFromConfigLimitsRegularFileRights(t *testing.T) {
-	root := t.TempDir()
+	root := resolvedTempDir(t)
 	allowedPath := filepath.Join(root, "allowed.txt")
 	if err := os.WriteFile(allowedPath, []byte("allowed"), 0o600); err != nil {
 		t.Fatalf("write allowed placeholder: %v", err)
