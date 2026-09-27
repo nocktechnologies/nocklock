@@ -199,6 +199,7 @@ All notable changes to NockLock will be documented in this file.
   unavailable, dropping its candidates out of the scan and letting a legacy
   in-project chain be adopted while a real state-dir chain sat behind the
   unresolvable root (N10860).
+<<<<<<< HEAD
 - Concurrent logger opens now set SQLite's busy timeout before enabling WAL,
   avoiding lock failures during simultaneous first-time database setup.
 - `ResolveDBPath` now resolves the audit state root once and carries that
