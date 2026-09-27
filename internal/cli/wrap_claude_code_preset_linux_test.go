@@ -297,11 +297,13 @@ func readAndPrint(p string) {
 func main() {
 	args := os.Args[1:]
 	if len(args) > 0 && args[0] == "--descendant" {
-		self, err := os.Executable()
-		if err != nil {
-			fmt.Println("ERROR", err)
-			os.Exit(1)
-		}
+		// os.Executable() reads /proc/self/exe, which this fence's narrowed
+		// grant (stat/status/statm only) denies — using it here would make
+		// this negative-control test fail every time it actually runs under
+		// the fence. wrap execs argv[0] directly with no PATH search (see
+		// landlockProcSelfAllowPaths' doc comment on the exec model), so
+		// os.Args[0] is already this binary's own absolute path.
+		self := os.Args[0]
 		pid := os.Getpid()
 		resolved := make([]string, len(args)-1)
 		for i, name := range args[1:] {
