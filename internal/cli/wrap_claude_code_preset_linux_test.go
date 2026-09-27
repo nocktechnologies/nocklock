@@ -160,10 +160,14 @@ func TestWrapClaudeCodePresetDeniesSiblingProcExposure(t *testing.T) {
 	}
 	t.Cleanup(func() { _ = os.RemoveAll(repo) })
 
+	startupMarker := "NOCKLOCK_PRESET_TEST_STARTED_" + strconv.FormatInt(time.Now().UnixNano(), 36)
 	cmd := exec.Command(bin, "wrap", "--profile", "claude-code", "--",
-		"/bin/sh", "-c", "cat "+environPath+" "+cmdlinePath)
+		"/bin/sh", "-c", "echo "+startupMarker+"; cat "+environPath+" "+cmdlinePath)
 	cmd.Dir = repo
 	out, _ := cmd.CombinedOutput()
+	if !bytes.Contains(out, []byte(startupMarker)) {
+		t.Fatalf("wrapped child did not emit its startup marker — the negative assertion would be vacuous; output:\n%s", out)
+	}
 	for _, m := range []string{envMarker, argMarker} {
 		if bytes.Contains(out, []byte(m)) {
 			t.Fatalf("wrapped child leaked the sibling's %q marker — the preset must deny /proc/<pid> reads; output:\n%s", m, out)
