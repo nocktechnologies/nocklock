@@ -178,6 +178,13 @@ All notable changes to NockLock will be documented in this file.
 
 ### Fixed
 
+- `ResolveDBPath` now fails closed when the audit state root stats as an
+  existing directory but cannot be resolved (`EvalSymlinks` erroring on a
+  mid-call symlink swap or `ELOOP`), matching the sibling Stat-error branch
+  added by PR #128: previously that case silently left the state root
+  unavailable, dropping its candidates out of the scan and letting a legacy
+  in-project chain be adopted while a real state-dir chain sat behind the
+  unresolvable root (N10860).
 - `ResolveDBPath` now resolves the audit state root once and carries that
   canonical path through its candidate scan and final directory setup, so a
   retargeted state-root symlink cannot make it inspect one audit location and
