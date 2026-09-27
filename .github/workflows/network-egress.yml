@@ -424,10 +424,15 @@ jobs:
       # Run as root with NOCKLOCK_DNS_ESCAPE_REQUIRE=1 so a non-root or tool-missing
       # runner HARD-FAILS instead of green-skipping. The test drives the real netns
       # tproxy floor and, from inside the namespace, runs the three July-2026 tricks
-      # (getaddrinfo override to a disallowed IP, raw-IP connect, own resolver
-      # query, resolv.conf rewrite, /etc/hosts pin). It asserts a host-side witness
-      # at the attacker IP receives ZERO bytes, the allowlisted upstream still
-      # works, and the proxy recorded the deny.
+      # (getaddrinfo override to a disallowed IP, raw-IP connect to that same
+      # disallowed IP, own resolver query, resolv.conf rewrite, /etc/hosts pin).
+      # Every row below is asserted somewhere in the test: a non-zero child
+      # exit (a distinct code per trick, from runDNSEscapeClient) fails the run
+      # for most rows, and the parent TestNetnsDNSEscape adds two run-wide
+      # checks of its own (the allowed upstream was actually hit, and the deny
+      # log carries a tls/empty-host receipt) after the child exits 0. A green
+      # run means every one of those checks held, not merely that a log line
+      # was printed.
       - name: run DNS-escape acceptance test as root (skips forbidden)
         run: sudo env NOCKLOCK_DNS_ESCAPE_REQUIRE=1 ./netns.test -test.run '^TestNetnsDNSEscape$' -test.v -test.count=1
 
@@ -438,15 +443,15 @@ jobs:
           {
             echo "### DNS-escape — Linux netns egress floor"
             echo ""
-            echo "| trick | vector | expected NockLock behavior |"
+            echo "| trick | vector | what the test asserts |"
             echo "|---|---|---|"
-            echo "| T1a in-process resolver | getaddrinfo override: connect to a disallowed IP with the allowed SNI | tproxy redirects by port; proxy re-resolves the SNI itself and the request lands on the real allowed host (reads back its 200) |"
-            echo "| T1b in-process resolver | raw disallowed IP, no SNI | proxy has no allowlisted name to honor and terminates the connection (deny recorded) |"
-            echo "| T1c in-process resolver | own UDP+TCP/53 query to an off-namespace resolver | external resolvers unreachable (default-drop): no answer |"
-            echo "| T2 resolv.conf rewrite | write nameserver 8.8.8.8 into the resolver the child sees | root-owned bind-mount → write denied (EACCES); connecting by the allowed name still lands on the allowed upstream |"
-            echo "| T3 /etc/hosts pin | map the allowed name to a disallowed IP | root-owned shared file → write denied (EACCES); connecting by the allowed name still lands on the allowed upstream |"
+            echo "| T1a in-process resolver | getaddrinfo override: connect to a disallowed IP with the allowed SNI | the child reads back the real allowed upstream's 200 (exit 50 if not) |"
+            echo "| T1b in-process resolver | raw disallowed IP, no SNI | the child's connection is terminated by the proxy (exit 51 if not), AND — separately, checked by the parent after the child exits — the deny log carries a tls/empty-host receipt |"
+            echo "| T1c in-process resolver | own UDP+TCP/53 query to an off-namespace resolver | no answer comes back (exit 52 if one does; exit 58 if the job forgot to configure an external resolver address) |"
+            echo "| T2 resolv.conf rewrite | write nameserver 8.8.8.8 into the resolver the child sees | the write is denied with EACCES/EPERM/EROFS (exit 56 otherwise), and the allowed name still lands on the allowed upstream afterward (exit 53 if not) |"
+            echo "| T3 /etc/hosts pin | map the allowed name to a disallowed IP | the write is denied with EACCES/EPERM/EROFS (exit 57 otherwise), and the allowed name still lands on the allowed upstream afterward (exit 54 if not) |"
             echo ""
-            echo "Green means every row held: the SNI-spoofed request re-resolved to the real allowed host, the raw-IP attempt was denied and recorded, and the write tricks failed closed. See the test log for per-trick outcomes."
+            echo "Green means every row above held — the test log carries a per-trick outcome line (T1a/T1b/T1c result, T2/T3 write_denied with errno) as evidence, not just --- PASS."
           } >> "$GITHUB_STEP_SUMMARY"
 
   dns-escape-macos:

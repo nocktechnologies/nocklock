@@ -126,7 +126,7 @@ func runProtocolMatrixClient() int {
 	if !protocolTLSDenied("blocked.example") {
 		return 44 // non-allowed HTTPS must close at the proxy before upstream
 	}
-	if !protocolDirectIPRejected() {
+	if !protocolDirectIPRejected("127.0.0.1:443") {
 		return 45 // no-SNI direct-IP TLS must be terminated by the proxy
 	}
 	if !protocolDNSStub() {
@@ -189,8 +189,11 @@ func protocolTLSDenied(host string) bool {
 	return err != nil
 }
 
-func protocolDirectIPRejected() bool {
-	conn, err := net.DialTimeout("tcp", "127.0.0.1:443", 4*time.Second)
+// protocolDirectIPRejected dials dialAddr directly on TLS/443 with no SNI and
+// reports whether the proxy terminated it (or refused the connection outright)
+// rather than serving a response.
+func protocolDirectIPRejected(dialAddr string) bool {
+	conn, err := net.DialTimeout("tcp", dialAddr, 4*time.Second)
 	if err != nil {
 		return true
 	}
