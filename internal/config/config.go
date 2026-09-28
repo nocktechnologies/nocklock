@@ -328,6 +328,7 @@ type NetworkConfig struct {
 	Allow              []string `toml:"allow"`
 	AllowAll           bool     `toml:"allow_all"`
 	AllowPrivateRanges bool     `toml:"allow_private_ranges"`
+	RequireEnforced    bool     `toml:"require_enforced"`
 }
 
 // SecretsConfig defines environment filtering and optional secret preflight checks.

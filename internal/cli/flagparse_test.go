@@ -43,6 +43,19 @@ func TestParseWrapFlagsDryRun(t *testing.T) {
 	}
 }
 
+func TestParseWrapFlagsRequireEnforcedEgress(t *testing.T) {
+	flags, childArgs, err := parseWrapFlags([]string{"--require-enforced-egress", "--", "cmd"})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !flags.RequireEnforcedEgress {
+		t.Fatal("expected RequireEnforcedEgress to be true")
+	}
+	if len(childArgs) != 1 || childArgs[0] != "cmd" {
+		t.Fatalf("unexpected child args: %v", childArgs)
+	}
+}
+
 func TestParseWrapFlagsProfile(t *testing.T) {
 	flags, childArgs, err := parseWrapFlags([]string{"--profile", "codex", "--", "cmd"})
 	if err != nil {
