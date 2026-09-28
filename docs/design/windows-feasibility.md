@@ -1483,11 +1483,10 @@ $taskCreated = $true
 # $limitedStuck and the fast-fail $limitedDead, and every later call returns $false at once.
 function Assert-LimitedQuiescent {
   if ($script:limitedStuck) { return $false }
-  if (-not $taskCreated) { return $true }          # never registered: no instance can exist
   Stop-ScheduledTask -TaskName $taskName -ErrorAction SilentlyContinue
   for ($i = 0; ($st = (Get-ScheduledTask -TaskName $taskName -ErrorAction SilentlyContinue).State) -in @('Running','Queued') -and $i -lt 30; $i++) { Start-Sleep 1 }
   if ("$st" -in @('Ready','Disabled')) { return $true }
-  $script:limitedStuck = "limited task $taskName is '$st' 30 s after Stop-ScheduledTask"
+  $script:limitedStuck = "limited task $taskName reads '$st' after Stop-ScheduledTask and a wait of up to 30 s ('' = state unreadable)"
   $script:limitedDead  = $script:limitedStuck
   $false
 }
@@ -1525,9 +1524,10 @@ function Invoke-LimitedPhase {
     # TIMEOUT. THE GATE before returning, so a late phase cannot make exemption / profile /
     # ETW changes while the caller carries on; its children die with it (ContainSelf's job).
     # Always $null, even if .done lands after the stop: a timed-out phase is never scored.
-    $started = Test-Path $token      # _limited.ps1 writes its token file first thing
+    $quiet   = Assert-LimitedQuiescent
+    $started = Test-Path $token      # read AFTER the stop: _limited.ps1 writes its token first thing
     $script:limitedFault = "timeout: phase $Phase ($inv) wrote no .done within $TimeoutSec s (started=$started$(if (-not $started) {', console session logged off?'}))"
-    if (-not (Assert-LimitedQuiescent)) {
+    if (-not $quiet) {
       $script:limitedFault += "; $script:limitedStuck"   # the caller aborts the run
     } elseif (-not $started) {
       # A task that never started would only repeat the wait: fail every later phase at
@@ -1713,7 +1713,7 @@ measured step itself: each exemption attempt first removes this run's entry and
 proves it absent, so a repeated attempt never scores an earlier attempt's entry. The limited task that
 ran the `exempt` phase is shared with Probe 3 and likewise removed by the global
 teardown, which keeps it (and the exemption) in place instead if the task will not
-stop (see the quiescence gate below).
+stop (see the quiescence gate above).
 
 | State touched | Detail |
 |---|---|
@@ -2486,8 +2486,9 @@ Test-Path $probeRoot
 
 # --- TEARDOWN (desktop run — no package uninstalls). Everything by EXACT name. ---
 $profileNames = @($moniker, "nocklock-p3-$runId", "agent-escape-$runId")   # scaffold, Probe 3, Probe 10
-# THE GATE, before any destructive step. $true also when the task was never registered.
-$quiet = Assert-LimitedQuiescent
+# THE GATE, before any destructive step. Guarded: a scaffold that failed before registering
+# the task may not have defined the gate either, and no instance can exist then.
+$quiet = (-not $taskCreated) -or (Assert-LimitedQuiescent)
 # Not limited-task state, so these run either way:
 if ($pipeGranted) { $pipeGranted.Dispose() }               # Probe 11
 if ($pipeNoAce)   { $pipeNoAce.Dispose() }
