@@ -24,6 +24,7 @@ jobs:
     steps:
       - name: Reclaim stale Anvil Codex copies
         run: |
+          # Includes per-run output directories left by interrupted reviews.
           for stale_dir in "${RUNNER_TEMP}"/anvil-codex.*; do
             [[ -d "${stale_dir}" && ! -L "${stale_dir}" ]] || continue
             echo "::warning::Removing stale Anvil Codex copy: ${stale_dir}"
@@ -132,9 +133,14 @@ jobs:
           fi
 
           CODEX_DIR="$(mktemp -d "${RUNNER_TEMP}/anvil-codex.XXXXXX")"
-          trap 'chmod -R u+w "${CODEX_DIR}"; rm -rf "${CODEX_DIR}"' EXIT
+          OUTPUT_DIR=""
+          trap 'chmod -R u+w "${CODEX_DIR}" 2>/dev/null || true; rm -rf "${CODEX_DIR}"; if [[ -n "${OUTPUT_DIR}" ]]; then rm -rf "${OUTPUT_DIR}"; fi' EXIT
           trap 'exit 143' TERM
           trap 'exit 130' INT
+          OUTPUT_DIR="$(mktemp -d "${RUNNER_TEMP}/anvil-codex-output.XXXXXX")"
+          OUTPUT_FILE="${OUTPUT_DIR}/review.txt"
+          (umask 077; : > "${OUTPUT_FILE}")
+          chmod 600 "${OUTPUT_FILE}"
           CODEX_APP="${CODEX_DIR}/$(basename "${CODEX_SOURCE_APP}")"
           cp -R "${CODEX_SOURCE_APP}" "${CODEX_APP}"
           if [[ ! -O "${CODEX_APP}" ]]; then
@@ -215,7 +221,7 @@ jobs:
           NO_COLOR=1 "${CODEX_BIN}" review \
             -c 'sandbox_mode="read-only"' \
             -c "model=${MODEL_LABEL}" \
-            "${PROMPT}" > "${RUNNER_TEMP}/anvil-output.txt" 2>&1 || CODEX_EXIT=$?
+            "${PROMPT}" > "${OUTPUT_FILE}" 2>&1 || CODEX_EXIT=$?
           echo "codex_exit=${CODEX_EXIT}" >> "$GITHUB_OUTPUT"
 
           python3 - \
@@ -223,7 +229,7 @@ jobs:
             "${CODEX_HOME}/auth.json" \
             "${CODEX_DIR}/shared-auth-before.json" \
             "${HOME}/.codex/auth.json" \
-            "${RUNNER_TEMP}/anvil-output.txt" <<'PY'
+            "${OUTPUT_FILE}" <<'PY'
           import json
           import sys
 
@@ -260,7 +266,7 @@ jobs:
           REVIEW_MARKER="ANVIL_REVIEW_EOF_$(uuidgen | tr -d '-')"
           {
             echo "review<<${REVIEW_MARKER}"
-            head -c 60000 "${RUNNER_TEMP}/anvil-output.txt"
+            head -c 60000 "${OUTPUT_FILE}"
             printf '\n%s\n' "${REVIEW_MARKER}"
           } >> "$GITHUB_OUTPUT"
 
