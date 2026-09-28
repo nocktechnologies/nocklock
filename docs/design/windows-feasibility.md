@@ -1076,6 +1076,11 @@ namespace NockProbe {
     [DllImport("kernel32.dll", SetLastError = true)] static extern bool GetExitCodeProcess(IntPtr h, out uint code);
     [DllImport("kernel32.dll", SetLastError = true)] static extern bool TerminateProcess(IntPtr h, uint code);
     [DllImport("kernel32.dll")] static extern bool CloseHandle(IntPtr h);
+    [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+    static extern IntPtr CreateJobObject(IntPtr sa, string name);
+    [DllImport("kernel32.dll", SetLastError = true)] static extern bool AssignProcessToJobObject(IntPtr job, IntPtr proc);
+    [DllImport("kernel32.dll", SetLastError = true)] static extern bool TerminateJobObject(IntPtr job, uint code);
+    [DllImport("kernel32.dll", SetLastError = true)] static extern uint ResumeThread(IntPtr thread);
     [DllImport("kernel32.dll", SetLastError = true)] static extern IntPtr OpenProcess(uint access, bool inherit, int pid);
     [DllImport("advapi32.dll", SetLastError = true)] static extern bool OpenProcessToken(IntPtr proc, uint access, out IntPtr tok);
     [DllImport("advapi32.dll", SetLastError = true)]
@@ -1100,7 +1105,11 @@ namespace NockProbe {
 
     // Starts cmdLine as an AppContainer process for packageSid holding exactly capabilitySids
     // (empty = zero capabilities), cwd = System32 (readable by ALL APPLICATION PACKAGES).
-    // Waits up to timeoutMs (then terminates it and throws) and returns the exit code.
+    // Waits up to timeoutMs and returns the exit code. The child starts suspended inside an
+    // anonymous job, so a timeout kills its WHOLE tree (TerminateJobObject), not just the
+    // direct child, then throws. The job has no KILL_ON_JOB_CLOSE: on a normal return,
+    // descendants a probe keeps on purpose (Probe 1's 9998 listener) survive and are reaped
+    // by teardown's verified-identity stop.
     public static int Run(string packageSid, string[] capabilitySids, string cmdLine, int timeoutMs) {
       IntPtr acSid = IntPtr.Zero, caps = IntPtr.Zero, sc = IntPtr.Zero, list = IntPtr.Zero;
       IntPtr[] capPtrs = new IntPtr[capabilitySids.Length];
@@ -1135,17 +1144,28 @@ namespace NockProbe {
         si.lpAttributeList = list;
         PROCESS_INFORMATION pi;
         Check(CreateProcess(null, new StringBuilder(cmdLine), IntPtr.Zero, IntPtr.Zero, false,
-          0x00080000 | 0x08000000,                                          // EXTENDED_STARTUPINFO_PRESENT | CREATE_NO_WINDOW
+          0x00080000 | 0x08000000 | 0x00000004,     // EXTENDED_STARTUPINFO_PRESENT | CREATE_NO_WINDOW | CREATE_SUSPENDED
           IntPtr.Zero, Environment.SystemDirectory, ref si, out pi));
+        IntPtr job = IntPtr.Zero;
         try {
+          job = CreateJobObject(IntPtr.Zero, null);
+          if (job == IntPtr.Zero || !AssignProcessToJobObject(job, pi.hProcess)) {
+            int err = Marshal.GetLastWin32Error();
+            TerminateProcess(pi.hProcess, 1);                               // never let an untracked child run
+            Marshal.ThrowExceptionForHR(unchecked((int)0x80070000) | err);
+          }
+          ResumeThread(pi.hThread);
           if (WaitForSingleObject(pi.hProcess, (uint)timeoutMs) != 0) {
-            TerminateProcess(pi.hProcess, 1);
-            throw new TimeoutException("container process exceeded " + timeoutMs + " ms and was terminated");
+            TerminateJobObject(job, 1);
+            throw new TimeoutException("container process exceeded " + timeoutMs + " ms; its job was terminated");
           }
           uint code;
           Check(GetExitCodeProcess(pi.hProcess, out code));
           return (int)code;
-        } finally { CloseHandle(pi.hThread); CloseHandle(pi.hProcess); }
+        } finally {
+          if (job != IntPtr.Zero) CloseHandle(job);
+          CloseHandle(pi.hThread); CloseHandle(pi.hProcess);
+        }
       } finally {
         if (listInit) DeleteProcThreadAttributeList(list);
         if (list != IntPtr.Zero) Marshal.FreeHGlobal(list);
@@ -1208,7 +1228,7 @@ try {
   $env:TMP = $scratch.FullName; $env:TEMP = $scratch.FullName
   try {
     Add-Type -TypeDefinition (Get-Content -Raw (Join-Path $probeRoot '_launcher.cs')) `
-      -OutputAssembly $launcherDll -OutputType Library -ErrorAction Stop
+      -OutputAssembly $launcherDll -OutputType Library -IgnoreWarnings -ErrorAction Stop   # private P/Invoke structs raise CS0649
   } finally {
     $env:TMP = $oldTmp; $env:TEMP = $oldTemp
   }
@@ -1262,6 +1282,7 @@ $moniker   = "nocklock-probe-$runId"
 $lim       = Join-Path $probeRoot 'limited'
 $phase     = (Get-Content (Join-Path $lim 'phase.txt') -ErrorAction Stop).Trim()
 $log       = Join-Path $lim "$phase.log"
+$step      = 'setup'
 # This phase's OWN token, so each phase is scored against the token it actually ran under.
 whoami /groups | Out-File -FilePath (Join-Path $lim "$phase.token.txt") -Encoding utf8
 "PHASE $phase" | Out-File -FilePath $log -Encoding utf8
@@ -1277,7 +1298,9 @@ try {
   }
 } catch {
   $e = $_.Exception.GetBaseException()
-  ('ERROR: HResult=0x{0:X8} {1}' -f $e.HResult, $e.Message) | Out-File $log -Append -Encoding utf8
+  # $step (set by a phase body before each call) says WHICH call failed, so a denial on
+  # a setup step is never read as the answer to the probe's question.
+  ('ERROR: step={0} HResult=0x{1:X8} {2}' -f $step, $e.HResult, $e.Message) | Out-File $log -Append -Encoding utf8
 } finally {
   # Completion sentinel, written LAST: the outer session never scores a half-written log.
   Set-Content -Path (Join-Path $lim "$phase.done") -Value 'done'
@@ -1296,7 +1319,10 @@ $action = New-ScheduledTaskAction -Execute 'powershell.exe' -Argument (
 $principal = New-ScheduledTaskPrincipal -UserId ([Security.Principal.WindowsIdentity]::GetCurrent().Name) `
   -LogonType Interactive -RunLevel Limited
 $taskCreated = $false
-Register-ScheduledTask -TaskName $taskName -Action $action -Principal $principal -ErrorAction Stop | Out-Null
+# Defaults would skip a start on battery; IgnoreNew is kept, so Invoke-LimitedPhase
+# stops any still-running instance before each /Run (else the /Run is silently ignored).
+$settings = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -MultipleInstances IgnoreNew
+Register-ScheduledTask -TaskName $taskName -Action $action -Principal $principal -Settings $settings -ErrorAction Stop | Out-Null
 $taskCreated = $true
 
 # Runs one _limited.ps1 phase and returns its log lines ONLY if the phase completed
@@ -1313,6 +1339,7 @@ function Invoke-LimitedPhase {
   $done  = Join-Path $limitedDir "$Phase.done"
   $token = Join-Path $limitedDir "$Phase.token.txt"
   Set-Content -Path (Join-Path $limitedDir 'phase.txt') -Value $Phase
+  Stop-ScheduledTask -TaskName $taskName -ErrorAction SilentlyContinue   # a timed-out earlier phase
   schtasks /Run /TN $taskName | Out-Null
   if ($LASTEXITCODE -ne 0) { $script:limitedFault = "schtasks /Run exit $LASTEXITCODE"; return $null }
   for ($i = 0; $i -lt $TimeoutSec -and -not (Test-Path $done); $i++) { Start-Sleep 1 }
@@ -1348,6 +1375,11 @@ is a Phase 2 property, not something this probe can confirm — see
 before Probe 2's persistence checks.
 
 ```powershell
+# A busy probe port (scaffold BEFORE check) means a foreign listener could answer
+# every curl below: do not run Probe 1 at all, so nothing prints as if scored.
+# (`return` leaves this probe's own block in run-probe.ps1, as in Probe 10.)
+if ($setupFaults -match '^Probe 1 ') { "VERDICT(1): SETUP-FAULT - $($setupFaults -match '^Probe 1 ' -join '; '); Probe 1 and Probe 2 not run"; return }
+
 # terminal A - two listeners OUTSIDE any container (both serve from the probe root).
 # 8899 is the primary target; 9999 is a SECOND real listener so the unrelated-port
 # check below has something to reach — without it, curl to 9999 fails with
@@ -1512,11 +1544,15 @@ documents `E_ACCESSDENIED`).
 The `probe3` body inside `_limited.ps1`:
 
 ```powershell
+$step = 'load'
 [void][Reflection.Assembly]::Load([IO.File]::ReadAllBytes((Join-Path $probeRoot '_launcher.dll')))
+$step = 'createprofile'
 $sid3 = [NockProbe.AC]::CreateProfile("nocklock-p3-$runId")      # throws -> ERROR line (caught above)
 "profile=CREATED sid=$sid3" | Out-File $log -Append -Encoding utf8
+$step = 'grant'
 $d3 = New-Item -ItemType Directory -Path (Join-Path $probeRoot 'p3') -ErrorAction Stop
 icacls $d3.FullName /grant "*${sid3}:(OI)(CI)(M)" | Out-Null   # the limited token owns p3\, so it holds WRITE_DAC
+$step = 'run'
 $rc = [NockProbe.AC]::Run($sid3, @(),
   ('cmd.exe /c whoami /all > "' + (Join-Path $d3.FullName 'whoami-inside.txt') + '"'), 60000)
 "launch=OK exit=$rc" | Out-File $log -Append -Encoding utf8
@@ -1530,8 +1566,9 @@ $w  = Get-Content (Join-Path $probeRoot 'p3\whoami-inside.txt') -ErrorAction Sil
 $p3err = (@($p3) -match '^ERROR:') -join '; '
 if (-not $p3) {
   "VERDICT(3): SETUP-FAULT - $limitedFault; not scored"
-} elseif ($p3 | Select-String -SimpleMatch 'ERROR: HResult=0x80070005') {
-  # CreateProfile or Run was DENIED under the limited token: the answer is "needs admin".
+} elseif ($p3 | Select-String -Pattern '^ERROR: step=(createprofile|run) HResult=0x80070005') {
+  # CreateProfile or Run itself was DENIED under the limited token: the answer is "needs admin".
+  # A denial on load/grant is a setup problem and falls through to INDETERMINATE.
   "VERDICT(3): FAILS UNELEVATED - $p3err"
 } elseif (-not ($p3 | Select-String -SimpleMatch 'launch=OK')) {
   # Any other failure (launcher did not compile, timeout, ...) is not a denial.
@@ -2150,8 +2187,15 @@ $pipeGranted = New-ProbePipe "nocklock-probe-pipe-$runId" $true
 $pipeNoAce   = New-ProbePipe "nocklock-probe-pipe-noace-$runId" $false
 
 # INSIDE the container (names re-derived from $runId by the bootstrap):
-[System.IO.Pipes.NamedPipeClientStream]::new('.', "nocklock-probe-pipe-$runId", 'Out').Connect(5000)          # MUST succeed
-Assert-AccessDenied { [System.IO.Pipes.NamedPipeClientStream]::new('.', "nocklock-probe-pipe-noace-$runId", 'Out').Connect(5000) } 'pipe without the package-SID ACE'
+# POSITIVE control first: the negative is scored only if the granted pipe connects, so
+# a container-wide pipe denial can never pass as "the ACE gates access".
+try {
+  [System.IO.Pipes.NamedPipeClientStream]::new('.', "nocklock-probe-pipe-$runId", 'Out').Connect(5000)
+  "PASS(control): granted pipe reachable"
+  Assert-AccessDenied { [System.IO.Pipes.NamedPipeClientStream]::new('.', "nocklock-probe-pipe-noace-$runId", 'Out').Connect(5000) } 'pipe without the package-SID ACE'
+} catch {
+  "FAIL(control): granted pipe unreachable -> HResult=$(Get-BaseHResult $_); negative control NOT scored"
+}
 ```
 
 Confirm a package-SID-granted pipe is reachable from inside, and that one without
