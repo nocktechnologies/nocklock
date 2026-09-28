@@ -17,7 +17,10 @@ jobs:
       github.event.pull_request.draft == false &&
       github.event.pull_request.user.login != 'dependabot[bot]' &&
       github.event.pull_request.head.repo.full_name == github.repository &&
-      contains(fromJSON('["OWNER","MEMBER","COLLABORATOR"]'), github.event.pull_request.author_association)
+      (
+        github.event.pull_request.user.login == 'nock-fleet[bot]' ||
+        contains(fromJSON('["OWNER","MEMBER","COLLABORATOR"]'), github.event.pull_request.author_association)
+      )
     runs-on: [self-hosted, macOS, ARM64, codex-signed]
     timeout-minutes: 25
 
@@ -134,7 +137,24 @@ jobs:
 
           CODEX_DIR="$(mktemp -d "${RUNNER_TEMP}/anvil-codex.XXXXXX")"
           OUTPUT_DIR=""
-          trap 'chmod -R u+w "${CODEX_DIR}" 2>/dev/null || true; rm -rf "${CODEX_DIR}"; if [[ -n "${OUTPUT_DIR}" ]]; then rm -rf "${OUTPUT_DIR}"; fi' EXIT
+          cleanup() {
+            local status=$?
+            trap - EXIT
+            chmod -R u+w "${CODEX_DIR}" 2>/dev/null || true
+            if ! rm -rf "${CODEX_DIR}" || [[ -e "${CODEX_DIR}" ]]; then
+              echo "::error::Could not remove the temporary Anvil Codex copy."
+              status=1
+            fi
+            if [[ -n "${OUTPUT_DIR}" ]] && { ! rm -rf "${OUTPUT_DIR}" || [[ -e "${OUTPUT_DIR}" ]]; }; then
+              echo "::error::Could not remove temporary Anvil review output."
+              status=1
+            fi
+            if [[ "${status}" -eq 0 ]]; then
+              echo "Anvil temporary files removed."
+            fi
+            exit "${status}"
+          }
+          trap cleanup EXIT
           trap 'exit 143' TERM
           trap 'exit 130' INT
           OUTPUT_DIR="$(mktemp -d "${RUNNER_TEMP}/anvil-codex.output.XXXXXX")"
@@ -213,15 +233,96 @@ jobs:
 
           Check for injection, auth/authz bypasses, insecure data handling,
           hard-coded secrets, CSRF, and logic errors in security-critical paths.
-          Report every finding with file and line references. Be adversarial."
-          MODEL_LABEL="${ANVIL_CODEX_MODEL:-${ANVIL_DEFAULT_CODEX_MODEL}}"
-          echo "model_label=${MODEL_LABEL}" >> "$GITHUB_OUTPUT"
+          Report every finding with file and line references. Be adversarial.
 
-          CODEX_EXIT=0
-          NO_COLOR=1 "${CODEX_BIN}" review \
-            -c 'sandbox_mode="read-only"' \
-            -c "model=${MODEL_LABEL}" \
-            "${PROMPT}" > "${OUTPUT_FILE}" 2>&1 || CODEX_EXIT=$?
+          Your entire final answer must be exactly one of these forms:
+          - One or more finding lines, each: - [P0|P1|P2|P3] <title> - <file>:<line>
+            (choose one priority, for example - [P1] Unsafe path check - internal/cli/wrap.go:42)
+          - If there are no findings, exactly: ANVIL_NO_FINDINGS
+          Do not add headers, summaries, prose, or code fences."
+          MODEL_LABEL="${ANVIL_CODEX_MODEL:-${ANVIL_DEFAULT_CODEX_MODEL}}"
+          CODEX_LOG="${OUTPUT_DIR}/codex-run.log"
+
+          set +e
+          python3 - \
+            "${CODEX_BIN}" "${MODEL_LABEL}" "${PROMPT}" "${OUTPUT_FILE}" "${CODEX_LOG}" <<'PY'
+          import os
+          import signal
+          import subprocess
+          import sys
+          import time
+
+          codex_bin, model, prompt, output_path, log_path = sys.argv[1:]
+          command = [
+              codex_bin,
+              "exec",
+              "-c", 'sandbox_mode="read-only"',
+              "-c", f"model={model}",
+              "--output-last-message", output_path,
+              prompt,
+          ]
+
+          def signal_group(process_group, signum):
+              try:
+                  os.killpg(process_group, signum)
+              except ProcessLookupError:
+                  pass
+
+          def group_exists(process_group):
+              try:
+                  os.killpg(process_group, 0)
+                  return True
+              except ProcessLookupError:
+                  return False
+              except PermissionError:
+                  return True
+
+          with open(log_path, "wb") as log:
+              process = subprocess.Popen(
+                  command,
+                  stdout=log,
+                  stderr=subprocess.STDOUT,
+                  env={**os.environ, "NO_COLOR": "1"},
+                  start_new_session=True,
+              )
+
+              def stop_process_group():
+                  signal_group(process.pid, signal.SIGTERM)
+                  try:
+                      process.wait(timeout=15)
+                  except subprocess.TimeoutExpired:
+                      signal_group(process.pid, signal.SIGKILL)
+                      process.wait()
+                  deadline = time.monotonic() + 15
+                  while group_exists(process.pid) and time.monotonic() < deadline:
+                      time.sleep(0.2)
+                  if group_exists(process.pid):
+                      signal_group(process.pid, signal.SIGKILL)
+                  deadline = time.monotonic() + 5
+                  while group_exists(process.pid) and time.monotonic() < deadline:
+                      time.sleep(0.1)
+                  if group_exists(process.pid):
+                      raise RuntimeError("Codex process group cleanup could not be confirmed")
+
+              def stop_for_signal(signum, _frame):
+                  stop_process_group()
+                  raise SystemExit(128 + signum)
+
+              signal.signal(signal.SIGTERM, stop_for_signal)
+              signal.signal(signal.SIGINT, stop_for_signal)
+              try:
+                  exit_code = process.wait(timeout=10 * 60)
+              except subprocess.TimeoutExpired:
+                  stop_process_group()
+                  exit_code = 124
+              else:
+                  # Codex may leave helper children behind after its main process exits.
+                  stop_process_group()
+
+          raise SystemExit(exit_code)
+          PY
+          CODEX_EXIT=$?
+          set -e
           echo "codex_exit=${CODEX_EXIT}" >> "$GITHUB_OUTPUT"
 
           python3 - \
@@ -262,44 +363,76 @@ jobs:
           with open(output_path, "w") as stream:
               stream.write(output)
           PY
-          echo "model=${MODEL_LABEL}; codex exit=${CODEX_EXIT}"
-          REVIEW_MARKER="ANVIL_REVIEW_EOF_$(uuidgen | tr -d '-')"
-          {
-            echo "review<<${REVIEW_MARKER}"
-            head -c 60000 "${OUTPUT_FILE}"
-            printf '\n%s\n' "${REVIEW_MARKER}"
-          } >> "$GITHUB_OUTPUT"
+          REVIEW_PATH="$(python3 scripts/anvil-output.py store \
+            "${OUTPUT_FILE}" "${GITHUB_REPOSITORY}" "${GITHUB_RUN_ID}" "${PR_HEAD_SHA}")"
+          echo "Redacted Anvil review stored at ${REVIEW_PATH}"
+          echo "review_path=${REVIEW_PATH}" >> "$GITHUB_OUTPUT"
+          REVIEW_VERDICT="$(python3 scripts/anvil-output.py verdict "${OUTPUT_FILE}")"
+          echo "review_verdict=${REVIEW_VERDICT}" >> "$GITHUB_OUTPUT"
+          if [[ "${CODEX_EXIT}" != "0" ]]; then
+            echo "::warning::Codex exited with ${CODEX_EXIT}; review cannot pass."
+          elif [[ "${REVIEW_VERDICT}" == "findings" ]]; then
+            echo "::warning::Anvil review reported one or more finding lines."
+          elif [[ "${REVIEW_VERDICT}" == "unparseable" ]]; then
+            echo "::error::unparseable review output"
+          fi
 
       - name: Post Anvil review comment
-        if: always() && steps.anvil.outcome == 'success'
+        if: always() && steps.anvil.outputs.review_path != ''
         uses: actions/github-script@f28e40c7f34bde8b3046d885e986cb6290c5673b  # v7
         env:
-          ANVIL_REVIEW: ${{ steps.anvil.outputs.review }}
           ANVIL_EXIT: ${{ steps.anvil.outputs.codex_exit }}
-          ANVIL_MODEL: ${{ steps.anvil.outputs.model_label }}
+          ANVIL_VERDICT: ${{ steps.anvil.outputs.review_verdict }}
+          ANVIL_REVIEW_PATH: ${{ steps.anvil.outputs.review_path }}
         with:
           script: |
-            const output = process.env.ANVIL_REVIEW || '';
             const exitCode = process.env.ANVIL_EXIT || '0';
-            const model = process.env.ANVIL_MODEL || 'gpt-5.5';
-            const header = exitCode === '0'
-              ? '## 🔨 Anvil Security Review (Codex)'
-              : `## 🔨 Anvil Security Review (Codex) — FAILED (codex exit ${exitCode})`;
+            const verdict = process.env.ANVIL_VERDICT || 'unparseable';
+            const reviewPath = process.env.ANVIL_REVIEW_PATH || '';
+            const passed = exitCode === '0' && verdict === 'clean';
+            const header = passed
+              ? '## 🔨 Anvil Security Review'
+              : '## 🔨 Anvil Security Review — FAILED';
+            const result = exitCode !== '0'
+              ? `Review process exited ${exitCode}; the review failed closed.`
+              : verdict === 'findings'
+                ? 'Anvil reported one or more finding lines; the review failed closed.'
+                : verdict === 'unparseable'
+                  ? 'unparseable review output; the review failed closed.'
+                  : 'Anvil returned ANVIL_NO_FINDINGS.';
             const body = [
               header,
               '',
-              '```',
-              output || 'No output captured — verify dedicated Anvil auth and the signed Codex app on the runner.',
-              '```',
+              result,
               '',
-              `*Adversarial security audit (${model}). Does not replace human review.*`,
+              `Redacted review output is stored on the runner at: \`${reviewPath}\``,
+              '',
+              '*Review text is not included in this comment. This review does not replace human review.*',
             ].join('\n');
-            await github.rest.issues.createComment({
+            const comments = await github.paginate(github.rest.issues.listComments, {
               issue_number: context.issue.number,
               owner: context.repo.owner,
               repo: context.repo.repo,
-              body,
+              per_page: 100,
             });
+            const previous = comments.reverse().find(comment =>
+              comment.user?.login === 'github-actions[bot]' &&
+              comment.body?.startsWith('## 🔨 Anvil Security Review'));
+            if (previous) {
+              await github.rest.issues.updateComment({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                comment_id: previous.id,
+                body,
+              });
+            } else {
+              await github.rest.issues.createComment({
+                issue_number: context.issue.number,
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                body,
+              });
+            }
 
       - name: Verify shared Codex auth untouched
         if: always() && steps.shared-codex-auth.outcome == 'success'
@@ -327,10 +460,16 @@ jobs:
           fi
           echo "Shared Codex auth unchanged."
 
-      - name: Fail job if Codex errored
-        if: steps.anvil.outputs.codex_exit != '0'
+      - name: Fail job unless Anvil returned the clean sentinel
+        if: always()
         env:
           CODEX_EXIT: ${{ steps.anvil.outputs.codex_exit }}
+          ANVIL_VERDICT: ${{ steps.anvil.outputs.review_verdict }}
+          ANVIL_REVIEW_PATH: ${{ steps.anvil.outputs.review_path }}
+          ANVIL_STEP_OUTCOME: ${{ steps.anvil.outcome }}
         run: |
-          echo "::error::Codex security review exited ${CODEX_EXIT}; see the Anvil review comment for captured output."
-          exit 1
+          if [[ "${ANVIL_STEP_OUTCOME:-}" != "success" || "${CODEX_EXIT:-}" != "0" || "${ANVIL_VERDICT:-}" != "clean" || -z "${ANVIL_REVIEW_PATH:-}" ]]; then
+            echo "::error::Anvil failed closed: step=${ANVIL_STEP_OUTCOME:-not-run}, Codex exit=${CODEX_EXIT:-not-run}, verdict=${ANVIL_VERDICT:-unparseable}, review path=${ANVIL_REVIEW_PATH:-missing}."
+            exit 1
+          fi
+          echo "Anvil passed: Codex exited successfully, returned ANVIL_NO_FINDINGS, and stored the redacted review."

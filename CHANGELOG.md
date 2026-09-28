@@ -29,10 +29,12 @@ All notable changes to NockLock will be documented in this file.
 
 ### Changed
 
-- Anvil security reviews use the signed Codex CLI on `codex-signed` macOS
-  runners, with a 15-minute review timeout and a 25-minute job timeout. Raw
-  review output stays in a private per-run directory that is removed on exit
-  and reclaimed after an interrupted run.
+- Anvil security reviews now admit `nock-fleet[bot]` by exact login while
+  retaining the same-repository and existing association gates. Reviews pass
+  only on `ANVIL_NO_FINDINGS`; finding lines and unparseable output fail closed.
+  Redacted output is retained outside runner temp with 0700 directories and
+  0600 files, keeping the newest 50 per repository. Codex runs in a bounded
+  process group so timeout cleanup can remove its temporary copies.
 - The Linux filesystem fence rejects configurations whose `allow_rw` entries
   push the shared allow cap or the combined wire budget over its limit.
 - macOS Seatbelt root-write confinement no longer grants the fenced child
