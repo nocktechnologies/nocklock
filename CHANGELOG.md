@@ -26,6 +26,12 @@ All notable changes to NockLock will be documented in this file.
   its temporary probe files outside granted paths, including `/tmp`.
 - Source builds now embed `git describe --tags --always --dirty` in
   `nocklock version`.
+- `docs/probes/n10825/run-probe.ps1` runs the Windows feasibility Probes 1, 2
+  and 3 on a real desktop, assembled verbatim from
+  `docs/design/windows-feasibility.md`. It proves the launcher and the
+  limited token before any probe changes machine state, always runs the global
+  teardown, and writes BEFORE/AFTER state plus environment stamps to
+  `output.txt`. Operator steps are in the directory's README.
 
 ### Changed
 
