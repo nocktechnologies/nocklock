@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 
@@ -529,6 +530,20 @@ func TestAppendSerializedAllow_RefusesSeparatorInjection(t *testing.T) {
 	for _, d := range sc.DenyPaths {
 		if d == "/etc" {
 			t.Fatalf("injected deny field /etc leaked into policy: deny=%v", sc.DenyPaths)
+		}
+	}
+}
+
+// TestSelfProcFilesExcludesSecretBearingEntries pins the curated self-proc list
+// that both fences grant (#10764, ADR-005): Landlock rules are inherited by
+// every descendant, so granting environ/cmdline/mem/maps/fd — or an empty name,
+// which becomes the /proc/<pid> directory itself — would expose the wrapped
+// process's secrets tree-wide, re-opening the leak #115 removed.
+func TestSelfProcFilesExcludesSecretBearingEntries(t *testing.T) {
+	files := SelfProcFiles()
+	for _, forbidden := range []string{"environ", "cmdline", "mem", "maps", "fd", ""} {
+		if slices.Contains(files, forbidden) {
+			t.Errorf("SelfProcFiles() contains %q; granting it exposes the wrapped process's secrets to every inheriting descendant (#115, ADR-005)", forbidden)
 		}
 	}
 }

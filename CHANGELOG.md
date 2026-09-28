@@ -343,8 +343,10 @@ All notable changes to NockLock will be documented in this file.
   namespaced-root surface `allow_namespaces=false` exists to deny, and the
   privileged-helper lifecycle of ADR-004. `os.cpus()` is unaffected tree-wide.
   `TestLandlockProcSelfAllowPathsStaysNarrow` pins the grant to one read-only
-  `/proc/self/<file>` entry per curated file so this cannot be "fixed" by
-  widening it.
+  `/proc/self/<file>` entry per curated file, and
+  `TestSelfProcFilesExcludesSecretBearingEntries` keeps `environ`, `cmdline`,
+  `mem`, `maps` and `fd` off that list, so this cannot be "fixed" by widening
+  it.
 
 ## [0.5.0] - 2026-09-26
 

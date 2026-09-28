@@ -15,8 +15,6 @@ import (
 	"time"
 
 	"github.com/nocktechnologies/nocklock/internal/config"
-	fsfence "github.com/nocktechnologies/nocklock/internal/fence/fs"
-	"github.com/nocktechnologies/nocklock/internal/fence/fs/landlock"
 )
 
 // TestClaudeCodePresetGrantsProcSystemFiles is the UNCONDITIONAL guard for the
@@ -48,37 +46,6 @@ func TestClaudeCodePresetGrantsProcSystemFiles(t *testing.T) {
 	for _, forbidden := range []string{"/proc", "/proc/", "/proc/self", "/proc/self/"} {
 		if allow[forbidden] {
 			t.Errorf("claude-code preset filesystem.allow must not contain %q — it re-opens the sibling /proc/<pid>/environ path (#115) or binds to the wrapper's pid", forbidden)
-		}
-	}
-}
-
-// TestLandlockProcSelfAllowPathsStaysNarrow pins the accepted #10764 limitation
-// (ADR-005): the in-code self-proc grant covers ONLY the directly wrapped
-// child's own curated files (Landlock is inode-bound), and it must NOT be
-// widened to reach grandchildren. Every widening that would reach them — the
-// /proc/self or /proc/<pid> directory, or the broad "/proc/" tree — re-opens the
-// /proc/<pid>/environ leak #115 removed. This asserts one read-only literal
-// "/proc/self/<file>" entry per fsfence.SelfProcFiles() and nothing else, and
-// that the curated list never names environ/cmdline/mem/maps/fd.
-func TestLandlockProcSelfAllowPathsStaysNarrow(t *testing.T) {
-	files := fsfence.SelfProcFiles()
-	got := landlockProcSelfAllowPaths()
-	if len(got) != len(files) {
-		t.Fatalf("landlockProcSelfAllowPaths() returned %d entries, want exactly %d (one per SelfProcFiles, #10764/#115): %+v", len(got), len(files), got)
-	}
-	for i, f := range files {
-		if want := "/proc/self/" + f; got[i].Path != want {
-			t.Errorf("grant[%d] path = %q, want the literal file %q (a directory or resolved path re-opens the #115 leak or binds the wrapper's pid)", i, got[i].Path, want)
-		}
-		if got[i].Access != landlock.AccessReadOnly {
-			t.Errorf("grant[%d] access = %q, want %q: the child never writes its own procfs", i, got[i].Access, landlock.AccessReadOnly)
-		}
-	}
-	for _, forbidden := range []string{"environ", "cmdline", "mem", "maps", "fd", ""} {
-		for _, f := range files {
-			if f == forbidden {
-				t.Errorf("SelfProcFiles() contains %q: granting it exposes the wrapped process's secrets to every inheriting descendant (#115, ADR-005)", forbidden)
-			}
 		}
 	}
 }

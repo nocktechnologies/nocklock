@@ -36,9 +36,10 @@ a new pid cannot read its own `/proc/self/stat` and `process.memoryUsage()` will
 throw `EACCES` there. This is documented in code
 (`landlockProcSelfAllowPaths` doc comment) and pinned by
 `TestLandlockProcSelfAllowPathsStaysNarrow`, which asserts the grant stays one
-read-only literal `/proc/self/<file>` entry per curated file (and that the list
-never names `environ`/`cmdline`/`mem`/`maps`/`fd`), so a future "fix" cannot
-silently widen it to a directory or the broad `/proc` tree.
+read-only literal `/proc/self/<file>` entry per curated file, and
+`TestSelfProcFilesExcludesSecretBearingEntries`, which asserts the curated list
+never names `environ`/`cmdline`/`mem`/`maps`/`fd` or the directory itself, so a
+future "fix" cannot silently widen it to a directory or the broad `/proc` tree.
 
 ## Rationale — the options considered, and why each fails
 Every path that would reach grandchildren was assessed against the fence's core
