@@ -345,8 +345,9 @@ All notable changes to NockLock will be documented in this file.
   `TestLandlockProcSelfAllowPathsStaysNarrow` pins the grant to one read-only
   `/proc/self/<file>` entry per curated file, and
   `TestSelfProcFilesExcludesSecretBearingEntries` keeps `environ`, `cmdline`,
-  `mem`, `maps` and `fd` off that list, so this cannot be "fixed" by widening
-  it.
+  `mem`, `maps` and `fd` off that list, and `TestSelfProcFilesPinsExactSet`
+  pins the list to exactly `stat`, `statm` and `status`, so this cannot be
+  "fixed" by widening it.
 
 ## [0.5.0] - 2026-09-26
 

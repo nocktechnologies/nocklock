@@ -38,8 +38,10 @@ throw `EACCES` there. This is documented in code
 `TestLandlockProcSelfAllowPathsStaysNarrow`, which asserts the grant stays one
 read-only literal `/proc/self/<file>` entry per curated file, and
 `TestSelfProcFilesExcludesSecretBearingEntries`, which asserts the curated list
-never names `environ`/`cmdline`/`mem`/`maps`/`fd` or the directory itself, so a
-future "fix" cannot silently widen it to a directory or the broad `/proc` tree.
+never names `environ`/`cmdline`/`mem`/`maps`/`fd` or the directory itself, and
+`TestSelfProcFilesPinsExactSet`, which pins the list to exactly
+`stat`/`statm`/`status` (each a bare file name), so a future "fix" cannot
+silently widen it to a directory, the broad `/proc` tree, or any extra file.
 
 ## Rationale — the options considered, and why each fails
 Every path that would reach grandchildren was assessed against the fence's core
@@ -110,8 +112,10 @@ host regardless of this sysctl.
 - **Security posture is unchanged and the narrowness is now pinned:** the #115
   sibling-`environ` block stays green, and a regression test asserts
   `landlockProcSelfAllowPaths()` returns exactly one read-only
-  `/proc/self/<file>` per `SelfProcFiles()` entry, so the grant cannot be
-  quietly widened to a directory or `/proc` while "resolving" this.
+  `/proc/self/<file>` per `SelfProcFiles()` entry while
+  `TestSelfProcFilesPinsExactSet` pins that list to exactly
+  `stat`/`statm`/`status`, so the grant cannot be quietly widened to a
+  directory, `/proc`, or an extra file while "resolving" this.
 - **Revisit trigger:** if NockLock later adopts a privileged namespace helper for
   another reason (e.g. the persistent SCM_RIGHTS helper deferred in ADR-004), a
   per-tree PID namespace with a fresh `/proc` becomes reachable and this decision

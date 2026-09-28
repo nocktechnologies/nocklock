@@ -547,3 +547,20 @@ func TestSelfProcFilesExcludesSecretBearingEntries(t *testing.T) {
 		}
 	}
 }
+
+// TestSelfProcFilesPinsExactSet enforces that the self-proc grant cannot be
+// quietly widened (ADR-005): the denylist above only catches known-bad names,
+// and TestLandlockProcSelfAllowPathsStaysNarrow derives its expectation from
+// SelfProcFiles() itself, so only an exact pin fails on a new entry.
+func TestSelfProcFilesPinsExactSet(t *testing.T) {
+	files := SelfProcFiles()
+	want := []string{"stat", "statm", "status"}
+	if got := slices.Sorted(slices.Values(files)); !slices.Equal(got, want) {
+		t.Errorf("SelfProcFiles() = %v, want exactly %v; every entry is granted to all inheriting descendants, so changing this list is a deliberate security change that needs review (ADR-005, #115) — update this pin only alongside that review", got, want)
+	}
+	for _, name := range files {
+		if name == "" || name == "." || name == ".." || strings.Contains(name, "/") {
+			t.Errorf("SelfProcFiles() contains %q; an entry must be a single file name under /proc/<pid>, never empty, \".\", \"..\", or a path", name)
+		}
+	}
+}
