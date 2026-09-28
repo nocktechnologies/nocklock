@@ -271,6 +271,10 @@ discovery key off `USERPROFILE`/`APPDATA`, which are *not* documented as
 redirected — so git config is likely found but the credential store likely is
 not. NockLock should treat cache directories as first-class `filesystem.allow`
 entries and ACL them to the package SID, exactly as it does for the project root.
+(The probe launcher below does not rely on any of this: it passes an explicit
+environment block that points all five of `TEMP`, `TMP`, `LOCALAPPDATA`, `APPDATA`
+and `USERPROFILE` at the AC folder, so inside the probes git finds the host's
+per-user config and credential store through none of them.)
 
 Everything else in the "what breaks" list is **UNVERIFIED** and needs the probe
 box: whether `git.exe`, `node.exe`, `python.exe`, and MSVC launch at all under a
@@ -1060,6 +1064,8 @@ namespace NockProbe {
     static extern int CreateAppContainerProfile(string name, string display, string desc, IntPtr caps, uint capCount, out IntPtr sid);
     [DllImport("userenv.dll", CharSet = CharSet.Unicode)]
     static extern int DeleteAppContainerProfile(string name);
+    [DllImport("userenv.dll", CharSet = CharSet.Unicode)]
+    static extern int GetAppContainerFolderPath(string sid, out IntPtr path);
     [DllImport("advapi32.dll")] static extern IntPtr FreeSid(IntPtr sid);
     [DllImport("advapi32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
     static extern bool ConvertStringSidToSid(string s, out IntPtr sid);
@@ -1103,18 +1109,45 @@ namespace NockProbe {
     // DeleteAppContainerProfile; returns the HRESULT (teardown prints it, never throws).
     public static int DeleteProfile(string name) { return DeleteAppContainerProfile(name); }
 
+    // The child's explicit environment block (CREATE_UNICODE_ENVIRONMENT): TEMP, TMP,
+    // LOCALAPPDATA, APPDATA and USERPROFILE all point at the profile's own AC folder
+    // (%LOCALAPPDATA%\Packages\<moniker>\AC, which CreateAppContainerProfile creates and
+    // grants to the package SID), so no probe reads or writes the operator's real
+    // profile dirs through them. Only the variables tools need to start are copied through.
+    // Layout "K=V\0...K=V\0", sorted case-insensitively; StringToHGlobalUni adds the final \0.
+    // A failure throws InvalidOperationException with NO inner exception, so a denial
+    // resolving the folder is never read as a launch denial (0x80070005).
+    static IntPtr BuildEnvironment(string packageSid) {
+      IntPtr p;
+      int hr = GetAppContainerFolderPath(packageSid, out p);
+      if (hr != 0) throw new InvalidOperationException(string.Format("environment block: GetAppContainerFolderPath HRESULT 0x{0:X8}", hr));
+      string acDir;
+      try { acDir = Marshal.PtrToStringUni(p); } finally { Marshal.FreeCoTaskMem(p); }
+      string[] redirected = { "TEMP", "TMP", "LOCALAPPDATA", "APPDATA", "USERPROFILE" };
+      string[] copied = { "SystemRoot", "windir", "SystemDrive", "ComSpec", "PATH", "PATHEXT", "PSModulePath",
+                          "PROCESSOR_ARCHITECTURE", "NUMBER_OF_PROCESSORS", "OS" };
+      var vars = new System.Collections.Generic.SortedDictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+      foreach (string n in redirected) vars[n] = acDir;
+      foreach (string n in copied) { string v = Environment.GetEnvironmentVariable(n); if (v != null) vars[n] = v; }
+      StringBuilder b = new StringBuilder();
+      foreach (var kv in vars) b.Append(kv.Key).Append('=').Append(kv.Value).Append('\0');
+      return Marshal.StringToHGlobalUni(b.ToString());
+    }
+
     // Starts cmdLine as an AppContainer process for packageSid holding exactly capabilitySids
-    // (empty = zero capabilities), cwd = System32 (readable by ALL APPLICATION PACKAGES).
+    // (empty = zero capabilities), cwd = System32 (readable by ALL APPLICATION PACKAGES),
+    // environment = BuildEnvironment's explicit block, never the caller's inherited one.
     // Waits up to timeoutMs and returns the exit code. The child starts suspended inside an
     // anonymous job, so a timeout kills its WHOLE tree (TerminateJobObject), not just the
     // direct child, then throws. The job has no KILL_ON_JOB_CLOSE: on a normal return,
     // descendants a probe keeps on purpose (Probe 1's 9998 listener) survive and are reaped
     // by teardown's verified-identity stop.
     public static int Run(string packageSid, string[] capabilitySids, string cmdLine, int timeoutMs) {
-      IntPtr acSid = IntPtr.Zero, caps = IntPtr.Zero, sc = IntPtr.Zero, list = IntPtr.Zero;
+      IntPtr acSid = IntPtr.Zero, caps = IntPtr.Zero, sc = IntPtr.Zero, list = IntPtr.Zero, env = IntPtr.Zero;
       IntPtr[] capPtrs = new IntPtr[capabilitySids.Length];
       bool listInit = false;
       try {
+        env = BuildEnvironment(packageSid);
         Check(ConvertStringSidToSid(packageSid, out acSid));
         int saSize = Marshal.SizeOf(typeof(SID_AND_ATTRIBUTES));
         if (capabilitySids.Length > 0) {
@@ -1144,8 +1177,9 @@ namespace NockProbe {
         si.lpAttributeList = list;
         PROCESS_INFORMATION pi;
         Check(CreateProcess(null, new StringBuilder(cmdLine), IntPtr.Zero, IntPtr.Zero, false,
-          0x00080000 | 0x08000000 | 0x00000004,     // EXTENDED_STARTUPINFO_PRESENT | CREATE_NO_WINDOW | CREATE_SUSPENDED
-          IntPtr.Zero, Environment.SystemDirectory, ref si, out pi));
+          0x00080000 | 0x08000000 | 0x00000004 | 0x00000400,   // EXTENDED_STARTUPINFO_PRESENT | CREATE_NO_WINDOW
+                                                                // | CREATE_SUSPENDED | CREATE_UNICODE_ENVIRONMENT
+          env, Environment.SystemDirectory, ref si, out pi));
         IntPtr job = IntPtr.Zero;
         try {
           job = CreateJobObject(IntPtr.Zero, null);
@@ -1173,6 +1207,7 @@ namespace NockProbe {
         if (caps != IntPtr.Zero) Marshal.FreeHGlobal(caps);
         foreach (IntPtr p in capPtrs) if (p != IntPtr.Zero) LocalFree(p);
         if (acSid != IntPtr.Zero) LocalFree(acSid);
+        if (env != IntPtr.Zero) Marshal.FreeHGlobal(env);
       }
     }
 
@@ -1202,6 +1237,21 @@ namespace NockProbe {
   }
 }
 ```
+
+**The child's environment is explicit, not inherited.** Passing `NULL` would hand the
+container the elevated operator's `TEMP`, `TMP`, `LOCALAPPDATA`, `APPDATA` and
+`USERPROFILE`; attaching `SECURITY_CAPABILITIES` does not rewrite them, so every probe
+that assumes profile-local paths would test the host directories. `BuildEnvironment`
+sets all five to the profile's AC folder (`GetAppContainerFolderPath`, i.e.
+`%LOCALAPPDATA%\Packages\<moniker>\AC`) — the folder root rather than `AC\Temp`,
+because `CreateAppContainerProfile` creates and ACLs the root but the launcher creates
+no directories (it also runs *inside* the container for Probe 10(a)). The only other
+variables are `SystemRoot`, `windir`, `SystemDrive`, `ComSpec`, `PATH`, `PATHEXT`,
+`PSModulePath` (in-box modules such as `Resolve-DnsName`), `PROCESSOR_ARCHITECTURE`,
+`NUMBER_OF_PROCESSORS` and `OS`, copied from the launcher's own environment so
+`cmd`, PowerShell, git, node and python can start. Probes 3 and 5
+print the container's `TEMP` and `LOCALAPPDATA`, and Probe 3's verdict requires both
+to equal the AC folder.
 
 PS 5.1's `Add-Type` compiles through CodeDom/`csc.exe`, which writes transient
 `.cs`/`.cmdline` files to `Path.GetTempPath()` (TMP, then TEMP) — so the one
@@ -1270,7 +1320,11 @@ One Scheduled Task per run, registered for the current user with
 be logged on at the console, otherwise the task never starts and every routed
 step records SETUP-FAULT). Its action is fixed at registration with the absolute,
 quoted path of `_limited.ps1`; the phase to run is handed over in
-`limited\phase.txt`. A console window may flash briefly on the desktop when it
+`limited\request.txt` together with a **per-invocation id** (`<phase>-<GUID>`).
+Every file the phase writes (`<id>.token.txt`, `<id>.log`, `<id>.done`, and Probe 3's
+`p3\<id>\`) is named by that id, so a repeated phase (re-running the exemption
+step, say) can only ever be scored from its own files, never from an earlier run's
+`.done`, token, or log. A console window may flash briefly on the desktop when it
 runs.
 
 `_limited.ps1` (written into `$probeRoot` by `run-probe.ps1`):
@@ -1280,11 +1334,12 @@ $probeRoot = $PSScriptRoot
 $runId     = (Split-Path -Leaf $probeRoot) -replace '^nocklock-probe-',''
 $moniker   = "nocklock-probe-$runId"
 $lim       = Join-Path $probeRoot 'limited'
-$phase     = (Get-Content (Join-Path $lim 'phase.txt') -ErrorAction Stop).Trim()
-$log       = Join-Path $lim "$phase.log"
+# Line 1 = phase, line 2 = this invocation's id; every result path below is keyed by the id.
+$phase, $inv = Get-Content (Join-Path $lim 'request.txt') -ErrorAction Stop
+$log       = Join-Path $lim "$inv.log"
 $step      = 'setup'
-# This phase's OWN token, so each phase is scored against the token it actually ran under.
-whoami /groups | Out-File -FilePath (Join-Path $lim "$phase.token.txt") -Encoding utf8
+# This invocation's OWN token, so each phase is scored against the token it actually ran under.
+whoami /groups | Out-File -FilePath (Join-Path $lim "$inv.token.txt") -Encoding utf8
 "PHASE $phase" | Out-File -FilePath $log -Encoding utf8
 try {
   switch ($phase) {
@@ -1303,7 +1358,7 @@ try {
   ('ERROR: step={0} HResult=0x{1:X8} {2}' -f $step, $e.HResult, $e.Message) | Out-File $log -Append -Encoding utf8
 } finally {
   # Completion sentinel, written LAST: the outer session never scores a half-written log.
-  Set-Content -Path (Join-Path $lim "$phase.done") -Value 'done'
+  Set-Content -Path (Join-Path $lim "$inv.done") -Value 'done'
 }
 ```
 
@@ -1320,43 +1375,54 @@ $principal = New-ScheduledTaskPrincipal -UserId ([Security.Principal.WindowsIden
   -LogonType Interactive -RunLevel Limited
 $taskCreated = $false
 # Defaults would skip a start on battery; IgnoreNew is kept, so Invoke-LimitedPhase
-# stops any still-running instance before each /Run (else the /Run is silently ignored).
+# stops AND awaits any still-running instance before each /Run (else the /Run is
+# silently ignored).
 $settings = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -MultipleInstances IgnoreNew
 Register-ScheduledTask -TaskName $taskName -Action $action -Principal $principal -Settings $settings -ErrorAction Stop | Out-Null
 $taskCreated = $true
 
-# Runs one _limited.ps1 phase and returns its log lines ONLY if the phase completed
-# (.done present) AND its own token is proven limited: Medium Mandatory Level
-# (S-1-16-8192) present, High Mandatory Level (S-1-16-12288) absent. Otherwise returns
-# $null with the reason in $limitedFault; callers turn $null into SETUP-FAULT, never
-# into a scored result. `schtasks /Run` returns immediately, hence the bounded poll.
+# Runs one _limited.ps1 phase under a fresh invocation id ($limitedInv, "<phase>-<GUID>")
+# and returns that invocation's log lines ONLY if it completed (its own <id>.done present)
+# AND its own token is proven limited: Medium Mandatory Level (S-1-16-8192) present, High
+# Mandatory Level (S-1-16-12288) absent. Otherwise returns $null with the reason in
+# $limitedFault; callers turn $null into SETUP-FAULT, never into a scored result.
+# `schtasks /Run` returns immediately, hence the bounded poll.
 function Invoke-LimitedPhase {
   param([string]$Phase, [int]$TimeoutSec = 120)
   # A failed positive control fails every later phase at once, instead of each
   # waiting out its own timeout for a task that will not run either.
   if ($script:limitedDead) { $script:limitedFault = "positive control failed ($script:limitedDead)"; return $null }
   $script:limitedFault = $null
-  $done  = Join-Path $limitedDir "$Phase.done"
-  $token = Join-Path $limitedDir "$Phase.token.txt"
-  Set-Content -Path (Join-Path $limitedDir 'phase.txt') -Value $Phase
-  Stop-ScheduledTask -TaskName $taskName -ErrorAction SilentlyContinue   # a timed-out earlier phase
+  $inv = '{0}-{1}' -f $Phase, [guid]::NewGuid().ToString('N')
+  $script:limitedInv = $inv
+  $done  = Join-Path $limitedDir "$inv.done"
+  $token = Join-Path $limitedDir "$inv.token.txt"
+  # A timed-out earlier phase may still be running: stop it and WAIT until it is gone
+  # before handing over the new request, so no old instance can pick it up.
+  Stop-ScheduledTask -TaskName $taskName -ErrorAction SilentlyContinue
+  for ($i = 0; $i -lt 30 -and (Get-ScheduledTask -TaskName $taskName).State -eq 'Running'; $i++) { Start-Sleep 1 }
+  if ((Get-ScheduledTask -TaskName $taskName).State -eq 'Running') {
+    $script:limitedFault = "an earlier instance of $taskName is still running 30 s after Stop-ScheduledTask"
+    return $null
+  }
+  Set-Content -Path (Join-Path $limitedDir 'request.txt') -Value @($Phase, $inv)
   schtasks /Run /TN $taskName | Out-Null
   if ($LASTEXITCODE -ne 0) { $script:limitedFault = "schtasks /Run exit $LASTEXITCODE"; return $null }
   for ($i = 0; $i -lt $TimeoutSec -and -not (Test-Path $done); $i++) { Start-Sleep 1 }
   if (-not (Test-Path $done)) {
-    $script:limitedFault = "phase $Phase wrote no .done within $TimeoutSec s (task not started — console session logged off?)"
+    $script:limitedFault = "phase $Phase ($inv) wrote no .done within $TimeoutSec s (task not started — console session logged off?)"
     return $null
   }
   $medium = [bool](Select-String -Path $token -SimpleMatch 'S-1-16-8192' -ErrorAction SilentlyContinue)
   $high   = [bool](Select-String -Path $token -SimpleMatch 'S-1-16-12288' -ErrorAction SilentlyContinue)
   if (-not $medium -or $high) {
-    $script:limitedFault = "phase $Phase token not proven limited (Medium present=$medium, High present=$high)"
+    $script:limitedFault = "phase $Phase ($inv) token not proven limited (Medium present=$medium, High present=$high)"
     return $null
   }
-  Get-Content (Join-Path $limitedDir "$Phase.log")
+  Get-Content (Join-Path $limitedDir "$inv.log")
 }
 
-# POSITIVE CONTROL. limited\control.token.txt is kept verbatim as evidence (the
+# POSITIVE CONTROL. limited\control-<GUID>.token.txt is kept verbatim as evidence (the
 # Administrators line should read deny-only); only the two Mandatory Level SIDs are scored.
 if (Invoke-LimitedPhase 'control') {
   "LIMITED-TOKEN: PASS — task token is Medium IL with High absent"
@@ -1491,7 +1557,7 @@ teardown.
 
 | State touched | Detail |
 |---|---|
-| Creates | 2 outer jobs (`$job8899`, `$job9999`); 1 inside listener process (identity in `own-listener.txt`); loopback exemption (machine-wide, added by the limited task or the elevated retry, kept until global teardown); `limited\exempt.*` files under `$probeRoot` (one run of the scaffold's scheduled task) |
+| Creates | 2 outer jobs (`$job8899`, `$job9999`); 1 inside listener process (identity in `own-listener.txt`); loopback exemption (machine-wide, added by the limited task or the elevated retry, kept until global teardown); `limited\exempt-<GUID>.*` files under `$probeRoot` (one run of the scaffold's scheduled task) |
 | Removes | the 2 outer jobs (by handle); inside listener (by verified PID+StartTime+Path) |
 | Must never touch | other user jobs; loopback exemptions not created by this run; scheduled tasks other than `nocklock-probe-limited-$runId` |
 
@@ -1550,11 +1616,13 @@ $step = 'createprofile'
 $sid3 = [NockProbe.AC]::CreateProfile("nocklock-p3-$runId")      # throws -> ERROR line (caught above)
 "profile=CREATED sid=$sid3" | Out-File $log -Append -Encoding utf8
 $step = 'grant'
-$d3 = New-Item -ItemType Directory -Path (Join-Path $probeRoot 'p3') -ErrorAction Stop
-icacls $d3.FullName /grant "*${sid3}:(OI)(CI)(M)" | Out-Null   # the limited token owns p3\, so it holds WRITE_DAC
+$d3 = New-Item -ItemType Directory -Path (Join-Path $probeRoot "p3\$inv") -ErrorAction Stop   # this invocation's own dir
+icacls $d3.FullName /grant "*${sid3}:(OI)(CI)(M)" | Out-Null   # the limited token owns p3\<id>\, so it holds WRITE_DAC
 $step = 'run'
+# `set` records the container's own environment, so the verdict shows TEMP/LOCALAPPDATA were redirected.
 $rc = [NockProbe.AC]::Run($sid3, @(),
-  ('cmd.exe /c whoami /all > "' + (Join-Path $d3.FullName 'whoami-inside.txt') + '"'), 60000)
+  ('cmd.exe /c whoami /all > "' + (Join-Path $d3.FullName 'whoami-inside.txt') +
+   '" & set > "' + (Join-Path $d3.FullName 'env-inside.txt') + '"'), 60000)
 "launch=OK exit=$rc" | Out-File $log -Append -Encoding utf8
 ```
 
@@ -1562,7 +1630,18 @@ Scored in the elevated shell, one verdict line:
 
 ```powershell
 $p3 = Invoke-LimitedPhase 'probe3'
-$w  = Get-Content (Join-Path $probeRoot 'p3\whoami-inside.txt') -ErrorAction SilentlyContinue
+$inv3 = $limitedInv                  # this call's id, captured once
+# Read ONLY this invocation's dir; with no proven run, read nothing.
+$d3  = if ($p3) { Join-Path $probeRoot "p3\$inv3" }
+$w   = if ($d3) { Get-Content (Join-Path $d3 'whoami-inside.txt') -ErrorAction SilentlyContinue }
+$e3  = if ($d3) { Get-Content (Join-Path $d3 'env-inside.txt') -ErrorAction SilentlyContinue }
+# The launcher's redirect target. Trailing '\' is trimmed on every side, so a correctly
+# redirected child never misses on separator form alone (-ne is already case-insensitive).
+$ac3 = (Join-Path $env:LOCALAPPDATA "Packages\nocklock-p3-$runId\AC").TrimEnd('\')
+# -join makes each a plain string: an empty array would slip past -ne below.
+$t3  = (((@($e3) -match '^TEMP=') -replace '^TEMP=','') -join ';').TrimEnd('\')
+$l3  = (((@($e3) -match '^LOCALAPPDATA=') -replace '^LOCALAPPDATA=','') -join ';').TrimEnd('\')
+$env3 = "container TEMP=$t3 LOCALAPPDATA=$l3"
 $p3err = (@($p3) -match '^ERROR:') -join '; '
 if (-not $p3) {
   "VERDICT(3): SETUP-FAULT - $limitedFault; not scored"
@@ -1573,20 +1652,27 @@ if (-not $p3) {
 } elseif (-not ($p3 | Select-String -SimpleMatch 'launch=OK')) {
   # Any other failure (launcher did not compile, timeout, ...) is not a denial.
   "VERDICT(3): INDETERMINATE - $p3err"
-} elseif (($w | Select-String -SimpleMatch 'S-1-16-4096') -and ($w | Select-String -Pattern 'S-1-15-2-1\b')) {
-  "VERDICT(3): WORKS UNELEVATED - limited-token parent created the profile and launched a Low-IL AppContainer child"
+} elseif (-not (($w | Select-String -SimpleMatch 'S-1-16-4096') -and ($w | Select-String -Pattern 'S-1-15-2-1\b'))) {
+  "VERDICT(3): INDETERMINATE - launched, but p3\$inv3\whoami-inside.txt shows no Low IL (S-1-16-4096) plus ALL APPLICATION PACKAGES (S-1-15-2-1)"
+} elseif ($t3 -ne $ac3 -or $l3 -ne $ac3) {
+  # A Low-IL child that still sees host TEMP/LOCALAPPDATA means the launcher's environment block is wrong.
+  "VERDICT(3): INDETERMINATE - Low-IL AppContainer child launched, but it was not redirected to $ac3 ($env3)"
 } else {
-  "VERDICT(3): INDETERMINATE - launched, but p3\whoami-inside.txt shows no Low IL (S-1-16-4096) plus ALL APPLICATION PACKAGES (S-1-15-2-1)"
+  "VERDICT(3): WORKS UNELEVATED - limited-token parent created the profile and launched a Low-IL AppContainer child ($env3)"
 }
 ```
 
+Re-running `probe3` within the same run prints its own verdict from its own
+`p3\<id>\` files: the profile already exists, so it reads `INDETERMINATE` with
+`step=createprofile` (HResult `0x800700B7`, not a denial), never the first run's result.
+
 **Teardown.** The container process exits on its own; the global teardown deletes
-the `nocklock-p3-$runId` profile and the scheduled task by exact name; `p3\` and
-`limited\` go with `$probeRoot`.
+the `nocklock-p3-$runId` profile and the scheduled task by exact name; every
+invocation's `p3\<id>\` and `limited\<id>.*` files go with `$probeRoot`.
 
 | State touched | Detail |
 |---|---|
-| Creates | AppContainer profile `nocklock-p3-$runId` (per-user, outside the root); transient container process; `p3\` and `limited\probe3.*` under `$probeRoot`; one run of the scheduled task |
+| Creates | AppContainer profile `nocklock-p3-$runId` (per-user, outside the root); transient container process; `p3\<id>\` and `limited\probe3-<GUID>.*` under `$probeRoot`; one run of the scheduled task |
 | Removes | nothing itself (profile and task removed by the global teardown, by exact name) |
 | Must never touch | user token; system groups; the scaffold's `nocklock-probe-$runId` profile |
 
@@ -1729,6 +1815,9 @@ capabilities.
 # This is the survival signal. Required tools must already be present on the
 # desktop (checked by the shared scaffold); if any are absent, record
 # SETUP-FAULT for this probe and skip it.
+# The launcher's explicit environment block: both MUST print ...\Packages\<moniker>\AC
+# (the scaffold's profile folder), never the operator's own TEMP/LOCALAPPDATA.
+"container TEMP=$env:TEMP LOCALAPPDATA=$env:LOCALAPPDATA"
 $repo = Join-Path $probeRoot 'project\repo'
 git --version; git init $repo; git -C $repo status
 node -e "console.log(JSON.stringify(process.env).slice(0,400))"
@@ -1751,10 +1840,13 @@ Record which fail, and whether failures are ACL-related (fixable with a grant) o
 architectural (COM / named pipe / Low IL) — and separate those from part (b)
 failures that are merely "no real proxy was supplied." Explicitly note **where
 npm and pip actually wrote their caches** (the overrides above force them into the
-probe root; note whether the AppContainer redirection of `LOCALAPPDATA`/`TEMP`
-still applies on top when the launcher passes an explicit environment block —
-section (a) assumes the redirection happens and section (d) passes an explicit
-environment, and those two have not been reconciled against a real run).
+probe root). The launcher passes an explicit environment block with `TEMP`, `TMP`,
+`LOCALAPPDATA`, `APPDATA` and `USERPROFILE` set to the profile's AC folder (see
+[the launcher](#launcher-desktop-path-add-type-pinvoke)), so the first line above
+shows what the tools saw; if it names the operator's own directories, the run is a
+SETUP-FAULT and the toolchain results are not scored. Whether Windows would redirect
+those variables *itself* when handed an explicit block (UNVERIFIED #12) is a product
+question the probe launcher deliberately sidesteps.
 
 **Teardown.** Everything is under `$probeRoot`; the global `Remove-Item` is the
 only cleanup. On a disposable box, part (b)'s artifacts go with it.
@@ -1850,7 +1942,7 @@ box, group membership changes go with the box.
 
 | State touched | Detail |
 |---|---|
-| Creates | ETW trace session `nocklock-fileprobe-$runId` (machine state, run-unique); `.etl` file and `limited\probe7.*` under `$probeRoot`; one run of the scheduled task |
+| Creates | ETW trace session `nocklock-fileprobe-$runId` (machine state, run-unique); `.etl` file and `limited\probe7-<GUID>.*` under `$probeRoot`; one run of the scheduled task |
 | Removes | the trace session (only if this run created it); `.etl` removed globally with `$probeRoot` |
 | Must never touch | other ETW sessions; Performance Log Users group membership (desktop run) |
 
@@ -1987,7 +2079,9 @@ if (-not $verdictA) {
 }
 if (-not $verdictA) {
   try {
-    # Run waits for curl (its -m 5 bounds it) and returns curl's exit code.
+    # Run waits for curl (its -m 5 bounds it) and returns curl's exit code. If Run cannot
+    # resolve the escape profile's AC folder for the child's environment block, it throws
+    # InvalidOperationException (never 0x80070005), which lands in INDETERMINATE below.
     $curlRc = [NockProbe.AC]::Run($s2, @('S-1-15-3-1'), 'curl.exe -sS -m 5 https://example.com/', 30000)
   } catch {
     $e = $_.Exception.GetBaseException(); $h = Get-BaseHResult $_
@@ -2246,7 +2340,8 @@ foreach ($idFile in (Get-ChildItem -Path $probeRoot -Filter '*.txt' -Recurse -Er
   Stop-VerifiedProcess -IdentityFile $idFile.FullName
 }
 # Probe 9 (VM only): restore firewall to the recorded per-profile state
-Remove-Item -Recurse -Force $probeRoot                     # everything else lived here
+Remove-Item -Recurse -Force $probeRoot                     # everything else lived here, incl. every
+                                                           # invocation's limited\<id>.* and p3\<id>\
 
 # --- AFTER: ASSERT the BEFORE baseline is restored. One line per check; any
 # LEFTOVER line is a failed run, to be cleaned by hand using the name it prints.
@@ -2291,7 +2386,7 @@ throwaway VM. Their teardown is "discard the box" — the VM is the cleanup.
 | 9 | AppContainer isolation fails open when the firewall is off | Fail-closed startup check |
 | 10 | Whether the agent can create its own AppContainer with `internetClient` | **Phase 1 entirely** — escape by construction |
 | 11 | Package-SID-granted named pipe reachable from inside the container | Event listener |
-| 12 | Whether `LOCALAPPDATA`/`TEMP` stay redirected when an explicit environment block is passed | Reconciles (a) with (d) |
+| 12 | Whether Windows itself keeps `LOCALAPPDATA`/`TEMP` redirected when the product passes an explicit environment block (the probe launcher sets them explicitly, so the probes do not answer this) | Reconciles (a) with (d) |
 | 13 | Go's AF_UNIX support on Windows (checkable on the Linux build host, not the probe box) | Event-listener transport choice |
 | 14 | Whether a WMI (`Win32_Process.Create`) child inherits the AppContainer token or is spawned by the broker under the plain user token | **Phase 0** — full escape if it escapes the token |
 | 15 | Whether a package SID granted recursive Modify on `filesystem.root` can rename/delete/replace an in-project `.nock/` via the parent (`FILE_DELETE_CHILD`) — why the audit DB moves to the per-user state dir | Informational — the DB moves out either way; does not gate Phase 0 |
