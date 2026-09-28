@@ -327,6 +327,28 @@ All notable changes to NockLock will be documented in this file.
   proxy, so it needs an interposer socket()/connect() translation that is a
   distinct design decision.
 
+### Documentation
+
+- Accepted-limitation record for grandchild procfs reads (#10764, follow-up to
+  #10757, ADR-005). A Node subprocess spawned by the wrapped Node agent (an MCP
+  server or tool that execs under a new pid) still throws `EACCES` on
+  `process.memoryUsage()`, because the `/proc/self/{stat,status,statm}` grants
+  are Landlock inode-bound to the directly wrapped child's own files. Every path
+  to reach grandchildren was assessed and rejected: a broad `/proc/` or
+  directory-level grant re-opens the #115 `/proc/<pid>/environ` leak; a
+  userspace interposer grant can never widen what the kernel Landlock policy
+  denies (rulesets only intersect); and a per-process PID namespace + fresh
+  `/proc` mount requires forking (abandoning the in-place `execve` that makes the
+  #10757 grant correct), a `CLONE_NEWUSER` that hands the tree the
+  namespaced-root surface `allow_namespaces=false` exists to deny, and the
+  privileged-helper lifecycle of ADR-004. `os.cpus()` is unaffected tree-wide.
+  `TestLandlockProcSelfAllowPathsStaysNarrow` pins the grant to one read-only
+  `/proc/self/<file>` entry per curated file, and
+  `TestSelfProcFilesExcludesSecretBearingEntries` keeps `environ`, `cmdline`,
+  `mem`, `maps` and `fd` off that list, and `TestSelfProcFilesPinsExactSet`
+  pins the list to exactly `stat`, `statm` and `status`, so this cannot be
+  "fixed" by widening it.
+
 ## [0.5.0] - 2026-09-26
 
 ### Added

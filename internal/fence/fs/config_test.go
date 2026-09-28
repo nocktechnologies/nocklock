@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 
@@ -529,6 +530,37 @@ func TestAppendSerializedAllow_RefusesSeparatorInjection(t *testing.T) {
 	for _, d := range sc.DenyPaths {
 		if d == "/etc" {
 			t.Fatalf("injected deny field /etc leaked into policy: deny=%v", sc.DenyPaths)
+		}
+	}
+}
+
+// TestSelfProcFilesExcludesSecretBearingEntries pins the curated self-proc list
+// that both fences grant (#10764, ADR-005): Landlock rules are inherited by
+// every descendant, so granting environ/cmdline/mem/maps/fd — or an empty name,
+// which becomes the /proc/<pid> directory itself — would expose the wrapped
+// process's secrets tree-wide, re-opening the leak #115 removed.
+func TestSelfProcFilesExcludesSecretBearingEntries(t *testing.T) {
+	files := SelfProcFiles()
+	for _, forbidden := range []string{"environ", "cmdline", "mem", "maps", "fd", ""} {
+		if slices.Contains(files, forbidden) {
+			t.Errorf("SelfProcFiles() contains %q; granting it exposes the wrapped process's secrets to every inheriting descendant (#115, ADR-005)", forbidden)
+		}
+	}
+}
+
+// TestSelfProcFilesPinsExactSet enforces that the self-proc grant cannot be
+// quietly widened (ADR-005): the denylist above only catches known-bad names,
+// and TestLandlockProcSelfAllowPathsStaysNarrow derives its expectation from
+// SelfProcFiles() itself, so only an exact pin fails on a new entry.
+func TestSelfProcFilesPinsExactSet(t *testing.T) {
+	files := SelfProcFiles()
+	want := []string{"stat", "statm", "status"}
+	if got := slices.Sorted(slices.Values(files)); !slices.Equal(got, want) {
+		t.Errorf("SelfProcFiles() = %v, want exactly %v; every entry is granted to all inheriting descendants, so changing this list is a deliberate security change that needs review (ADR-005, #115) — update this pin only alongside that review", got, want)
+	}
+	for _, name := range files {
+		if name == "" || name == "." || name == ".." || strings.Contains(name, "/") {
+			t.Errorf("SelfProcFiles() contains %q; an entry must be a single file name under /proc/<pid>, never empty, \".\", \"..\", or a path", name)
 		}
 	}
 }

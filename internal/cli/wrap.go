@@ -1218,8 +1218,10 @@ func resolvePathBestEffort(p string) string {
 // DIFFERENT pid does not get its OWN /proc/self grant — Landlock is
 // inode-bound to the original pid's files. Fixing that without re-granting the
 // broad /proc tree #115 removed needs a pid namespace + fresh proc mount,
-// which the syscall fence's allow_namespaces=false posture precludes — out of
-// scope here.)
+// which the syscall fence's allow_namespaces=false posture precludes — an
+// ACCEPTED limitation, assessed and recorded in ADR-005. The file-level grant
+// is pinned by TestLandlockProcSelfAllowPathsStaysNarrow so it cannot be
+// widened silently.)
 func landlockProcSelfAllowPaths() []landlock.AllowPath {
 	files := fsfence.SelfProcFiles()
 	paths := make([]landlock.AllowPath, 0, len(files))
