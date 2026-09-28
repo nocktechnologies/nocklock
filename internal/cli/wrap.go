@@ -85,14 +85,17 @@ var wrapCmd = &cobra.Command{
 		// promise, which is worse than not running at all.
 		dbPath, projectRoot, dbErr := config.ResolveDBPath(cfg, configPath)
 		if dbErr != nil {
+			cmd.SilenceUsage = true
 			return fmt.Errorf("could not resolve the event log location: %w\nThe audit trail is required — refusing to run unrecorded", dbErr)
 		}
 		auditDir, auditDirErr := resolveAuditDirectory(filepath.Dir(dbPath))
 		if auditDirErr != nil {
+			cmd.SilenceUsage = true
 			return fmt.Errorf("refusing to start: cannot resolve logging.db directory %s: %w; fix the audit directory path and permissions", filepath.Dir(dbPath), auditDirErr)
 		}
 		resolvedProjectRoot, projectRootErr := filepath.EvalSymlinks(filepath.Clean(projectRoot))
 		if projectRootErr != nil {
+			cmd.SilenceUsage = true
 			return fmt.Errorf("refusing to start: cannot resolve project root %s: %w; fix the project directory path and permissions", projectRoot, projectRootErr)
 		}
 		if filepath.Clean(auditDir) == filepath.Clean(resolvedProjectRoot) {

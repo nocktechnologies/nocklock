@@ -74,6 +74,9 @@ All notable changes to NockLock will be documented in this file.
   use the state directory with `[logging] db = "events.db"`.
   Dry runs apply the same refusal without writing audit events. Audit path
   resolution errors fail closed; fresh audit directories remain supported.
+  Dry runs now use the shared audit-path resolver: they also reject unusable
+  state roots and conflicting chains, and may create missing trusted state
+  directories, but do not create a database, signing key, or anchor.
 - New projects keep their audit trail outside the project, so the fenced agent
   can finally use its own project root (N10749). Two requirements had been in
   direct conflict: the agent must be able to create and remove files directly in

@@ -197,6 +197,7 @@ func TestMergeFSFenceEnvNoInheritedValues(t *testing.T) {
 }
 
 func TestWrapDryRunValidatesConfigWithoutCommand(t *testing.T) {
+	t.Setenv("XDG_STATE_HOME", trustedStateRoot(t))
 	dir := t.TempDir()
 	writeTestConfig(t, dir, dryRunTestTOML())
 	withWorkingDir(t, dir)
@@ -352,8 +353,8 @@ func TestWrapRefusesUnresolvableAuditDirectory(t *testing.T) {
 				flags = append(flags, "--dry-run")
 			}
 			marker, err := runWrapWithAuditDB(t, projectRoot, filepath.Join(loop, "events.db"), flags...)
-			if err == nil {
-				t.Fatal("wrap accepted an unresolvable audit directory")
+			if err == nil || !strings.Contains(err.Error(), "could not resolve the event log location") {
+				t.Fatalf("wrap error = %v, want event-log location refusal for symlink loop", err)
 			}
 			if _, err := os.Stat(marker); !os.IsNotExist(err) {
 				t.Fatalf("child launched or stat failed: %v", err)
