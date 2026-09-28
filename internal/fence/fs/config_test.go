@@ -1,6 +1,7 @@
 package fs
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -94,6 +95,190 @@ func TestProcessConfig_Valid(t *testing.T) {
 	wantDeny := filepath.Clean(filepath.Join(home, ".aws"))
 	if fc.DenyPaths[0] != wantDeny {
 		t.Errorf("DenyPaths[0] = %q, want %q", fc.DenyPaths[0], wantDeny)
+	}
+}
+
+// paths returns n distinct, resolvable paths under root for cap-boundary
+// tests: ProcessConfig resolves every allow/deny entry, so each needs to be a
+// real, distinguishable filesystem path rather than an arbitrary string.
+func paths(root string, n int, prefix string) []string {
+	out := make([]string, n)
+	for i := 0; i < n; i++ {
+		out[i] = filepath.Join(root, fmt.Sprintf("%s%d", prefix, i))
+	}
+	return out
+}
+
+// TestCheckInterposerBudget_AllowPathCapWithShim is the boundary test for
+// #10757's thread 2: the interposer's libfence_fs.c fails closed (denies
+// everything) once its allow_count ALONE reaches MAX_PATHS (256), and the
+// __landlock-exec shim injects one allow entry per SelfProcFiles() AFTER
+// config load (see allowSelfProcFS in internal/cli/landlock_exec.go). A user
+// config with exactly 256 allow paths used to trip the interposer's cap at
+// runtime once the self-proc entries were appended — a silent full deny-all.
+// CheckInterposerBudget must reject at wrap time when the shim engages.
+func TestCheckInterposerBudget_AllowPathCapWithShim(t *testing.T) {
+	reserve := len(SelfProcFiles())
+	room := maxAllowPaths - reserve
+
+	fc := &FenceConfig{Root: "/root", Mode: "read-write", AllowPaths: paths("/p", room, "f")}
+	if err := CheckInterposerBudget(fc, reserve); err != nil {
+		t.Fatalf("CheckInterposerBudget with %d allow paths (exactly the reserved cap) should succeed: %v", room, err)
+	}
+
+	fc.AllowPaths = paths("/p", room+1, "f")
+	if err := CheckInterposerBudget(fc, reserve); err == nil {
+		t.Fatalf("CheckInterposerBudget with %d allow paths (one past the reserved cap) should fail closed with a config error", room+1)
+	}
+}
+
+// TestCheckInterposerBudget_CombinedCapWithShim proves the cap covers allow
+// and deny TOGETHER under the Go-side wire budget.
+func TestCheckInterposerBudget_CombinedCapWithShim(t *testing.T) {
+	reserve := len(SelfProcFiles())
+	room := interposerMaxPathFields - interposerMetadataFields - reserve
+
+	fc := &FenceConfig{
+		Root:       "/root",
+		Mode:       "read-write",
+		AllowPaths: paths("/p", room-2, "a"),
+		DenyPaths:  paths("/p", 2, "d"),
+	}
+	if err := CheckInterposerBudget(fc, reserve); err != nil {
+		t.Fatalf("CheckInterposerBudget with %d allow + %d deny (exactly the combined cap) should succeed: %v",
+			len(fc.AllowPaths), len(fc.DenyPaths), err)
+	}
+
+	fc.DenyPaths = paths("/p", 3, "d")
+	if err := CheckInterposerBudget(fc, reserve); err == nil {
+		t.Fatalf("CheckInterposerBudget with %d allow + %d deny (one past the combined cap) should fail closed, "+
+			"even though neither list alone reaches maxAllowPaths", len(fc.AllowPaths), len(fc.DenyPaths))
+	}
+}
+
+func TestCheckInterposerBudget_AllowRWCannotHideDenies(t *testing.T) {
+	fc := &FenceConfig{
+		AllowPaths:   paths("/p", 250, "a"),
+		AllowRWPaths: paths("/p", 5, "w"),
+		DenyPaths:    paths("/p", 5, "d"),
+	}
+	if err := CheckInterposerBudget(fc, 0); err == nil {
+		t.Fatal("250 allow + 5 allow_rw + 5 deny paths must exceed the combined wire budget")
+	} else if !strings.Contains(err.Error(), "allow_rw (5)") || !strings.Contains(err.Error(), "deny (5)") {
+		t.Errorf("combined budget error must report both allow_rw and deny counts: %v", err)
+	}
+}
+
+func TestCheckInterposerBudget_CombinedCapWithAllowRW(t *testing.T) {
+	reserve := len(SelfProcFiles())
+	room := interposerMaxPathFields - interposerMetadataFields - reserve
+	fc := &FenceConfig{
+		AllowPaths:   paths("/p", room-7, "a"),
+		AllowRWPaths: paths("/p", 5, "w"),
+		DenyPaths:    paths("/p", 2, "d"),
+	}
+	if err := CheckInterposerBudget(fc, reserve); err != nil {
+		t.Fatalf("%d combined paths with allow_rw should fit the reserved wire budget: %v", room, err)
+	}
+	fc.DenyPaths = paths("/p", 3, "d")
+	if err := CheckInterposerBudget(fc, reserve); err == nil {
+		t.Fatalf("%d combined paths with allow_rw must exceed the reserved wire budget", room+1)
+	}
+}
+
+func TestCheckInterposerBudget_AllowRWSharedAllowCap(t *testing.T) {
+	reserve := len(SelfProcFiles())
+	room := maxAllowPaths - reserve
+	fc := &FenceConfig{AllowRWPaths: paths("/p", room, "w")}
+	if err := CheckInterposerBudget(fc, reserve); err != nil {
+		t.Fatalf("%d allow_rw paths should fit the reserved allow cap: %v", room, err)
+	}
+	fc.AllowRWPaths = paths("/p", room+1, "w")
+	if err := CheckInterposerBudget(fc, reserve); err == nil {
+		t.Fatalf("%d allow_rw paths must exceed the reserved allow cap", room+1)
+	}
+}
+
+func TestCheckInterposerBudget_MixedAllowCap(t *testing.T) {
+	fc := &FenceConfig{
+		AllowPaths:   paths("/p", 250, "a"),
+		AllowRWPaths: paths("/p", 7, "w"),
+	}
+	if err := CheckInterposerBudget(fc, 0); err == nil {
+		t.Fatal("250 allow + 7 allow_rw must exceed the shared allow cap even when the combined wire budget fits")
+	}
+}
+
+// TestCheckInterposerBudget_DenyPathCap verifies the per-category deny cap.
+// The C interposer's deny_count has the same MAX_PATHS ceiling as allow_count;
+// exceeding it triggers deny_all before the combined-budget check could catch it.
+func TestCheckInterposerBudget_DenyPathCap(t *testing.T) {
+	fc := &FenceConfig{
+		Root:      "/root",
+		Mode:      "read-write",
+		DenyPaths: paths("/p", maxAllowPaths, "d"),
+	}
+	if err := CheckInterposerBudget(fc, 0); err != nil {
+		t.Fatalf("CheckInterposerBudget with %d deny paths (exactly at cap) should succeed: %v", maxAllowPaths, err)
+	}
+
+	fc.DenyPaths = paths("/p", maxAllowPaths+1, "d")
+	if err := CheckInterposerBudget(fc, 0); err == nil {
+		t.Fatalf("CheckInterposerBudget with %d deny paths (one past cap) must fail closed", maxAllowPaths+1)
+	}
+}
+
+// TestCheckInterposerBudget_UserspaceOnly verifies the acceptance criterion
+// for N10815: when the __landlock-exec shim does NOT engage (pure userspace
+// interposer), no headroom is reserved and the user gets the full interposer
+// budget (up to 257 combined allow, allow_rw, and deny paths).
+func TestCheckInterposerBudget_UserspaceOnly(t *testing.T) {
+	fc := &FenceConfig{
+		Root:       "/root",
+		Mode:       "read-write",
+		AllowPaths: paths("/p", maxAllowPaths, "f"),
+	}
+	if err := CheckInterposerBudget(fc, 0); err != nil {
+		t.Fatalf("userspace-only fence with %d allow paths (the full interposer budget) must succeed: %v", maxAllowPaths, err)
+	}
+
+	fc.AllowPaths = paths("/p", maxAllowPaths+1, "f")
+	if err := CheckInterposerBudget(fc, 0); err == nil {
+		t.Fatalf("userspace-only fence with %d allow paths (one past the interposer budget) must still fail closed", maxAllowPaths+1)
+	}
+
+	combined := interposerMaxPathFields - interposerMetadataFields
+	fc = &FenceConfig{
+		Root:       "/root",
+		Mode:       "read-write",
+		AllowPaths: paths("/p", combined-2, "a"),
+		DenyPaths:  paths("/p", 2, "d"),
+	}
+	if err := CheckInterposerBudget(fc, 0); err != nil {
+		t.Fatalf("userspace-only fence with %d combined paths (exactly the combined budget) must succeed: %v", combined, err)
+	}
+
+	fc.DenyPaths = paths("/p", 3, "d")
+	if err := CheckInterposerBudget(fc, 0); err == nil {
+		t.Fatalf("userspace-only fence with %d combined paths (one past the combined budget) must still fail closed", combined+1)
+	}
+}
+
+// TestCheckInterposerBudget_NilConfig verifies no panic on a nil FenceConfig.
+func TestCheckInterposerBudget_NilConfig(t *testing.T) {
+	if err := CheckInterposerBudget(nil, 3); err != nil {
+		t.Fatalf("nil FenceConfig should not error: %v", err)
+	}
+}
+
+// TestProcessConfig_NoCapOnConfig verifies that ProcessConfig itself no longer
+// rejects high-path-count configs (the budget check moved to
+// CheckInterposerBudget, called post-ABI-detection in wrap.go).
+func TestProcessConfig_NoCapOnConfig(t *testing.T) {
+	root := t.TempDir()
+	cfg := config.FilesystemConfig{Root: root, Allow: paths(root, maxAllowPaths, "f")}
+	if _, err := ProcessConfig(cfg); err != nil {
+		t.Fatalf("ProcessConfig must not reject %d allow paths (budget is checked later): %v", maxAllowPaths, err)
 	}
 }
 
@@ -300,5 +485,50 @@ func TestParseSerialized_TooFewFields(t *testing.T) {
 	_, err := ParseSerialized("root" + fieldSep + "rw")
 	if err == nil {
 		t.Fatal("expected error for fewer than 3 fields")
+	}
+}
+
+func TestAppendSerializedAllow_AppendsReadAllowField(t *testing.T) {
+	fc := &FenceConfig{Root: "/root", Mode: "read-write", AllowPaths: []string{"/tmp"}}
+	base := fc.Serialize("/sock")
+
+	got := AppendSerializedAllow(base, "/proc/123")
+
+	sc, err := ParseSerialized(got)
+	if err != nil {
+		t.Fatalf("re-parse appended policy: %v", err)
+	}
+	found := false
+	for _, p := range sc.AllowPaths {
+		if p == "/proc/123" {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("appended allow path /proc/123 not present after round-trip; allow=%v", sc.AllowPaths)
+	}
+}
+
+// TestAppendSerializedAllow_RefusesSeparatorInjection is the fail-closed negative
+// control: a path carrying the reserved field separator must not smuggle extra
+// allow/deny fields into the serialized policy. The grant is dropped, not injected.
+func TestAppendSerializedAllow_RefusesSeparatorInjection(t *testing.T) {
+	fc := &FenceConfig{Root: "/root", Mode: "read-write"}
+	base := fc.Serialize("/sock")
+
+	injected := "/proc/1" + fieldSep + "-/etc"
+	got := AppendSerializedAllow(base, injected)
+
+	if got != base {
+		t.Fatalf("separator-bearing path must be refused (returned unchanged), got %q", got)
+	}
+	sc, err := ParseSerialized(got)
+	if err != nil {
+		t.Fatalf("parse: %v", err)
+	}
+	for _, d := range sc.DenyPaths {
+		if d == "/etc" {
+			t.Fatalf("injected deny field /etc leaked into policy: deny=%v", sc.DenyPaths)
+		}
 	}
 }

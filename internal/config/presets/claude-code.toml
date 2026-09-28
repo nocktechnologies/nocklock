@@ -10,6 +10,14 @@ allow = [
     "~/.claude/",
     "~/.cache/",
     "/tmp/",
+    # Node runtime introspection: os.cpus() reads these system-wide,
+    # process-independent files (read-only, never a path to another process);
+    # without them it silently returns an empty array and mis-sizes worker pools.
+    # The child's own /proc/<pid> (for process.memoryUsage) is granted in code,
+    # not here — config resolution would follow /proc/self to the wrapper's pid.
+    "/proc/cpuinfo",
+    "/proc/stat",
+    "/proc/meminfo",
     # Standard system read-only paths. Without these the child cannot even
     # resolve its dynamic loader or exec /bin/echo — Landlock and the
     # interposer deny every path outside the root and this allow list. Writable
@@ -32,7 +40,10 @@ allow = [
     #     needed; dropped. A child that truly needs its own /proc/<pid> cannot be
     #     served by a "/proc/self/" narrowing (the Landlock rule binds the
     #     wrapper's pid dir, not the child's) — that would require a private pid
-    #     namespace, not an allow entry.
+    #     namespace, not an allow entry. (N10757: the wrapped child's own
+    #     /proc/<pid>/{stat,status,statm} — never the directory, never
+    #     environ/cmdline/mem/maps/fd — is granted in code instead; see
+    #     landlockProcSelfAllowPaths in internal/cli/wrap.go.)
     "/usr/",
     "/lib/",
     "/lib64/",

@@ -5,7 +5,9 @@ import (
 	"fmt"
 	"os"
 	"runtime"
+	"strings"
 
+	fsfence "github.com/nocktechnologies/nocklock/internal/fence/fs"
 	"github.com/nocktechnologies/nocklock/internal/fence/fs/landlock"
 	"github.com/nocktechnologies/nocklock/internal/fence/syscallfence"
 	"github.com/spf13/cobra"
@@ -83,8 +85,10 @@ var landlockExecCmd = &cobra.Command{
 		}
 
 		// Stage 3: execve. Strip the shim's control env so the child does not see
-		// the serialized rules/policy.
+		// the serialized rules/policy, and grant the child its own /proc/<pid> to
+		// the userspace interposer (see allowSelfProcFS).
 		childEnv := removeEnvVars(os.Environ(), landlockRulesEnv, syscallPolicyEnv)
+		childEnv = allowSelfProcFS(childEnv)
 		return landlock.Exec(args, childEnv)
 	},
 }
@@ -113,6 +117,49 @@ func applySyscallFence(policy syscallfence.Policy) error {
 		return fmt.Errorf("failed to apply syscall fence: %w", err)
 	}
 	return nil
+}
+
+// allowSelfProcFS grants the LD_PRELOAD filesystem interposer read access to
+// THIS process's own fsfence.SelfProcFiles under /proc/<pid>, so Node's
+// process.memoryUsage() and reads of /proc/self/status are not blocked by the
+// userspace fence. It is the interposer companion to landlockProcSelfAllowPaths
+// (wrap.go); both grant exactly the same file list.
+//
+// The shim IS the child — unix.Exec (below) execve's in place and preserves the
+// pid — so os.Getpid() is the child's real pid. The concrete pid is required,
+// not "/proc/self": the interposer realpaths accessed paths, so /proc/self/stat
+// arrives as /proc/<pid>/stat and only a concrete /proc/<pid>/<file> entry
+// matches. The interposer's prefix match is component-boundary aware, so
+// /proc/<pid> never matches a sibling sharing a numeric prefix — no other
+// process is exposed.
+//
+// Only the specific files are granted, never the /proc/<pid> directory: a
+// directory-wide allow entry would also make environ, cmdline, mem, maps and
+// fd match the interposer's allow check — the same-UID leak #115 removed,
+// reachable one level down through any descendant that inherits this fence's
+// posture. See landlockProcSelfAllowPaths for the Landlock-side rationale,
+// which is the actual kernel backstop even if this userspace list were ever
+// wider.
+//
+// This runs only in the __landlock-exec shim, which wrap inserts whenever
+// Landlock or the syscall fence is active — always so for the hardened presets
+// that need this. A pure userspace-only fs fence has no shim and does not reach
+// here; that degraded posture is out of scope. No-op when NOCKLOCK_FS_ALLOWED is
+// unset or empty.
+func allowSelfProcFS(env []string) []string {
+	pid := os.Getpid()
+	for i, entry := range env {
+		name, val, ok := strings.Cut(entry, "=")
+		if !ok || name != fsfence.EnvFSAllowed || val == "" {
+			continue
+		}
+		for _, f := range fsfence.SelfProcFiles() {
+			val = fsfence.AppendSerializedAllow(val, fmt.Sprintf("/proc/%d/%s", pid, f))
+		}
+		env[i] = fsfence.EnvFSAllowed + "=" + val
+		break
+	}
+	return env
 }
 
 func init() {
