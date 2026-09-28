@@ -1720,6 +1720,10 @@ try {
 $log1 = Get-Content (Join-Path $out.FullName '_inside-1.log') -ErrorAction SilentlyContinue
 $log1 | ForEach-Object { "inside(1): $_" }
 $exempt1 = Test-ExemptListed        # read BEFORE Probe 1's teardown, like everything scored below
+# The 9998 sub-claim (bind + listen inside) has evidence only if the container recorded its
+# listener. A per-user python (e.g. under %LOCALAPPDATA%\Programs) is unreadable to a
+# zero-capability container, so this line reads False there, with the ERROR line above.
+"inside(1) 9998 listener identity recorded: $(Test-Path (Join-Path $out.FullName 'own-listener.txt'))"
 
 # Probe 1's own teardown (see Teardown below), before the next probe runs.
 $job8899, $job9999 | Stop-Job -PassThru | Remove-Job
