@@ -12,7 +12,7 @@ The secret fence filters environment variables. Your agent sees `PATH` and `HOME
 
 The filesystem fence is built differently on each platform. Linux uses a kernel root allowlist (Landlock) with LD_PRELOAD event logging. macOS uses kernel Seatbelt (`sandbox-exec`) to confine writes to `filesystem.root` plus required runtime paths, and it denies credential and sensitive paths such as `~/.ssh`, `~/.aws`, `~/.config`, `~/.gnupg`, and `~/Library/Keychains` for both reads and writes.
 
-The network fence is a local proxy with a domain allowlist. Your agent can reach GitHub and `api.anthropic.com`. It cannot reach anywhere else. On Linux, `nocklock wrap --net-fence=netns` opts into a kernel-enforced version: a network namespace with an nftables default-drop floor and a transparent HTTP(S) and DNS allowlist, so nothing outside `network.allow` leaves the namespace on any transport.
+The default network policy is a userspace proxy with a domain allowlist. A client that ignores `HTTP_PROXY` can bypass it. On Linux, `nocklock wrap --net-fence=netns` opts into a kernel-enforced version: a network namespace with an nftables default-drop floor and a transparent HTTP(S) and DNS allowlist, so nothing outside `network.allow` leaves the namespace on any transport.
 
 ## Quick start
 
@@ -45,9 +45,23 @@ It filters environment variables against the pass and block lists, which accept 
 
 It fences the filesystem. On Linux, Landlock applies a kernel allowlist and LD_PRELOAD records blocked-access events. On macOS, Seatbelt denies writes by default, then permits only `filesystem.root`, NockLock state, and essential per-user runtime paths; its sensitive-path denies also block reads. Every child process inherits the profile. Before launch, NockLock validates the generated profile, so a requested macOS fence either engages or refuses to start. It never silently degrades.
 
-It routes network traffic through a local proxy that enforces a domain allowlist. On Linux, in the default proxy mode with the syscall fence enabled, IP socket creation is denied in the child; proxy-aware HTTP(S) clients connect to an advertised loopback proxy address that the interposer maps onto a Unix socket. Direct IP sockets, including `--noproxy` bypass attempts, fail closed. For HTTPS, only the hostname is inspected. There is no certificate injection and no payload decryption. If the proxy is not confirmed healthy, the agent does not start.
+It routes network traffic through a local proxy that enforces a domain allowlist. On Linux, in proxy mode with syscall enforcement and the filesystem interposer enabled, IP socket creation is denied in the child; proxy-aware HTTP(S) clients connect to an advertised loopback proxy address that the interposer maps onto a Unix socket. Direct IP sockets, including `--noproxy` bypass attempts, fail closed. For HTTPS, only the hostname is inspected. There is no certificate injection and no payload decryption. If the proxy is not confirmed healthy, the agent does not start.
 
 On Linux you can instead pass `--net-fence=netns`. The child then runs in its own network namespace behind a kernel default-drop floor, keeps its configured IP socket families, and reaches only `network.allow` hosts through a transparent HTTP(S) proxy and a fixed-answer DNS stub that answers DNS over UDP and TCP port 53 inside the namespace. All other traffic leaving the namespace is dropped in the kernel, including direct DNS to other resolvers, non-DNS UDP, QUIC (UDP/443), SCTP and raw IP. This mode needs the privileged egress helper described under "Linux network-egress helper" and fails closed without it.
+
+### What “network fence active” means
+
+`wrap` prints and signs the effective egress level for each session. The proxy checks hostnames only for clients that use it; it does not decrypt HTTPS.
+
+| Level | Boundary |
+|---|---|
+| `KERNEL` | Linux netns with a kernel default-drop floor and the configured HTTP(S)/DNS allowlist. |
+| `CONFINED` | Linux proxy with syscall enforcement and the filesystem interposer bridge; the child can connect only to the proxy's Unix socket. |
+| `ADVISORY` | Userspace proxy only. A client that ignores `HTTP_PROXY` can reach any host. The wrap warning names this limitation. |
+| `OFF` | `network.allow_all = true`; any host is reachable. |
+| `UNREACHABLE` | Syscall enforcement restricts proxy traffic to Unix sockets, but the filesystem interposer bridge is disabled, so the allowlist cannot be reached. Wrap refuses to start. |
+
+Set `network.require_enforced = true` in `.nock/config.toml` or pass `--require-enforced-egress` to refuse `ADVISORY`, `OFF`, and `UNREACHABLE` levels. Linux can use `--net-fence=netns`; macOS cannot provide enforced egress today.
 
 Linux blocked accesses are logged to the event log (see "Event log" for where it lives). The macOS Seatbelt path records its fence state but does not yet emit one audit event per denied file; Seatbelt returns its native permission error. Blocked domains get a 403.
 
@@ -243,6 +257,7 @@ allow = [
     "crates.io",
 ]
 allow_all = false
+require_enforced = false
 
 [syscall]
 enforcement = "required"
@@ -307,6 +322,7 @@ Two candidate runtimes are deliberately left without a preset:
 | `nocklock init --runtime <name>` | Create `.nock/config.toml` from an embedded runtime preset |
 | `nocklock wrap -- <cmd>` | Run a command inside the fence |
 | `nocklock wrap --net-fence=netns -- <cmd>` | Linux only: run inside the kernel-enforced netns egress fence (needs the privileged helper) |
+| `nocklock wrap --require-enforced-egress -- <cmd>` | Refuse to start unless egress is `KERNEL` or `CONFINED` |
 | `nocklock wrap --profile list` | List embedded runtime presets |
 | `nocklock wrap --dry-run` | Validate config without starting fences or a command |
 | `nocklock scan [path ...]` | Scan selected local files; `--env` adds environment values and `--json` prints structured results |

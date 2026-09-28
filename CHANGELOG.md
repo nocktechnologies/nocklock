@@ -17,6 +17,11 @@ All notable changes to NockLock will be documented in this file.
 
 ### Added
 
+- `wrap` reports and signs the effective network egress level (`KERNEL`,
+  `CONFINED`, `ADVISORY`, `OFF`, or `UNREACHABLE`). Advisory proxy mode warns
+  that clients ignoring `HTTP_PROXY` can reach any host. Set
+  `network.require_enforced = true` or pass `--require-enforced-egress` to
+  refuse sessions without enforced egress.
 - Every `wrap` signs a `config.digest` row containing the canonical resolved
   policy and prior digest. Changed policy fields warn before the child starts;
   `verify --audit` reports the history and requires each retained post-adoption

@@ -23,6 +23,7 @@ import (
 	"github.com/nocktechnologies/nocklock/internal/fence/network"
 	"github.com/nocktechnologies/nocklock/internal/fence/network/netns"
 	"github.com/nocktechnologies/nocklock/internal/fence/secrets"
+	"github.com/nocktechnologies/nocklock/internal/fence/syscallfence"
 	"github.com/nocktechnologies/nocklock/internal/logging"
 	"github.com/spf13/cobra"
 )
@@ -168,9 +169,6 @@ var wrapCmd = &cobra.Command{
 				SessionID: sessionID,
 			})
 		}
-
-		// Log session start with the command being run.
-		logEvent(logging.EventSessionStart, "session", args[0], false)
 
 		// Log config loaded with project name.
 		logEvent(logging.EventConfigLoaded, "session", cfg.Project.Name, false)
@@ -462,13 +460,15 @@ var wrapCmd = &cobra.Command{
 		// seccomp filter just before execve (see landlock_exec.go). On non-Linux
 		// the syscall fence is a no-op and we skip the wiring entirely.
 		syscallProxyModeActive := false
+		syscallFenceActive := false
 		if runtime.GOOS == "linux" {
 			// Tell the syscall fence which network mode is active EXPLICITLY, so
 			// it can grant the child inet/inet6 sockets under the netns egress
 			// floor while keeping unix-only for the userspace proxy (N10710).
 			netFence := wrapNetworkFenceMode(useNetns, cfg.Network.AllowAll)
 			if policy, ok := buildSyscallPolicy(cfg, netFence); ok {
-				syscallProxyModeActive = netFence == networkFenceProxy
+				syscallFenceActive = syscallfence.Supported()
+				syscallProxyModeActive = syscallFenceActive && netFence == networkFenceProxy
 				encoded, err := marshalSyscallPolicy(policy)
 				if err != nil {
 					return fmt.Errorf("failed to serialize syscall policy: %w", err)
@@ -486,6 +486,30 @@ var wrapCmd = &cobra.Command{
 				fmt.Fprintf(os.Stderr, "NockLock: Linux syscall fence active — seccomp-BPF (%s)\n", policy.Mode)
 				logEvent(logging.EventFilePassed, "syscall", fmt.Sprintf("seccomp mode=%s socket_families=%d allow_namespaces=%t", policy.Mode, len(policy.AllowedSocketFamilies), policy.AllowNamespaces), false)
 			}
+		}
+		egressLevel := effectiveEgressLevel(
+			runtime.GOOS,
+			resolvedNetworkFenceMode(wrapFlags),
+			cfg.Network.AllowAll,
+			syscallFenceActive,
+			fsFence != nil,
+		)
+		if egressLevel == egressLevelUnreachable {
+			detail := egressRequirementMessage(egressLevel, runtime.GOOS)
+			logEvent(logging.EventNetworkError, "network", detail, true)
+			fmt.Fprintln(cmd.ErrOrStderr(), egressBanner(egressLevel, len(cfg.Network.Allow)))
+			fmt.Fprintf(cmd.ErrOrStderr(), "NockLock: fix: %s\n", strings.TrimPrefix(detail, "effective egress level is UNREACHABLE; "))
+			cmd.SilenceUsage = true
+			cmd.SilenceErrors = true
+			return &exitCodeError{code: 2}
+		}
+		if (cfg.Network.RequireEnforced || wrapFlags.RequireEnforcedEgress) && !egressLevelMeetsRequirement(egressLevel) {
+			detail := egressRequirementMessage(egressLevel, runtime.GOOS)
+			logEvent(logging.EventNetworkError, "network", detail, true)
+			fmt.Fprintf(cmd.ErrOrStderr(), "NockLock: fatal: enforced egress required — %s\n", detail)
+			cmd.SilenceUsage = true
+			cmd.SilenceErrors = true
+			return &exitCodeError{code: 2}
 		}
 
 		// Validate the interposer's field budget now that we know whether the
@@ -568,8 +592,8 @@ var wrapCmd = &cobra.Command{
 			// the sidecars so the transparent proxy appends decisions to it.
 			netnsEgress.DecisionLogPath = decisionLogPath
 
-			logEvent(logging.EventNetworkPassed, "network", fmt.Sprintf("netns tproxy egress fence active domains=%d", len(netnsEgress.Allow)), false)
-			fmt.Fprintf(os.Stderr, "NockLock: network egress fence active — netns tproxy allowlist (%d domain(s))\n", len(netnsEgress.Allow))
+			logEvent(logging.EventNetworkPassed, "network", fmt.Sprintf("egress level=%s netns tproxy domains=%d", egressLevel, len(netnsEgress.Allow)), false)
+			fmt.Fprintln(os.Stderr, egressBanner(egressLevel, len(netnsEgress.Allow)))
 		} else if !cfg.Network.AllowAll {
 			proxyCfg := effectiveCfg.Network
 			proxy := network.NewProxyServer(proxyCfg, logger, sessionID)
@@ -658,11 +682,28 @@ var wrapCmd = &cobra.Command{
 						"NOCKLOCK_PROXY_UNIX_SOCKET="+proxyUnixSocket,
 					)
 				}
-				fmt.Fprintf(os.Stderr, "NockLock: network fence active — allowing %d domain(s)\n", len(cfg.Network.Allow))
-				logEvent(logging.EventNetworkPassed, "network", fmt.Sprintf("proxy=%s domains=%d", addr, len(cfg.Network.Allow)), false)
+				fmt.Fprintln(os.Stderr, egressBanner(egressLevel, len(cfg.Network.Allow)))
+				logEvent(logging.EventNetworkPassed, "network", fmt.Sprintf("egress level=%s proxy=%s domains=%d", egressLevel, addr, len(cfg.Network.Allow)), false)
 			}
 		} else {
-			fmt.Fprintf(os.Stderr, "NockLock: network fence disabled (allow_all = true)\n")
+			fmt.Fprintln(os.Stderr, egressBanner(egressLevel, 0))
+			logEvent(logging.EventNetworkPassed, "network", "egress level=OFF allow_all=true", false)
+		}
+
+		// Record the effective egress level in the signed session-start row only
+		// after the configured bridge and network fence have initialized.
+		if err := logger.Log(logging.Event{
+			Timestamp:   time.Now(),
+			EventType:   logging.EventSessionStart,
+			Category:    "session",
+			Detail:      args[0],
+			EgressLevel: string(egressLevel),
+			SessionID:   sessionID,
+		}); err != nil {
+			fmt.Fprintf(cmd.ErrOrStderr(), "NockLock: fatal: cannot record effective egress level in the signed audit trail: %v — refusing to start\n", err)
+			cmd.SilenceUsage = true
+			cmd.SilenceErrors = true
+			return &exitCodeError{code: 2}
 		}
 
 		// On macOS the filesystem fence wraps the child argv with sandbox-exec

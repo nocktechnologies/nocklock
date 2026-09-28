@@ -112,6 +112,8 @@ allow = [
     "crates.io",
 ]
 allow_all = false
+# Refuse wrap unless egress is kernel-enforced or Linux syscall-confined.
+require_enforced = false
 
 [secrets]
 # Optional local preflight. A finding or incomplete scan prevents launch.

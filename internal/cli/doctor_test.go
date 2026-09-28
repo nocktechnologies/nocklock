@@ -147,8 +147,8 @@ func TestDoctorNetworkAllowlistWarnsWhenBridgeInterposerDisabled(t *testing.T) {
 }
 
 func TestDoctorNetworkAllowlistNotInertWhenSyscallOff(t *testing.T) {
-	// With the syscall fence off, the child keeps IP sockets and the proxy-based
-	// allowlist actually functions — no inert-allowlist warning should appear.
+	// With the syscall fence off, the proxy is advisory because clients can ignore
+	// HTTP_PROXY and make direct connections outside the allowlist.
 	dir := t.TempDir()
 	// Target the [syscall] enforcement line specifically (line-start), not the
 	// filesystem's linux_enforcement line which also contains the substring.
@@ -177,6 +177,12 @@ func TestDoctorNetworkAllowlistNotInertWhenSyscallOff(t *testing.T) {
 	}
 	if strings.Contains(out.String(), "Network allowlist cannot be reached") {
 		t.Fatalf("did not expect bridge warning with syscall off, got:\n%s", out.String())
+	}
+	if !strings.Contains(out.String(), "ADVISORY: clients that ignore HTTP_PROXY can reach any host") {
+		t.Fatalf("expected advisory egress warning with syscall off, got:\n%s", out.String())
+	}
+	if !strings.Contains(out.String(), "network-egress-advisory") {
+		t.Fatalf("expected named network-egress-advisory check, got:\n%s", out.String())
 	}
 }
 

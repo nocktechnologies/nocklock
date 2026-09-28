@@ -137,6 +137,14 @@ func TestConfigDigestCanonicalizesPolicyAndExcludesCloudAPIKey(t *testing.T) {
 	if first.Digest != second.Digest || !bytes.Equal(first.Policy, second.Policy) {
 		t.Fatalf("equivalent policy ordering changed digest: %s != %s", first.Digest, second.Digest)
 	}
+	cfg.Network.RequireEnforced = true
+	third, err := newConfigDigestRecord(&cfg, configPath, filepath.Join(project, "events.db"), "proxy")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if second.Digest == third.Digest {
+		t.Fatal("network.require_enforced change did not change the config digest")
+	}
 	if bytes.Contains(first.Policy, []byte(cfg.Cloud.APIKey)) {
 		t.Fatalf("canonical policy leaked cloud.api_key: %s", first.Policy)
 	}
@@ -157,6 +165,7 @@ var configDigestPolicyFields = map[string]string{
 	"Network.Allow":                 "network.allow",
 	"Network.AllowAll":              "network.allow_all",
 	"Network.AllowPrivateRanges":    "network.allow_private_ranges",
+	"Network.RequireEnforced":       "network.require_enforced",
 	"Secrets.Pass":                  "secrets.pass",
 	"Secrets.Block":                 "secrets.block",
 	"Secrets.ScanEnv":               "secrets.scan_env",

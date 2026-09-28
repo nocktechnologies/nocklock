@@ -40,6 +40,7 @@ func restrictOverlay(base, overlay Config, fields map[string]bool) Config {
 	}
 	cfg.Network.AllowAll = base.Network.AllowAll && overlay.Network.AllowAll
 	cfg.Network.AllowPrivateRanges = base.Network.AllowPrivateRanges && overlay.Network.AllowPrivateRanges
+	cfg.Network.RequireEnforced = base.Network.RequireEnforced || overlay.Network.RequireEnforced
 
 	if fields["secrets.pass"] {
 		// secrets.pass has INVERTED semantics: an empty pass list means "pass
@@ -162,6 +163,8 @@ func addMetadataFields(fields map[string]bool, md toml.MetaData) {
 		"macos_allow_unfenced": "macos_allow_unfenced",
 		"allowall":             "allow_all",
 		"allow_all":            "allow_all",
+		"requireenforced":      "require_enforced",
+		"require_enforced":     "require_enforced",
 		"allowprivateranges":   "allow_private_ranges",
 		"allow_private_ranges": "allow_private_ranges",
 		"pass":                 "pass",

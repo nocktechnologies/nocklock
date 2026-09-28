@@ -405,6 +405,30 @@ func sanityDoctorChecks(cfg *config.Config, configPath string, caps doctorCapabi
 			Fix:      "set network.allow and allow_all = false",
 		})
 	}
+	if len(cfg.Network.Allow) > 0 {
+		syscallActive := false
+		if caps.goos == "linux" &&
+			syscallEnforcementMode(cfg.Syscall.Enforcement) != syscallfence.ModeOff &&
+			caps.syscallBackend != nil {
+			syscallActive = caps.syscallBackend()
+		}
+		fsInterposer := caps.goos == "linux" && cfg.Filesystem.Root != ""
+		level := effectiveEgressLevel(caps.goos, "proxy", cfg.Network.AllowAll, syscallActive, fsInterposer)
+		if level == egressLevelAdvisory {
+			fix := "use --net-fence=netns on Linux, or enable Linux syscall enforcement and the filesystem interposer for CONFINED proxy mode"
+			if caps.goos != "linux" {
+				fix = "macOS cannot provide enforced egress today; run on Linux with --net-fence=netns"
+			}
+			checks = append(checks, doctorCheck{
+				Group:    "Sanity",
+				Name:     "network-egress-advisory",
+				Severity: doctorWarning,
+				Status:   "advisory",
+				Message:  fmt.Sprintf("Network allowlist has %d domain(s), but effective egress is ADVISORY: clients that ignore HTTP_PROXY can reach any host.", len(cfg.Network.Allow)),
+				Fix:      fix,
+			})
+		}
+	}
 
 	// Linux proxy mode with the syscall fence relies on the LD_PRELOAD interposer
 	// to bridge the advertised loopback proxy address onto a Unix socket. If the

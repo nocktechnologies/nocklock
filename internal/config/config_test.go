@@ -24,6 +24,7 @@ deny = ["~/.ssh/"]
 [network]
 allow = ["github.com"]
 allow_all = false
+require_enforced = true
 
 [secrets]
 pass = ["HOME"]
@@ -58,6 +59,9 @@ endpoint = "https://cc.nocktechnologies.io/api/fence/events/"
 	}
 	if cfg.Network.AllowAll != false {
 		t.Error("expected allow_all to be false")
+	}
+	if !cfg.Network.RequireEnforced {
+		t.Error("expected network.require_enforced to be true")
 	}
 	if len(cfg.Filesystem.Allow) != 1 || cfg.Filesystem.Allow[0] != "." {
 		t.Errorf("unexpected filesystem allow: %v", cfg.Filesystem.Allow)
@@ -236,6 +240,7 @@ func TestLoadOverlayCanTightenButNotLoosenProfile(t *testing.T) {
 allow = ["api.openai.com", "example.com"]
 allow_all = true
 allow_private_ranges = true
+require_enforced = true
 
 [filesystem]
 allow = ["/tmp/", "/"]
@@ -270,6 +275,9 @@ socket_families = ["unix", "netlink"]
 	if cfg.Network.AllowAll || cfg.Network.AllowPrivateRanges {
 		t.Fatalf("network loosening survived: allow_all=%t private=%t", cfg.Network.AllowAll, cfg.Network.AllowPrivateRanges)
 	}
+	if !cfg.Network.RequireEnforced {
+		t.Fatal("network.require_enforced must be allowed to tighten the profile")
+	}
 	if !reflect.DeepEqual(cfg.Filesystem.Allow, []string{"/tmp/"}) {
 		t.Fatalf("filesystem.allow = %v, want only /tmp/", cfg.Filesystem.Allow)
 	}
@@ -298,6 +306,17 @@ socket_families = ["unix", "netlink"]
 	}
 	if !reflect.DeepEqual(cfg.Syscall.SocketFamilies, []string{"unix"}) {
 		t.Fatalf("syscall.socket_families = %v, want only unix", cfg.Syscall.SocketFamilies)
+	}
+}
+
+func TestOverlayCannotTurnOffRequireEnforced(t *testing.T) {
+	base := DefaultConfig()
+	base.Network.RequireEnforced = true
+	overlay := DefaultConfig()
+	overlay.Network.RequireEnforced = false
+	cfg := restrictOverlay(base, overlay, map[string]bool{"network.require_enforced": true})
+	if !cfg.Network.RequireEnforced {
+		t.Fatal("overlay disabled network.require_enforced from the base profile")
 	}
 }
 
@@ -408,6 +427,9 @@ func TestDefaultConfig(t *testing.T) {
 	}
 	if cfg.Network.AllowAll != false {
 		t.Error("expected default allow_all to be false")
+	}
+	if cfg.Network.RequireEnforced {
+		t.Error("expected network.require_enforced to default false")
 	}
 	if cfg.Logging.Level != "info" {
 		t.Errorf("expected default log level 'info', got %q", cfg.Logging.Level)
