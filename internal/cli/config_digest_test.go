@@ -150,6 +150,27 @@ func TestConfigDigestCanonicalizesPolicyAndExcludesCloudAPIKey(t *testing.T) {
 	}
 }
 
+func TestConfigDigestCoversRequireEnforcedCLIFlag(t *testing.T) {
+	project := t.TempDir()
+	configPath := filepath.Join(project, config.Dir, config.File)
+	cfg := config.DefaultConfig()
+	base, err := newConfigDigestRecord(&cfg, configPath, filepath.Join(project, "events.db"), "proxy")
+	if err != nil {
+		t.Fatal(err)
+	}
+	effective := effectiveWrapConfig(&cfg, WrapFlags{RequireEnforcedEgress: true})
+	flagged, err := newConfigDigestRecord(&effective, configPath, filepath.Join(project, "events.db"), "proxy")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if base.Digest == flagged.Digest {
+		t.Fatal("--require-enforced-egress did not change the signed config digest")
+	}
+	if !jsonPathPresent(flagged.Policy, "network.require_enforced") {
+		t.Fatalf("effective policy omitted network.require_enforced: %s", flagged.Policy)
+	}
+}
+
 var configDigestPolicyFields = map[string]string{
 	"ProfileName":                   "profile",
 	"Project.Name":                  "project.name",

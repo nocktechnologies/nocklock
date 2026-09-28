@@ -479,6 +479,17 @@ func TestEffectiveWrapConfigPreservesAllowPrivateRanges(t *testing.T) {
 	if !effective.Network.AllowPrivateRanges {
 		t.Fatal("expected config allow_private_ranges to be preserved in effective config")
 	}
+
+	effective = effectiveWrapConfig(&cfg, WrapFlags{RequireEnforcedEgress: true})
+	if !effective.Network.RequireEnforced {
+		t.Fatal("expected require-enforced-egress CLI flag to be reflected in effective config")
+	}
+
+	cfg.Network.RequireEnforced = true
+	effective = effectiveWrapConfig(&cfg, WrapFlags{})
+	if !effective.Network.RequireEnforced {
+		t.Fatal("expected config require_enforced to be preserved in effective config")
+	}
 }
 
 func TestComposeChildArgvAddsPrefixesWithoutDroppingPriorShim(t *testing.T) {

@@ -970,6 +970,9 @@ func effectiveWrapConfig(cfg *config.Config, flags WrapFlags) config.Config {
 	effective := *cfg
 	// CLI flag is additive: if either config-file or flag permits private ranges, allow them.
 	effective.Network.AllowPrivateRanges = cfg.Network.AllowPrivateRanges || flags.AllowPrivateRanges
+	// A CLI requirement is also part of the effective policy recorded in the
+	// signed config digest, not only a launch-time check.
+	effective.Network.RequireEnforced = cfg.Network.RequireEnforced || flags.RequireEnforcedEgress
 	return effective
 }
 

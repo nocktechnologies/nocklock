@@ -73,8 +73,8 @@ type signedEventDetail struct {
 // signed event fields are present. New fields use a versioned JSON envelope in
 // the already-signed detail column, so existing audit databases need no schema
 // migration and their historical hashes remain unchanged.
-func encodeEventDetail(detail, egressLevel string) string {
-	if egressLevel == "" {
+func encodeEventDetail(eventType EventType, detail, egressLevel string) string {
+	if eventType != EventSessionStart || egressLevel == "" {
 		return detail
 	}
 	data, _ := json.Marshal(signedEventDetail{
@@ -85,7 +85,10 @@ func encodeEventDetail(detail, egressLevel string) string {
 	return string(data)
 }
 
-func decodeEventDetail(stored string) (detail, egressLevel string) {
+func decodeEventDetail(eventType EventType, stored string) (detail, egressLevel string) {
+	if eventType != EventSessionStart {
+		return stored, ""
+	}
 	var envelope signedEventDetail
 	if err := json.Unmarshal([]byte(stored), &envelope); err != nil ||
 		envelope.Schema != signedEventDetailSchema || envelope.EgressLevel == "" {
@@ -569,7 +572,7 @@ func latestEvent(ctx context.Context, tx eventTransaction, eventType EventType) 
 		return nil, fmt.Errorf("failed to read previous event: %w", err)
 	}
 	event.EventType = EventType(storedType)
-	event.Detail, event.EgressLevel = decodeEventDetail(storedDetail)
+	event.Detail, event.EgressLevel = decodeEventDetail(event.EventType, storedDetail)
 	event.Blocked = blocked != 0
 	event.Timestamp, err = time.Parse(time.RFC3339, timestamp)
 	if err != nil {
@@ -580,7 +583,7 @@ func latestEvent(ctx context.Context, tx eventTransaction, eventType EventType) 
 
 func (l *Logger) logInTransaction(tx eventTransaction, event Event) error {
 	ts := formatTimestampForChain(event.Timestamp)
-	storedDetail := encodeEventDetail(event.Detail, event.EgressLevel)
+	storedDetail := encodeEventDetail(event.EventType, event.Detail, event.EgressLevel)
 	blocked := 0
 	if event.Blocked {
 		blocked = 1
@@ -691,7 +694,7 @@ func (l *Logger) LogBatch(events []Event) error {
 	// Insert all events with chaining
 	for _, event := range events {
 		ts := formatTimestampForChain(event.Timestamp)
-		storedDetail := encodeEventDetail(event.Detail, event.EgressLevel)
+		storedDetail := encodeEventDetail(event.EventType, event.Detail, event.EgressLevel)
 		blocked := 0
 		if event.Blocked {
 			blocked = 1
@@ -838,8 +841,8 @@ func (l *Logger) Query(opts QueryOptions) ([]Event, error) {
 		if err := rows.Scan(&e.ID, &ts, &eventType, &e.Category, &storedDetail, &blocked, &e.SessionID); err != nil {
 			return nil, fmt.Errorf("failed to scan event row: %w", err)
 		}
-		e.Detail, e.EgressLevel = decodeEventDetail(storedDetail)
 		e.EventType = EventType(eventType)
+		e.Detail, e.EgressLevel = decodeEventDetail(e.EventType, storedDetail)
 		e.Blocked = blocked != 0
 		e.Timestamp, err = time.Parse(time.RFC3339, ts)
 		if err != nil {
