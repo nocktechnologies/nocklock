@@ -1249,9 +1249,10 @@ no directories (it also runs *inside* the container for Probe 10(a)). The only o
 variables are `SystemRoot`, `windir`, `SystemDrive`, `ComSpec`, `PATH`, `PATHEXT`,
 `PSModulePath` (in-box modules such as `Resolve-DnsName`), `PROCESSOR_ARCHITECTURE`,
 `NUMBER_OF_PROCESSORS` and `OS`, copied from the launcher's own environment so
-`cmd`, PowerShell, git, node and python can start. Probes 3 and 5
-print the container's `TEMP` and `LOCALAPPDATA`, and Probe 3's verdict requires both
-to equal the AC folder.
+`cmd`, PowerShell, git, node and python can start. The scaffold's first
+zero-capability launch checks that the child's `TEMP` and `LOCALAPPDATA` equal the
+AC folder and stops the run as SETUP-FAULT if not; Probe 3 repeats the check on its
+limited-token launch, and Probes 3 and 5 print both values as evidence.
 
 PS 5.1's `Add-Type` compiles through CodeDom/`csc.exe`, which writes transient
 `.cs`/`.cmdline` files to `Path.GetTempPath()` (TMP, then TEMP) — so the one
@@ -1298,8 +1299,22 @@ icacls $launcherDll /grant "*${sid}:(R)"          # Probe 10(a) loads it inside 
 # and Probe 10's WMI child PID (see the bootstrap note above):
 $out = New-Item -ItemType Directory -Force -Path (Join-Path $probeRoot 'out')
 icacls $out.FullName /grant "*${sid}:(OI)(CI)(M)"
-# zero-capability container — the default, and the study's pivot:
-[NockProbe.AC]::Run($sid, @(), 'cmd.exe /c exit 0', 30000)
+# zero-capability container — the default, and the study's pivot. It doubles as the
+# environment self-check every launcher probe relies on: the child's TEMP and
+# LOCALAPPDATA must be this profile's AC folder, or no launcher probe is scored.
+# Value of Name in a `cmd /c set` capture, trailing '\' trimmed; '' if absent (-join
+# makes it a plain string, so an absent line can never slip past -ne). Probe 3 reuses it.
+function Get-SetValue([object[]]$Lines, [string]$Name) {
+  (((@($Lines) -match "^$Name=") -replace "^$Name=",'') -join ';').TrimEnd('\')
+}
+$envSmoke = Join-Path $out.FullName 'env-smoke.txt'
+[NockProbe.AC]::Run($sid, @(), ('cmd.exe /c set > "' + $envSmoke + '"'), 30000)
+$acDir = (Join-Path $env:LOCALAPPDATA "Packages\$moniker\AC").TrimEnd('\')
+$smoke = Get-Content $envSmoke -ErrorAction SilentlyContinue
+if ((Get-SetValue $smoke 'TEMP') -ne $acDir -or (Get-SetValue $smoke 'LOCALAPPDATA') -ne $acDir) {
+  "SETUP-FAULT: container environment not redirected to $acDir (TEMP=$(Get-SetValue $smoke 'TEMP') LOCALAPPDATA=$(Get-SetValue $smoke 'LOCALAPPDATA')); probes 1, 3, 4, 5, 6, 10, 11 not scored"
+  throw 'launcher environment self-check failed'
+}
 # one capability (internetClient, S-1-15-3-1), for the contrast case:
 [NockProbe.AC]::Run($sid, @('S-1-15-3-1'), 'cmd.exe /c exit 0', 30000)
 ```
@@ -1400,8 +1415,8 @@ function Invoke-LimitedPhase {
   # A timed-out earlier phase may still be running: stop it and WAIT until it is gone
   # before handing over the new request, so no old instance can pick it up.
   Stop-ScheduledTask -TaskName $taskName -ErrorAction SilentlyContinue
-  for ($i = 0; $i -lt 30 -and (Get-ScheduledTask -TaskName $taskName).State -eq 'Running'; $i++) { Start-Sleep 1 }
-  if ((Get-ScheduledTask -TaskName $taskName).State -eq 'Running') {
+  for ($i = 0; ($st = (Get-ScheduledTask -TaskName $taskName).State) -eq 'Running' -and $i -lt 30; $i++) { Start-Sleep 1 }
+  if ($st -eq 'Running') {
     $script:limitedFault = "an earlier instance of $taskName is still running 30 s after Stop-ScheduledTask"
     return $null
   }
@@ -1635,12 +1650,10 @@ $inv3 = $limitedInv                  # this call's id, captured once
 $d3  = if ($p3) { Join-Path $probeRoot "p3\$inv3" }
 $w   = if ($d3) { Get-Content (Join-Path $d3 'whoami-inside.txt') -ErrorAction SilentlyContinue }
 $e3  = if ($d3) { Get-Content (Join-Path $d3 'env-inside.txt') -ErrorAction SilentlyContinue }
-# The launcher's redirect target. Trailing '\' is trimmed on every side, so a correctly
-# redirected child never misses on separator form alone (-ne is already case-insensitive).
+# The launcher's redirect target, compared with the scaffold's Get-SetValue.
 $ac3 = (Join-Path $env:LOCALAPPDATA "Packages\nocklock-p3-$runId\AC").TrimEnd('\')
-# -join makes each a plain string: an empty array would slip past -ne below.
-$t3  = (((@($e3) -match '^TEMP=') -replace '^TEMP=','') -join ';').TrimEnd('\')
-$l3  = (((@($e3) -match '^LOCALAPPDATA=') -replace '^LOCALAPPDATA=','') -join ';').TrimEnd('\')
+$t3  = Get-SetValue $e3 'TEMP'
+$l3  = Get-SetValue $e3 'LOCALAPPDATA'
 $env3 = "container TEMP=$t3 LOCALAPPDATA=$l3"
 $p3err = (@($p3) -match '^ERROR:') -join '; '
 if (-not $p3) {
@@ -1843,8 +1856,8 @@ npm and pip actually wrote their caches** (the overrides above force them into t
 probe root). The launcher passes an explicit environment block with `TEMP`, `TMP`,
 `LOCALAPPDATA`, `APPDATA` and `USERPROFILE` set to the profile's AC folder (see
 [the launcher](#launcher-desktop-path-add-type-pinvoke)), so the first line above
-shows what the tools saw; if it names the operator's own directories, the run is a
-SETUP-FAULT and the toolchain results are not scored. Whether Windows would redirect
+shows what the tools saw (the scaffold's environment self-check has already
+stopped the run if the block was not redirected). Whether Windows would redirect
 those variables *itself* when handed an explicit block (UNVERIFIED #12) is a product
 question the probe launcher deliberately sidesteps.
 
@@ -2340,8 +2353,7 @@ foreach ($idFile in (Get-ChildItem -Path $probeRoot -Filter '*.txt' -Recurse -Er
   Stop-VerifiedProcess -IdentityFile $idFile.FullName
 }
 # Probe 9 (VM only): restore firewall to the recorded per-profile state
-Remove-Item -Recurse -Force $probeRoot                     # everything else lived here, incl. every
-                                                           # invocation's limited\<id>.* and p3\<id>\
+Remove-Item -Recurse -Force $probeRoot                     # everything else lived here
 
 # --- AFTER: ASSERT the BEFORE baseline is restored. One line per check; any
 # LEFTOVER line is a failed run, to be cleaned by hand using the name it prints.
