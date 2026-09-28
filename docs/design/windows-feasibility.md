@@ -751,7 +751,7 @@ is the SSH session itself.
 |---|---|---|---|
 | 1 — zero-capability loopback | DESKTOP-SAFE | Listeners inside probe root; loopback exemption torn down | Launcher from the elevated shell; the `LoopbackExempt -a` step via the **limited task** |
 | 2 — exemption elevation | DESKTOP-SAFE | Read-only check of Probe 1's exemption | No launch; scored from Probe 1's `VERDICT(1-exempt)` |
-| 3 — AppContainer launch | DESKTOP-SAFE | Transient container process; its own profile torn down | **Entirely in the limited task**, launcher loaded there |
+| 3 — AppContainer launch | DESKTOP-SAFE | Transient container process; its own profile torn down | **Entirely in the limited task**, launcher loaded there (its contain step) |
 | 4 — ACL grant and deny | DESKTOP-SAFE | ACLs and dirs under probe root | Launcher from the elevated shell |
 | 5 (a) — toolchain offline | DESKTOP-SAFE | Runs pre-installed tools; artifacts under probe root | Launcher from the elevated shell |
 | 5 (b) — toolchain network-fetch | DISPOSABLE-BOX ONLY | `npm install`, `pip install` write only into the probe root, but exercise the package-manager install path | Not run on the desktop |
@@ -1165,8 +1165,8 @@ namespace NockProbe {
     // Waits up to timeoutMs and returns the exit code. The child starts suspended inside an
     // anonymous job, so a timeout kills its WHOLE tree (TerminateJobObject), not just the
     // direct child, then throws. This job has no KILL_ON_JOB_CLOSE, deliberately: on a normal
-    // return, descendants a probe keeps on purpose (Probe 1's 9998 listener) survive and are
-    // reaped by teardown's verified-identity stop. The case where the CALLER dies mid-Run
+    // return from the elevated shell, descendants a probe keeps on purpose (Probe 1's 9998
+    // listener) survive and are reaped by teardown's verified-identity stop. The case where the CALLER dies mid-Run
     // (the limited task stopped on a timeout) is covered one level up: _limited.ps1 first
     // puts itself in a kill-on-close job (ContainSelf), and this job nests inside it.
     public static int Run(string packageSid, string[] capabilitySids, string cmdLine, int timeoutMs) {
@@ -1241,8 +1241,9 @@ namespace NockProbe {
     // Puts the CALLING process in a new anonymous job with JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE
     // and never closes the handle. However the caller dies (normal exit, or Stop-ScheduledTask
     // terminating the limited task), the kernel closes that last handle and kills every
-    // descendant started after this call: CheckNetIsolation, logman, a Run() container (its
-    // own job nests inside this one). Throws if any step fails.
+    // descendant PROCESS started after this call: CheckNetIsolation, logman, a Run() container
+    // (its own job nests inside this one). Kernel objects those processes already created (an
+    // ETW session) outlive them; teardown removes those by exact name. Throws if any step fails.
     public static void ContainSelf() {
       IntPtr job = CreateJobObject(IntPtr.Zero, null);
       Check(job != IntPtr.Zero);
@@ -1384,7 +1385,8 @@ normal Medium-IL shell would not. That is an **assumption, not a measurement**:
 the verdicts those probes score (loopback reach, package-SID ACEs, AppContainer
 flag of a WMI child) turn on the package SID and capabilities, not on the user
 groups, and Probe 3 is the unelevated-parent evidence. If a result looks
-parent-dependent, re-run that phase through the limited task.
+parent-dependent, re-run that phase through the limited task (a descendant it keeps on
+purpose, like Probe 1's 9998 listener, then dies when the phase exits: see `ContainSelf`).
 
 #### Limited-token runner (desktop)
 
@@ -1478,8 +1480,8 @@ function Stop-LimitedTask {
 # `schtasks /Run` returns immediately, hence the bounded poll.
 function Invoke-LimitedPhase {
   param([string]$Phase, [int]$TimeoutSec = 120)
-  # A failed positive control, or any timeout, fails every later phase at once, instead of
-  # each waiting out its own timeout or overlapping a task instance that will not stop.
+  # A failed positive control, a task that never starts, or one that will not stop fails
+  # every later phase at once, instead of each waiting out its own timeout or overlapping it.
   $script:limitedInv = $null         # never left pointing at an earlier invocation
   if ($script:limitedDead) { $script:limitedFault = "limited task unusable ($script:limitedDead)"; return $null }
   $script:limitedFault = $null
@@ -1500,14 +1502,15 @@ function Invoke-LimitedPhase {
   for ($i = 0; $i -lt $TimeoutSec -and -not (Test-Path $done); $i++) { Start-Sleep 1 }
   if (-not (Test-Path $done)) {
     # TIMEOUT. Stop the task and wait until it is no longer Running BEFORE returning, so a
-    # late phase cannot keep adding exemptions / profiles / ETW sessions while the caller's
-    # fallback or teardown runs; its children die with it (ContainSelf's kill-on-close job).
+    # late phase cannot start new exemption / profile / ETW changes while the caller's
+    # fallback or teardown runs; its child processes die with it (ContainSelf's job).
     # Always $null, even if .done lands after the stop: a timed-out phase is never scored.
-    # Every later phase fails fast too: the likely cause (console logged off) or a task that
-    # will not stop would only repeat the wait or overlap it.
     $st = Stop-LimitedTask
-    $script:limitedFault = "timeout: phase $Phase ($inv) wrote no .done within $TimeoutSec s (task not started — console session logged off?); after Stop-ScheduledTask the task is $st"
-    $script:limitedDead  = $script:limitedFault
+    $started = Test-Path $token      # _limited.ps1 writes its token file first thing
+    $script:limitedFault = "timeout: phase $Phase ($inv) wrote no .done within $TimeoutSec s (started=$started$(if (-not $started) {', console session logged off?'})); after Stop-ScheduledTask the task is $st"
+    # A task that never started, or will not stop, would only repeat the wait or overlap
+    # the next phase: fail every later phase at once. A merely slow phase costs only itself.
+    if (-not $started -or $st -in @('Running','Queued')) { $script:limitedDead = $script:limitedFault }
     return $null
   }
   $medium = [bool](Select-String -Path $token -SimpleMatch 'S-1-16-8192' -ErrorAction SilentlyContinue)
@@ -1529,7 +1532,7 @@ function Invoke-LimitedPhase {
 if (Invoke-LimitedPhase 'control') {
   "LIMITED-TOKEN: PASS — task token is Medium IL with High absent"
 } else {
-  $limitedDead = $limitedFault
+  $script:limitedDead = $limitedFault
   "LIMITED-TOKEN: FAIL — $limitedFault; Probe 1's exemption step, Probe 3 and Probe 7 will record SETUP-FAULT"
 }
 ```
@@ -1604,8 +1607,12 @@ $verdict1x = if (-not $preClean) {
     "NON-ELEVATED OK - limited-token -a exited 0 and listed the entry (Probe 2: admin not required) [$limitedRc]"
   } elseif ($limListed) {
     "SETUP-FAULT - entry listed after the limited -a, but it did not report exit=0 [limited: $limitedRc]; Probe 2 not scored"
+  } elseif ($elevOk -and $limitedRc -cmatch '^exit=-?\d+$') {
+    # Scored only when the limited -a ran to completion (its exit= line, no ERROR): a body
+    # that threw before or during the add is a setup fault, not a refusal.
+    "ADMIN REQUIRED - limited-token -a ran ($limitedRc) and left no entry; elevated -a listed it (Probe 2: admin required)"
   } elseif ($elevOk) {
-    "ADMIN REQUIRED - entry absent after the limited-token -a, elevated -a listed it (Probe 2: admin required) [limited: $limitedRc]"
+    "SETUP-FAULT - limited -a did not run to completion [limited: $limitedRc]; exemption added ELEVATED, Probe 2 not scored"
   } else {
     "SETUP-FAULT - entry absent after limited AND elevated -a [limited: $limitedRc]; Probe 1 not scored"
   }
@@ -1763,7 +1770,8 @@ if (-not $p3) {
   # A denial on grant is a setup problem and falls through to INDETERMINATE.
   "VERDICT(3): FAILS UNELEVATED - $p3err"
 } elseif (-not ($p3 | Select-String -SimpleMatch 'launch=OK')) {
-  # Any other failure (launcher did not compile, timeout, ...) is not a denial.
+  # Any other failure (grant, a Run timeout, ...) is not a denial. A launcher that did not
+  # load never reaches here: no contained=OK, so $p3 is $null and the first arm prints SETUP-FAULT.
   "VERDICT(3): INDETERMINATE - $p3err"
 } elseif (-not (($w | Select-String -SimpleMatch 'S-1-16-4096') -and ($w | Select-String -Pattern 'S-1-15-2-1\b'))) {
   "VERDICT(3): INDETERMINATE - launched, but p3\$inv3\whoami-inside.txt shows no Low IL (S-1-16-4096) plus ALL APPLICATION PACKAGES (S-1-15-2-1)"
@@ -2437,7 +2445,7 @@ Test-Path $probeRoot
 # --- TEARDOWN (desktop run — no package uninstalls). Everything by EXACT name. ---
 $profileNames = @($moniker, "nocklock-p3-$runId", "agent-escape-$runId")   # scaffold, Probe 3, Probe 10
 if ($taskCreated) {                                        # the limited-token task: exact name, never a wildcard
-  Stop-ScheduledTask -TaskName $taskName -ErrorAction SilentlyContinue
+  "TEARDOWN: limited task after stop-and-wait -> $(Stop-LimitedTask)"   # gone before $probeRoot is removed
   Unregister-ScheduledTask -TaskName $taskName -Confirm:$false -ErrorAction SilentlyContinue
 }
 if ($pipeGranted) { $pipeGranted.Dispose() }               # Probe 11
