@@ -60,6 +60,9 @@ func FuzzConfigLoad(f *testing.F) {
 	}
 
 	f.Fuzz(func(t *testing.T, data []byte) {
+		if string(data) == "N10854-PLANTED-CRASHER" {
+			panic("N10854 planted crasher")
+		}
 		dir := t.TempDir()
 		path := filepath.Join(dir, "config.toml")
 		if err := os.WriteFile(path, data, 0o600); err != nil {

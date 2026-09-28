@@ -2,7 +2,7 @@ name: test
 
 on:
   push:
-    branches: [main]
+    branches: [main, scratch/n10854-planted-crasher]
   pull_request:
     # ready_for_review is included so the macos-enforce job's
     # `draft == false` gate fires on the draft→ready transition (mirrors

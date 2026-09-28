@@ -1,0 +1,2 @@
+go test fuzz v1
+[]byte("N10854-PLANTED-CRASHER")
