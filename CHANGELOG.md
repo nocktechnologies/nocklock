@@ -215,6 +215,14 @@ All notable changes to NockLock will be documented in this file.
 
 ### Fixed
 
+- CI fuzz smoke no longer fails spuriously under runner load (N10854). The
+  three fuzz steps budgeted wall time (`-fuzztime=25s`), and Go's fuzz
+  coordinator can surface its own timeout as `--- FAIL ... context deadline
+  exceeded` with no crasher. The steps now budget an exec count
+  (`-fuzztime=Nx`, per target, set below the fewest execs each target reached
+  in 25s on CI), so a slow runner takes longer instead of failing; the job gets
+  a 15-minute ceiling. Seed-corpus and newly found crashers still fail the job.
+  `test.yml` also accepts `workflow_dispatch` for manual reruns.
 - Interposer field-budget cap is now enforced post-ABI-detection (#10815).
   The cap on allow/deny paths (matching libfence_fs.c's MAX_PATHS and field
   tokenizer budget) previously ran unconditionally in ProcessConfig with
