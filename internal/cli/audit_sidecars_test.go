@@ -17,7 +17,22 @@ import (
 // the root-level case.
 func rootAuditFixture(t *testing.T) (string, string) {
 	t.Helper()
-	project := t.TempDir()
+	// Keep the project outside the default /tmp grant. Landlock cannot deny an
+	// audit file below a separately granted /tmp hierarchy, even when the
+	// project root itself is withheld.
+	project, err := os.MkdirTemp(".", ".nocklock-audit-root-")
+	if err != nil {
+		t.Fatalf("create project-root fixture: %v", err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(project) })
+	project, err = filepath.Abs(project)
+	if err != nil {
+		t.Fatalf("resolve project-root fixture: %v", err)
+	}
+	project, err = filepath.EvalSymlinks(project)
+	if err != nil {
+		t.Fatalf("canonicalize project-root fixture: %v", err)
+	}
 	stateHome, err := os.MkdirTemp("", "nocklock-test-state-")
 	if err != nil {
 		t.Fatalf("create state-home fixture: %v", err)
@@ -40,6 +55,10 @@ func rootAuditFixture(t *testing.T) (string, string) {
 	if err := os.WriteFile(dbPath, nil, 0o600); err != nil {
 		t.Fatalf("create root audit database fixture: %v", err)
 	}
+	dbPath, err = filepath.EvalSymlinks(dbPath)
+	if err != nil {
+		t.Fatalf("canonicalize root audit database fixture: %v", err)
+	}
 
 	configPath := filepath.Join(project, config.Dir, config.File)
 	cfg, err := config.Load(configPath)
@@ -50,7 +69,11 @@ func rootAuditFixture(t *testing.T) (string, string) {
 	if err != nil {
 		t.Fatalf("resolve root audit database: %v", err)
 	}
-	if resolved != dbPath || resolvedProject != project {
+	canonicalResolvedProject, err := filepath.EvalSymlinks(resolvedProject)
+	if err != nil {
+		t.Fatalf("canonicalize resolved project root: %v", err)
+	}
+	if resolved != dbPath || canonicalResolvedProject != project {
 		t.Fatalf("resolved audit location = (%q, %q), want (%q, %q)", resolved, resolvedProject, dbPath, project)
 	}
 	return project, dbPath
