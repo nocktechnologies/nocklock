@@ -35,6 +35,22 @@ All notable changes to NockLock will be documented in this file.
 
 ### Changed
 
+- The Windows desktop probe script (`docs/probes/n10825/run-probe.ps1`) runs
+  every command inside a container through `cmd.exe`: on the first desktop run
+  `powershell.exe` exited `0xC0000142` (`STATUS_DLL_INIT_FAILED`) in a
+  zero-capability container. Probe 1 launches each loopback curl on its own and
+  checks the 9998 bind + listen with a python that exits; Probe 3 captures
+  `whoami /groups` and `set` with their errors and exit codes. SETUP-FAULT lines
+  print exit codes in hex. A launch counts as the tool's answer only when its
+  capture holds a line the tool itself writes (curl's `--write-out`
+  `CURL_DONE exit=<n>`, python's `PYTHON_RAN`, a SID from whoami): cmd failing to
+  start the tool (access denied on the exe, or the exe missing) is a SETUP-FAULT,
+  never `PHASE 1 DEAD` or another probe verdict. The launcher's environment block now accounts for
+  Windows' own AppContainer redirection, which had doubled the
+  `Packages\<moniker>\AC` path, and the environment self-check fails when
+  `TEMP` or `LOCALAPPDATA` does not exist. The first run's output is committed
+  as `docs/probes/n10825/output-20260928T0558Z.txt`.
+
 - The Linux filesystem fence rejects configurations whose `allow_rw` entries
   push the shared allow cap or the combined wire budget over its limit.
 - macOS Seatbelt root-write confinement no longer grants the fenced child

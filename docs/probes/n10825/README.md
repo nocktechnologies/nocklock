@@ -71,8 +71,22 @@ mappings and package folders) and every `%TEMP%\nocklock-probe-*` probe root. Th
 or `AFTER!=BEFORE` line per category, and the final `RUN:` line.
 
 The transcript carries the verdicts: `LAUNCHER-ENV:`, `LIMITED-TOKEN:`,
-`VERDICT(1-exempt):`, the `inside(1):` lines with `VERDICT(1):`, `VERDICT(2):` and
-`VERDICT(3):`, then the teardown's `RESTORED:` / `LEFTOVER:` lines.
+`VERDICT(1-exempt):`, the `inside(1):` lines with `VERDICT(1):`, `VERDICT(2):`, the
+`inside(3) whoami:` lines with `VERDICT(3):`, then the teardown's `RESTORED:` /
+`LEFTOVER:` lines.
+
+- Every command inside a container runs through `cmd.exe`, never `powershell.exe`,
+  which did not start in a zero-capability container on the first desktop run (exit
+  `0xC0000142`, `STATUS_DLL_INIT_FAILED`). A `SETUP-FAULT` that names a
+  launch prints its exit code in hex; a negative one is an NTSTATUS, meaning that
+  process did not start (`0xC0000142`) or crashed (e.g. `0xC0000005`).
+- cmd's exit code alone does not prove the target tool ran: when cmd cannot start it
+  (access denied on the exe, or the exe missing) cmd exits with its own code. Each
+  capture carries a line only the tool writes: curl's `CURL_DONE exit=<n>` (from
+  `--write-out`), python's `PYTHON_RAN`, and a SID in the whoami capture. Without it,
+  the launch is a `SETUP-FAULT` that says the tool did not run, never a network or
+  probe result. A real curl failure keeps its `CURL_DONE exit=<n>` line (e.g. `7`
+  refused, `28` timed out).
 
 - The scaffold's tool check prints lines for every probe in the doc; a
   `SETUP-FAULT: Probe 5a requires ...` line concerns a probe this run does not execute.
@@ -85,6 +99,13 @@ The transcript carries the verdicts: `LAUNCHER-ENV:`, `LIMITED-TOKEN:`,
   the task, the probe root, the profiles and the exemption, and prints each by exact name
   with `RECOVERY` commands. Run those by hand once the task reads Ready or Disabled; until
   then it is a failed run.
+
+## Recorded runs
+
+- [`output-20260928T0558Z.txt`](output-20260928T0558Z.txt): the first desktop run
+  (script `30b25dfd`), `output.txt` and the transcript verbatim. `RUN: COMPLETE`;
+  `VERDICT(1)` was a SETUP-FAULT (`powershell.exe` exited `0xC0000142` inside the
+  container) and `VERDICT(3)` INDETERMINATE, which this revision of the script addresses.
 
 ## If the run was interrupted
 
