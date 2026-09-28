@@ -980,10 +980,13 @@ $out       = Get-Item (Join-Path $probeRoot 'out')
 } *>&1 | ForEach-Object { "$_" } | Out-File -FilePath (Join-Path $out.FullName "_inside-$Phase.log") -Append -Encoding utf8
 ```
 
-**`powershell.exe` does not start in a zero-capability container on the desktop.** The
+**`powershell.exe` did not start in a zero-capability container on the desktop.** The
 first desktop run launched `_inside.ps1 -Phase 1` this way and it exited
 `-1073741502` (`0xC0000142`, `STATUS_DLL_INIT_FAILED`) with an empty log, while
-`cmd.exe` started in the same container. So `run-probe.ps1` assembles no `_inside.ps1`
+`cmd.exe` started in the same container. That run also handed the child a doubled,
+nonexistent `LOCALAPPDATA`/`TEMP` (see [the launcher](#launcher-desktop-path-add-type-pinvoke)),
+so whether `powershell.exe` starts with a correct block is still open. The measured
+commands do not need PowerShell, so `run-probe.ps1` assembles no `_inside.ps1`
 phase: Probes 1 and 3 run each measured command directly through the launcher as
 `cmd.exe /c <command> > "<file>" 2>&1`, into a SID-writable dir. The inside probes that
 need PowerShell (4a/4b, 5, 6, 10, 11) add their own `-Phase` arm when they are
@@ -1177,8 +1180,8 @@ namespace NockProbe {
     // own AppContainer redirection ON TOP of this block: it appends Packages\<moniker>\AC to the
     // LOCALAPPDATA it is handed and derives TEMP from the result (the first desktop run handed
     // it the AC folder and got ...\AC\Packages\<moniker>\AC). So LOCALAPPDATA carries the base
-    // that redirection expects (the AC folder three levels up), TEMP and TMP name AC\Temp (the
-    // caller creates it), and APPDATA and USERPROFILE name the AC folder itself
+    // that redirection expects (the AC folder three levels up), TEMP and TMP name AC\Temp
+    // (created here), and APPDATA and USERPROFILE name the AC folder itself
     // (%LOCALAPPDATA%\Packages\<moniker>\AC, which CreateAppContainerProfile creates and
     // grants to the package SID), so no probe reads or writes the operator's real
     // profile dirs through them. Only the variables tools need to start are copied through.
@@ -1206,7 +1209,7 @@ namespace NockProbe {
                           "CommonProgramFiles(x86)", "ProgramData", "ALLUSERSPROFILE" };
       var vars = new System.Collections.Generic.SortedDictionary<string, string>(StringComparer.OrdinalIgnoreCase);
       vars["LOCALAPPDATA"] = System.IO.Path.GetDirectoryName(System.IO.Path.GetDirectoryName(System.IO.Path.GetDirectoryName(acDir)));
-      vars["TEMP"] = vars["TMP"] = acDir + "\\Temp";
+      vars["TEMP"] = vars["TMP"] = System.IO.Directory.CreateDirectory(acDir + "\\Temp").FullName;
       vars["APPDATA"] = vars["USERPROFILE"] = acDir;
       foreach (string n in copied) { string v = Environment.GetEnvironmentVariable(n); if (v != null) vars[n] = v; }
       StringBuilder b = new StringBuilder();
@@ -1350,9 +1353,8 @@ Windows appends `Packages\<moniker>\AC` to the `LOCALAPPDATA` it is handed and d
 (the AC folder three levels up, i.e. `%LOCALAPPDATA%`), sets `TEMP` and `TMP` to
 `AC\Temp`, and sets `APPDATA` and `USERPROFILE` to the AC folder itself
 (`GetAppContainerFolderPath`, i.e. `%LOCALAPPDATA%\Packages\<moniker>\AC`, which
-`CreateAppContainerProfile` creates and ACLs). The launcher creates no directories, so
-whoever creates a profile also creates its `AC\Temp` (the scaffold, and `_limited.ps1`
-for Probe 3). The other variables are copied from the launcher's
+`CreateAppContainerProfile` creates and ACLs). `AC\Temp` is the one directory the launcher
+creates itself (`Directory.CreateDirectory`, a no-op when it exists). The other variables are copied from the launcher's
 own environment so `cmd`, PowerShell, git, node, python and MSVC discovery can start:
 `SystemRoot`, `windir`, `SystemDrive`, `ComSpec`, `PATH`, `PATHEXT`, `PSModulePath`
 (in-box modules such as `Resolve-DnsName`), `PROCESSOR_ARCHITECTURE`,
@@ -1432,8 +1434,6 @@ function Test-Redirected([object[]]$Lines, [string]$AcDir) {
   $shown -join ' '
 }
 $acDir    = (Join-Path $env:LOCALAPPDATA "Packages\$moniker\AC").TrimEnd('\')
-# The launcher's TEMP/TMP (see BuildEnvironment); it creates no directories itself.
-New-Item -ItemType Directory -Force -Path (Join-Path $acDir 'Temp') | Out-Null
 $envSmoke = Join-Path $out.FullName 'env-smoke.txt'
 $rcSmoke  = [NockProbe.AC]::Run($sid, @(), ('cmd.exe /c set > "' + $envSmoke + '"'), 30000)
 $envShown = Test-Redirected (Get-Content $envSmoke -ErrorAction SilentlyContinue) $acDir
@@ -1733,7 +1733,7 @@ $verdict1x = if (-not $preClean) {
 "VERDICT(1-exempt): $verdict1x"
 
 # then, inside a ZERO-capability container: each measured command in its own launch from
-# the elevated shell, run by cmd.exe. Not powershell.exe: it does not start in a
+# the elevated shell, run by cmd.exe. Not powershell.exe: it did not start in a
 # zero-capability container (the first desktop run's launch exited 0xC0000142,
 # STATUS_DLL_INIT_FAILED, while cmd.exe started). Never run those curls in this shell: an
 # outer curl answers nothing about the container. cmd writes each command's output (curl's
@@ -1927,10 +1927,8 @@ $sid3 = [NockProbe.AC]::CreateProfile("nocklock-p3-$runId")      # throws -> ERR
 $step = 'grant'
 $d3 = New-Item -ItemType Directory -Path (Join-Path $probeRoot "p3\$inv") -ErrorAction Stop   # this invocation's own dir
 icacls $d3.FullName /grant "*${sid3}:(OI)(CI)(M)" | Out-Null   # the limited token owns p3\<id>\, so it holds WRITE_DAC
-# The launcher's TEMP/TMP (see BuildEnvironment); it creates no directories itself.
-New-Item -ItemType Directory -Force -Path (Join-Path $env:LOCALAPPDATA "Packages\nocklock-p3-$runId\AC\Temp") -ErrorAction Stop | Out-Null
 $step = 'run'
-# Two launches through cmd.exe (not powershell.exe, which does not start in a zero-capability
+# Two launches through cmd.exe (not powershell.exe, which did not start in a zero-capability
 # container), each with its own exit code and its stderr kept: `whoami /groups` for the token,
 # `set` for the container's own environment, so the verdict shows TEMP/LOCALAPPDATA were redirected.
 $rcW = [NockProbe.AC]::Run($sid3, @(), ('cmd.exe /c whoami /groups > "' + (Join-Path $d3.FullName 'whoami-inside.txt') + '" 2>&1'), 60000)

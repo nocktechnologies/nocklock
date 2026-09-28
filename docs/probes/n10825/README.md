@@ -76,8 +76,8 @@ The transcript carries the verdicts: `LAUNCHER-ENV:`, `LIMITED-TOKEN:`,
 `LEFTOVER:` lines.
 
 - Every command inside a container runs through `cmd.exe`, never `powershell.exe`,
-  which does not start in a zero-capability container (exit `0xC0000142`,
-  `STATUS_DLL_INIT_FAILED`, on the first desktop run). A `SETUP-FAULT` that names a
+  which did not start in a zero-capability container on the first desktop run (exit
+  `0xC0000142`, `STATUS_DLL_INIT_FAILED`). A `SETUP-FAULT` that names a
   launch prints its exit code in hex; a negative one is an NTSTATUS, meaning that
   process never started.
 

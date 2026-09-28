@@ -36,8 +36,8 @@ All notable changes to NockLock will be documented in this file.
 ### Changed
 
 - The Windows desktop probe script (`docs/probes/n10825/run-probe.ps1`) runs
-  every command inside a container through `cmd.exe`: the first desktop run
-  showed `powershell.exe` exits `0xC0000142` (`STATUS_DLL_INIT_FAILED`) in a
+  every command inside a container through `cmd.exe`: on the first desktop run
+  `powershell.exe` exited `0xC0000142` (`STATUS_DLL_INIT_FAILED`) in a
   zero-capability container. Probe 1 launches each loopback curl on its own and
   finds the container's 9998 listener from the outer shell; Probe 3 captures
   `whoami /groups` and `set` with their errors and exit codes. SETUP-FAULT lines

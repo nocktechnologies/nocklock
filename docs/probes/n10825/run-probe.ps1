@@ -231,8 +231,8 @@ try {
   }
 
   # --- The two files the scaffold writes into $probeRoot (doc: "Launcher (desktop
-  # path)", "Limited-token runner"). No _inside.ps1: powershell.exe does not start in a
-  # zero-capability container, so Probes 1 and 3 run their inside commands through cmd.exe. ---
+  # path)", "Limited-token runner"). No _inside.ps1: powershell.exe did not start in a
+  # zero-capability container on the first desktop run, so Probes 1 and 3 run their inside commands through cmd.exe. ---
   Set-Content -Path (Join-Path $probeRoot '_launcher.cs') -Encoding UTF8 -Value @'
 using System;
 using System.Runtime.InteropServices;
@@ -334,8 +334,8 @@ namespace NockProbe {
     // own AppContainer redirection ON TOP of this block: it appends Packages\<moniker>\AC to the
     // LOCALAPPDATA it is handed and derives TEMP from the result (the first desktop run handed
     // it the AC folder and got ...\AC\Packages\<moniker>\AC). So LOCALAPPDATA carries the base
-    // that redirection expects (the AC folder three levels up), TEMP and TMP name AC\Temp (the
-    // caller creates it), and APPDATA and USERPROFILE name the AC folder itself
+    // that redirection expects (the AC folder three levels up), TEMP and TMP name AC\Temp
+    // (created here), and APPDATA and USERPROFILE name the AC folder itself
     // (%LOCALAPPDATA%\Packages\<moniker>\AC, which CreateAppContainerProfile creates and
     // grants to the package SID), so no probe reads or writes the operator's real
     // profile dirs through them. Only the variables tools need to start are copied through.
@@ -363,7 +363,7 @@ namespace NockProbe {
                           "CommonProgramFiles(x86)", "ProgramData", "ALLUSERSPROFILE" };
       var vars = new System.Collections.Generic.SortedDictionary<string, string>(StringComparer.OrdinalIgnoreCase);
       vars["LOCALAPPDATA"] = System.IO.Path.GetDirectoryName(System.IO.Path.GetDirectoryName(System.IO.Path.GetDirectoryName(acDir)));
-      vars["TEMP"] = vars["TMP"] = acDir + "\\Temp";
+      vars["TEMP"] = vars["TMP"] = System.IO.Directory.CreateDirectory(acDir + "\\Temp").FullName;
       vars["APPDATA"] = vars["USERPROFILE"] = acDir;
       foreach (string n in copied) { string v = Environment.GetEnvironmentVariable(n); if (v != null) vars[n] = v; }
       StringBuilder b = new StringBuilder();
@@ -529,10 +529,8 @@ try {
       $step = 'grant'
       $d3 = New-Item -ItemType Directory -Path (Join-Path $probeRoot "p3\$inv") -ErrorAction Stop   # this invocation's own dir
       icacls $d3.FullName /grant "*${sid3}:(OI)(CI)(M)" | Out-Null   # the limited token owns p3\<id>\, so it holds WRITE_DAC
-      # The launcher's TEMP/TMP (see BuildEnvironment); it creates no directories itself.
-      New-Item -ItemType Directory -Force -Path (Join-Path $env:LOCALAPPDATA "Packages\nocklock-p3-$runId\AC\Temp") -ErrorAction Stop | Out-Null
       $step = 'run'
-      # Two launches through cmd.exe (not powershell.exe, which does not start in a zero-capability
+      # Two launches through cmd.exe (not powershell.exe, which did not start in a zero-capability
       # container), each with its own exit code and its stderr kept: `whoami /groups` for the token,
       # `set` for the container's own environment, so the verdict shows TEMP/LOCALAPPDATA were redirected.
       $rcW = [NockProbe.AC]::Run($sid3, @(), ('cmd.exe /c whoami /groups > "' + (Join-Path $d3.FullName 'whoami-inside.txt') + '" 2>&1'), 60000)
@@ -609,8 +607,6 @@ try {
     $shown -join ' '
   }
   $acDir    = (Join-Path $env:LOCALAPPDATA "Packages\$moniker\AC").TrimEnd('\')
-  # The launcher's TEMP/TMP (see BuildEnvironment); it creates no directories itself.
-  New-Item -ItemType Directory -Force -Path (Join-Path $acDir 'Temp') | Out-Null
   $envSmoke = Join-Path $out.FullName 'env-smoke.txt'
   $rcSmoke  = [NockProbe.AC]::Run($sid, @(), ('cmd.exe /c set > "' + $envSmoke + '"'), 30000)
   $envShown = Test-Redirected (Get-Content $envSmoke -ErrorAction SilentlyContinue) $acDir
@@ -818,7 +814,7 @@ try {
       "VERDICT(1-exempt): $verdict1x"
 
       # then, inside a ZERO-capability container: each measured command in its own launch from
-      # the elevated shell, run by cmd.exe. Not powershell.exe: it does not start in a
+      # the elevated shell, run by cmd.exe. Not powershell.exe: it did not start in a
       # zero-capability container (the first desktop run's launch exited 0xC0000142,
       # STATUS_DLL_INIT_FAILED, while cmd.exe started). Never run those curls in this shell: an
       # outer curl answers nothing about the container. cmd writes each command's output (curl's
