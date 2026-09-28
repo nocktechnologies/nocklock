@@ -64,9 +64,9 @@ assembled yet, and on `-Mode Desktop` it refuses the DISPOSABLE-BOX ONLY probes 
 `output.txt` holds the environment stamps (date, script SHA-256, run id, OS version, build,
 edition, architecture, PowerShell version, user, `elevated=`), then the BEFORE and AFTER
 state listings: loopback exemptions, listeners on 8899/9999/9998, `nocklock-probe-*`
-scheduled tasks, `nocklock-*` AppContainer profiles (registry mappings and package
-folders) and whether `$probeRoot` exists. Then one `AFTER==BEFORE` or `AFTER!=BEFORE`
-line each for exemptions, ports, tasks and profiles, and the final `RUN:` line.
+scheduled tasks, `nocklock-*` / `agent-escape-*` AppContainer profiles (registry
+mappings and package folders) and whether `$probeRoot` exists. Then one `AFTER==BEFORE`
+or `AFTER!=BEFORE` line per category, and the final `RUN:` line.
 
 The transcript carries the verdicts: `LAUNCHER-ENV:`, `LIMITED-TOKEN:`,
 `VERDICT(1-exempt):`, the `inside(1):` lines with `VERDICT(1):`, `VERDICT(2):` and

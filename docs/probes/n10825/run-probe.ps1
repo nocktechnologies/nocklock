@@ -30,9 +30,9 @@ param(
 # --- Probe selection: refuse before anything is created -------------------------------
 # `-File run-probe.ps1 -Probes 1,2,3` binds one string '1,2,3', hence the split.
 $probeList = @()
-foreach ($p in @($Probes -split ',')) {
-  if ($p.Trim() -notmatch '^(1[01]|[1-9])$') { "REFUSED: -Probes entry '$p' is not a probe number 1-11. Nothing was changed."; exit 2 }
-  $probeList += [int]$p.Trim()
+foreach ($p in @($Probes -split ',').Trim()) {
+  if ($p -notmatch '^(1[01]|[1-9])$') { "REFUSED: -Probes entry '$p' is not a probe number 1-11. Nothing was changed."; exit 2 }
+  $probeList += [int]$p
 }
 $disposableOnly = @{ 8 = 'installs user-scope packages'; 9 = 'disables the firewall' }   # doc: Probe classification
 foreach ($p in $probeList) {
@@ -58,15 +58,16 @@ function Get-ProbeState {
   $maps = 'HKCU:\Software\Classes\Local Settings\Software\Microsoft\Windows\CurrentVersion\AppContainer\Mappings'
   [ordered]@{
     exemptions = @(CheckNetIsolation.exe LoopbackExempt -s | Select-String -Pattern 'S-1-15-2-[0-9-]+' -AllMatches |
-                   ForEach-Object { $_.Matches } | ForEach-Object { $_.Value } | Sort-Object -Unique)
+                   ForEach-Object { $_.Matches.Value } | Sort-Object -Unique)
     ports      = @(Get-NetTCPConnection -State Listen -LocalPort 8899, 9999, 9998 -ErrorAction SilentlyContinue |
                    ForEach-Object { '{0}:{1} pid={2}' -f $_.LocalAddress, $_.LocalPort, $_.OwningProcess } | Sort-Object -Unique)
     tasks      = @(Get-ScheduledTask -ErrorAction SilentlyContinue | Where-Object { $_.TaskName -like 'nocklock-probe-*' } |
                    ForEach-Object { $_.TaskPath + $_.TaskName } | Sort-Object -Unique)
     profiles   = @(@(Get-ChildItem $maps -ErrorAction SilentlyContinue |
                      ForEach-Object { (Get-ItemProperty $_.PSPath -ErrorAction SilentlyContinue).Moniker } |
-                     Where-Object { $_ -like 'nocklock-*' } | ForEach-Object { "mapping:$_" }) +
-                   @(Get-ChildItem (Join-Path $env:LOCALAPPDATA 'Packages') -Directory -Filter 'nocklock-*' -ErrorAction SilentlyContinue |
+                     Where-Object { $_ -like 'nocklock-*' -or $_ -like 'agent-escape-*' } | ForEach-Object { "mapping:$_" }) +
+                   @(Get-ChildItem (Join-Path $env:LOCALAPPDATA 'Packages') -Directory -ErrorAction SilentlyContinue |
+                     Where-Object { $_.Name -like 'nocklock-*' -or $_.Name -like 'agent-escape-*' } |
                      ForEach-Object { "folder:$($_.Name)" }) | Sort-Object -Unique)
     probeRoot  = @("$probeRoot exists=$(Test-Path $probeRoot)")
   }
@@ -763,7 +764,6 @@ function Write-ProcessIdentity {
   } else {
     # An unproven token aborts the run HERE, before any probe makes a machine-wide change
     # (listeners, exemption): the teardown then has only the task and the profile to remove.
-    $script:limitedDead = $limitedFault
     "LIMITED-TOKEN: FAIL — $limitedFault; run aborted before any probe"
     throw "SETUP-FAULT: run aborted - limited-token positive control failed"
   }
@@ -1020,22 +1020,15 @@ function Write-ProcessIdentity {
   # --- AFTER: the machine listing again; AFTER must equal BEFORE. ---
   $stateAfter = Get-ProbeState
   Write-State 'AFTER' $stateAfter | Write-Evidence
-  $mismatch = @(foreach ($k in 'exemptions', 'ports', 'tasks', 'profiles') {
-    if (($stateAfter[$k] -join ', ') -cne ($stateBefore[$k] -join ', ')) { $k }
-  })
-  $(foreach ($k in 'exemptions', 'ports', 'tasks', 'profiles') {
-    if ($mismatch -contains $k) { "AFTER!=BEFORE: $k" } else { "AFTER==BEFORE: $k" }
+  # Covers everything the doc's RESTORED/LEFTOVER lines check (by category, for every run's
+  # leftovers, not only this run's names), so a LEFTOVER always shows up here as a mismatch.
+  $mismatch = @()
+  $(foreach ($k in $stateBefore.Keys) {
+    if (($stateAfter[$k] -join ', ') -cne ($stateBefore[$k] -join ', ')) { $mismatch += $k; "AFTER!=BEFORE: $k" }
+    else { "AFTER==BEFORE: $k" }
   }) | Write-Evidence
-  $summary = if ($runError) {
-      "RUN: FAILED - aborted: $runError"
-    } elseif ($mismatch.Count) {
-      "RUN: FAILED - AFTER != BEFORE for $($mismatch -join ', '); clean up by the names above"
-    } elseif (Test-Path $probeRoot) {
-      "RUN: FAILED - probe root still present: $probeRoot"
-    } else {
-      "RUN: COMPLETE - AFTER == BEFORE for exemptions, ports, tasks and profiles"
-    }
-  if ($summary -like 'RUN: COMPLETE*') { $exitCode = 0 }
-  $summary | Write-Evidence
+  if ($runError)           { "RUN: FAILED - aborted: $runError" | Write-Evidence }
+  elseif ($mismatch.Count) { "RUN: FAILED - AFTER != BEFORE for $($mismatch -join ', '); clean up by the names above" | Write-Evidence }
+  else                     { $exitCode = 0; "RUN: COMPLETE - AFTER == BEFORE for every listed category" | Write-Evidence }
 }
 exit $exitCode

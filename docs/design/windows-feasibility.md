@@ -1606,7 +1606,6 @@ if (Invoke-LimitedPhase 'control') {
 } else {
   # An unproven token aborts the run HERE, before any probe makes a machine-wide change
   # (listeners, exemption): the teardown then has only the task and the profile to remove.
-  $script:limitedDead = $limitedFault
   "LIMITED-TOKEN: FAIL — $limitedFault; run aborted before any probe"
   throw "SETUP-FAULT: run aborted - limited-token positive control failed"
 }
