@@ -131,6 +131,25 @@ func Validate(cfg *Config) []ValidationError {
 		}
 	}
 
+	// filesystem.allow_rw entries must not contain path traversal.
+	for _, p := range cfg.Filesystem.AllowRW {
+		if strings.TrimSpace(p) == "" {
+			errs = append(errs, ValidationError{
+				Field:    "filesystem.allow_rw",
+				Message:  "entries must not be empty",
+				Severity: "error",
+			})
+			continue
+		}
+		if containsTraversal(p) {
+			errs = append(errs, ValidationError{
+				Field:    "filesystem.allow_rw",
+				Message:  fmt.Sprintf("entry %q contains path traversal (\"../\")", p),
+				Severity: "error",
+			})
+		}
+	}
+
 	return errs
 }
 
@@ -173,6 +192,9 @@ func (cfg *Config) EffectivePolicy() string {
 	fmt.Fprintf(&b, "  Filesystem: root=%s mode=%s linux_enforcement=%s", root, mode, linuxEnforcement)
 	if len(cfg.Filesystem.Deny) > 0 {
 		fmt.Fprintf(&b, " deny=%d path(s)", len(cfg.Filesystem.Deny))
+	}
+	if len(cfg.Filesystem.AllowRW) > 0 {
+		fmt.Fprintf(&b, " allow_rw=%d path(s)", len(cfg.Filesystem.AllowRW))
 	}
 	if cfg.Filesystem.Hardened {
 		b.WriteString(" hardened=true")

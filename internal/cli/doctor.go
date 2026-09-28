@@ -8,6 +8,7 @@ import (
 	"io"
 	"net"
 	"os"
+	"path/filepath"
 	"runtime"
 	"strings"
 	"syscall"
@@ -147,12 +148,15 @@ func runDoctor(caps doctorCapabilities) doctorReport {
 		Message:  fmt.Sprintf("Config loaded from %s", configPath),
 	})
 
+	if check, ok := auditStateUnavailableCheck(cfg, configPath); ok {
+		checks = append(checks, check)
+	}
 	checks = append(checks, filesystemDoctorCheck(cfg, caps))
 	checks = append(checks, syscallDoctorCheck(cfg, caps))
 	checks = append(checks, networkDoctorCheck(cfg, caps))
 	checks = append(checks, secretDoctorCheck(cfg))
 	checks = append(checks, egressHelperDoctorCheck(caps))
-	checks = append(checks, sanityDoctorChecks(cfg, caps)...)
+	checks = append(checks, sanityDoctorChecks(cfg, configPath, caps)...)
 
 	activity := doctorActivityCheck(cfg, configPath, caps.now())
 	checks = append(checks, doctorCheck{
@@ -383,8 +387,14 @@ func secretDoctorCheck(cfg *config.Config) doctorCheck {
 	return doctorOKCheck("Fences", "secrets", "enforceable", fmt.Sprintf("Secret fence enforceable with %d blocked pattern(s).", len(cfg.Secrets.Block)))
 }
 
-func sanityDoctorChecks(cfg *config.Config, caps doctorCapabilities) []doctorCheck {
+func sanityDoctorChecks(cfg *config.Config, configPath string, caps doctorCapabilities) []doctorCheck {
 	var checks []doctorCheck
+	if check, ok := auditLogInsideFenceRootCheck(cfg); ok {
+		checks = append(checks, check)
+	}
+	if check, ok := auditStateInsideGrantCheck(cfg, configPath); ok {
+		checks = append(checks, check)
+	}
 	if cfg.Network.AllowAll {
 		checks = append(checks, doctorCheck{
 			Group:    "Sanity",
@@ -396,30 +406,25 @@ func sanityDoctorChecks(cfg *config.Config, caps doctorCapabilities) []doctorChe
 		})
 	}
 
-	// Inert-allowlist footgun: on Linux, plain `nocklock wrap` (the userspace
-	// proxy) with the network fence active (allow_all = false) AND the syscall
-	// fence on narrows the child to unix-only sockets (buildSyscallPolicy /
-	// networkFenceProxy). The proxy that enforces network.allow listens on TCP
-	// 127.0.0.1, which the child can no longer reach — so the posture collapses
-	// to no-IP-network and the curated domain allowlist is inert (the agent
-	// reaches NONE of the allowed domains). doctor works from config alone and
-	// cannot see the runtime --net-fence flag, so it warns whenever the config
-	// COULD hit this; the message names the `--net-fence=netns` escape, where the
-	// child keeps inet/inet6 and the kernel egress floor enforces the allowlist
-	// (N10710), so the footgun does NOT apply there.
+	// Linux proxy mode with the syscall fence relies on the LD_PRELOAD interposer
+	// to bridge the advertised loopback proxy address onto a Unix socket. If the
+	// filesystem interposer is disabled entirely, the child is still narrowed to
+	// unix-only sockets but has no bridge to the userspace proxy, so the allowlist
+	// becomes unreachable.
 	if caps.goos == "linux" &&
 		!cfg.Network.AllowAll &&
 		len(cfg.Network.Allow) > 0 &&
+		cfg.Filesystem.Root == "" &&
 		syscallEnforcementMode(cfg.Syscall.Enforcement) != syscallfence.ModeOff {
 		checks = append(checks, doctorCheck{
 			Group:    "Sanity",
-			Name:     "network-allowlist-inert-under-syscall-fence",
+			Name:     "network-proxy-bridge-requires-filesystem-interposer",
 			Severity: doctorWarning,
 			Status:   "warning",
 			Message: fmt.Sprintf(
-				"Network allowlist is inert on Linux under plain `nocklock wrap`: the syscall fence restricts the child to unix-domain sockets while the userspace network proxy is active, so the agent gets no IP network at all — your %d allowed domain(s) are not selectively reachable. (Under `nocklock wrap --net-fence=netns` the child keeps IP sockets and the kernel egress floor enforces the allowlist, so this does not apply.)",
+				"Network allowlist cannot be reached on Linux because the syscall fence restricts proxy-mode children to unix-domain sockets, but filesystem.root is empty so the LD_PRELOAD proxy bridge is disabled; your %d allowed domain(s) are not selectively reachable.",
 				len(cfg.Network.Allow)),
-			Fix: "wrap with --net-fence=netns for a kernel-enforced domain allowlist; or, for a userspace-bypassable allowlist under plain wrap, set [syscall] enforcement = \"off\"; otherwise plain wrap is no-network by design and network.allow is documentation-only",
+			Fix: "enable the Linux filesystem interposer with filesystem.root, use --net-fence=netns, or set [syscall] enforcement = \"off\" if you accept the proxy as a userspace boundary",
 		})
 	}
 	if len(cfg.Secrets.Block) == 0 {
@@ -448,7 +453,10 @@ func sanityDoctorChecks(cfg *config.Config, caps doctorCapabilities) []doctorChe
 }
 
 func doctorActivityCheck(cfg *config.Config, configPath string, now time.Time) doctorActivity {
-	dbPath, projectRoot := config.ResolveDBPath(cfg, configPath)
+	dbPath, projectRoot, err := config.ResolveDBPath(cfg, configPath)
+	if err != nil {
+		return doctorActivity{}
+	}
 	if _, err := os.Stat(dbPath); err != nil {
 		return doctorActivity{}
 	}
@@ -535,6 +543,120 @@ func doctorSymbol(severity doctorSeverity) string {
 	}
 }
 
+// auditStateInsideGrantCheck warns when the audit state directory
+// falls inside a path the fence GRANTS. Landlock is allow-only, so the deny
+// that protects the audit trail cannot be enforced inside a granted tree, and
+// RulesFromConfig aborts the whole wrap with an overlap error that names the
+// offending grant but explains neither the audit log nor $XDG_STATE_HOME.
+//
+// It happens for real: every shipped preset grants /tmp read-only, so a
+// container or CI step whose HOME or XDG_STATE_HOME sits under /tmp lands the
+// audit state inside a grant and wrap refuses to start. Naming the cause here
+// turns an opaque abort into a fixable one.
+func auditStateInsideGrantCheck(cfg *config.Config, configPath string) (doctorCheck, bool) {
+	// Same derivation ResolveDBPath uses: the project root is the parent of the
+	// .nock directory holding the config.
+	stateDir, err := config.AuditStateDir(filepath.Dir(filepath.Dir(configPath)))
+	if err != nil {
+		return doctorCheck{}, false
+	}
+	grants := append([]string{cfg.Filesystem.Root}, cfg.Filesystem.Allow...)
+	grants = append(grants, cfg.Filesystem.AllowRW...)
+	for _, grant := range grants {
+		if strings.TrimSpace(grant) == "" {
+			continue
+		}
+		expanded, err := fsfence.ExpandTilde(grant)
+		if err != nil {
+			continue
+		}
+		abs, err := filepath.Abs(expanded)
+		if err != nil {
+			continue
+		}
+		if !pathIsWithinDir(stateDir, abs) {
+			continue
+		}
+		// A WARNING, not a CRITICAL. The condition is real and wrap will refuse
+		// to start on it, but it comes from the environment ($XDG_STATE_HOME or
+		// $HOME landing under a granted path) rather than from a mistake in the
+		// config being audited, and wrap reports it precisely at the moment it
+		// matters. Flipping doctor's whole verdict would turn every run inside a
+		// sandbox whose state directory sits under a granted /tmp red.
+		return doctorCheck{
+			Group:    "Sanity",
+			Name:     "audit-state-granted",
+			Severity: doctorWarning,
+			Status:   "warning",
+			Message: fmt.Sprintf(
+				"The audit state directory (%s) is inside the granted path %q, so the fenced agent could reach its own audit trail. 'nocklock wrap' fails closed rather than allow it.",
+				stateDir, grant),
+			Fix: "set XDG_STATE_HOME to a directory outside every filesystem.allow/allow_rw entry and outside filesystem.root",
+		}, true
+	}
+	return doctorCheck{}, false
+}
+
+// auditStateUnavailableCheck reports a CRITICAL when the event log's location
+// cannot be resolved at all — an unusable audit state directory, or two
+// competing event logs for one project. doctorActivityCheck deliberately
+// stays quiet about every failure (it reports activity, not health), so without
+// this the operator would see an empty activity summary and no reason for it,
+// while `wrap` refuses to start for a cause doctor never named.
+func auditStateUnavailableCheck(cfg *config.Config, configPath string) (doctorCheck, bool) {
+	if _, _, err := config.ResolveDBPath(cfg, configPath); err != nil {
+		return doctorCriticalCheck(
+			"Config", "audit-state", "unavailable",
+			fmt.Sprintf("The event log location cannot be resolved: %v", err),
+			"fix the audit state directory, then rerun nocklock doctor",
+		), true
+	}
+	return doctorCheck{}, false
+}
+
+// auditLogInsideFenceRootCheck warns when an ABSOLUTE logging.db points back
+// inside filesystem.root. A relative logging.db resolves into the audit state
+// directory outside the project (config.ResolveDBPath), which is what keeps the
+// event log out of the fenced child's reach; an absolute path is honored
+// verbatim, so an operator can aim it at a directory the fence grants.
+//
+// That is not a cosmetic preference. Landlock grants the fence root as one
+// hierarchy so the child can create and remove entries in its own project, and
+// no rule can carve a protected hole out of a granted tree — an event log
+// under filesystem.root is therefore writable and deletable by the very agent
+// it records. It also makes the log's own deny path unenforceable, so
+// 'nocklock wrap' fails closed rather than running with a forgeable audit
+// trail. Warn here so the failure is explained before it is hit.
+func auditLogInsideFenceRootCheck(cfg *config.Config) (doctorCheck, bool) {
+	db := strings.TrimSpace(cfg.Logging.DB)
+	if db == "" || !filepath.IsAbs(db) || strings.TrimSpace(cfg.Filesystem.Root) == "" {
+		return doctorCheck{}, false
+	}
+	root, err := fsfence.ExpandTilde(cfg.Filesystem.Root)
+	if err != nil {
+		return doctorCheck{}, false
+	}
+	root, err = filepath.Abs(root)
+	if err != nil {
+		return doctorCheck{}, false
+	}
+	if !pathIsWithinDir(db, root) {
+		return doctorCheck{}, false
+	}
+	root = resolvePathBestEffort(root)
+	db = resolvePathBestEffort(db)
+	return doctorCheck{
+		Group:    "Sanity",
+		Name:     "audit-log-inside-root",
+		Severity: doctorWarning,
+		Status:   "warning",
+		Message: fmt.Sprintf(
+			"logging.db (%s) is inside filesystem.root (%s), so the fenced agent can modify or delete its own audit trail. Landlock grants the root as one hierarchy and cannot exclude a path beneath it.",
+			db, root),
+		Fix: "remove the absolute logging.db so the event log goes to NockLock's audit state directory outside the project",
+	}, true
+}
+
 func doctorOKCheck(group, name, status, message string) doctorCheck {
 	return doctorCheck{Group: group, Name: name, Severity: doctorOK, Status: status, Message: message}
 }
@@ -544,7 +666,9 @@ func doctorCriticalCheck(group, name, status, message, fix string) doctorCheck {
 }
 
 func hasBroadFilesystemAllow(cfg *config.Config) bool {
-	for _, allow := range cfg.Filesystem.Allow {
+	allows := append([]string(nil), cfg.Filesystem.Allow...)
+	allows = append(allows, cfg.Filesystem.AllowRW...)
+	for _, allow := range allows {
 		switch strings.TrimSpace(allow) {
 		case ".", "./", "/", "*":
 			return true

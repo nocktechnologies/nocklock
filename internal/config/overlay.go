@@ -15,6 +15,9 @@ func restrictOverlay(base, overlay Config, fields map[string]bool) Config {
 	if fields["filesystem.allow"] {
 		cfg.Filesystem.Allow = intersectStrings(base.Filesystem.Allow, overlay.Filesystem.Allow)
 	}
+	if fields["filesystem.allow_rw"] {
+		cfg.Filesystem.AllowRW = intersectStrings(base.Filesystem.AllowRW, overlay.Filesystem.AllowRW)
+	}
 	if fields["filesystem.deny"] {
 		cfg.Filesystem.Deny = unionStrings(base.Filesystem.Deny, overlay.Filesystem.Deny)
 	}
@@ -94,6 +97,7 @@ func tightenInvertedAllowlist(base, overlay []string) []string {
 
 func cloneConfig(cfg Config) Config {
 	cfg.Filesystem.Allow = append([]string(nil), cfg.Filesystem.Allow...)
+	cfg.Filesystem.AllowRW = append([]string(nil), cfg.Filesystem.AllowRW...)
 	cfg.Filesystem.Deny = append([]string(nil), cfg.Filesystem.Deny...)
 	cfg.Network.Allow = append([]string(nil), cfg.Network.Allow...)
 	cfg.Secrets.Pass = append([]string(nil), cfg.Secrets.Pass...)
@@ -147,6 +151,8 @@ func addMetadataFields(fields map[string]bool, md toml.MetaData) {
 	}
 	keyNames := map[string]string{
 		"allow":                "allow",
+		"allowrw":              "allow_rw",
+		"allow_rw":             "allow_rw",
 		"deny":                 "deny",
 		"mode":                 "mode",
 		"root":                 "root",

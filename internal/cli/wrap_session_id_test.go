@@ -80,7 +80,7 @@ func runWrapPrintingEnv(t *testing.T) (childSees map[string]string, dbSessionIDs
 		childSees[k] = v
 	}
 
-	dbPath := filepath.Join(dir, ".nock", "events.db")
+	dbPath := resolvedAuditDB(t, dir)
 	logger, err := logging.NewLogger(dbPath, dir)
 	if err != nil {
 		t.Fatalf("reopen audit DB %s: %v", dbPath, err)

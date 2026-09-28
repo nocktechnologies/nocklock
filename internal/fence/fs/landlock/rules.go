@@ -127,19 +127,22 @@ func RulesFromConfig(cfg *fsfence.FenceConfig, extra []AllowPath, abi int) (Spec
 	spec := Spec{
 		ABI:             abi,
 		HandledAccessFS: handled,
-		Paths:           make([]PathRule, 0, len(cfg.AllowPaths)+len(extra)),
+		Paths:           make([]PathRule, 0, len(cfg.AllowPaths)+len(cfg.AllowRWPaths)+len(extra)),
 	}
 	rootAccess := AccessReadWrite
 	if cfg.Mode == "read-only" {
 		rootAccess = AccessReadOnly
 	}
-	rootRules, err := rootPathRules(cfg.Root, rootAccess, abi)
+	rootRuleset, err := rootRules(cfg.Root, cfg.ProtectedRootSubdir, rootAccess, abi)
 	if err != nil {
 		return Spec{}, err
 	}
-	spec.Paths = append(spec.Paths, rootRules...)
+	spec.Paths = append(spec.Paths, rootRuleset...)
 	for _, p := range cfg.AllowPaths {
 		spec.Paths = append(spec.Paths, pathRule(p, AccessReadOnly, abi))
+	}
+	for _, p := range cfg.AllowRWPaths {
+		spec.Paths = append(spec.Paths, pathRule(p, AccessReadWrite, abi))
 	}
 	for _, p := range extra {
 		spec.Paths = append(spec.Paths, pathRule(filepath.Clean(p.Path), p.Access, abi))
@@ -281,22 +284,69 @@ func isAncestor(ancestor, descendant string) bool {
 	return strings.HasPrefix(descendant, ancestor+sep)
 }
 
-func rootPathRules(root, access string, abi int) ([]PathRule, error) {
+// rootRules grants the fence root. It has two shapes, and which one applies is
+// decided entirely by whether the audit state sits inside the root.
+//
+// DEFAULT (protectedSubdir empty): ONE rule on the root, so the fenced child can
+// create and remove entries DIRECTLY IN the root and not merely inside
+// subdirectories that already exist. Landlock checks
+// MAKE_REG/MAKE_DIR/REMOVE_FILE/REMOVE_DIR against the directory holding the
+// entry, so without a rule on the root itself `touch <root>/newfile` is denied
+// even in read-write mode. Granting the root alone is also strictly safer for
+// symlinks: Landlock binds the rule to the root's inode, so a symlink inside the
+// root pointing outside it grants nothing.
+//
+// LEGACY (protectedSubdir set): grant each EXISTING CHILD of the root and skip
+// the protected directory, leaving the root itself ungranted. The child keeps
+// the access it has today but cannot create or remove entries directly in the
+// root. This is the shape every release before the audit state moved out used,
+// and it is required whenever a directory inside the root must stay unwritable:
+// the kernel walks upward from the accessed file and allows as soon as an
+// ancestor rule grants the access, so a rule on the root cannot be narrowed
+// underneath, and stacking layers does not help because every layer would need
+// MAKE_REG on the root for a create in the root to succeed.
+//
+// The per-child grants resolve symlinks, so this shape needs the escape check
+// the single root rule does not: a child symlinked outside the root would
+// otherwise produce a real rule on the target.
+func rootRules(root, protectedSubdir, access string, abi int) ([]PathRule, error) {
 	cleanRoot, err := filepath.EvalSymlinks(filepath.Clean(root))
 	if err != nil {
 		return nil, fmt.Errorf("resolve Landlock root %q: %w", root, err)
 	}
-	entries, err := os.ReadDir(root)
+	if protectedSubdir == "" {
+		return []PathRule{pathRule(cleanRoot, access, abi)}, nil
+	}
+
+	protected, err := filepath.EvalSymlinks(filepath.Clean(protectedSubdir))
 	if err != nil {
-		return nil, fmt.Errorf("read Landlock root %q: %w", root, err)
+		// A protected directory that cannot be resolved must not silently
+		// downgrade to granting the whole root, which would expose it.
+		return nil, fmt.Errorf("resolve protected root subdirectory %q: %w", protectedSubdir, err)
+	}
+	// Skipping one entry only protects a DIRECT child. If the protected
+	// directory sits deeper, the child on the path to it gets granted and the
+	// ancestor walk reaches the protected directory anyway — silently, which is
+	// the worst outcome. Refuse instead of pretending to protect it. This
+	// happens when filesystem.root is an ancestor of the project directory
+	// holding the audit trail.
+	if filepath.Dir(protected) != cleanRoot {
+		return nil, fmt.Errorf(
+			"cannot protect %q inside Landlock root %q: it is not a direct child, and Landlock grants a whole hierarchy, so granting %q would grant it too; "+
+				"set filesystem.root to the directory that holds the audit trail, or move the audit trail out of the root",
+			protected, cleanRoot, filepath.Dir(protected))
+	}
+	entries, err := os.ReadDir(cleanRoot)
+	if err != nil {
+		return nil, fmt.Errorf("read Landlock root %q: %w", cleanRoot, err)
 	}
 
 	paths := make([]string, 0, len(entries))
 	for _, entry := range entries {
-		if entry.Name() == ".nock" {
+		child := filepath.Join(cleanRoot, entry.Name())
+		if child == protected {
 			continue
 		}
-		child := filepath.Join(cleanRoot, entry.Name())
 		if entry.Type()&os.ModeSymlink != 0 {
 			resolved, err := filepath.EvalSymlinks(child)
 			if err != nil {
@@ -304,6 +354,9 @@ func rootPathRules(root, access string, abi int) ([]PathRule, error) {
 			}
 			if !pathInsideRoot(cleanRoot, resolved) {
 				return nil, fmt.Errorf("Landlock root child %q resolves outside Landlock root %q to %q", child, cleanRoot, resolved)
+			}
+			if resolved == protected {
+				continue
 			}
 			child = resolved
 		}

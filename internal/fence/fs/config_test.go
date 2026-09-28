@@ -54,10 +54,11 @@ func TestProcessConfig_Valid(t *testing.T) {
 	root := t.TempDir()
 
 	cfg := config.FilesystemConfig{
-		Root:  root,
-		Mode:  "read-write",
-		Allow: []string{root},
-		Deny:  []string{"~/.aws"},
+		Root:    root,
+		Mode:    "read-write",
+		Allow:   []string{root},
+		AllowRW: []string{"~/.claude"},
+		Deny:    []string{"~/.aws"},
 	}
 
 	fc, err := ProcessConfig(cfg)
@@ -80,6 +81,9 @@ func TestProcessConfig_Valid(t *testing.T) {
 
 	if len(fc.AllowPaths) != 1 {
 		t.Fatalf("expected 1 allow path, got %d", len(fc.AllowPaths))
+	}
+	if len(fc.AllowRWPaths) != 1 {
+		t.Fatalf("expected 1 read-write allow path, got %d", len(fc.AllowRWPaths))
 	}
 
 	if len(fc.DenyPaths) != 1 {
@@ -281,6 +285,16 @@ func TestProcessConfig_DefaultMode(t *testing.T) {
 	}
 }
 
+func TestProcessConfigRejectsEmptyAllowRW(t *testing.T) {
+	_, err := ProcessConfig(config.FilesystemConfig{
+		Root:    t.TempDir(),
+		AllowRW: []string{""},
+	})
+	if err == nil || !strings.Contains(err.Error(), "must not be empty") {
+		t.Fatalf("empty allow_rw error = %v, want rejection", err)
+	}
+}
+
 func TestProcessConfig_SymlinkedRoot(t *testing.T) {
 	// Create a real directory.
 	realDir := t.TempDir()
@@ -356,10 +370,11 @@ func TestProcessConfig_NonexistentAllowPathResolvesSymlinkedAncestor(t *testing.
 
 func TestSerialize_RoundTrip(t *testing.T) {
 	fc := &FenceConfig{
-		Root:       "/home/user/project",
-		Mode:       "read-write",
-		AllowPaths: []string{"/tmp", "/home/user/.claude"},
-		DenyPaths:  []string{"/home/user/.ssh", "/home/user/.aws"},
+		Root:         "/home/user/project",
+		Mode:         "read-write",
+		AllowPaths:   []string{"/tmp", "/home/user/.claude"},
+		AllowRWPaths: []string{"/home/user/.cache/tool"},
+		DenyPaths:    []string{"/home/user/.ssh", "/home/user/.aws"},
 	}
 
 	serialized := fc.Serialize("/tmp/nock.sock")
@@ -383,6 +398,9 @@ func TestSerialize_RoundTrip(t *testing.T) {
 	}
 	if parsed.AllowPaths[0] != "/tmp" || parsed.AllowPaths[1] != "/home/user/.claude" {
 		t.Errorf("AllowPaths = %v, want [/tmp /home/user/.claude]", parsed.AllowPaths)
+	}
+	if len(parsed.AllowRWPaths) != 1 || parsed.AllowRWPaths[0] != "/home/user/.cache/tool" {
+		t.Errorf("AllowRWPaths = %v, want [/home/user/.cache/tool]", parsed.AllowRWPaths)
 	}
 	if len(parsed.DenyPaths) != 2 {
 		t.Fatalf("expected 2 deny paths, got %d", len(parsed.DenyPaths))

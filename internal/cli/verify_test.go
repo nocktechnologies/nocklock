@@ -3,6 +3,8 @@ package cli
 import (
 	"context"
 	"errors"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -175,6 +177,62 @@ func TestCreateFilesystemCanaryFallsBackForBroadAllow(t *testing.T) {
 	}
 }
 
+func TestCreateScratchOutsideAvoidsGrantedTmp(t *testing.T) {
+	root := t.TempDir()
+	cfg := config.DefaultConfig()
+	cfg.Filesystem.Root = root
+	cfg.Filesystem.Allow = []string{"/tmp"}
+
+	scratch, cleanup, ok := createScratchOutside(filesystemAllowedRoots(&cfg, root))
+	if !ok {
+		t.Fatal("could not create scratch directory outside granted paths")
+	}
+	defer cleanup()
+	if pathWithinAny(scratch, filesystemAllowedRoots(&cfg, root)) {
+		t.Fatalf("scratch directory %q is inside a granted filesystem path", scratch)
+	}
+}
+
+func TestCreateCanaryOutsideFallsBackAfterWriteFailure(t *testing.T) {
+	first, second := t.TempDir(), t.TempDir()
+	origBases, origWrite := verifyScratchBases, verifyWriteFile
+	verifyScratchBases = []string{first, second}
+	verifyWriteFile = func(path string, data []byte, mode os.FileMode) error {
+		if pathWithinAny(path, []string{first}) {
+			return errors.New("injected write failure")
+		}
+		return os.WriteFile(path, data, mode)
+	}
+	defer func() {
+		verifyScratchBases, verifyWriteFile = origBases, origWrite
+	}()
+
+	path, _, cleanup, ok := createCanaryOutside(nil)
+	if !ok {
+		t.Fatal("expected fallback scratch base to succeed")
+	}
+	defer cleanup()
+	if !pathWithinAny(path, []string{second}) {
+		t.Fatalf("canary path = %q, want fallback under %q", path, second)
+	}
+	entries, err := os.ReadDir(first)
+	if err != nil || len(entries) != 0 {
+		t.Fatalf("failed scratch directory was not cleaned up: entries=%v err=%v", entries, err)
+	}
+}
+
+func TestCloneVerifyConfigCopiesAllowRW(t *testing.T) {
+	cfg := config.DefaultConfig()
+	cfg.Filesystem.AllowRW = []string{"/var/lib/tool-state"}
+
+	clone := cloneVerifyConfig(&cfg)
+	clone.Filesystem.AllowRW[0] = "/var/lib/other-state"
+
+	if cfg.Filesystem.AllowRW[0] != "/var/lib/tool-state" {
+		t.Fatalf("clone mutated source allow_rw: %v", cfg.Filesystem.AllowRW)
+	}
+}
+
 func TestVerifyReportSucceededRequiresAtLeastOnePass(t *testing.T) {
 	report := verifyReport{Summary: verifySummary{Skipped: 4}}
 	if verifyReportSucceeded(report) {
@@ -202,5 +260,43 @@ func TestSelectOffAllowlistNetworkTargetSkipsAllowedHosts(t *testing.T) {
 	}
 	if !strings.Contains(target, "nocklock-verify-canary.test") {
 		t.Fatalf("target = %q, want .test fallback", target)
+	}
+}
+
+func TestPathWithinAnyResolvesSymlinkedRoots(t *testing.T) {
+	real := t.TempDir()
+	link := filepath.Join(t.TempDir(), "link")
+	if err := os.Symlink(real, link); err != nil {
+		t.Skipf("symlinks unavailable: %v", err)
+	}
+	file := filepath.Join(real, "canary.txt")
+	if err := os.WriteFile(file, []byte("x"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	// Like macOS /tmp -> /private/tmp: an existing path resolves through the
+	// link, so a root given in its symlinked form must still contain it.
+	if !pathWithinAny(file, []string{link}) {
+		t.Fatalf("%q should be within symlinked root %q", file, link)
+	}
+	if pathWithinAny(file, []string{t.TempDir()}) {
+		t.Fatalf("%q must not be within an unrelated root", file)
+	}
+}
+
+func TestPathWithinAnyResolvesNotYetCreatedPathUnderSymlinkedRoot(t *testing.T) {
+	real := t.TempDir()
+	link := filepath.Join(t.TempDir(), "link")
+	if err := os.Symlink(real, link); err != nil {
+		t.Skipf("symlinks unavailable: %v", err)
+	}
+	// Neither the file nor its parent exists yet; the parent chain does
+	// resolve through the symlink, and the answer must not depend on which
+	// spelling (link or target) the caller used for the root or the path.
+	missing := filepath.Join(link, "sub", "canary.txt")
+	if !pathWithinAny(missing, []string{real}) {
+		t.Fatalf("%q should be within %q through the symlink", missing, real)
+	}
+	if !pathWithinAny(filepath.Join(real, "sub", "canary.txt"), []string{link}) {
+		t.Fatalf("path under %q should be within symlinked root %q", real, link)
 	}
 }

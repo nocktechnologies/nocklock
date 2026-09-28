@@ -1,0 +1,71 @@
+# NockLock N10753 AF_INET-to-AF_UNIX Node/undici probe
+date_utc=2026-09-27T16:25:55Z
+repo_head=5c1ba39
+kernel=Linux kevinlinux 7.0.0-30-generic #30~24.04.1-Ubuntu SMP PREEMPT_DYNAMIC Fri Aug  7 13:27:52 UTC 2 x86_64 x86_64 x86_64 GNU/Linux
+node=v22.23.2
+claude=2.1.281 (Claude Code)
+gcc=gcc (Ubuntu 13.3.0-6ubuntu2~24.04.1) 13.3.0
+
+compiled_shim=/tmp/nocklock-n10753-probe.7vkocq/inet_to_unix_probe.so
+proxy_unix_socket=/tmp/nocklock-n10753-probe.7vkocq/proxy.sock
+proxy_advertised_tcp=127.0.0.1:56905
+
+## case: control-no-preload
+exit=1
+  (node:3447870) [UNDICI-EHPA] Warning: EnvHttpProxyAgent is experimental, expect them to change at any time.
+  (Use `node --trace-warnings ...` to show where the warning was created)
+  node_version=v22.23.2
+  target=https://api.anthropic.com/
+  HTTPS_PROXY=http://127.0.0.1:56905
+  NODE_USE_ENV_PROXY=1
+  fetch_error_name=TypeError
+  fetch_error_message=fetch failed
+  fetch_error_cause=ECONNREFUSED
+result=PASS
+
+## case: preload-no-fakes
+exit=1
+  (node:3448016) [UNDICI-EHPA] Warning: EnvHttpProxyAgent is experimental, expect them to change at any time.
+  (Use `node --trace-warnings ...` to show where the warning was created)
+  node_version=v22.23.2
+  target=https://api.anthropic.com/
+  HTTPS_PROXY=http://127.0.0.1:56905
+  NODE_USE_ENV_PROXY=1
+  shim: socket(domain=AF_INET,type=526337,protocol=0) -> unix fd=21
+  shim: setsockopt(fd=21,level=IPPROTO_TCP,opt=1) -> rc=-1 errno=95
+  fetch_error_name=TypeError
+  fetch_error_message=fetch failed
+  fetch_error_cause=ENOTSUP
+result=PASS
+
+## case: preload-fake-tcp-and-names
+exit=0
+  (node:3448255) [UNDICI-EHPA] Warning: EnvHttpProxyAgent is experimental, expect them to change at any time.
+  (Use `node --trace-warnings ...` to show where the warning was created)
+  node_version=v22.23.2
+  target=https://api.anthropic.com/
+  HTTPS_PROXY=http://127.0.0.1:56905
+  NODE_USE_ENV_PROXY=1
+  shim: socket(domain=AF_INET,type=526337,protocol=0) -> unix fd=21
+  shim: setsockopt(fd=21,level=IPPROTO_TCP,opt=1) -> fake success
+  shim: setsockopt(fd=21,level=IPPROTO_TCP,opt=4) -> fake success
+  shim: setsockopt(fd=21,level=IPPROTO_TCP,opt=5) -> fake success
+  shim: setsockopt(fd=21,level=IPPROTO_TCP,opt=6) -> fake success
+  shim: connect(fd=21) requested 127.0.0.1:56905
+  shim: connect(fd=21) -> AF_UNIX /tmp/nocklock-n10753-probe.7vkocq/proxy.sock
+  shim: setsockopt(fd=21,level=IPPROTO_TCP,opt=1) -> fake success
+  shim: setsockopt(fd=21,level=IPPROTO_TCP,opt=4) -> fake success
+  shim: setsockopt(fd=21,level=IPPROTO_TCP,opt=5) -> fake success
+  shim: setsockopt(fd=21,level=IPPROTO_TCP,opt=6) -> fake success
+  shim: setsockopt(fd=21,level=IPPROTO_TCP,opt=4) -> fake success
+  shim: setsockopt(fd=21,level=IPPROTO_TCP,opt=5) -> fake success
+  shim: setsockopt(fd=21,level=IPPROTO_TCP,opt=6) -> fake success
+  shim: setsockopt(fd=21,level=IPPROTO_TCP,opt=1) -> fake success
+  fetch_status=404
+  fetch_body_prefix=""
+result=PASS
+
+## proxy log
+  proxy: ready socket=/tmp/nocklock-n10753-probe.7vkocq/proxy.sock
+  proxy: request_line=CONNECT api.anthropic.com:443 HTTP/1.1
+  proxy: connected_upstream=api.anthropic.com:443
