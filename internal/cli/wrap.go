@@ -74,18 +74,6 @@ var wrapCmd = &cobra.Command{
 			return fmt.Errorf("--net-fence=netns requires Linux kernel network namespaces; refusing to run without the kernel-enforced egress floor")
 		}
 
-		if wrapFlags.DryRun {
-			fmt.Fprintln(os.Stdout, effectiveCfg.EffectivePolicy())
-			if useNetns {
-				fmt.Fprintln(os.Stderr, "NockLock: --net-fence=netns selected — kernel tproxy enforcement uses network.allow for HTTP(S)+DNS; all other egress remains default-drop and passwordless sudo is required at run time")
-			}
-			if wrapFlags.Profile != "" {
-				fmt.Fprintf(os.Stderr, "NockLock: profile %q is the base; %s overlays may only tighten it\n", wrapFlags.Profile, filepath.Join(config.Dir, config.File))
-			}
-			fmt.Fprintf(os.Stderr, "NockLock: dry run OK (%s)\n", configPath)
-			return nil
-		}
-
 		// Generate a session ID for event logging.
 		sessionID := uuid.New().String()
 
@@ -99,16 +87,24 @@ var wrapCmd = &cobra.Command{
 		if dbErr != nil {
 			return fmt.Errorf("could not resolve the event log location: %w\nThe audit trail is required — refusing to run unrecorded", dbErr)
 		}
-		auditDir, auditDirErr := filepath.EvalSymlinks(filepath.Clean(filepath.Dir(dbPath)))
+		auditDir, auditDirErr := resolveAuditDirectory(filepath.Dir(dbPath))
+		if auditDirErr != nil {
+			return fmt.Errorf("refusing to start: cannot resolve logging.db directory %s: %w; fix the audit directory path and permissions", filepath.Dir(dbPath), auditDirErr)
+		}
 		resolvedProjectRoot, projectRootErr := filepath.EvalSymlinks(filepath.Clean(projectRoot))
-		if auditDirErr == nil && projectRootErr == nil &&
-			filepath.Clean(auditDir) == filepath.Clean(resolvedProjectRoot) {
+		if projectRootErr != nil {
+			return fmt.Errorf("refusing to start: cannot resolve project root %s: %w; fix the project directory path and permissions", projectRoot, projectRootErr)
+		}
+		if filepath.Clean(auditDir) == filepath.Clean(resolvedProjectRoot) {
 			cmd.SilenceUsage = true
 			root := filepath.Clean(resolvedProjectRoot)
 			refusal := fmt.Errorf(
 				"refusing to start: logging.db resolves to the project root %s; move it with its SQLite sidecars and chain anchor under %s/.nock/ and set [logging] db = \".nock/events.db\", or use the NockLock state directory with [logging] db = \"events.db\"",
 				root, root,
 			)
+			if wrapFlags.DryRun {
+				return refusal
+			}
 			logger, logErr := logging.NewLogger(dbPath, projectRoot, signingLoggerOpts()...)
 			if logErr != nil {
 				return fmt.Errorf("%w; could not record the refusal in the audit log: %v", refusal, logErr)
@@ -135,6 +131,18 @@ var wrapCmd = &cobra.Command{
 			}
 			return refusal
 		}
+		if wrapFlags.DryRun {
+			fmt.Fprintln(os.Stdout, effectiveCfg.EffectivePolicy())
+			if useNetns {
+				fmt.Fprintln(os.Stderr, "NockLock: --net-fence=netns selected — kernel tproxy enforcement uses network.allow for HTTP(S)+DNS; all other egress remains default-drop and passwordless sudo is required at run time")
+			}
+			if wrapFlags.Profile != "" {
+				fmt.Fprintf(os.Stderr, "NockLock: profile %q is the base; %s overlays may only tighten it\n", wrapFlags.Profile, filepath.Join(config.Dir, config.File))
+			}
+			fmt.Fprintf(os.Stderr, "NockLock: dry run OK (%s)\n", configPath)
+			return nil
+		}
+
 		// Sign the audit trail with the NockLock-managed Ed25519 key so each
 		// recorded decision is authentic, not merely internally consistent. The
 		// key is generated 0600 on first use. If its path cannot be resolved we
@@ -1350,4 +1358,27 @@ func pathIsWithinDir(path, dir string) bool {
 		return false
 	}
 	return rel == "." || (rel != ".." && !strings.HasPrefix(rel, ".."+string(os.PathSeparator)))
+}
+
+// resolveAuditDirectory resolves the nearest existing ancestor of a fresh audit
+// directory, preserving its missing suffix. Existing but broken symlinks and
+// errors other than ENOENT must not bypass the project-root refusal.
+func resolveAuditDirectory(path string) (string, error) {
+	path = filepath.Clean(path)
+	resolved, err := filepath.EvalSymlinks(path)
+	if err == nil || !errors.Is(err, os.ErrNotExist) {
+		return resolved, err
+	}
+	if _, statErr := os.Lstat(path); !errors.Is(statErr, os.ErrNotExist) {
+		return "", err
+	}
+	parent := filepath.Dir(path)
+	if parent == path {
+		return "", err
+	}
+	resolved, err = resolveAuditDirectory(parent)
+	if err != nil {
+		return "", err
+	}
+	return filepath.Join(resolved, filepath.Base(path)), nil
 }

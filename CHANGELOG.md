@@ -72,6 +72,8 @@ All notable changes to NockLock will be documented in this file.
   cannot be protected there. Move the database, sidecars, and chain anchor
   together under `<root>/.nock/` with `[logging] db = ".nock/events.db"`, or
   use the state directory with `[logging] db = "events.db"`.
+  Dry runs apply the same refusal without writing audit events. Audit path
+  resolution errors fail closed; fresh audit directories remain supported.
 - New projects keep their audit trail outside the project, so the fenced agent
   can finally use its own project root (N10749). Two requirements had been in
   direct conflict: the agent must be able to create and remove files directly in

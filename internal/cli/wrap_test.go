@@ -1,6 +1,7 @@
 package cli
 
 import (
+	"bytes"
 	"context"
 	"fmt"
 	"io"
@@ -310,6 +311,122 @@ func TestWrapRefusesSymlinkedProjectRootAuditDBBeforeLaunchingChild(t *testing.T
 	assertRootAuditRefusalLogged(t, dbPath)
 }
 
+func TestWrapDryRunRefusesSymlinkedProjectRootAuditDB(t *testing.T) {
+	projectRoot := resolvedTempDir(t)
+	alias := filepath.Join(projectRoot, "logs")
+	if err := os.Symlink(".", alias); err != nil {
+		t.Fatal(err)
+	}
+	db := filepath.Join(alias, "events.db")
+	if err := os.WriteFile(db, nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	marker, err := runWrapWithAuditDB(t, projectRoot, "logs/events.db", "--dry-run")
+	if err == nil || !strings.Contains(err.Error(), "refusing to start: logging.db resolves to the project root") {
+		t.Fatalf("dry-run error = %v, want root-level refusal", err)
+	}
+	for _, path := range []string{marker, logging.DefaultAnchorPath(db)} {
+		if _, err := os.Stat(path); !os.IsNotExist(err) {
+			t.Fatalf("dry-run created %s or stat failed: %v", path, err)
+		}
+	}
+	if contents, readErr := os.ReadFile(db); readErr != nil || len(contents) != 0 {
+		t.Fatalf("dry-run changed audit DB: %v", readErr)
+	}
+	_, realErr := runWrapWithAuditDB(t, projectRoot, "logs/events.db")
+	if realErr == nil || realErr.Error() != err.Error() {
+		t.Fatalf("real refusal = %v, dry-run refusal = %v", realErr, err)
+	}
+}
+
+func TestWrapRefusesUnresolvableAuditDirectory(t *testing.T) {
+	for _, dryRun := range []bool{false, true} {
+		t.Run(fmt.Sprintf("dry-run=%v", dryRun), func(t *testing.T) {
+			projectRoot := resolvedTempDir(t)
+			loop := filepath.Join(projectRoot, "loop")
+			if err := os.Symlink("loop", loop); err != nil {
+				t.Fatal(err)
+			}
+			var flags []string
+			if dryRun {
+				flags = append(flags, "--dry-run")
+			}
+			marker, err := runWrapWithAuditDB(t, projectRoot, filepath.Join(loop, "events.db"), flags...)
+			if err == nil {
+				t.Fatal("wrap accepted an unresolvable audit directory")
+			}
+			if _, err := os.Stat(marker); !os.IsNotExist(err) {
+				t.Fatalf("child launched or stat failed: %v", err)
+			}
+		})
+	}
+}
+
+func TestWrapRefusesDanglingAuditDirectoryBeforeOpeningLog(t *testing.T) {
+	projectRoot := resolvedTempDir(t)
+	dangling := filepath.Join(projectRoot, "dangling")
+	if err := os.Symlink("missing", dangling); err != nil {
+		t.Fatal(err)
+	}
+	marker, err := runWrapWithAuditDB(t, projectRoot, filepath.Join(dangling, "events.db"))
+	if err == nil || !strings.Contains(err.Error(), "refusing to start: cannot resolve logging.db directory") {
+		t.Fatalf("wrap error = %v, want audit-directory resolution refusal before logger initialization", err)
+	}
+	if _, err := os.Stat(marker); !os.IsNotExist(err) {
+		t.Fatalf("child launched or stat failed: %v", err)
+	}
+}
+
+func TestWrapAcceptsMissingAuditDirectory(t *testing.T) {
+	projectRoot := resolvedTempDir(t)
+	db := filepath.Join(projectRoot, "fresh", ".nock", "events.db")
+	if _, err := os.Stat(filepath.Dir(db)); !os.IsNotExist(err) {
+		t.Fatalf("fixture directory must not exist: %v", err)
+	}
+	marker, err := runWrapWithAuditDB(t, projectRoot, db)
+	assertWrapChildLaunched(t, marker, err)
+	if _, err := os.Stat(db); err != nil {
+		t.Fatalf("audit DB not created: %v", err)
+	}
+}
+
+func TestWrapRootAuditRefusalVerifies(t *testing.T) {
+	projectRoot := resolvedTempDir(t)
+	alias := filepath.Join(projectRoot, "logs")
+	if err := os.Symlink(".", alias); err != nil {
+		t.Fatal(err)
+	}
+	db := filepath.Join(alias, "events.db")
+	if err := os.WriteFile(db, nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	_, err := runWrapWithAuditDB(t, projectRoot, "logs/events.db")
+	if err == nil || !strings.Contains(err.Error(), "logging.db resolves to the project root") {
+		t.Fatalf("expected refusal: %v", err)
+	}
+	assertRootAuditRefusalLogged(t, db)
+	logger, err := logging.NewLogger(db, projectRoot)
+	if err != nil {
+		t.Fatal(err)
+	}
+	rows, err := logger.Query(logging.QueryOptions{})
+	logger.Close()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(rows) != 1 || rows[0].EventType != logging.EventFileBlocked {
+		t.Fatalf("expected refusal-only session: %+v", rows)
+	}
+	var out bytes.Buffer
+	if err := runAuditVerify(context.Background(), &out, ""); err != nil {
+		t.Fatalf("verify --audit failed: %v\n%s", err, out.String())
+	}
+	out.Reset()
+	if err := runVerifyAgainstAnchor(&out, logging.DefaultAnchorPath(db), ""); err != nil {
+		t.Fatalf("anchor verification failed: %v\n%s", err, out.String())
+	}
+}
+
 func TestWrapAcceptsAuditDBInProjectNockDirectory(t *testing.T) {
 	projectRoot := resolvedTempDir(t)
 	nockDir := filepath.Join(projectRoot, config.Dir)
@@ -345,7 +462,7 @@ func TestWrapAcceptsAuditDBInStateDirectory(t *testing.T) {
 	}
 }
 
-func runWrapWithAuditDB(t *testing.T, projectRoot, db string) (string, error) {
+func runWrapWithAuditDB(t *testing.T, projectRoot, db string, flags ...string) (string, error) {
 	t.Helper()
 	t.Setenv("XDG_STATE_HOME", trustedStateRoot(t))
 	contents := fmt.Sprintf(`[filesystem]
@@ -369,9 +486,9 @@ db = %q
 	marker := filepath.Join(t.TempDir(), "child-launched")
 	cmd := &cobra.Command{}
 	cmd.SetContext(context.Background())
-	err = wrapCmd.RunE(cmd, []string{
-		"--", child, "-test.run=^TestWrapChildLaunchMarker$", wrapChildMarkerArg + marker,
-	})
+	err = wrapCmd.RunE(cmd, append(flags,
+		"--", child, "-test.run=^TestWrapChildLaunchMarker$", wrapChildMarkerArg+marker,
+	))
 	return marker, err
 }
 
@@ -764,6 +881,48 @@ func TestLandlockProcSelfAllowPathsStaysNarrow(t *testing.T) {
 		}
 		if got[i].Access != landlock.AccessReadOnly {
 			t.Errorf("grant[%d] access = %q, want %q: the child never writes its own procfs", i, got[i].Access, landlock.AccessReadOnly)
+		}
+	}
+}
+
+func TestResolveAuditDirectory(t *testing.T) {
+	root := resolvedTempDir(t)
+	alias := filepath.Join(root, "alias")
+	if err := os.Symlink(root, alias); err != nil {
+		t.Fatal(err)
+	}
+	missing := filepath.Join(alias, "fresh", ".nock")
+	got, err := resolveAuditDirectory(missing)
+	if err != nil || got != filepath.Join(root, "fresh", ".nock") {
+		t.Fatalf("resolve missing suffix = %q, %v", got, err)
+	}
+	if _, err := os.Stat(missing); !os.IsNotExist(err) {
+		t.Fatalf("resolution created directory: %v", err)
+	}
+	for _, name := range []string{"dangling", "loop"} {
+		target := "absent"
+		if name == "loop" {
+			target = name
+		}
+		path := filepath.Join(root, name)
+		if err := os.Symlink(target, path); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := resolveAuditDirectory(filepath.Join(path, "fresh")); err == nil {
+			t.Fatalf("accepted %s symlink", name)
+		}
+	}
+	denied := filepath.Join(root, "denied")
+	if err := os.Mkdir(denied, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(denied, 0); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(denied, 0o700) })
+	if os.Geteuid() != 0 {
+		if _, err := resolveAuditDirectory(filepath.Join(denied, "fresh")); !os.IsPermission(err) {
+			t.Fatalf("permission-denied ancestor: %v", err)
 		}
 	}
 }
