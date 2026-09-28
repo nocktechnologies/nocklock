@@ -487,9 +487,10 @@ var wrapCmd = &cobra.Command{
 				logEvent(logging.EventFilePassed, "syscall", fmt.Sprintf("seccomp mode=%s socket_families=%d allow_namespaces=%t", policy.Mode, len(policy.AllowedSocketFamilies), policy.AllowNamespaces), false)
 			}
 		}
+		netFenceMode := resolvedNetworkFenceMode(wrapFlags)
 		egressLevel := effectiveEgressLevel(
 			runtime.GOOS,
-			resolvedNetworkFenceMode(wrapFlags),
+			netFenceMode,
 			cfg.Network.AllowAll,
 			syscallFenceActive,
 			fsFence != nil,
@@ -497,7 +498,7 @@ var wrapCmd = &cobra.Command{
 		if egressLevel == egressLevelUnreachable {
 			detail := egressRequirementMessage(egressLevel, runtime.GOOS)
 			logEvent(logging.EventNetworkError, "network", detail, true)
-			fmt.Fprintln(cmd.ErrOrStderr(), egressBanner(egressLevel, len(cfg.Network.Allow)))
+			fmt.Fprintln(cmd.ErrOrStderr(), egressBanner(egressLevel, len(cfg.Network.Allow), runtime.GOOS, netFenceMode))
 			fmt.Fprintf(cmd.ErrOrStderr(), "NockLock: fix: %s\n", strings.TrimPrefix(detail, "effective egress level is UNREACHABLE; "))
 			cmd.SilenceUsage = true
 			cmd.SilenceErrors = true
@@ -593,7 +594,7 @@ var wrapCmd = &cobra.Command{
 			netnsEgress.DecisionLogPath = decisionLogPath
 
 			logEvent(logging.EventNetworkPassed, "network", fmt.Sprintf("egress level=%s netns tproxy domains=%d", egressLevel, len(netnsEgress.Allow)), false)
-			fmt.Fprintln(os.Stderr, egressBanner(egressLevel, len(netnsEgress.Allow)))
+			fmt.Fprintln(os.Stderr, egressBanner(egressLevel, len(netnsEgress.Allow), runtime.GOOS, netFenceMode))
 		} else if !cfg.Network.AllowAll {
 			proxyCfg := effectiveCfg.Network
 			proxy := network.NewProxyServer(proxyCfg, logger, sessionID)
@@ -682,11 +683,11 @@ var wrapCmd = &cobra.Command{
 						"NOCKLOCK_PROXY_UNIX_SOCKET="+proxyUnixSocket,
 					)
 				}
-				fmt.Fprintln(os.Stderr, egressBanner(egressLevel, len(cfg.Network.Allow)))
+				fmt.Fprintln(os.Stderr, egressBanner(egressLevel, len(cfg.Network.Allow), runtime.GOOS, netFenceMode))
 				logEvent(logging.EventNetworkPassed, "network", fmt.Sprintf("egress level=%s proxy=%s domains=%d", egressLevel, addr, len(cfg.Network.Allow)), false)
 			}
 		} else {
-			fmt.Fprintln(os.Stderr, egressBanner(egressLevel, 0))
+			fmt.Fprintln(os.Stderr, egressBanner(egressLevel, 0, runtime.GOOS, netFenceMode))
 			logEvent(logging.EventNetworkPassed, "network", "egress level=OFF allow_all=true", false)
 		}
 

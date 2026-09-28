@@ -62,7 +62,7 @@ func egressRequirementMessage(level egressLevel, goos string) string {
 	return fmt.Sprintf("effective egress level is %s; %s", level, fix)
 }
 
-func egressBanner(level egressLevel, domainCount int) string {
+func egressBanner(level egressLevel, domainCount int, goos, netFence string) string {
 	switch level {
 	case egressLevelKernel:
 		return fmt.Sprintf("NockLock: network fence active — %d domain(s), KERNEL-enforced (netns)", domainCount)
@@ -73,6 +73,9 @@ func egressBanner(level egressLevel, domainCount int) string {
 	case egressLevelOff:
 		return "NockLock: WARNING: network fence is OFF — allow_all = true; the agent can reach any host"
 	case egressLevelUnreachable:
+		if netFence == "netns" && goos == "darwin" {
+			return "NockLock: fatal: network egress is UNREACHABLE — netns is Linux-only; macOS cannot provide enforced egress"
+		}
 		return "NockLock: fatal: network egress is UNREACHABLE — syscall enforcement restricts proxy-mode children to Unix sockets, but the filesystem interposer proxy bridge is disabled"
 	default:
 		return fmt.Sprintf("NockLock: network egress level is unknown (%q)", level)

@@ -49,16 +49,69 @@ func TestEgressBannersNameEveryLevel(t *testing.T) {
 		{egressLevelConfined, []string{"CONFINED (syscall fence; proxy bridge only)", "3 domain(s)"}},
 		{egressLevelAdvisory, []string{"WARNING", "ADVISORY", "userspace proxy only", "ignores HTTP_PROXY", "any host"}},
 		{egressLevelOff, []string{"WARNING", "OFF", "allow_all = true", "any host"}},
-		{egressLevelUnreachable, []string{"fatal", "UNREACHABLE", "proxy bridge is disabled"}},
 	}
 	for _, tt := range tests {
 		var stderr bytes.Buffer
-		fmt.Fprintln(&stderr, egressBanner(tt.level, 3))
+		fmt.Fprintln(&stderr, egressBanner(tt.level, 3, "linux", "proxy"))
 		for _, part := range tt.want {
 			if !strings.Contains(stderr.String(), part) {
 				t.Errorf("%s banner did not contain %q: %s", tt.level, part, stderr.String())
 			}
 		}
+	}
+}
+
+func TestUnreachableEgressBannersNameCause(t *testing.T) {
+	tests := []struct {
+		name            string
+		goos            string
+		netFence        string
+		syscall         bool
+		interposer      bool
+		want            []string
+		avoid           []string
+		requirementWant string
+	}{
+		{
+			name:            "Linux syscall fence without interposer",
+			goos:            "linux",
+			netFence:        "proxy",
+			syscall:         true,
+			want:            []string{"fatal", "UNREACHABLE", "syscall enforcement", "filesystem interposer proxy bridge is disabled"},
+			avoid:           []string{"netns is Linux-only"},
+			requirementWant: "enable the Linux filesystem interposer",
+		},
+		{
+			name:            "macOS netns",
+			goos:            "darwin",
+			netFence:        "netns",
+			want:            []string{"fatal", "UNREACHABLE", "netns is Linux-only", "macOS cannot provide enforced egress"},
+			avoid:           []string{"filesystem interposer proxy bridge is disabled"},
+			requirementWant: "macOS cannot provide enforced egress today",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			level := effectiveEgressLevel(tt.goos, tt.netFence, false, tt.syscall, tt.interposer)
+			if level != egressLevelUnreachable {
+				t.Fatalf("effective egress level = %s, want %s", level, egressLevelUnreachable)
+			}
+			var stderr bytes.Buffer
+			fmt.Fprintln(&stderr, egressBanner(level, 3, tt.goos, tt.netFence))
+			for _, part := range tt.want {
+				if !strings.Contains(stderr.String(), part) {
+					t.Errorf("stderr banner did not contain %q: %s", part, stderr.String())
+				}
+			}
+			for _, part := range tt.avoid {
+				if strings.Contains(stderr.String(), part) {
+					t.Errorf("stderr banner unexpectedly contained %q: %s", part, stderr.String())
+				}
+			}
+			if requirement := egressRequirementMessage(level, tt.goos); !strings.Contains(requirement, tt.requirementWant) {
+				t.Errorf("requirement message did not match banner cause %q: %s", tt.requirementWant, requirement)
+			}
+		})
 	}
 }
 

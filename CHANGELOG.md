@@ -44,6 +44,7 @@ All notable changes to NockLock will be documented in this file.
 
 ### Changed
 
+- An `UNREACHABLE` egress banner now explains that `--net-fence=netns` is Linux-only on macOS instead of showing the Linux interposer failure.
 - The Windows desktop probe script (`docs/probes/n10825/run-probe.ps1`) runs
   every command inside a container through `cmd.exe`: on the first desktop run
   `powershell.exe` exited `0xC0000142` (`STATUS_DLL_INIT_FAILED`) in a
