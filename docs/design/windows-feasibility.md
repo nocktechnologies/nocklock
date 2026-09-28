@@ -1404,6 +1404,17 @@ step, say) can only ever be scored from its own files, never from an earlier run
 `.done`, token, or log. A console window may flash briefly on the desktop when it
 runs.
 
+**One quiescence rule.** Whether the task is really stopped is decided in exactly
+one place, `Assert-LimitedQuiescent` (the gate): it stops the task, waits up to
+30 s, and passes only when the task reads Ready or Disabled. Each step that must
+not overlap a live instance calls it first: `Invoke-LimitedPhase` (before each
+request and after a timeout), Probe 1 before its presence read and elevated
+fallback, and the global teardown. A failed gate is final and handled the same way
+everywhere: the current probe prints its one verdict as SETUP-FAULT and the whole
+run aborts (no elevated fallback, no further probe), and the teardown keeps the
+task registration, probe root, profiles and exemption in place, printing each by
+exact name with the commands to remove it by hand once the task is stopped.
+
 `_limited.ps1` (written into `$probeRoot` by `run-probe.ps1`):
 
 ```powershell
@@ -1458,61 +1469,71 @@ $action = New-ScheduledTaskAction -Execute 'powershell.exe' -Argument (
 $principal = New-ScheduledTaskPrincipal -UserId ([Security.Principal.WindowsIdentity]::GetCurrent().Name) `
   -LogonType Interactive -RunLevel Limited
 $taskCreated = $false
+$script:limitedDead = $null; $script:limitedStuck = $null   # set only by this run's gate / control
 # Defaults would skip a start on battery; IgnoreNew is kept, so Invoke-LimitedPhase
-# stops AND awaits any still-running instance before each /Run (else the /Run is
-# silently ignored).
+# passes the quiescence gate before each /Run (else the /Run is silently ignored).
 $settings = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -MultipleInstances IgnoreNew
 Register-ScheduledTask -TaskName $taskName -Action $action -Principal $principal -Settings $settings -ErrorAction Stop | Out-Null
 $taskCreated = $true
 
-# Stops the task and WAITS (up to 30 s) until no instance is Running or Queued (a queued
-# instance would start later and pick up whatever request.txt then holds); returns the state.
-function Stop-LimitedTask {
+# THE ONE QUIESCENCE RULE (see "One quiescence rule" above), and the only place the task
+# is stopped. $true ONLY when the task reads Ready or Disabled after the stop and a wait of
+# up to 30 s; Running, Queued (it would start later and read whatever request.txt then
+# holds) or unreadable is $false. Never throws. A $false is final for the run: it sets
+# $limitedStuck and the fast-fail $limitedDead, and every later call returns $false at once.
+function Assert-LimitedQuiescent {
+  if ($script:limitedStuck) { return $false }
+  if (-not $taskCreated) { return $true }          # never registered: no instance can exist
   Stop-ScheduledTask -TaskName $taskName -ErrorAction SilentlyContinue
-  for ($i = 0; ($st = (Get-ScheduledTask -TaskName $taskName).State) -in @('Running','Queued') -and $i -lt 30; $i++) { Start-Sleep 1 }
-  $st
+  for ($i = 0; ($st = (Get-ScheduledTask -TaskName $taskName -ErrorAction SilentlyContinue).State) -in @('Running','Queued') -and $i -lt 30; $i++) { Start-Sleep 1 }
+  if ("$st" -in @('Ready','Disabled')) { return $true }
+  $script:limitedStuck = "limited task $taskName is '$st' 30 s after Stop-ScheduledTask"
+  $script:limitedDead  = $script:limitedStuck
+  $false
 }
+
+# The one abort, run by every limited consumer right after its one verdict: once the gate
+# has failed, no further probe runs; the run's try/finally runs the (keeping) teardown.
+function Stop-RunIfStuck { if ($script:limitedStuck) { throw "SETUP-FAULT: run aborted - $script:limitedStuck" } }
 
 # Runs one _limited.ps1 phase under a fresh invocation id ($limitedInv, "<phase>-<GUID>")
 # and returns that invocation's log lines ONLY if it completed (its own <id>.done present)
 # AND its own token is proven limited: Medium Mandatory Level (S-1-16-8192) present, High
 # Mandatory Level (S-1-16-12288) absent, AND it ran contained (`contained=OK` in its own
 # log: its children die with it if it is stopped). Otherwise returns $null with the reason in
-# $limitedFault; callers turn $null into SETUP-FAULT, never into a scored result.
+# $limitedFault; callers turn $null into SETUP-FAULT, never into a scored result, and
+# then call Stop-RunIfStuck (the gate may have said the task will not stop).
 # `schtasks /Run` returns immediately, hence the bounded poll.
 function Invoke-LimitedPhase {
   param([string]$Phase, [int]$TimeoutSec = 120)
   # A failed positive control, a task that never starts, or one that will not stop fails
-  # every later phase at once, instead of each waiting out its own timeout or overlapping it.
+  # every later phase at once, instead of each waiting out its own timeout.
   $script:limitedInv = $null         # never left pointing at an earlier invocation
   if ($script:limitedDead) { $script:limitedFault = "limited task unusable ($script:limitedDead)"; return $null }
   $script:limitedFault = $null
+  # THE GATE, first: an instance still Running or Queued would pick up the new request.
+  if (-not (Assert-LimitedQuiescent)) { $script:limitedFault = $script:limitedStuck; return $null }
   $inv = '{0}-{1}' -f $Phase, [guid]::NewGuid().ToString('N')
   $script:limitedInv = $inv
   $done  = Join-Path $limitedDir "$inv.done"
   $token = Join-Path $limitedDir "$inv.token.txt"
-  # A timed-out earlier phase may still be running: stop it before handing over the new
-  # request, so no old instance can pick it up.
-  if (($st = Stop-LimitedTask) -in @('Running','Queued')) {
-    $script:limitedFault = "an earlier instance of $taskName is still $st 30 s after Stop-ScheduledTask"
-    $script:limitedDead  = $script:limitedFault
-    return $null
-  }
   Set-Content -Path (Join-Path $limitedDir 'request.txt') -Value @($Phase, $inv)
   schtasks /Run /TN $taskName | Out-Null
   if ($LASTEXITCODE -ne 0) { $script:limitedFault = "schtasks /Run exit $LASTEXITCODE"; return $null }
   for ($i = 0; $i -lt $TimeoutSec -and -not (Test-Path $done); $i++) { Start-Sleep 1 }
   if (-not (Test-Path $done)) {
-    # TIMEOUT. Stop the task and wait until it is no longer Running BEFORE returning, so a
-    # late phase cannot start new exemption / profile / ETW changes while the caller's
-    # fallback or teardown runs; its child processes die with it (ContainSelf's job).
+    # TIMEOUT. THE GATE before returning, so a late phase cannot make exemption / profile /
+    # ETW changes while the caller carries on; its children die with it (ContainSelf's job).
     # Always $null, even if .done lands after the stop: a timed-out phase is never scored.
-    $st = Stop-LimitedTask
     $started = Test-Path $token      # _limited.ps1 writes its token file first thing
-    $script:limitedFault = "timeout: phase $Phase ($inv) wrote no .done within $TimeoutSec s (started=$started$(if (-not $started) {', console session logged off?'})); after Stop-ScheduledTask the task is $st"
-    # A task that never started, or will not stop, would only repeat the wait or overlap
-    # the next phase: fail every later phase at once. A merely slow phase costs only itself.
-    if (-not $started -or $st -in @('Running','Queued')) { $script:limitedDead = $script:limitedFault }
+    $script:limitedFault = "timeout: phase $Phase ($inv) wrote no .done within $TimeoutSec s (started=$started$(if (-not $started) {', console session logged off?'}))"
+    if (-not (Assert-LimitedQuiescent)) {
+      $script:limitedFault += "; $script:limitedStuck"   # the caller aborts the run
+    } elseif (-not $started) {
+      # A task that never started would only repeat the wait: fail every later phase at
+      # once. A merely slow phase that did stop costs only itself.
+      $script:limitedDead = $script:limitedFault
+    }
     return $null
   }
   $medium = [bool](Select-String -Path $token -SimpleMatch 'S-1-16-8192' -ErrorAction SilentlyContinue)
@@ -1533,6 +1554,9 @@ function Invoke-LimitedPhase {
 # Administrators line should read deny-only); only the two Mandatory Level SIDs are scored.
 if (Invoke-LimitedPhase 'control') {
   "LIMITED-TOKEN: PASS — task token is Medium IL with High absent"
+} elseif ($limitedStuck) {
+  "LIMITED-TOKEN: SETUP-FAULT — $limitedFault; run aborted"
+  Stop-RunIfStuck
 } else {
   $script:limitedDead = $limitedFault
   "LIMITED-TOKEN: FAIL — $limitedFault; Probe 1's exemption step, Probe 3 and Probe 7 will record SETUP-FAULT"
@@ -1585,6 +1609,13 @@ foreach ($port in @(8899, 9999)) {
 CheckNetIsolation.exe LoopbackExempt -d "-n=$moniker" | Out-Null
 $preClean    = -not (Test-ExemptListed)
 $nonElevated = if ($preClean) { Invoke-LimitedPhase 'exempt' }
+# THE GATE, before presence is read and before anything elevated touches the exemption:
+# a surviving limited instance could add the entry after either. On $false: this one
+# verdict, no elevated fallback, and the run aborts.
+if (-not (Assert-LimitedQuiescent)) {
+  "VERDICT(1-exempt): SETUP-FAULT - $limitedStuck; no elevated fallback, run aborted"
+  Stop-RunIfStuck
+}
 # Case-sensitive: only the phase's own `exit=` / `ERROR:` lines, never CheckNetIsolation's "Error:" text.
 $limitedRc   = (@($nonElevated) -cmatch '^(exit=|ERROR:)') -join '; '
 # Presence is read right after the limited attempt, BEFORE any elevated retry can add it.
@@ -1681,7 +1712,8 @@ loopback exemption is machine-wide session state shared by every probe, so it is
 measured step itself: each exemption attempt first removes this run's entry and
 proves it absent, so a repeated attempt never scores an earlier attempt's entry. The limited task that
 ran the `exempt` phase is shared with Probe 3 and likewise removed by the global
-teardown.
+teardown, which keeps it (and the exemption) in place instead if the task will not
+stop (see the quiescence gate below).
 
 | State touched | Detail |
 |---|---|
@@ -1784,6 +1816,7 @@ if (-not $p3) {
 } else {
   "VERDICT(3): WORKS UNELEVATED - limited-token parent created the profile and launched a Low-IL AppContainer child ($env3)"
 }
+Stop-RunIfStuck
 ```
 
 Re-running `probe3` within the same run prints its own verdict from its own
@@ -2053,6 +2086,7 @@ if (-not $p7) {
 } else {
   "VERDICT(7): NEEDS MORE THAN A LIMITED TOKEN - $((@($p7) -match '^(create-exit=|ERROR:)') -join '; ') (Phase 2)"
 }
+Stop-RunIfStuck
 ```
 
 Run non-elevated first. If it succeeds, file-event logging is Phase 0 material.
@@ -2434,8 +2468,13 @@ No on-disk state.
 ### Global teardown and state listing
 
 Run this last, unconditionally (wrap the whole probe run in `try { … } finally {
-<teardown> }` so it runs even on failure). It removes everything the run created
-and prints a before/after state listing so nothing is left behind:
+<teardown> }` so it runs even on failure). It first passes the limited task's
+quiescence gate (`Assert-LimitedQuiescent`). On `$true` it removes everything the run
+created and asserts the before/after state listing. On `$false` (the task will not stop)
+it keeps the task registration, the probe root, the AppContainer profiles and the
+loopback exemption exactly as they are, because a surviving instance could use or
+recreate them after a cleanup; it prints each kept item by exact name and the manual
+recovery commands, to run once the task is confirmed stopped:
 
 ```powershell
 # --- BEFORE (also run this at the very start, to diff against). The scaffold has
@@ -2447,18 +2486,12 @@ Test-Path $probeRoot
 
 # --- TEARDOWN (desktop run — no package uninstalls). Everything by EXACT name. ---
 $profileNames = @($moniker, "nocklock-p3-$runId", "agent-escape-$runId")   # scaffold, Probe 3, Probe 10
-if ($taskCreated) {                                        # the limited-token task: exact name, never a wildcard
-  "TEARDOWN: limited task after stop-and-wait -> $(Stop-LimitedTask)"   # gone before $probeRoot is removed
-  Unregister-ScheduledTask -TaskName $taskName -Confirm:$false -ErrorAction SilentlyContinue
-}
+# THE GATE, before any destructive step. $true also when the task was never registered.
+$quiet = Assert-LimitedQuiescent
+# Not limited-task state, so these run either way:
 if ($pipeGranted) { $pipeGranted.Dispose() }               # Probe 11
 if ($pipeNoAce)   { $pipeNoAce.Dispose() }
-CheckNetIsolation.exe LoopbackExempt -d "-n=$moniker" | Out-Null   # machine-wide exemption (Probes 1-2)
-if ('NockProbe.AC' -as [type]) {                           # launcher loaded => profiles may exist
-  foreach ($n in $profileNames) {                          # DeleteAppContainerProfile; HRESULT printed, never thrown
-    'TEARDOWN: DeleteProfile {0} -> 0x{1:X8}' -f $n, [NockProbe.AC]::DeleteProfile($n)
-  }
-}
+$job8899, $job9999 | Where-Object { $_ } | Remove-Job -Force -ErrorAction SilentlyContinue   # Probe 1's listeners, by handle (an abort skips its own teardown)
 if ($etwCreated) { logman stop $etwSession -ets 2>$null }  # only if THIS run created it
 # Reap spawned processes BEFORE deleting $probeRoot (identity files live there).
 foreach ($idFile in (Get-ChildItem -Path $probeRoot -Filter '*.txt' -Recurse -ErrorAction SilentlyContinue |
@@ -2466,32 +2499,62 @@ foreach ($idFile in (Get-ChildItem -Path $probeRoot -Filter '*.txt' -Recurse -Er
   Stop-VerifiedProcess -IdentityFile $idFile.FullName
 }
 # Probe 9 (VM only): restore firewall to the recorded per-profile state
-Remove-Item -Recurse -Force $probeRoot                     # everything else lived here
+if (-not $quiet) {
+  # KEEP everything a surviving instance could use or recreate; print it and the recovery.
+  "TEARDOWN: SETUP-FAULT - $limitedStuck; kept in place, by exact name:"
+  "  scheduled task : $taskName"
+  "  probe root     : $probeRoot"
+  "  exemption      : $moniker"
+  "  profiles       : $($profileNames -join ', ')"
+  "RECOVERY (elevated PowerShell). Stop it and read its state; run the rest ONLY once it reads Ready or Disabled:"
+  "  Stop-ScheduledTask -TaskName '$taskName'; (Get-ScheduledTask -TaskName '$taskName').State"
+  "  Unregister-ScheduledTask -TaskName '$taskName' -Confirm:`$false"
+  "  CheckNetIsolation.exe LoopbackExempt -d -n=$moniker"
+  "  [void][Reflection.Assembly]::Load([IO.File]::ReadAllBytes('$probeRoot\_launcher.dll'))   # skip in this session"
+  foreach ($n in $profileNames) { "  [NockProbe.AC]::DeleteProfile('$n')" }
+  if ($etwCreated) { "  logman stop $etwSession -ets" }
+  "  Remove-Item -Recurse -Force '$probeRoot'"
+} else {
+  if ($taskCreated) {                                      # the limited-token task: exact name, never a wildcard
+    Unregister-ScheduledTask -TaskName $taskName -Confirm:$false -ErrorAction SilentlyContinue
+  }
+  CheckNetIsolation.exe LoopbackExempt -d "-n=$moniker" | Out-Null   # machine-wide exemption (Probes 1-2)
+  if ('NockProbe.AC' -as [type]) {                         # launcher loaded => profiles may exist
+    foreach ($n in $profileNames) {                        # DeleteAppContainerProfile; HRESULT printed, never thrown
+      'TEARDOWN: DeleteProfile {0} -> 0x{1:X8}' -f $n, [NockProbe.AC]::DeleteProfile($n)
+    }
+  }
+  Remove-Item -Recurse -Force $probeRoot                   # everything else lived here
 
-# --- AFTER: ASSERT the BEFORE baseline is restored. One line per check; any
-# LEFTOVER line is a failed run, to be cleaned by hand using the name it prints.
-function Assert-Restored([string]$Label, [bool]$Ok) { if ($Ok) { "RESTORED: $Label" } else { "LEFTOVER: $Label" } }
-$mappings = 'HKCU:\Software\Classes\Local Settings\Software\Microsoft\Windows\CurrentVersion\AppContainer\Mappings'
-$leftMaps = @(Get-ChildItem $mappings -ErrorAction SilentlyContinue |
-  Where-Object { $profileNames -contains (Get-ItemProperty $_.PSPath -ErrorAction SilentlyContinue).Moniker })
-Assert-Restored "loopback exemptions back to BEFORE ($baseExempt)" ((Get-ExemptCount) -eq $baseExempt)
-if ($sid) {        # unset only if the scaffold stopped before the profile existed
-  Assert-Restored "this run's SID absent from LoopbackExempt -s" (-not (Test-ExemptListed))
+  # --- AFTER: ASSERT the BEFORE baseline is restored. One line per check; any
+  # LEFTOVER line is a failed run, to be cleaned by hand using the name it prints.
+  # (Skipped on the kept branch above: its listing already names what is left.)
+  function Assert-Restored([string]$Label, [bool]$Ok) { if ($Ok) { "RESTORED: $Label" } else { "LEFTOVER: $Label" } }
+  $mappings = 'HKCU:\Software\Classes\Local Settings\Software\Microsoft\Windows\CurrentVersion\AppContainer\Mappings'
+  $leftMaps = @(Get-ChildItem $mappings -ErrorAction SilentlyContinue |
+    Where-Object { $profileNames -contains (Get-ItemProperty $_.PSPath -ErrorAction SilentlyContinue).Moniker })
+  Assert-Restored "loopback exemptions back to BEFORE ($baseExempt)" ((Get-ExemptCount) -eq $baseExempt)
+  if ($sid) {        # unset only if the scaffold stopped before the profile existed
+    Assert-Restored "this run's SID absent from LoopbackExempt -s" (-not (Test-ExemptListed))
+  }
+  Assert-Restored "ports 8899/9999/9998 back to BEFORE ($basePorts listening)" ((Get-BusyPorts) -eq $basePorts)
+  if ($taskName) {   # unset only if the scaffold stopped before registering the task
+    Assert-Restored "scheduled task $taskName absent" (-not (Get-ScheduledTask -TaskName $taskName -ErrorAction SilentlyContinue))
+  }
+  foreach ($n in $profileNames) {
+    Assert-Restored "AppContainer profile folder $n absent" (-not (Test-Path (Join-Path $env:LOCALAPPDATA "Packages\$n")))
+  }
+  Assert-Restored "AppContainer Mappings keys for this run's monikers absent" ($leftMaps.Count -eq 0)
+  Assert-Restored "probe root $probeRoot absent" (-not (Test-Path $probeRoot))
 }
-Assert-Restored "ports 8899/9999/9998 back to BEFORE ($basePorts listening)" ((Get-BusyPorts) -eq $basePorts)
-if ($taskName) {   # unset only if the scaffold stopped before registering the task
-  Assert-Restored "scheduled task $taskName absent" (-not (Get-ScheduledTask -TaskName $taskName -ErrorAction SilentlyContinue))
-}
-foreach ($n in $profileNames) {
-  Assert-Restored "AppContainer profile folder $n absent" (-not (Test-Path (Join-Path $env:LOCALAPPDATA "Packages\$n")))
-}
-Assert-Restored "AppContainer Mappings keys for this run's monikers absent" ($leftMaps.Count -eq 0)
-Assert-Restored "probe root $probeRoot absent" (-not (Test-Path $probeRoot))
 logman query -ets                                          # ETW: diff by eye against BEFORE
 ```
 
 On the desktop the expected AFTER is every line `RESTORED`, which restores the
-documented baseline: 0 loopback exemptions and ports 8899/9999/9998 free.
+documented baseline: 0 loopback exemptions and ports 8899/9999/9998 free. A run
+that ends on the kept branch instead prints `TEARDOWN: SETUP-FAULT` with its
+inventory and recovery commands; that run is a failed run until the recovery has
+been done by hand.
 
 Disposable-box probes (8, 9, and the disposable-box steps of 5b, 6, 7) run on a
 throwaway VM. Their teardown is "discard the box" — the VM is the cleanup.
