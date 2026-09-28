@@ -10,13 +10,15 @@ claude-code posture (Landlock + seccomp required + LD_PRELOAD interposer):
 `os.cpus()` reads the system-wide `/proc/cpuinfo`, `/proc/stat`, `/proc/meminfo`
 (granted in the preset), and `process.memoryUsage()` reads `/proc/self/stat`,
 granted by `landlockProcSelfAllowPaths()` (wrap.go) plus its interposer companion
-`allowSelfProcFS()` (landlock_exec.go).
+`allowSelfProcFS()` (landlock_exec.go). Both grant only the curated files in
+`fsfence.SelfProcFiles()` (`stat`, `status`, `statm`), never the `/proc/<pid>`
+directory.
 
 That fix reaches exactly the **direct** wrapped child. The `__landlock-exec` shim
 builds the Landlock ruleset and then `execve`s the child *in place* (same pid), so
-the literal `/proc/self` rule binds to the inode that becomes the child's own
-`/proc/<pid>`. Landlock is **inode-bound**: the rule covers that one dentry, not a
-descendant's own `/proc/<gcpid>`.
+each literal `/proc/self/<file>` rule binds to a file inode inside what becomes
+the child's own `/proc/<pid>`. Landlock is **inode-bound**: the rule covers those
+files, not a descendant's own `/proc/<gcpid>/<file>`.
 
 #10764 is the measured consequence: a Node subprocess spawned by the wrapped Node
 agent (an MCP server, a tool — a *grandchild* that execs under a new pid) calls
@@ -32,9 +34,11 @@ granted by path, not pid-scoped.
 directly wrapped process gets its own `/proc/self`; a descendant that execs under
 a new pid cannot read its own `/proc/self/stat` and `process.memoryUsage()` will
 throw `EACCES` there. This is documented in code
-(`landlockProcSelfAllowPaths` doc comment) and pinned by a regression test that
-asserts the grant stays exactly one entry — the literal `/proc/self`, read-only —
-so a future "fix" cannot silently widen it to the broad `/proc` tree.
+(`landlockProcSelfAllowPaths` doc comment) and pinned by
+`TestLandlockProcSelfAllowPathsStaysNarrow`, which asserts the grant stays one
+read-only literal `/proc/self/<file>` entry per curated file (and that the list
+never names `environ`/`cmdline`/`mem`/`maps`/`fd`), so a future "fix" cannot
+silently widen it to a directory or the broad `/proc` tree.
 
 ## Rationale — the options considered, and why each fails
 Every path that would reach grandchildren was assessed against the fence's core
@@ -104,8 +108,9 @@ host regardless of this sysctl.
   worker-pool sizing is correct for grandchildren.
 - **Security posture is unchanged and the narrowness is now pinned:** the #115
   sibling-`environ` block stays green, and a regression test asserts
-  `landlockProcSelfAllowPaths()` returns exactly `{/proc/self, read-only}` so the
-  grant cannot be quietly widened to `/proc` while "resolving" this.
+  `landlockProcSelfAllowPaths()` returns exactly one read-only
+  `/proc/self/<file>` per `SelfProcFiles()` entry, so the grant cannot be
+  quietly widened to a directory or `/proc` while "resolving" this.
 - **Revisit trigger:** if NockLock later adopts a privileged namespace helper for
   another reason (e.g. the persistent SCM_RIGHTS helper deferred in ADR-004), a
   per-tree PID namespace with a fresh `/proc` becomes reachable and this decision

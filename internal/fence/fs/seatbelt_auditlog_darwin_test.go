@@ -32,10 +32,10 @@ func TestSeatbeltDeniesWriteToFencedAuditLog(t *testing.T) {
 	}
 	allowedFile := filepath.Join(allowedDir, "ok.txt")
 
-	// The audit directory sits inside the write-allowed project root and is also
-	// passed as the state directory. Its Phase 1 read/write deny must still win,
-	// otherwise Phase 2 root confinement would re-open audit-log tampering.
-	profile, _, err := GenerateWriteConfinementProfile([]string{auditDir}, base, "read-write", auditDir, false)
+	// The audit directory sits inside the write-allowed project root. Its Phase
+	// 1 read/write deny must still win, otherwise root confinement would re-open
+	// audit-log tampering.
+	profile, _, err := GenerateWriteConfinementProfile([]string{auditDir}, base, "read-write", false)
 	if err != nil {
 		t.Fatalf("GenerateWriteConfinementProfile: %v", err)
 	}

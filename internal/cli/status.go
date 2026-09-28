@@ -4,7 +4,6 @@ import (
 	"errors"
 	"fmt"
 	"os"
-	"path/filepath"
 
 	"github.com/nocktechnologies/nocklock/internal/config"
 	"github.com/nocktechnologies/nocklock/internal/logging"
@@ -42,8 +41,9 @@ var statusCmd = &cobra.Command{
 		// Filesystem fence status
 		if cfg.Filesystem.Root != "" {
 			allowCount := len(cfg.Filesystem.Allow)
+			allowRWCount := len(cfg.Filesystem.AllowRW)
 			denyCount := len(cfg.Filesystem.Deny)
-			fmt.Printf("Filesystem fence: active (allow %d, deny %d)\n", allowCount, denyCount)
+			fmt.Printf("Filesystem fence: active (allow %d read-only, %d read-write, deny %d)\n", allowCount, allowRWCount, denyCount)
 		} else {
 			fmt.Println("Filesystem fence: not configured")
 		}
@@ -57,17 +57,16 @@ var statusCmd = &cobra.Command{
 		}
 
 		// Event log summary
-		dbPath, projectRoot := config.ResolveDBPath(cfg, configPath)
-		relDB := cfg.Logging.DB
-		if relDB == "" {
-			// Show the default path when config doesn't specify one.
-			rel, relErr := filepath.Rel(projectRoot, dbPath)
-			if relErr == nil {
-				relDB = rel
-			} else {
-				relDB = dbPath
-			}
+		dbPath, projectRoot, err := config.ResolveDBPath(cfg, configPath)
+		if err != nil {
+			cmd.SilenceUsage = true
+			return err
 		}
+		// Show the RESOLVED path, not what the config says. A relative
+		// logging.db no longer describes where the log is — it resolves into
+		// the audit state directory outside the project — so echoing the config
+		// value would point the operator at a file that is not there.
+		relDB := dbPath
 
 		if _, statErr := os.Stat(dbPath); statErr != nil {
 			if errors.Is(statErr, os.ErrNotExist) {

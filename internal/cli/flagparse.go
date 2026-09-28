@@ -6,9 +6,10 @@ import "fmt"
 // These appear before the "--" separator and are consumed by NockLock,
 // not forwarded to the child process.
 type WrapFlags struct {
-	AllowPrivateRanges bool // --allow-private-ranges: permit RFC1918/loopback connections
-	DryRun             bool // --dry-run: validate config without starting fences or child process
-	Profile            string
+	AllowPrivateRanges    bool // --allow-private-ranges: permit RFC1918/loopback connections
+	DryRun                bool // --dry-run: validate config without starting fences or child process
+	RequireEnforcedEgress bool // --require-enforced-egress: refuse advisory or disabled egress
+	Profile               string
 	// NetFence opts into a kernel-enforced network egress fence. "" (default)
 	// keeps the existing userspace-proxy posture unchanged; "netns" selects the
 	// privileged-helper network-namespace default-drop floor (Linux only).
@@ -66,6 +67,8 @@ func parseWrapFlags(args []string) (WrapFlags, []string, error) {
 			flags.AllowPrivateRanges = true
 		case "--dry-run":
 			flags.DryRun = true
+		case "--require-enforced-egress":
+			flags.RequireEnforcedEgress = true
 		case "--profile":
 			if i+1 >= len(nockArgs) {
 				return WrapFlags{}, nil, fmt.Errorf("--profile requires a profile name")
@@ -108,7 +111,7 @@ func allRecognizedWrapFlags(args []string) bool {
 	for i := 0; i < len(args); i++ {
 		a := args[i]
 		switch a {
-		case "--allow-unfenced", "--allow-private-ranges", "--dry-run":
+		case "--allow-unfenced", "--allow-private-ranges", "--dry-run", "--require-enforced-egress":
 		case "--profile", "--net-fence":
 			if i+1 >= len(args) {
 				return false

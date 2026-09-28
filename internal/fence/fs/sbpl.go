@@ -73,22 +73,20 @@ func GenerateProfileAndCount(sensitivePaths []string, hardened bool) (string, in
 
 // GenerateWriteConfinementProfile builds the macOS Seatbelt profile used when
 // filesystem.root is configured. It denies every file write first, then grants
-// writes only to the canonical root (unless mode is read-only), the NockLock
-// state directory, and the per-user runtime paths needed to launch common
-// tools. Sensitive paths remain denied for both reads and writes after those
-// grants, so a sensitive path under root never becomes accessible.
-func GenerateWriteConfinementProfile(sensitivePaths []string, root, mode, stateDir string, hardened bool) (string, int, error) {
+// writes only to the canonical root (unless mode is read-only) and the per-user
+// runtime paths needed to launch common tools. NockLock's parent, not the
+// fenced child, writes the audit state directory. Sensitive paths remain denied
+// for both reads and writes after those grants, so a sensitive path under root
+// never becomes accessible.
+func GenerateWriteConfinementProfile(sensitivePaths []string, root, mode string, hardened bool) (string, int, error) {
 	if strings.TrimSpace(root) == "" {
 		return "", 0, fmt.Errorf("refusing to generate write-confinement profile with an empty root")
-	}
-	if strings.TrimSpace(stateDir) == "" {
-		return "", 0, fmt.Errorf("refusing to generate write-confinement profile with an empty state directory")
 	}
 	if mode != "read-write" && mode != "read-only" {
 		return "", 0, fmt.Errorf("invalid filesystem mode %q: must be \"read-write\" or \"read-only\"", mode)
 	}
 
-	writePaths, err := writeConfinementPaths(root, mode, stateDir)
+	writePaths, err := writeConfinementPaths(root, mode)
 	if err != nil {
 		return "", 0, err
 	}
@@ -166,7 +164,7 @@ func generateProfile(sensitivePaths []string, hardened bool, writePaths []string
 // the source of the invoking user's temporary and cache locations. On macOS,
 // reject an arbitrary TMPDIR outside the system's per-user temp locations so a
 // caller cannot silently widen the boundary through its environment.
-func writeConfinementPaths(root, mode, stateDir string) ([]string, error) {
+func writeConfinementPaths(root, mode string) ([]string, error) {
 	tempDir, err := canonicalizeForProfile(os.TempDir())
 	if err != nil {
 		return nil, fmt.Errorf("cannot canonicalize user temporary directory: %w", err)
@@ -187,7 +185,6 @@ func writeConfinementPaths(root, mode, stateDir string) ([]string, error) {
 		"/private/tmp",
 		tempDir,
 		cacheDir,
-		stateDir,
 	}
 	// macOS gives each invoking user a paired T (temp) and C (cache) directory
 	// under /private/var/folders. os.TempDir identifies the T directory; add its

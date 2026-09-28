@@ -77,11 +77,11 @@ func TestDoctorNetworkAllowAllWarnsButDoesNotFail(t *testing.T) {
 	}
 }
 
-func TestDoctorNetworkAllowlistInertUnderSyscallFenceWarns(t *testing.T) {
+func TestDoctorNetworkAllowlistBridgeDoesNotWarnWithFilesystemInterposer(t *testing.T) {
 	// Default config on Linux: syscall fence "required" + network fenced with a
-	// curated allowlist. The syscall fence forces unix-only sockets, so the TCP
-	// proxy that enforces the allowlist is unreachable and the allowlist is
-	// inert. Doctor must surface that footgun (as a warning, not a failure).
+	// curated allowlist. The proxy-mode syscall policy narrows the child to
+	// unix-only sockets, and the filesystem interposer now bridges the configured
+	// proxy address to a Unix socket, so this is no longer an inert allowlist.
 	dir := t.TempDir()
 	writeTestConfig(t, dir, doctorTestTOML(false))
 	withWorkingDir(t, dir)
@@ -103,10 +103,43 @@ func TestDoctorNetworkAllowlistInertUnderSyscallFenceWarns(t *testing.T) {
 	cmd.SetErr(&bytes.Buffer{})
 
 	if err := doctorCmd.RunE(cmd, nil); err != nil {
-		t.Fatalf("inert-allowlist warning should not fail doctor: %v", err)
+		t.Fatalf("doctor should not fail: %v", err)
 	}
-	if !strings.Contains(out.String(), "Network allowlist is inert on Linux") {
-		t.Fatalf("expected inert-allowlist warning, got:\n%s", out.String())
+	if strings.Contains(out.String(), "Network allowlist cannot be reached") {
+		t.Fatalf("did not expect bridge warning with filesystem interposer, got:\n%s", out.String())
+	}
+	if !strings.Contains(out.String(), "VERDICT: PROTECTED") {
+		t.Fatalf("expected protected verdict, got:\n%s", out.String())
+	}
+}
+
+func TestDoctorNetworkAllowlistWarnsWhenBridgeInterposerDisabled(t *testing.T) {
+	dir := t.TempDir()
+	toml := strings.Replace(doctorTestTOML(false), "[filesystem]\nroot = \".\"", "[filesystem]\nroot = \"\"", 1)
+	writeTestConfig(t, dir, toml)
+	withWorkingDir(t, dir)
+
+	restore := stubDoctorCapabilities(doctorCapabilities{
+		goos:           "linux",
+		fsBackend:      func() error { return nil },
+		landlockABI:    func() (int, error) { return 3, nil },
+		syscallBackend: func() bool { return true },
+		networkBackend: func() error { return nil },
+		sandboxExec:    func() error { return nil },
+		now:            func() time.Time { return time.Date(2026, 6, 18, 12, 0, 0, 0, time.UTC) },
+	})
+	defer restore()
+
+	var out bytes.Buffer
+	cmd := &cobra.Command{}
+	cmd.SetOut(&out)
+	cmd.SetErr(&bytes.Buffer{})
+
+	if err := doctorCmd.RunE(cmd, nil); err != nil {
+		t.Fatalf("bridge warning should not fail doctor: %v", err)
+	}
+	if !strings.Contains(out.String(), "Network allowlist cannot be reached") {
+		t.Fatalf("expected bridge warning, got:\n%s", out.String())
 	}
 	if !strings.Contains(out.String(), "VERDICT: PROTECTED") {
 		t.Fatalf("warning alone should keep protected verdict, got:\n%s", out.String())
@@ -114,8 +147,8 @@ func TestDoctorNetworkAllowlistInertUnderSyscallFenceWarns(t *testing.T) {
 }
 
 func TestDoctorNetworkAllowlistNotInertWhenSyscallOff(t *testing.T) {
-	// With the syscall fence off, the child keeps IP sockets and the proxy-based
-	// allowlist actually functions — no inert-allowlist warning should appear.
+	// With the syscall fence off, the proxy is advisory because clients can ignore
+	// HTTP_PROXY and make direct connections outside the allowlist.
 	dir := t.TempDir()
 	// Target the [syscall] enforcement line specifically (line-start), not the
 	// filesystem's linux_enforcement line which also contains the substring.
@@ -142,8 +175,14 @@ func TestDoctorNetworkAllowlistNotInertWhenSyscallOff(t *testing.T) {
 	if err := doctorCmd.RunE(cmd, nil); err != nil {
 		t.Fatalf("doctor should pass with syscall off: %v", err)
 	}
-	if strings.Contains(out.String(), "Network allowlist is inert") {
-		t.Fatalf("did not expect inert-allowlist warning with syscall off, got:\n%s", out.String())
+	if strings.Contains(out.String(), "Network allowlist cannot be reached") {
+		t.Fatalf("did not expect bridge warning with syscall off, got:\n%s", out.String())
+	}
+	if !strings.Contains(out.String(), "ADVISORY: clients that ignore HTTP_PROXY can reach any host") {
+		t.Fatalf("expected advisory egress warning with syscall off, got:\n%s", out.String())
+	}
+	if !strings.Contains(out.String(), "network-egress-advisory") {
+		t.Fatalf("expected named network-egress-advisory check, got:\n%s", out.String())
 	}
 }
 

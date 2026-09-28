@@ -16,24 +16,88 @@ import (
 // the serialized fence config passed to the LD_PRELOAD interposer.
 const fieldSep = "\x1f"
 
+// maxAllowPaths mirrors MAX_PATHS in the interposer's libfence_fs.c
+// (internal/fence/fs/interposer/libfence_fs.c; kept in sync by
+// TestMaxAllowPathsMatchesInterposerMaxPaths). Past this count in EITHER the
+// shared allow/allow_rw or deny category, the interposer fails closed (denies
+// every path) rather than silently dropping entries.
+const maxAllowPaths = 256
+
+// interposerMaxPathFields preserves the Go-side wire budget of MAX_PATHS + 4
+// fields, including 3 metadata fields. The C tokenizer now allocates more
+// slots and fails closed on overflow, but configurations exceeding this
+// conservative budget are still rejected before starting a wrapped process.
+const interposerMaxPathFields = maxAllowPaths + 4
+const interposerMetadataFields = 3
+
+// selfProcFiles are the specific, read-only /proc/<pid> entries the fence
+// grants a wrapped process for its own runtime introspection (e.g. Node's
+// process.memoryUsage(), which reads /proc/self/stat). Only these files are
+// ever granted — never the /proc/<pid> directory itself, which would also
+// expose environ, cmdline, mem, maps and fd to the wrapped process AND to any
+// descendant that inherits the Landlock rule. (Verified empirically: Node
+// startup also touches /proc/self/exe, maps and cgroup, but tolerates each
+// failing to open — it falls back to argv[0] for process.execPath and
+// otherwise degrades silently — so none of those need a grant.)
+//
+// Both the Landlock ruleset (landlockProcSelfAllowPaths in
+// internal/cli/wrap.go) and the userspace interposer's allow-list injection
+// (allowSelfProcFS in internal/cli/landlock_exec.go) grant exactly this list
+// and must stay in sync, so this is the single source of truth for both —
+// call SelfProcFiles() rather than duplicating the list.
+var selfProcFiles = []string{"stat", "status", "statm"}
+
+// SelfProcFiles returns a copy of the curated /proc/<pid> file list (see
+// selfProcFiles); callers get their own slice so they cannot mutate the
+// shared source of truth.
+func SelfProcFiles() []string {
+	return append([]string(nil), selfProcFiles...)
+}
+
 // FenceConfig holds resolved, absolute filesystem fence paths ready
 // for enforcement. All paths have been cleaned, expanded, and (for Root)
 // symlink-resolved.
 type FenceConfig struct {
-	Root       string
-	Mode       string
-	AllowPaths []string
-	DenyPaths  []string
+	Root         string
+	Mode         string
+	AllowPaths   []string
+	AllowRWPaths []string
+	DenyPaths    []string
+
+	// ProtectedRootSubdir, when set, is a directory INSIDE Root that must not
+	// become writable — in practice a legacy in-project audit directory. It
+	// changes how the root is granted: instead of one rule on Root, the fence
+	// grants each of Root's existing children and skips this one, so the child
+	// keeps its existing access but cannot create or remove entries directly in
+	// Root itself.
+	//
+	// That trade is forced, not chosen. Landlock resolves an access by walking
+	// UPWARD from the accessed file and allowing as soon as any ancestor rule
+	// grants it, so a rule on Root cannot be narrowed by a rule underneath it:
+	// granting Root would grant this directory too. Leave it empty whenever the
+	// audit state lives outside Root, which is the default, and the root is
+	// granted as one hierarchy.
+	//
+	// It must be a DIRECT child of Root: skipping one entry protects only that
+	// entry, so a directory further down would be reached through the grant on
+	// the child above it. Rule generation refuses rather than pretend otherwise.
+	//
+	// Landlock-only. It shapes the kernel ruleset and is deliberately absent
+	// from Serialize, because the LD_PRELOAD interposer and the macOS Seatbelt
+	// profile express the same protection through DenyPaths, which they can
+	// enforce directly.
+	ProtectedRootSubdir string
 }
 
 // SerializedConfig is the parsed representation of a serialized fence
 // rule string, as consumed by the interposer shared library.
 type SerializedConfig struct {
-	Root       string
-	Mode       string // "rw" or "ro"
-	SocketPath string
-	AllowPaths []string
-	DenyPaths  []string
+	Root         string
+	Mode         string // "rw" or "ro"
+	SocketPath   string
+	AllowPaths   []string
+	AllowRWPaths []string
+	DenyPaths    []string
 }
 
 // ExpandTilde replaces a leading ~ in path with the user's home directory.
@@ -143,6 +207,17 @@ func ProcessConfig(cfg config.FilesystemConfig) (*FenceConfig, error) {
 		}
 		allowPaths = append(allowPaths, resolved)
 	}
+	allowRWPaths := make([]string, 0, len(cfg.AllowRW))
+	for _, p := range cfg.AllowRW {
+		if strings.TrimSpace(p) == "" {
+			return nil, fmt.Errorf("read-write allow path must not be empty")
+		}
+		resolved, err := resolvePath(p)
+		if err != nil {
+			return nil, fmt.Errorf("cannot resolve read-write allow path %q: %w", p, err)
+		}
+		allowRWPaths = append(allowRWPaths, resolved)
+	}
 
 	// Resolve deny paths.
 	denyPaths := make([]string, 0, len(cfg.Deny))
@@ -163,6 +238,11 @@ func ProcessConfig(cfg config.FilesystemConfig) (*FenceConfig, error) {
 			return nil, err
 		}
 	}
+	for _, p := range allowRWPaths {
+		if err := validateNoSeparator(p, "allow_rw"); err != nil {
+			return nil, err
+		}
+	}
 	for _, p := range denyPaths {
 		if err := validateNoSeparator(p, "deny"); err != nil {
 			return nil, err
@@ -170,11 +250,52 @@ func ProcessConfig(cfg config.FilesystemConfig) (*FenceConfig, error) {
 	}
 
 	return &FenceConfig{
-		Root:       rootPath,
-		Mode:       mode,
-		AllowPaths: allowPaths,
-		DenyPaths:  denyPaths,
+		Root:         rootPath,
+		Mode:         mode,
+		AllowPaths:   allowPaths,
+		AllowRWPaths: allowRWPaths,
+		DenyPaths:    denyPaths,
 	}, nil
+}
+
+// CheckInterposerBudget validates that fc's allow, allow_rw, and deny paths fit
+// within the Go-side wire budget and the C interposer's per-category limits.
+// selfProcReserve is the number of additional allow entries that will be injected
+// after config load (the /proc/<pid> self-proc grants from allowSelfProcFS in
+// landlock_exec.go). Pass len(SelfProcFiles()) when the __landlock-exec shim
+// will engage; pass 0 when it will not (pure userspace-only fence).
+//
+// This check is deliberately separate from ProcessConfig: ProcessConfig runs
+// before wrap.go knows whether the shim will actually engage (that depends on a
+// runtime landlock.DetectABI() probe and the syscall fence config, both resolved
+// later). Callers in wrap.go invoke this once the shim-engagement decision is
+// final.
+func CheckInterposerBudget(fc *FenceConfig, selfProcReserve int) error {
+	if fc == nil {
+		return nil
+	}
+	if room := maxAllowPaths - selfProcReserve; len(fc.AllowPaths)+len(fc.AllowRWPaths) > room {
+		return fmt.Errorf(
+			"too many filesystem allow (%d) and allow_rw (%d) paths: the fence interposer supports at most %d combined, "+
+				"and %d are reserved for the wrapped process's own /proc/<pid> grants (see "+
+				"SelfProcFiles); remove entries from [filesystem].allow or [filesystem].allow_rw",
+			len(fc.AllowPaths), len(fc.AllowRWPaths), maxAllowPaths, selfProcReserve)
+	}
+	if len(fc.DenyPaths) > maxAllowPaths {
+		return fmt.Errorf(
+			"too many filesystem deny paths (%d): the fence interposer supports at most %d per category; "+
+				"remove entries from [filesystem].deny", len(fc.DenyPaths), maxAllowPaths)
+	}
+	room := interposerMaxPathFields - interposerMetadataFields - selfProcReserve
+	if combined := len(fc.AllowPaths) + len(fc.AllowRWPaths) + len(fc.DenyPaths); combined > room {
+		return fmt.Errorf(
+			"too many combined filesystem allow (%d), allow_rw (%d), and deny (%d) paths: the fence's "+
+				"wire format supports at most %d combined, and %d are reserved for the wrapped "+
+				"process's own /proc/<pid> grants (see SelfProcFiles); remove entries from "+
+				"[filesystem].allow, [filesystem].allow_rw, or [filesystem].deny",
+			len(fc.AllowPaths), len(fc.AllowRWPaths), len(fc.DenyPaths), room+selfProcReserve, selfProcReserve)
+	}
+	return nil
 }
 
 // validateNoSeparator checks that a path does not contain the field separator
@@ -190,7 +311,7 @@ func validateNoSeparator(path, label string) error {
 // passing to the LD_PRELOAD interposer via an environment variable.
 // The format uses the Unit Separator (\x1f) as delimiter:
 //
-//	root\x1fmode\x1fsocket\x1f+allow1\x1f+allow2\x1f-deny1\x1f-deny2
+//	root\x1fmode\x1fsocket\x1f+allow1\x1f*allowRW1\x1f-deny1
 //
 // Mode is abbreviated: "read-write" becomes "rw", "read-only" becomes "ro".
 func (fc *FenceConfig) Serialize(socketPath string) string {
@@ -202,6 +323,9 @@ func (fc *FenceConfig) Serialize(socketPath string) string {
 	parts := []string{fc.Root, modeShort, socketPath}
 	for _, p := range fc.AllowPaths {
 		parts = append(parts, "+"+p)
+	}
+	for _, p := range fc.AllowRWPaths {
+		parts = append(parts, "*"+p)
 	}
 	for _, p := range fc.DenyPaths {
 		parts = append(parts, "-"+p)
@@ -243,6 +367,8 @@ func ParseSerialized(s string) (*SerializedConfig, error) {
 	for _, f := range fields[3:] {
 		if strings.HasPrefix(f, "+") {
 			sc.AllowPaths = append(sc.AllowPaths, f[1:])
+		} else if strings.HasPrefix(f, "*") {
+			sc.AllowRWPaths = append(sc.AllowRWPaths, f[1:])
 		} else if strings.HasPrefix(f, "-") {
 			sc.DenyPaths = append(sc.DenyPaths, f[1:])
 		}

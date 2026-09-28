@@ -15,6 +15,7 @@ func DefaultConfig() Config {
 				"~/.claude/",
 				"/tmp/",
 			},
+			AllowRW: []string{},
 			Deny: []string{
 				"~/.ssh/",
 				"~/.aws/",
@@ -62,7 +63,7 @@ func DefaultConfig() Config {
 			SocketFamilies:  []string{"unix", "inet", "inet6"},
 		},
 		Logging: LoggingConfig{
-			DB:    ".nock/events.db",
+			DB:    "events.db",
 			Level: "info",
 		},
 		Cloud: CloudConfig{
@@ -91,6 +92,8 @@ allow = [
     "~/.claude/",
     "/tmp/",
 ]
+# Linux only: paths explicitly granted read-write access. allow stays read-only.
+allow_rw = []
 deny = [
     "~/.ssh/",
     "~/.aws/",
@@ -109,6 +112,8 @@ allow = [
     "crates.io",
 ]
 allow_all = false
+# Refuse wrap unless egress is kernel-enforced or Linux syscall-confined.
+require_enforced = false
 
 [secrets]
 # Optional local preflight. A finding or incomplete scan prevents launch.
@@ -148,7 +153,15 @@ socket_families = [
 ]
 
 [logging]
-db = ".nock/events.db"
+# A relative db goes to NockLock's audit state directory OUTSIDE this project
+# ($XDG_STATE_HOME/nocklock/<project>), keeping only the filename. The fence
+# grants the project root to the agent so it can create files there, and
+# Landlock cannot exclude a path beneath a granted directory - so an event log
+# stored in the project would be editable by the agent it records. An existing
+# .nock/events.db is left where it is and keeps being used; while it sits inside
+# the fence root the agent cannot create entries directly in the root. An
+# absolute path is allowed only inside the project or the audit state directory.
+db = "events.db"
 level = "info"
 
 [cloud]

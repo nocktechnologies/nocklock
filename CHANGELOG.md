@@ -4,7 +4,230 @@ All notable changes to NockLock will be documented in this file.
 
 ## [Unreleased]
 
+### Breaking
+
+- Fresh projects now keep audit state outside the project in
+  `$XDG_STATE_HOME/nocklock` (or `~/.local/state/nocklock`). As a result,
+  NockLock refuses to start when a `filesystem.deny` path is inside
+  `filesystem.root`; move the denied path outside the root. It also refuses to
+  start when `filesystem.root` is `$HOME` or another ancestor of the audit
+  state directory; narrow `filesystem.root` to the project. If more than one
+  audit chain exists for a project, NockLock refuses to guess which chain to
+  use.
+
+### Added
+
+- `wrap` reports and signs the effective network egress level (`KERNEL`,
+  `CONFINED`, `ADVISORY`, `OFF`, or `UNREACHABLE`). Advisory proxy mode warns
+  that clients ignoring `HTTP_PROXY` can reach any host. Set
+  `network.require_enforced = true` or pass `--require-enforced-egress` to
+  refuse sessions without enforced egress.
+- A strict Linux claude-code preset regression proof checks that `ls .` and
+  `os.listdir('.')` can read a fresh project's root while the relocated audit
+  database and a path outside the allowlist (default-deny) remain inaccessible
+  to the wrapped child.
+- Every `wrap` signs a `config.digest` row containing the canonical resolved
+  policy and prior digest. Changed policy fields warn before the child starts;
+  `verify --audit` reports the history and requires each retained post-adoption
+  `session_start` to have its own preceding `config.digest` row.
+- Linux `filesystem.allow_rw` entries grant explicit read-write access while
+  existing `filesystem.allow` entries remain read-only. `nocklock verify` keeps
+  its temporary probe files outside granted paths, including `/tmp`.
+- Source builds now embed `git describe --tags --always --dirty` in
+  `nocklock version`.
+- `docs/probes/n10825/run-probe.ps1` runs the Windows feasibility Probes 1, 2
+  and 3 on a real desktop, assembled verbatim from
+  `docs/design/windows-feasibility.md`. It proves the launcher and the
+  limited token before any probe changes machine state, always runs the global
+  teardown, and writes BEFORE/AFTER state plus environment stamps to
+  `output.txt`. Operator steps are in the directory's README.
+
+### Changed
+
+- The Windows desktop probe script (`docs/probes/n10825/run-probe.ps1`) runs
+  every command inside a container through `cmd.exe`: on the first desktop run
+  `powershell.exe` exited `0xC0000142` (`STATUS_DLL_INIT_FAILED`) in a
+  zero-capability container. Probe 1 launches each loopback curl on its own and
+  checks the 9998 bind + listen with a python that exits; Probe 3 captures
+  `whoami /groups` and `set` with their errors and exit codes. SETUP-FAULT lines
+  print exit codes in hex. A launch counts as the tool's answer only when its
+  capture holds a line the tool itself writes (curl's `--write-out`
+  `CURL_DONE exit=<n>`, python's `PYTHON_RAN`, a SID from whoami): cmd failing to
+  start the tool (access denied on the exe, or the exe missing) is a SETUP-FAULT,
+  never `PHASE 1 DEAD` or another probe verdict. The launcher's environment block now accounts for
+  Windows' own AppContainer redirection, which had doubled the
+  `Packages\<moniker>\AC` path, and the environment self-check fails when
+  `TEMP` or `LOCALAPPDATA` does not exist. The first run's output is committed
+  as `docs/probes/n10825/output-20260928T0558Z.txt`.
+
+- The Linux filesystem fence rejects configurations whose `allow_rw` entries
+  push the shared allow cap or the combined wire budget over its limit.
+- macOS Seatbelt root-write confinement no longer grants the fenced child
+  write access to NockLock's audit state directory. The unfenced parent alone
+  writes the event database, SQLite sidecars, and chain anchor; a macOS
+  enforcement test now proves child truncate and rename attempts are denied
+  while a wrapped session still produces a verifiable audit chain.
+- New projects keep their audit trail outside the project, so the fenced agent
+  can finally use its own project root (N10749). Two requirements had been in
+  direct conflict: the agent must be able to create and remove files directly in
+  `filesystem.root`, and it must not be able to touch the log that records what
+  it did. Landlock checks `MAKE_REG`/`MAKE_DIR`/`REMOVE_FILE`/`REMOVE_DIR`
+  against the directory holding the entry, so `touch <root>/newfile` was denied
+  even in read-write mode: the ruleset granted the root's existing children but
+  never the root itself, precisely so `<root>/.nock` could be skipped. No ruleset
+  resolves both — the kernel walks upward from the accessed file and allows as
+  soon as an ancestor rule grants the access, so a narrower rule on `.nock`
+  cannot revoke the root's grant, and stacking layers does not help because
+  every layer would need `MAKE_REG` on the root. They collided only because the
+  audit trail sat inside the writable root.
+  - The event log, its SQLite sidecars, the chain anchor and the per-session
+    egress decision logs live in `$XDG_STATE_HOME/nocklock/<project-key>/` (or
+    `~/.local/state/nocklock/<project-key>/`). `<project-key>` is a SHA-256
+    prefix of the project root's real path, so projects never share a chain.
+    This matches where the Ed25519 signing key already lived.
+  - Every directory NockLock creates there is 0700, and each one is checked —
+    not just the last — for being a real directory, owned by the current user,
+    and not group- or world-writable. A trusted directory reached through a
+    writable parent is not trusted: whoever can write the parent can rename the
+    leaf away and substitute their own. The configured state root itself is
+    resolved once with `EvalSymlinks` and symlinks above it are allowed, because
+    `/tmp`, `/var` and the macOS default `TMPDIR` are system links into
+    `/private`.
+  - With no home directory available — a container with no passwd entry for the
+    uid, or `HOME` unset in CI — the state root falls back to a per-uid
+    directory under `/var/tmp`. Deliberately not `/tmp`, which the shipped
+    presets grant.
+  - A relative `logging.db` — the default, and what every `nocklock init` config
+    carries — resolves there, keeping only its filename.
+- **An existing `<root>/.nock/events.db` is left exactly where it is** and keeps
+  being used. NockLock will not relocate an audit chain: moving a live SQLite
+  database, its WAL sidecars and its chain anchor is one operation that must
+  either fully succeed or not start, and a half-finished move leaves a chain that
+  still verifies while missing its most recent rows. While the log sits inside
+  the fence root, the fence withholds the root grant and falls back to granting
+  each existing child, so work inside existing subdirectories is unaffected but
+  creates directly in the root stay denied. `nocklock wrap` says so on stderr
+  and names the manual move that lifts it; `nocklock state migrate` will
+  automate that in a later release. Two logs for one root is still refused
+  rather than silently reconciled.
+- `logging.db` now has one contract for absolute paths instead of two: a path
+  outside both the project and the audit state directory is rejected when the
+  config loads, with an error naming the setting. `logging.db` is a setting a
+  repository can ship, so an unrestricted absolute path would let a hostile
+  checkout aim a SQLite write at any path the invoking user can reach.
+  Absolute paths below a symlinked audit state root are evaluated in both their
+  raw and resolved spellings, and every supplied intermediate component is
+  `Lstat`-checked before use. An error while inspecting the state root now also
+  stops resolution rather than making the root look unavailable.
+  `nocklock doctor` warns when an absolute path lands back inside
+  `filesystem.root`, where the agent can reach its own audit trail, and when the
+  audit state directory falls inside a `filesystem.allow` grant.
+- Two consequences of granting the fence root on a project with no in-project
+  audit trail, both deliberate:
+  - `<root>/.nock/config.toml` is inside the root grant, so a fenced agent can
+    edit the fence's own config. It cannot widen the fence it is already
+    running under — the config is read by the unfenced parent before the child
+    starts — so a rewrite takes effect only on the next `wrap`, and it is a
+    tracked file, so the edit shows up in `git status`.
+  - A `filesystem.deny` path INSIDE `filesystem.root` can no longer be enforced
+    by Landlock, and rule generation is refused rather than shipping a fence
+    that ignores the deny. Deny paths outside the root — including every entry
+    in the shipped defaults and presets — are unaffected.
+- `ResolveDBPath` now refuses to guess between two coexisting legacy audit
+  chains inside a project: previously, if both the conventional
+  `<root>/.nock/<name>` log and a hand-written relative `logging.db` path
+  existed, the scan stopped at the first one it found and silently adopted it.
+  It now collects every existing, deduplicated candidate and refuses to start,
+  naming all of them, unless exactly one exists.
+- A relative `logging.db` containing a separator (for example
+  `../audit/events.db`) is now rejected at load if it would resolve outside
+  the project root, instead of silently being joined to the project root and
+  adopted as the authoritative legacy log wherever it landed.
+- `ResolveDBPath` now canonicalizes every candidate (resolving symlinks on
+  each one's existing parent) before de-duplicating them and before naming
+  them in a refusal. The state-dir candidate previously was not canonicalized
+  while the in-project candidates were, so on platforms where a temp root
+  reaches its real location through a symlink, the same file could be named
+  with a different spelling than the other candidates, or fail to collapse
+  with one that reached it another way. The existence and symlink checks
+  still run against each candidate's original, uncanonicalized path first —
+  de-duplicating by canonical form before that check would let a symlink
+  planted at one candidate hide behind another candidate's real file whenever
+  the two happened to resolve to the same target.
+- An absolute `logging.db` now joins the same candidate scan as the
+  conventional `.nock` path, the hand-written relative path and the state-dir
+  path, instead of being returned before any of them were even looked at. A
+  legacy chain already sitting in the state dir is refused rather than
+  silently abandoned when logging.db is reconfigured to an absolute path.
+  An absolute path that resolves inside the audit state directory also passes
+  the same state-root ownership and permission checks as a relative path to
+  that directory, and every directory it nests deeper than `nocklock/<hash>`
+  is held to the same 0700/owner/symlink rule, so a writable directory
+  planted between the state directory and the log cannot be used. Those
+  components are checked as the path spells them, so a symlinked one is
+  refused by the same rule as `nocklock/<hash>` -- whether it points back
+  inside the audit directory or out of it (N10830).
+- The configured state root (`XDG_STATE_HOME`, or the `~/.local/state`
+  fallback) is now itself checked before anything is created beneath it: it
+  must be owned by the current user and not group- or world-writable, or
+  `nocklock` refuses to start and names the path and the fix (`chmod` for a
+  permissive mode, `chown` for a foreign owner — the message no longer
+  suggests one for the other's problem). The `/var/tmp` per-uid fallback used
+  when no home directory is available is unaffected — it is a shared system
+  directory by design, and only the per-uid component NockLock creates under
+  it is held to this rule.
+- CI acceptance tests that run the three July-2026 DNS-based egress-escape tricks
+  (from the Hugging Face sandbox-escape writeup) against NockLock's egress fence
+  on both platforms (N10813). On Linux, `TestNetnsDNSEscape` drives the real netns
+  tproxy floor and, from inside the namespace, attempts each trick: (T1) an
+  in-process resolver override — a getaddrinfo-style connect to a disallowed IP
+  carrying the allowlisted SNI, a raw-IP connect to that same disallowed IP with
+  no SNI, and the child's own UDP+TCP/53 query to an off-namespace resolver;
+  (T2) a `resolv.conf` rewrite to 8.8.8.8; and (T3) an `/etc/hosts` pin of the
+  allowed name to a disallowed IP. The centerpiece (T1a) dials the attacker IP
+  while presenting the allowlisted SNI and must still read back the **real
+  allowed upstream's 200** — a race-free, synchronous receipt that the tproxy
+  floor redirected by port and re-resolved the SNI itself, so the trick changed
+  only what the child thought an address is, never where the proxy connected.
+  The raw-IP no-SNI attempt's connection is terminated at the proxy (checked by
+  the child), and the parent separately asserts the run's deny log carries a
+  matching tls/empty-host receipt after the child exits; the direct
+  off-namespace resolver query gets no answer (default-drop). The
+  `resolv.conf`/`hosts` writes are **asserted** to fail closed — the test fails
+  the run with a distinct exit code unless the write returns EACCES/EPERM/EROFS
+  — and only then connects by the allowed NAME and requires it still lands on
+  the allowed upstream. The test log carries a per-trick outcome line (e.g.
+  "T1a: redirected to allowed upstream, 200 read", "T2/T3: write_denied
+  (<errno>)") as evidence, not just `--- PASS`. On macOS,
+  `TestWrapMacOSDNSEscapeRecordsProxyEnforcement` records the proxy-only model:
+  it asserts a proxied disallowed host is denied and signed, the allowed host
+  works and is signed, and `verify --audit` is clean, while logging that direct-IP
+  egress and hosts-pinning are not kernel-blocked (macOS has no netns floor). Both
+  run in new `network-egress.yml` jobs — the Linux job as root, the macOS job on a
+  hosted runner — each emitting a per-trick verdict table to the step summary.
+- Linux userspace proxy mode now bridges syscall-fenced children to the
+  allowlist proxy without granting IP sockets (N10753). When the syscall fence
+  narrows proxy-mode children to Unix sockets, `wrap` serves the HTTP(S) proxy on
+  a Unix domain socket and the LD_PRELOAD interposer rewrites only the configured
+  loopback proxy connect to that socket; unexpected AF_INET/AF_INET6 connects
+  fail closed. The probe and captured Node/undici output live under
+  `docs/probes/n10753/`.
+
 ### Fixed
+
+- Interposer field-budget cap is now enforced post-ABI-detection (#10815).
+  The cap on allow/deny paths (matching libfence_fs.c's MAX_PATHS and field
+  tokenizer budget) previously ran unconditionally in ProcessConfig with
+  headroom reserved for the self-proc grants the __landlock-exec shim injects.
+  A config with linux_enforcement="off", syscall.enforcement="off" (pure
+  userspace interposer, no shim) was rejected at ~253 allow paths even though
+  the shim's injections would never happen. The validation now runs in wrap.go
+  after both the Landlock ABI probe and the syscall-fence decision, so headroom
+  is only reserved when the shim actually engages. A userspace-only config gets
+  the interposer's real 256-path budget. --dry-run and validateWrapRuntimeConfig
+  still catch configs that exceed the interposer's absolute ceiling (>256 per
+  category or >257 combined) via a floor check with reserve=0; the exact check
+  with the real shim reserve runs later in wrap, after the ABI probe.
 
 - claude-code preset: Node runtime introspection no longer breaks under the
   fence (#10757). With the broad `/proc/` grant removed in #115 (it exposed a
@@ -13,34 +236,115 @@ All notable changes to NockLock will be documented in this file.
   the agent and 0 CPUs mis-sizes worker pools. The narrow reads Node needs are
   now granted without any path to another process: the preset allows the
   system-wide `/proc/cpuinfo`, `/proc/stat` and `/proc/meminfo`, and the wrapped
-  child's OWN `/proc/<pid>` is granted to both fences self-scoped. Because the
+  child's OWN `/proc/<pid>/{stat,status,statm}` — the three files, never the
+  whole directory — is granted to both fences self-scoped. Because the
   `__landlock-exec` shim execve's the child in place (its pid IS the child's),
-  the literal `/proc/self` Landlock rule binds to the child's own proc dir, and
-  the shim appends that same concrete `/proc/<pid>` to the interposer allowlist.
-  A sibling's `/proc/<pid>/environ` and `/cmdline` stay denied at the kernel
-  layer, proven by a `CGO_ENABLED=0` raw-syscall reader test that bypasses the
-  userspace interposer. Scope: the grant covers the wrapped child; a descendant
-  that execs under a different pid does not get its own `/proc/self` (Landlock is
-  inode-bound), and the interposer grant applies only when a kernel fence engages
-  the shim — always true for the hardened presets this targets.
+  the literal `/proc/self/{stat,status,statm}` Landlock rules bind to the
+  child's own proc dir, and the shim appends the same concrete
+  `/proc/<pid>/{stat,status,statm}` files to the interposer allowlist. Round 2
+  (Gander): granting the whole `/proc/self` directory bound Landlock to the
+  child's `/proc/<pid>` dir inode, and a descendant inherits that rule — so a
+  grandchild could read the wrapped child's own `environ`/`cmdline`/`mem`, the
+  sibling leak #115 removed reopened one level down. Narrowing to the three
+  files closes it: a descendant that inherits the rule can read only those
+  files' identical inodes, never `environ`/`cmdline`/`mem`/`maps`/`fd`, proven
+  by a negative-control test where a grandchild is denied its wrapped parent's
+  `environ`. A sibling's `/proc/<pid>/environ` and `/cmdline` stay denied at the
+  kernel layer too, proven by a `CGO_ENABLED=0` raw-syscall reader test that
+  bypasses the userspace interposer. The Go-side filesystem config now also
+  reserves headroom below the interposer's combined allow+deny field budget
+  (`libfence_fs.c`'s `char *fields[MAX_PATHS + 4]` — allow and deny paths
+  share ONE 260-slot array, not independent 256-slot caps) for these injected
+  self-proc grants, and fails closed with a clear config error instead of
+  silently tripping the interposer's own cap — including the case where the
+  interposer's tokenizer would otherwise drop trailing deny paths — at
+  runtime. Verified empirically (LD_PRELOAD/strace diagnostic, no NockLock
+  fence involved) that Node tolerates the narrower grant: startup also
+  touches `/proc/self/{exe,maps,cgroup}`, but degrades gracefully when denied.
+- Config discovery resolves the project directory before `wrap` and
+  `verify --audit` derive audit state or signed config-digest paths, while
+  preserving the `.nock/config.toml` leaf so projects sharing a symlink target
+  retain separate audit state. Digest verification also keeps that association
+  through teardown rows emitted after `session_end`, so an untampered wrapped
+  session verifies successfully.
+- `verify --audit` now treats sessions that started before the first
+  `config.digest` row as legacy (and reports their count), while still
+  rejecting a post-adoption session without a digest. The signed canonical
+  policy now records the resolved network-fence mode, and each digest records
+  its committed predecessor atomically.
+- `verify --audit` treats setup events before `session_start` as covered by a
+  pending config digest and accepts a missing first digest predecessor only
+  when the signed chain records an authenticated prune boundary.
+- `ResolveDBPath` now fails closed when the audit state root stats as an
+  existing directory but cannot be resolved (`EvalSymlinks` erroring on a
+  mid-call symlink swap or `ELOOP`), matching the sibling Stat-error branch
+  added by PR #128: previously that case silently left the state root
+  unavailable, dropping its candidates out of the scan and letting a legacy
+  in-project chain be adopted while a real state-dir chain sat behind the
+  unresolvable root (N10860).
+- Concurrent logger opens now set SQLite's busy timeout before enabling WAL,
+  avoiding lock failures during simultaneous first-time database setup.
+- `ResolveDBPath` now resolves the audit state root once and carries that
+  canonical path through its candidate scan and final directory setup, so a
+  retargeted state-root symlink cannot make it inspect one audit location and
+  return another.
+- claude-code preset now runs real programs under the strongest non-root fence
+  (N10748, parts b+c). Two field-reported breakages are closed: (1) writes to
+  `/dev/null` and `/dev/tty` are permitted and `/dev/zero` is readable, so `git`
+  and shells work — the Landlock ruleset (`baselineDeviceRules`) and the
+  LD_PRELOAD interposer both grant these standard character devices as a
+  baseline, independent of the allow list, since the fence otherwise grants a
+  regular file read+execute only (the baseline also grants `/dev/urandom` and
+  `/dev/random` readable, the entropy sources musl and older TLS stacks read
+  directly). This baseline device set applies to **every** config, not only the
+  claude-code preset — by design: any fenced program needs these nodes. (2) The
+  preset's filesystem allow list now includes the standard system read paths
+  (`/usr`, `/lib`, `/lib64`, `/bin`, `/sbin`, `/etc`, `/sys`), without which the
+  child could not resolve its dynamic loader or exec `/bin/echo` — `/lib*`,
+  `/bin` and `/sbin` cover non-usr-merged distros (musl/Alpine) where the loader
+  lives outside `/usr`. An explicit `deny` of a baseline device still wins.
+- claude-code preset no longer grants `/proc/` or `/dev/` as directory-wide read
+  paths (N10748 round 2). `/proc/` let a wrapped child read every same-UID
+  process's `/proc/<pid>/cmdline`, `stat`, `status` and `comm` — process
+  enumeration and secrets passed on a command line (`--token=…`); `/dev/` made
+  same-user pty slaves (`/dev/pts/N`) and `/dev/shm` readable, so a wrapped agent
+  could read another terminal's input. Neither is needed as a Landlock read
+  grant: node startup, `git status` and a pty-attached shell run without them
+  (the workloads probed), and the specific device nodes the child does need are
+  granted individually by `baselineDeviceNodes`. (Measured on the fleet
+  host: with `/proc/` granted, a wrapped child read a sibling's `cmdline`, `stat`,
+  `status` and `comm` but NOT its `environ` or `maps` — a split a path-based
+  grant cannot produce, so the live secrets exposure was `cmdline` (argv), which
+  the ptrace-gated `environ`/`maps` already blocked for an unrelated sibling. The
+  removal closes the world-readable `/proc/<pid>` files and denies the child its
+  own and its descendants' `environ` as well.) A child that genuinely needed its
+  own `/proc/<pid>` could not be served by a `/proc/self/` allow entry — a
+  Landlock rule on `/proc/self` binds the wrapper's pid dir at ruleset-build time,
+  not the child's — so that would require a private pid namespace, not an allow
+  entry. The network half of N10748 — letting the wrapped agent reach the
+  allowlisted proxy while the syscall fence keeps direct-IP egress blocked — is
+  tracked separately (N10753); no standard client speaks a unix-socket HTTP
+  proxy, so it needs an interposer socket()/connect() translation that is a
+  distinct design decision.
 
 ### Documentation
 
 - Accepted-limitation record for grandchild procfs reads (#10764, follow-up to
   #10757, ADR-005). A Node subprocess spawned by the wrapped Node agent (an MCP
   server or tool that execs under a new pid) still throws `EACCES` on
-  `process.memoryUsage()`, because the `/proc/self` grant is Landlock
-  inode-bound to the directly wrapped child. Every path to reach grandchildren
-  was assessed and rejected: the broad `/proc/` grant re-opens the #115 sibling
-  `/proc/<pid>/environ` leak; a userspace interposer grant can never widen what
-  the kernel Landlock policy denies (rulesets only intersect); and a per-process
-  PID namespace + fresh `/proc` mount requires forking (abandoning the in-place
-  `execve` that makes the #10757 grant correct), a `CLONE_NEWUSER` that hands the
-  tree the namespaced-root surface `allow_namespaces=false` exists to deny, and
-  the privileged-helper lifecycle of ADR-004 — and does not even start
-  unprivileged on an `apparmor_restrict_unprivileged_userns=1` host.
-  `os.cpus()` is unaffected tree-wide. A regression test pins the grant to the
-  single read-only `/proc/self` entry so this cannot be "fixed" by widening it.
+  `process.memoryUsage()`, because the `/proc/self/{stat,status,statm}` grants
+  are Landlock inode-bound to the directly wrapped child's own files. Every path
+  to reach grandchildren was assessed and rejected: a broad `/proc/` or
+  directory-level grant re-opens the #115 `/proc/<pid>/environ` leak; a
+  userspace interposer grant can never widen what the kernel Landlock policy
+  denies (rulesets only intersect); and a per-process PID namespace + fresh
+  `/proc` mount requires forking (abandoning the in-place `execve` that makes the
+  #10757 grant correct), a `CLONE_NEWUSER` that hands the tree the
+  namespaced-root surface `allow_namespaces=false` exists to deny, and the
+  privileged-helper lifecycle of ADR-004. `os.cpus()` is unaffected tree-wide.
+  `TestLandlockProcSelfAllowPathsStaysNarrow` pins the grant to one read-only
+  `/proc/self/<file>` entry per curated file so this cannot be "fixed" by
+  widening it.
 
 ## [0.5.0] - 2026-09-26
 

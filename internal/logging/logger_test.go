@@ -204,7 +204,7 @@ func TestLog_AllEventTypes(t *testing.T) {
 		EventNetworkBlocked, EventNetworkPassed,
 		EventProxyStart, EventProxyStop, EventNetworkError,
 		EventSessionStart, EventSessionEnd,
-		EventConfigLoaded,
+		EventConfigLoaded, EventConfigDigest,
 	}
 
 	for _, et := range allTypes {
@@ -279,6 +279,37 @@ func TestLog_EmptyDetailString(t *testing.T) {
 	}
 	if events[0].Detail != "" {
 		t.Errorf("expected empty detail, got %q", events[0].Detail)
+	}
+}
+
+func TestQueryDoesNotDecodeEnvelopeLikeDetailsOnOtherEventTypes(t *testing.T) {
+	logger, _ := mustNewLogger(t)
+	defer logger.Close()
+
+	spoofed := `{"schema":"nocklock-event-detail/v1","detail":"hidden detail","egress_level":"KERNEL"}`
+	if err := logger.Log(Event{
+		Timestamp:   time.Now(),
+		EventType:   EventNetworkBlocked,
+		Category:    "network",
+		Detail:      spoofed,
+		EgressLevel: "KERNEL",
+		SessionID:   "session-spoof-test",
+	}); err != nil {
+		t.Fatalf("log event with envelope-like detail: %v", err)
+	}
+
+	rows, err := logger.Query(QueryOptions{ByID: true})
+	if err != nil {
+		t.Fatalf("query event: %v", err)
+	}
+	if len(rows) != 1 {
+		t.Fatalf("queried %d events, want 1", len(rows))
+	}
+	if rows[0].Detail != spoofed {
+		t.Fatalf("detail = %q, want original envelope-like string", rows[0].Detail)
+	}
+	if rows[0].EgressLevel != "" {
+		t.Fatalf("non-session egress level = %q, want empty", rows[0].EgressLevel)
 	}
 }
 

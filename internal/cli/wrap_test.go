@@ -65,6 +65,15 @@ func TestRemoveEnvVarsExactKeyWithoutEquals(t *testing.T) {
 	}
 }
 
+func TestValidateUnixProxySocketPathRejectsLongPath(t *testing.T) {
+	path := "/" + strings.Repeat("a", 108)
+
+	if err := validateUnixProxySocketPath(path); err == nil ||
+		!strings.Contains(err.Error(), "sockaddr_un.sun_path") {
+		t.Fatalf("validateUnixProxySocketPath() error = %v, want sockaddr_un.sun_path limit", err)
+	}
+}
+
 // fsAllowedEntries returns every NOCKLOCK_FS_ALLOWED=... entry in env, in order.
 func fsAllowedEntries(env []string) []string {
 	var out []string
@@ -200,17 +209,17 @@ func TestWrapDryRunValidatesConfigWithoutCommand(t *testing.T) {
 // fence (the removed --allow-unfenced).
 func TestWrapFailsClosedWhenEventLogCannotOpen(t *testing.T) {
 	dir := t.TempDir()
-	// Put a regular FILE where the log directory needs to be, so the logger's
-	// MkdirAll fails and NewLogger returns an error — a portable way to force an
-	// unopenable event log without relying on permission bits.
-	if err := os.WriteFile(filepath.Join(dir, "blocker"), []byte("x"), 0o644); err != nil {
+	// Put a regular FILE where the audit state directory needs to be, so the
+	// MkdirAll behind it fails and the event log cannot be opened — a portable
+	// way to force an unopenable log without relying on permission bits. The log
+	// now lives outside the project (config.AuditStateDir), so blocking the
+	// state root is what makes it unopenable.
+	blocker := filepath.Join(t.TempDir(), "blocker")
+	if err := os.WriteFile(blocker, []byte("x"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	toml := strings.Replace(dryRunTestTOML(), `db = ".nock/events.db"`, `db = "blocker/events.db"`, 1)
-	if !strings.Contains(toml, "blocker/events.db") {
-		t.Fatal("test setup: failed to redirect the log db path")
-	}
-	writeTestConfig(t, dir, toml)
+	t.Setenv("XDG_STATE_HOME", blocker)
+	writeTestConfig(t, dir, dryRunTestTOML())
 	withWorkingDir(t, dir)
 
 	cmd := &cobra.Command{}
@@ -271,23 +280,6 @@ func TestAuditDenyPathSymlinkedRoot(t *testing.T) {
 	db := filepath.Join(realRoot, "events.db")
 	if got := auditDenyPath(db, link); got != db {
 		t.Errorf("symlinked root not recognized: got %q, want the file %q (denying the root would break the agent)", got, db)
-	}
-}
-
-func TestLandlockAuditAllowPaths(t *testing.T) {
-	db := filepath.Join(t.TempDir(), ".nock", "events.db")
-	paths := landlockAuditAllowPaths(db)
-	want := []string{db, db + "-wal", db + "-shm", db + "-journal"}
-	if len(paths) != len(want) {
-		t.Fatalf("got %d paths, want %d: %+v", len(paths), len(want), paths)
-	}
-	for i := range want {
-		if paths[i].Path != want[i] {
-			t.Fatalf("path %d = %q, want %q", i, paths[i].Path, want[i])
-		}
-		if paths[i].Access != "read-write" {
-			t.Fatalf("path %d access = %q, want read-write", i, paths[i].Access)
-		}
 	}
 }
 
@@ -486,6 +478,17 @@ func TestEffectiveWrapConfigPreservesAllowPrivateRanges(t *testing.T) {
 	effective = effectiveWrapConfig(&cfg, WrapFlags{})
 	if !effective.Network.AllowPrivateRanges {
 		t.Fatal("expected config allow_private_ranges to be preserved in effective config")
+	}
+
+	effective = effectiveWrapConfig(&cfg, WrapFlags{RequireEnforcedEgress: true})
+	if !effective.Network.RequireEnforced {
+		t.Fatal("expected require-enforced-egress CLI flag to be reflected in effective config")
+	}
+
+	cfg.Network.RequireEnforced = true
+	effective = effectiveWrapConfig(&cfg, WrapFlags{})
+	if !effective.Network.RequireEnforced {
+		t.Fatal("expected config require_enforced to be preserved in effective config")
 	}
 }
 

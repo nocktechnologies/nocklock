@@ -4,6 +4,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"strings"
 	"testing"
 
 	"github.com/BurntSushi/toml"
@@ -17,11 +18,13 @@ root = "."
 
 [filesystem]
 allow = ["."]
+allow_rw = ["~/.claude/"]
 deny = ["~/.ssh/"]
 
 [network]
 allow = ["github.com"]
 allow_all = false
+require_enforced = true
 
 [secrets]
 pass = ["HOME"]
@@ -57,8 +60,14 @@ endpoint = "https://cc.nocktechnologies.io/api/fence/events/"
 	if cfg.Network.AllowAll != false {
 		t.Error("expected allow_all to be false")
 	}
+	if !cfg.Network.RequireEnforced {
+		t.Error("expected network.require_enforced to be true")
+	}
 	if len(cfg.Filesystem.Allow) != 1 || cfg.Filesystem.Allow[0] != "." {
 		t.Errorf("unexpected filesystem allow: %v", cfg.Filesystem.Allow)
+	}
+	if len(cfg.Filesystem.AllowRW) != 1 || cfg.Filesystem.AllowRW[0] != "~/.claude/" {
+		t.Errorf("unexpected filesystem allow_rw: %v", cfg.Filesystem.AllowRW)
 	}
 	if len(cfg.Secrets.Block) != 1 || cfg.Secrets.Block[0] != "AWS_*" {
 		t.Errorf("unexpected secrets block: %v", cfg.Secrets.Block)
@@ -199,6 +208,18 @@ func TestLoadProfilesValidateEmbeddedPresets(t *testing.T) {
 		if cfg.Syscall.Enforcement != "required" {
 			t.Fatalf("%s syscall.enforcement = %q, want required", profile.Name, cfg.Syscall.Enforcement)
 		}
+		// No preset may directory-grant the whole /proc or /dev tree: /proc exposes
+		// every same-UID process's /proc/<pid>/cmdline (secrets on a command line)
+		// and metadata; /dev exposes sibling pty slaves and /dev/shm. The device
+		// nodes a child needs are granted individually by baselineDeviceNodes, and
+		// no preset needs a whole-directory /proc grant (N10748 round 2). Compare on
+		// the cleaned path so an unslashed "/proc" or "/dev" cannot slip past.
+		for _, allow := range cfg.Filesystem.Allow {
+			switch filepath.Clean(allow) {
+			case "/proc", "/dev":
+				t.Fatalf("%s profile filesystem.allow must not directory-grant %q (exposes same-UID /proc/<pid> and pty slaves); have %v", profile.Name, allow, cfg.Filesystem.Allow)
+			}
+		}
 	}
 }
 
@@ -219,9 +240,11 @@ func TestLoadOverlayCanTightenButNotLoosenProfile(t *testing.T) {
 allow = ["api.openai.com", "example.com"]
 allow_all = true
 allow_private_ranges = true
+require_enforced = true
 
 [filesystem]
 allow = ["/tmp/", "/"]
+allow_rw = ["/tmp/", "/"]
 deny = ["~/work/private/"]
 mode = "read-only"
 macos_allow_unfenced = true
@@ -252,8 +275,14 @@ socket_families = ["unix", "netlink"]
 	if cfg.Network.AllowAll || cfg.Network.AllowPrivateRanges {
 		t.Fatalf("network loosening survived: allow_all=%t private=%t", cfg.Network.AllowAll, cfg.Network.AllowPrivateRanges)
 	}
+	if !cfg.Network.RequireEnforced {
+		t.Fatal("network.require_enforced must be allowed to tighten the profile")
+	}
 	if !reflect.DeepEqual(cfg.Filesystem.Allow, []string{"/tmp/"}) {
 		t.Fatalf("filesystem.allow = %v, want only /tmp/", cfg.Filesystem.Allow)
+	}
+	if len(cfg.Filesystem.AllowRW) != 0 {
+		t.Fatalf("filesystem.allow_rw widened profile: %v", cfg.Filesystem.AllowRW)
 	}
 	if !containsString(cfg.Filesystem.Deny, "~/work/private/") {
 		t.Fatalf("filesystem.deny did not add overlay deny: %v", cfg.Filesystem.Deny)
@@ -280,6 +309,17 @@ socket_families = ["unix", "netlink"]
 	}
 }
 
+func TestOverlayCannotTurnOffRequireEnforced(t *testing.T) {
+	base := DefaultConfig()
+	base.Network.RequireEnforced = true
+	overlay := DefaultConfig()
+	overlay.Network.RequireEnforced = false
+	cfg := restrictOverlay(base, overlay, map[string]bool{"network.require_enforced": true})
+	if !cfg.Network.RequireEnforced {
+		t.Fatal("overlay disabled network.require_enforced from the base profile")
+	}
+}
+
 // TestOverlayDisjointInvertedListsFailClosed guards the fail-OPEN edge case where
 // an overlay's pass / socket_families list is disjoint from the profile's: a naive
 // intersection would be EMPTY, and empty has INVERTED semantics for these two
@@ -303,9 +343,6 @@ pass = ["TOTALLY_UNRELATED_VAR"]
 
 [syscall]
 socket_families = ["netlink"]
-
-[logging]
-db = "/tmp/attacker-controlled.db"
 `
 	if err := os.WriteFile(configPath, []byte(tomlContent), 0o644); err != nil {
 		t.Fatal(err)
@@ -334,6 +371,54 @@ db = "/tmp/attacker-controlled.db"
 	}
 }
 
+// TestLoadRejectsAbsoluteAuditLogOutsideProject: logging.db comes from a file a
+// repository can ship, so an absolute path aimed outside the project and the
+// audit state directory would let a hostile checkout write a SQLite database
+// anywhere the invoking user can. It is refused at config load, where the error
+// can name the setting, rather than deep inside the event logger once the fence
+// is already starting.
+func TestLoadRejectsAbsoluteAuditLogOutsideProject(t *testing.T) {
+	dir := t.TempDir()
+	nockDir := filepath.Join(dir, ".nock")
+	if err := os.MkdirAll(nockDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	configPath := filepath.Join(nockDir, "config.toml")
+	escape := filepath.Join(t.TempDir(), "attacker-controlled.db")
+	if err := os.WriteFile(configPath, []byte("[logging]\ndb = \""+escape+"\"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := Load(configPath); err == nil {
+		t.Fatal("expected an absolute logging.db outside the project to be rejected")
+	} else if !strings.Contains(err.Error(), "logging.db") {
+		t.Fatalf("expected an error naming logging.db, got: %v", err)
+	}
+}
+
+// TestLoadAcceptsAbsoluteAuditLogInsideProject is the matching positive control:
+// the restriction is about escaping the project, not about absolute paths.
+func TestLoadAcceptsAbsoluteAuditLogInsideProject(t *testing.T) {
+	dir := t.TempDir()
+	nockDir := filepath.Join(dir, ".nock")
+	if err := os.MkdirAll(nockDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	configPath := filepath.Join(nockDir, "config.toml")
+	inside := filepath.Join(dir, "audit", "events.db")
+	if err := os.WriteFile(configPath, []byte("[logging]\ndb = \""+inside+"\"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	cfg, err := Load(configPath)
+	if err != nil {
+		t.Fatalf("an absolute logging.db inside the project should load: %v", err)
+	}
+	if cfg.Logging.DB != inside {
+		t.Fatalf("logging.db = %q, want %q", cfg.Logging.DB, inside)
+	}
+}
+
 func TestDefaultConfig(t *testing.T) {
 	cfg := DefaultConfig()
 
@@ -342,6 +427,9 @@ func TestDefaultConfig(t *testing.T) {
 	}
 	if cfg.Network.AllowAll != false {
 		t.Error("expected default allow_all to be false")
+	}
+	if cfg.Network.RequireEnforced {
+		t.Error("expected network.require_enforced to default false")
 	}
 	if cfg.Logging.Level != "info" {
 		t.Errorf("expected default log level 'info', got %q", cfg.Logging.Level)
@@ -443,6 +531,50 @@ func TestFindConfigWalksUp(t *testing.T) {
 	resolvedExpected, _ := filepath.EvalSymlinks(configPath)
 	if resolvedFound != resolvedExpected {
 		t.Errorf("FindConfig returned %q, expected %q", found, configPath)
+	}
+}
+
+func TestFindConfigPreservesSymlinkedConfigLeaf(t *testing.T) {
+	root := t.TempDir()
+	sharedConfig := filepath.Join(root, "shared-config.toml")
+	if err := os.WriteFile(sharedConfig, []byte(DefaultTOML()), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	stateDirs := make([]string, 0, 2)
+	for _, name := range []string{"project-a", "project-b"} {
+		project := filepath.Join(root, name)
+		configDir := filepath.Join(project, Dir)
+		if err := os.MkdirAll(configDir, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Symlink(sharedConfig, filepath.Join(configDir, File)); err != nil {
+			t.Fatalf("create symlinked config for %s: %v", project, err)
+		}
+		t.Chdir(project)
+
+		found, err := FindConfig()
+		if err != nil {
+			t.Fatalf("FindConfig from %s: %v", project, err)
+		}
+		resolvedProject, err := filepath.EvalSymlinks(project)
+		if err != nil {
+			t.Fatalf("resolve project %s: %v", project, err)
+		}
+		expected := filepath.Join(resolvedProject, Dir, File)
+		if found != expected {
+			t.Fatalf("FindConfig from %s returned %q, want project-local path %q", project, found, expected)
+		}
+
+		dbPath, _, err := ResolveDBPath(&Config{}, found)
+		if err != nil {
+			t.Fatalf("ResolveDBPath for %s: %v", project, err)
+		}
+		stateDirs = append(stateDirs, filepath.Dir(dbPath))
+	}
+
+	if stateDirs[0] == stateDirs[1] {
+		t.Fatalf("ResolveDBPath returned one shared state directory: %q", stateDirs[0])
 	}
 }
 

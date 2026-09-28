@@ -85,7 +85,9 @@ socket_families = [
 ]
 
 [logging]
-db = ".nock/events.db"
+# Relative: NockLock's audit state directory outside this project. Absolute:
+# used verbatim. See the "Event log" section of the README for why.
+db = "events.db"
 level = "info"
 
 [cloud]

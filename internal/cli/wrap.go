@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -22,6 +23,7 @@ import (
 	"github.com/nocktechnologies/nocklock/internal/fence/network"
 	"github.com/nocktechnologies/nocklock/internal/fence/network/netns"
 	"github.com/nocktechnologies/nocklock/internal/fence/secrets"
+	"github.com/nocktechnologies/nocklock/internal/fence/syscallfence"
 	"github.com/nocktechnologies/nocklock/internal/logging"
 	"github.com/spf13/cobra"
 )
@@ -93,7 +95,10 @@ var wrapCmd = &cobra.Command{
 		// posture as the network fence (cf. the removed --allow-unfenced flag):
 		// running unrecorded would silently break the "every decision is recorded"
 		// promise, which is worse than not running at all.
-		dbPath, projectRoot := config.ResolveDBPath(cfg, configPath)
+		dbPath, projectRoot, dbErr := config.ResolveDBPath(cfg, configPath)
+		if dbErr != nil {
+			return fmt.Errorf("could not resolve the event log location: %w\nThe audit trail is required — refusing to run unrecorded", dbErr)
+		}
 		// Sign the audit trail with the NockLock-managed Ed25519 key so each
 		// recorded decision is authentic, not merely internally consistent. The
 		// key is generated 0600 on first use. If its path cannot be resolved we
@@ -132,6 +137,13 @@ var wrapCmd = &cobra.Command{
 			pushAnchorOffBox(os.Stderr, anchor, logger.SigningPublicKey())
 		}()
 
+		// Record the resolved policy before any child setup or launch. The config
+		// file lives inside the project root by default, so the fenced child can
+		// change it for a later run; this signed row makes that change visible.
+		if err := recordConfigDigest(logger, &effectiveCfg, configPath, dbPath, sessionID, resolvedNetworkFenceMode(wrapFlags), cmd.ErrOrStderr()); err != nil {
+			return fmt.Errorf("could not record the effective config digest: %w\nThe audit trail is required — refusing to run unrecorded", err)
+		}
+
 		// logEvent records one event. logger is guaranteed non-nil here (the open
 		// above fails closed), so no nil guard is needed.
 		logEvent := func(eventType logging.EventType, category, detail string, blocked bool) {
@@ -157,9 +169,6 @@ var wrapCmd = &cobra.Command{
 				SessionID: sessionID,
 			})
 		}
-
-		// Log session start with the command being run.
-		logEvent(logging.EventSessionStart, "session", args[0], false)
 
 		// Log config loaded with project name.
 		logEvent(logging.EventConfigLoaded, "session", cfg.Project.Name, false)
@@ -255,6 +264,7 @@ var wrapCmd = &cobra.Command{
 		var fsFenceCancel context.CancelFunc
 		var fsSandboxPrefix []string
 		var landlockPrefix []string
+		var fsCfg *fsfence.FenceConfig
 		if cfg.Filesystem.Root != "" {
 			// Fence the audit log from the CHILD so the fenced agent can't delete
 			// or corrupt the record of its own actions (the unfenced parent still
@@ -267,7 +277,8 @@ var wrapCmd = &cobra.Command{
 			// tamper events.db directly, so this is consistent, not a new gap.
 			cfg.Filesystem.Deny = append(cfg.Filesystem.Deny, egressChildDenyPaths(dbPath, projectRoot, decisionLogDir)...)
 
-			fsCfg, err := fsfence.ProcessConfig(cfg.Filesystem)
+			var err error
+			fsCfg, err = fsfence.ProcessConfig(cfg.Filesystem)
 			if err != nil {
 				if runtime.GOOS == "darwin" {
 					if logErr := recordMacOSFilesystemFenceState("REFUSED-TO-START", "invalid filesystem configuration", true); logErr != nil {
@@ -277,6 +288,20 @@ var wrapCmd = &cobra.Command{
 				return fmt.Errorf("invalid filesystem fence config: %w", err)
 			}
 			if fsCfg != nil {
+				// An audit directory inside the fence root has to stay
+				// unwritable, which costs the root-mutation grant (see
+				// fs.FenceConfig.ProtectedRootSubdir). The question is only
+				// where the audit directory actually is -- not whether the log
+				// is "legacy" -- because filesystem.root and the project root
+				// can differ, and an audit dir outside filesystem.root needs no
+				// protection and must not cost the grant.
+				if auditDir := filepath.Dir(dbPath); pathIsWithinDir(auditDir, fsCfg.Root) {
+					fsCfg.ProtectedRootSubdir = auditDir
+					fmt.Fprintf(os.Stderr,
+						"NockLock: the audit trail is inside the fence root (%s), so the agent cannot create or remove entries directly in %s.\n"+
+							"NockLock: work inside existing subdirectories is unaffected. To lift the restriction, move %s (events.db, its -wal/-shm sidecars and chain-anchor.json together) outside the fence root while no session is running; 'nocklock state migrate' will do it for you in a later release.\n",
+						auditDir, fsCfg.Root, auditDir)
+				}
 				switch runtime.GOOS {
 				case "linux":
 					// Look for the shared library next to the nocklock binary or in standard paths.
@@ -374,9 +399,11 @@ var wrapCmd = &cobra.Command{
 						break
 					}
 					sensitive := append(defaultSensitive, fsCfg.DenyPaths...)
-					stateDir := filepath.Join(projectRoot, config.Dir)
+					// The audit state is written only by this unfenced parent. It
+					// is already included in sensitive through egressChildDenyPaths,
+					// so never grant its directory to the fenced child.
 					profile, pathCount, err := fsfence.GenerateWriteConfinementProfile(
-						sensitive, fsCfg.Root, fsCfg.Mode, stateDir, cfg.Filesystem.Hardened,
+						sensitive, fsCfg.Root, fsCfg.Mode, cfg.Filesystem.Hardened,
 					)
 					if err != nil {
 						if setupErr := degradeOrRefuse("profile generation failed", err); setupErr != nil {
@@ -432,12 +459,16 @@ var wrapCmd = &cobra.Command{
 		// __landlock-exec shim that applies Landlock — extended to apply the
 		// seccomp filter just before execve (see landlock_exec.go). On non-Linux
 		// the syscall fence is a no-op and we skip the wiring entirely.
+		syscallProxyModeActive := false
+		syscallFenceActive := false
 		if runtime.GOOS == "linux" {
 			// Tell the syscall fence which network mode is active EXPLICITLY, so
 			// it can grant the child inet/inet6 sockets under the netns egress
 			// floor while keeping unix-only for the userspace proxy (N10710).
 			netFence := wrapNetworkFenceMode(useNetns, cfg.Network.AllowAll)
 			if policy, ok := buildSyscallPolicy(cfg, netFence); ok {
+				syscallFenceActive = syscallfence.Supported()
+				syscallProxyModeActive = syscallFenceActive && netFence == networkFenceProxy
 				encoded, err := marshalSyscallPolicy(policy)
 				if err != nil {
 					return fmt.Errorf("failed to serialize syscall policy: %w", err)
@@ -454,6 +485,44 @@ var wrapCmd = &cobra.Command{
 				}
 				fmt.Fprintf(os.Stderr, "NockLock: Linux syscall fence active — seccomp-BPF (%s)\n", policy.Mode)
 				logEvent(logging.EventFilePassed, "syscall", fmt.Sprintf("seccomp mode=%s socket_families=%d allow_namespaces=%t", policy.Mode, len(policy.AllowedSocketFamilies), policy.AllowNamespaces), false)
+			}
+		}
+		egressLevel := effectiveEgressLevel(
+			runtime.GOOS,
+			resolvedNetworkFenceMode(wrapFlags),
+			cfg.Network.AllowAll,
+			syscallFenceActive,
+			fsFence != nil,
+		)
+		if egressLevel == egressLevelUnreachable {
+			detail := egressRequirementMessage(egressLevel, runtime.GOOS)
+			logEvent(logging.EventNetworkError, "network", detail, true)
+			fmt.Fprintln(cmd.ErrOrStderr(), egressBanner(egressLevel, len(cfg.Network.Allow)))
+			fmt.Fprintf(cmd.ErrOrStderr(), "NockLock: fix: %s\n", strings.TrimPrefix(detail, "effective egress level is UNREACHABLE; "))
+			cmd.SilenceUsage = true
+			cmd.SilenceErrors = true
+			return &exitCodeError{code: 2}
+		}
+		if (cfg.Network.RequireEnforced || wrapFlags.RequireEnforcedEgress) && !egressLevelMeetsRequirement(egressLevel) {
+			detail := egressRequirementMessage(egressLevel, runtime.GOOS)
+			logEvent(logging.EventNetworkError, "network", detail, true)
+			fmt.Fprintf(cmd.ErrOrStderr(), "NockLock: fatal: enforced egress required — %s\n", detail)
+			cmd.SilenceUsage = true
+			cmd.SilenceErrors = true
+			return &exitCodeError{code: 2}
+		}
+
+		// Validate the interposer's field budget now that we know whether the
+		// __landlock-exec shim will engage. The shim injects self-proc allow
+		// entries (allowSelfProcFS) that consume budget; a pure userspace-only
+		// fence (no shim) gets the interposer's full budget.
+		if runtime.GOOS == "linux" && fsCfg != nil {
+			reserve := 0
+			if len(landlockPrefix) > 0 {
+				reserve = len(fsfence.SelfProcFiles())
+			}
+			if err := fsfence.CheckInterposerBudget(fsCfg, reserve); err != nil {
+				return fmt.Errorf("invalid filesystem fence config: %w", err)
 			}
 		}
 
@@ -523,12 +592,36 @@ var wrapCmd = &cobra.Command{
 			// the sidecars so the transparent proxy appends decisions to it.
 			netnsEgress.DecisionLogPath = decisionLogPath
 
-			logEvent(logging.EventNetworkPassed, "network", fmt.Sprintf("netns tproxy egress fence active domains=%d", len(netnsEgress.Allow)), false)
-			fmt.Fprintf(os.Stderr, "NockLock: network egress fence active — netns tproxy allowlist (%d domain(s))\n", len(netnsEgress.Allow))
+			logEvent(logging.EventNetworkPassed, "network", fmt.Sprintf("egress level=%s netns tproxy domains=%d", egressLevel, len(netnsEgress.Allow)), false)
+			fmt.Fprintln(os.Stderr, egressBanner(egressLevel, len(netnsEgress.Allow)))
 		} else if !cfg.Network.AllowAll {
 			proxyCfg := effectiveCfg.Network
 			proxy := network.NewProxyServer(proxyCfg, logger, sessionID)
-			addr, proxyErr := proxy.Start()
+			var addr string
+			var proxyErr error
+			var proxyUnixSocket string
+			if syscallProxyModeActive {
+				if runtime.GOOS != "linux" || fsFence == nil {
+					logEvent(logging.EventNetworkError, "network", "unix proxy bridge requires Linux LD_PRELOAD interposer", true)
+					return fmt.Errorf("network fence with syscall enforcement requires the Linux filesystem interposer so loopback proxy connects can be mapped onto a Unix socket")
+				}
+				proxyDir, err := createUnixProxyDir()
+				if err != nil {
+					return fmt.Errorf("create unix proxy socket directory: %w", err)
+				}
+				defer os.RemoveAll(proxyDir)
+				proxyUnixSocket = filepath.Join(proxyDir, "proxy.sock")
+				if err := validateUnixProxySocketPath(proxyUnixSocket); err != nil {
+					return err
+				}
+				addr, err = reserveLoopbackProxyAddr()
+				if err != nil {
+					return fmt.Errorf("reserve loopback proxy token address: %w", err)
+				}
+				addr, proxyErr = proxy.StartUnix(proxyUnixSocket, addr)
+			} else {
+				addr, proxyErr = proxy.Start()
+			}
 			if proxyErr != nil {
 				logEvent(logging.EventNetworkError, "network", fmt.Sprintf("proxy start failed: %v", proxyErr), false)
 				fmt.Fprintf(os.Stderr, "NockLock: fatal: network fence failed to start: %v\n", proxyErr)
@@ -536,7 +629,13 @@ var wrapCmd = &cobra.Command{
 				cmd.SilenceErrors = true
 				return &exitCodeError{code: 2}
 			} else {
-				if readyErr := network.WaitForProxyReady(cmd.Context(), addr, 5*time.Second); readyErr != nil {
+				var readyErr error
+				if proxyUnixSocket != "" {
+					readyErr = network.WaitForProxyReadyUnix(cmd.Context(), proxyUnixSocket, 5*time.Second)
+				} else {
+					readyErr = network.WaitForProxyReady(cmd.Context(), addr, 5*time.Second)
+				}
+				if readyErr != nil {
 					_ = proxy.Stop()
 					logEvent(logging.EventNetworkError, "network", fmt.Sprintf("proxy readiness failed: %v", readyErr), true)
 					fmt.Fprintf(os.Stderr, "NockLock: fatal: network fence proxy is not healthy: %v\n", readyErr)
@@ -549,16 +648,26 @@ var wrapCmd = &cobra.Command{
 				// Launch watchdog: if proxy crashes mid-session, cancel childCtx to kill the child.
 				watchdogCtx, watchdogCancel := context.WithCancel(cmd.Context())
 				defer watchdogCancel()
-				watchdog := network.NewProxyWatchdog(addr, 5*time.Second, 2, func() {
+				var watchdog *network.ProxyWatchdog
+				onProxyFailure := func() {
 					proxyFailed.Store(true)
 					proxy.MarkDegraded("proxy watchdog: proxy died")
 					logEvent(logging.EventNetworkError, "network", "proxy watchdog: proxy died, killing child", true)
 					fmt.Fprintf(os.Stderr, "NockLock: fatal: network proxy died unexpectedly — terminating child process\n")
 					childCancel()
-				})
+				}
+				if proxyUnixSocket != "" {
+					watchdog = network.NewUnixProxyWatchdog(proxyUnixSocket, 5*time.Second, 2, onProxyFailure)
+				} else {
+					watchdog = network.NewProxyWatchdog(addr, 5*time.Second, 2, onProxyFailure)
+				}
 				watchdog.Start(watchdogCtx)
 
 				proxyURL := "http://" + addr
+				childEnv = removeEnvVars(childEnv,
+					"NOCKLOCK_PROXY_TCP_ADDR",
+					"NOCKLOCK_PROXY_UNIX_SOCKET",
+				)
 				childEnv = append(childEnv,
 					"HTTP_PROXY="+proxyURL,
 					"HTTPS_PROXY="+proxyURL,
@@ -567,11 +676,34 @@ var wrapCmd = &cobra.Command{
 					"ALL_PROXY="+proxyURL,
 					"all_proxy="+proxyURL,
 				)
-				fmt.Fprintf(os.Stderr, "NockLock: network fence active — allowing %d domain(s)\n", len(cfg.Network.Allow))
-				logEvent(logging.EventNetworkPassed, "network", fmt.Sprintf("proxy=%s domains=%d", addr, len(cfg.Network.Allow)), false)
+				if proxyUnixSocket != "" {
+					childEnv = append(childEnv,
+						"NOCKLOCK_PROXY_TCP_ADDR="+addr,
+						"NOCKLOCK_PROXY_UNIX_SOCKET="+proxyUnixSocket,
+					)
+				}
+				fmt.Fprintln(os.Stderr, egressBanner(egressLevel, len(cfg.Network.Allow)))
+				logEvent(logging.EventNetworkPassed, "network", fmt.Sprintf("egress level=%s proxy=%s domains=%d", egressLevel, addr, len(cfg.Network.Allow)), false)
 			}
 		} else {
-			fmt.Fprintf(os.Stderr, "NockLock: network fence disabled (allow_all = true)\n")
+			fmt.Fprintln(os.Stderr, egressBanner(egressLevel, 0))
+			logEvent(logging.EventNetworkPassed, "network", "egress level=OFF allow_all=true", false)
+		}
+
+		// Record the effective egress level in the signed session-start row only
+		// after the configured bridge and network fence have initialized.
+		if err := logger.Log(logging.Event{
+			Timestamp:   time.Now(),
+			EventType:   logging.EventSessionStart,
+			Category:    "session",
+			Detail:      args[0],
+			EgressLevel: string(egressLevel),
+			SessionID:   sessionID,
+		}); err != nil {
+			fmt.Fprintf(cmd.ErrOrStderr(), "NockLock: fatal: cannot record effective egress level in the signed audit trail: %v — refusing to start\n", err)
+			cmd.SilenceUsage = true
+			cmd.SilenceErrors = true
+			return &exitCodeError{code: 2}
 		}
 
 		// On macOS the filesystem fence wraps the child argv with sandbox-exec
@@ -838,7 +970,17 @@ func effectiveWrapConfig(cfg *config.Config, flags WrapFlags) config.Config {
 	effective := *cfg
 	// CLI flag is additive: if either config-file or flag permits private ranges, allow them.
 	effective.Network.AllowPrivateRanges = cfg.Network.AllowPrivateRanges || flags.AllowPrivateRanges
+	// A CLI requirement is also part of the effective policy recorded in the
+	// signed config digest, not only a launch-time check.
+	effective.Network.RequireEnforced = cfg.Network.RequireEnforced || flags.RequireEnforcedEgress
 	return effective
+}
+
+func resolvedNetworkFenceMode(flags WrapFlags) string {
+	if flags.NetFence == "netns" {
+		return "netns"
+	}
+	return "proxy"
 }
 
 func composeChildArgv(args []string, prefixes ...[]string) []string {
@@ -939,8 +1081,18 @@ func validateWrapRuntimeConfig(cfg *config.Config) error {
 		if !fsfence.IsSupported() {
 			return fmt.Errorf("filesystem fence configured but not supported on %s", runtime.GOOS)
 		}
-		if _, err := fsfence.ProcessConfig(cfg.Filesystem); err != nil {
+		fsCfg, err := fsfence.ProcessConfig(cfg.Filesystem)
+		if err != nil {
 			return fmt.Errorf("invalid filesystem fence config: %w", err)
+		}
+		// Floor check with reserve=0: catches configs that exceed the
+		// interposer's absolute budget regardless of shim engagement.
+		// The exact check (with the real reserve) runs later in wrap,
+		// after the ABI probe and syscall-fence decision are final.
+		if runtime.GOOS == "linux" {
+			if err := fsfence.CheckInterposerBudget(fsCfg, 0); err != nil {
+				return fmt.Errorf("invalid filesystem fence config: %w", err)
+			}
 		}
 	}
 
@@ -967,6 +1119,12 @@ func linuxEnforcementMode(raw string) linuxEnforcement {
 // directory (covering the db and blocking rename/delete of the log) unless the
 // log sits directly in the project root — in which case it denies only the db
 // file, so the root itself is never accidentally denied.
+//
+// With a default (relative) logging.db the audit directory is outside the
+// project (config.AuditStateDir) and Landlock already denies it by default, so
+// this deny is what carries the protection into the LD_PRELOAD interposer,
+// which is allow/deny-list driven rather than default-deny. It still matters:
+// the two enforcement paths must agree.
 //
 // The root comparison resolves symlinks (matching the fence's own path
 // canonicalization): on macOS /tmp and /var are symlinks to /private/*, so a
@@ -1004,14 +1162,14 @@ func egressChildDenyPaths(dbPath, projectRoot, decisionLogDir string) []string {
 //
 // Why the state root and not /tmp (N10710): the default filesystem preset GRANTs
 // /tmp, and Landlock is allow-only, so a deny path under a granted tree fails
-// rule generation (assertDenyPathsEnforceable). Placing the dir under the audit
-// root keeps its deny enforceable — but ONLY because landlock.rootPathRules
-// skips the literal ".nock" child of the filesystem root when it grants the
-// tree, so a decision dir under .nock sits outside every granted tree. That
-// coupling is to the ".nock" name specifically (narrower than "the audit dir"):
-// a logging.db relocated out of .nock would reintroduce the overlap, exactly as
-// it already does for the audit DB's own deny (auditDenyPath). Factored out so
-// the path is unit-testable without root.
+// rule generation (assertDenyPathsEnforceable). The audit state root now lives
+// outside the project entirely (config.AuditStateDir), so this directory sits
+// outside every granted tree by construction — it no longer depends on the
+// Landlock ruleset skipping a ".nock" child of the fence root, which is how this
+// held before the audit state moved out. A logging.db pointed back inside a
+// granted tree by an absolute path reintroduces the overlap, exactly as it does
+// for the audit DB's own deny (auditDenyPath). Factored out so the path is
+// unit-testable without root.
 func egressDecisionDir(dbPath, sessionID string) string {
 	return filepath.Join(filepath.Dir(dbPath), "sessions", sessionID, "egress")
 }
@@ -1026,39 +1184,51 @@ func resolvePathBestEffort(p string) string {
 	return filepath.Clean(p)
 }
 
-// landlockProcSelfAllowPaths grants the child read-only access to its OWN
-// /proc/<pid> directory via the /proc/self symlink. This is what Node needs for
-// process.memoryUsage() (reads /proc/self/stat) and fs reads of
-// /proc/self/status; without it the calls throw EACCES and can crash the agent.
+// landlockProcSelfAllowPaths grants the child read-only access to the specific
+// files in fsfence.SelfProcFiles under its OWN /proc/<pid>, via the /proc/self
+// symlink. This is what Node needs for process.memoryUsage() (reads
+// /proc/self/stat) and fs reads of /proc/self/status; without it the calls
+// throw EACCES and can crash the agent.
 //
 // Correctness hinges on the exec model: the __landlock-exec shim builds the
 // Landlock ruleset and then execve's the child IN PLACE (unix.Exec preserves the
-// pid — see landlock_exec.go). So the literal string "/proc/self", opened when
-// the shim applies the ruleset, binds to the very inode that becomes the child's
-// own /proc/<pid> — never a sibling's or another user's. It must stay the
-// literal "/proc/self": resolving the symlink (as the config allow list does)
-// would bind it to some other process's pid dir.
+// pid — see landlock_exec.go). So the literal string "/proc/self/<file>",
+// opened when the shim applies the ruleset, binds to a file inode inside the
+// very directory that becomes the child's own /proc/<pid> — never a sibling's
+// or another user's. It must stay the literal "/proc/self/<file>": resolving
+// the symlink (as the config allow list does) would bind it to some other
+// process's pid dir.
 //
-// The grant is read-only and reaches exactly one directory: the wrapped child's
-// own /proc/<pid>. That never widens the fence boundary — no process outside the
-// wrapped command is exposed. (Landlock is inode-bound, so the rule does NOT
-// cover a descendant that later execs under a DIFFERENT pid; such a grandchild's
-// own /proc/self stays denied. Fixing that without re-granting the broad /proc
-// tree #115 removed needs a pid namespace + fresh proc mount, which the syscall
-// fence's allow_namespaces=false posture precludes — an ACCEPTED limitation,
-// assessed and recorded in ADR-005. The single-entry grant is pinned by
-// TestLandlockProcSelfAllowPathsStaysNarrow so it cannot be widened silently.)
+// It grants FILES, never the /proc/<pid> DIRECTORY: a directory-level Landlock
+// rule covers every entry beneath it (RulesFromConfig grants a directory
+// read+readdir+execute over its whole subtree), which would reopen environ,
+// cmdline, mem, maps and fd — the same-UID leak #115 removed. Landlock rules
+// are also inherited by every future descendant of the process they were
+// applied to, so a directory grant would let a GRANDCHILD of the wrapped
+// process read the wrapped process's own environ too — reopening the leak one
+// level down (round 2). A file-level grant is inode-bound to that one file, so
+// an inheriting descendant can only re-read those same few files, never
+// environ/cmdline/mem/maps/fd (see
+// TestWrapClaudeCodePresetBlocksDescendantParentProcEnviron).
+//
+// The grant reaches only the wrapped child's own /proc/<pid>/<file> entries.
+// That never widens the fence boundary — no process outside the wrapped
+// command's own descendants is exposed, and even descendants only inherit
+// read on this same curated file list. (A grandchild that later execs under a
+// DIFFERENT pid does not get its OWN /proc/self grant — Landlock is
+// inode-bound to the original pid's files. Fixing that without re-granting the
+// broad /proc tree #115 removed needs a pid namespace + fresh proc mount,
+// which the syscall fence's allow_namespaces=false posture precludes — an
+// ACCEPTED limitation, assessed and recorded in ADR-005. The file-level grant
+// is pinned by TestLandlockProcSelfAllowPathsStaysNarrow so it cannot be
+// widened silently.)
 func landlockProcSelfAllowPaths() []landlock.AllowPath {
-	return []landlock.AllowPath{{Path: "/proc/self", Access: landlock.AccessReadOnly}}
-}
-
-func landlockAuditAllowPaths(dbPath string) []landlock.AllowPath {
-	return []landlock.AllowPath{
-		{Path: dbPath, Access: landlock.AccessReadWrite},
-		{Path: dbPath + "-wal", Access: landlock.AccessReadWrite},
-		{Path: dbPath + "-shm", Access: landlock.AccessReadWrite},
-		{Path: dbPath + "-journal", Access: landlock.AccessReadWrite},
+	files := fsfence.SelfProcFiles()
+	paths := make([]landlock.AllowPath, 0, len(files))
+	for _, f := range files {
+		paths = append(paths, landlock.AllowPath{Path: "/proc/self/" + f, Access: landlock.AccessReadOnly})
 	}
+	return paths
 }
 
 // findLibFenceFS searches only trusted locations for the filesystem fence shared
@@ -1074,6 +1244,38 @@ func findLibFenceFS() (string, error) {
 		return "", fmt.Errorf("cannot resolve current working directory for filesystem fence library trust check: %w", err)
 	}
 	return findTrustedLibFenceFS(exePath, cwd, nil, fileExists)
+}
+
+func reserveLoopbackProxyAddr() (string, error) {
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		return "", err
+	}
+	addr := ln.Addr().String()
+	if err := ln.Close(); err != nil {
+		return "", err
+	}
+	return addr, nil
+}
+
+func createUnixProxyDir() (string, error) {
+	base := os.Getenv("XDG_RUNTIME_DIR")
+	if base == "" {
+		base = filepath.Join("/run/user", fmt.Sprintf("%d", os.Getuid()))
+		if st, statErr := os.Stat(base); statErr != nil || !st.IsDir() {
+			base = "/tmp"
+		}
+	}
+	return os.MkdirTemp(base, "nlp-*")
+}
+
+func validateUnixProxySocketPath(path string) error {
+	const sunPathLimit = 108
+
+	if len(path) >= sunPathLimit {
+		return fmt.Errorf("unix proxy socket path is %d bytes; must be shorter than %d bytes for sockaddr_un.sun_path", len(path), sunPathLimit)
+	}
+	return nil
 }
 
 func findTrustedLibFenceFS(exePath, workingDir string, extraCandidates []string, exists func(string) (bool, error)) (string, error) {

@@ -120,16 +120,26 @@ func applySyscallFence(policy syscallfence.Policy) error {
 }
 
 // allowSelfProcFS grants the LD_PRELOAD filesystem interposer read access to
-// THIS process's own /proc/<pid> subtree, so Node's process.memoryUsage() and
-// reads of /proc/self/status are not blocked by the userspace fence. It is the
-// interposer companion to landlockProcSelfAllowPaths (wrap.go).
+// THIS process's own fsfence.SelfProcFiles under /proc/<pid>, so Node's
+// process.memoryUsage() and reads of /proc/self/status are not blocked by the
+// userspace fence. It is the interposer companion to landlockProcSelfAllowPaths
+// (wrap.go); both grant exactly the same file list.
 //
 // The shim IS the child — unix.Exec (below) execve's in place and preserves the
 // pid — so os.Getpid() is the child's real pid. The concrete pid is required,
 // not "/proc/self": the interposer realpaths accessed paths, so /proc/self/stat
-// arrives as /proc/<pid>/stat and only a concrete /proc/<pid> entry matches. The
-// interposer's prefix match is component-boundary aware, so /proc/<pid> never
-// matches a sibling sharing a numeric prefix — no other process is exposed.
+// arrives as /proc/<pid>/stat and only a concrete /proc/<pid>/<file> entry
+// matches. The interposer's prefix match is component-boundary aware, so
+// /proc/<pid> never matches a sibling sharing a numeric prefix — no other
+// process is exposed.
+//
+// Only the specific files are granted, never the /proc/<pid> directory: a
+// directory-wide allow entry would also make environ, cmdline, mem, maps and
+// fd match the interposer's allow check — the same-UID leak #115 removed,
+// reachable one level down through any descendant that inherits this fence's
+// posture. See landlockProcSelfAllowPaths for the Landlock-side rationale,
+// which is the actual kernel backstop even if this userspace list were ever
+// wider.
 //
 // This runs only in the __landlock-exec shim, which wrap inserts whenever
 // Landlock or the syscall fence is active — always so for the hardened presets
@@ -137,13 +147,16 @@ func applySyscallFence(policy syscallfence.Policy) error {
 // here; that degraded posture is out of scope. No-op when NOCKLOCK_FS_ALLOWED is
 // unset or empty.
 func allowSelfProcFS(env []string) []string {
-	selfProc := fmt.Sprintf("/proc/%d", os.Getpid())
+	pid := os.Getpid()
 	for i, entry := range env {
 		name, val, ok := strings.Cut(entry, "=")
 		if !ok || name != fsfence.EnvFSAllowed || val == "" {
 			continue
 		}
-		env[i] = fsfence.EnvFSAllowed + "=" + fsfence.AppendSerializedAllow(val, selfProc)
+		for _, f := range fsfence.SelfProcFiles() {
+			val = fsfence.AppendSerializedAllow(val, fmt.Sprintf("/proc/%d/%s", pid, f))
+		}
+		env[i] = fsfence.EnvFSAllowed + "=" + val
 		break
 	}
 	return env

@@ -106,8 +106,7 @@ func TestSeatbeltWriteConfinement_RealSandboxExec(t *testing.T) {
 
 	root := filepath.Join(base, "project")
 	outside := filepath.Join(base, "outside")
-	stateDir := filepath.Join(root, ".nock")
-	for _, dir := range []string{root, outside, stateDir} {
+	for _, dir := range []string{root, outside} {
 		if err := os.MkdirAll(dir, 0700); err != nil {
 			t.Fatal(err)
 		}
@@ -122,7 +121,7 @@ func TestSeatbeltWriteConfinement_RealSandboxExec(t *testing.T) {
 	}
 
 	profile, _, err := GenerateWriteConfinementProfile(
-		[]string{sensitiveDir}, root, "read-write", stateDir, false,
+		[]string{sensitiveDir}, root, "read-write", false,
 	)
 	if err != nil {
 		t.Fatalf("GenerateWriteConfinementProfile: %v", err)
