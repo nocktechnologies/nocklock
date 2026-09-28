@@ -95,8 +95,7 @@ jobs:
   fuzz-smoke:
     name: fuzz smoke (fence decision surface)
     runs-on: ubuntu-latest
-    # Ceiling for the exec-count budget: minimization stalls of 20s+ are
-    # routine on shared runners, and a count budget has no wall-clock bound.
+    # Wall-clock ceiling for the exec-count budgets below.
     timeout-minutes: 15
     steps:
       - uses: actions/checkout@v4
