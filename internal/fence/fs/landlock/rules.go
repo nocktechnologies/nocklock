@@ -133,7 +133,7 @@ func RulesFromConfig(cfg *fsfence.FenceConfig, extra []AllowPath, abi int) (Spec
 	if cfg.Mode == "read-only" {
 		rootAccess = AccessReadOnly
 	}
-	rootRuleset, err := rootRules(cfg.Root, cfg.ProtectedRootSubdir, rootAccess, abi)
+	rootRuleset, err := rootRules(cfg.Root, cfg.ProtectedRootSubdir, cfg.DenyPaths, rootAccess, abi)
 	if err != nil {
 		return Spec{}, err
 	}
@@ -296,11 +296,13 @@ func isAncestor(ancestor, descendant string) bool {
 // symlinks: Landlock binds the rule to the root's inode, so a symlink inside the
 // root pointing outside it grants nothing.
 //
-// LEGACY (protectedSubdir set): grant each EXISTING CHILD of the root and skip
-// the protected directory, leaving the root itself ungranted. The child keeps
-// the access it has today but cannot create or remove entries directly in the
-// root. This is the shape every release before the audit state moved out used,
-// and it is required whenever a directory inside the root must stay unwritable:
+// PROTECTED (protectedSubdir set): grant each EXISTING CHILD of the root and
+// skip the protected directory, leaving the root itself ungranted. If the
+// protected value is Root itself, skip each direct child covered by DenyPaths
+// instead; this protects a root-level audit DB and its sidecars. The child
+// keeps the access it has today but cannot create or remove entries directly
+// in the root. It is required whenever audit paths inside the root must stay
+// unwritable:
 // the kernel walks upward from the accessed file and allows as soon as an
 // ancestor rule grants the access, so a rule on the root cannot be narrowed
 // underneath, and stacking layers does not help because every layer would need
@@ -309,7 +311,7 @@ func isAncestor(ancestor, descendant string) bool {
 // The per-child grants resolve symlinks, so this shape needs the escape check
 // the single root rule does not: a child symlinked outside the root would
 // otherwise produce a real rule on the target.
-func rootRules(root, protectedSubdir, access string, abi int) ([]PathRule, error) {
+func rootRules(root, protectedSubdir string, denyPaths []string, access string, abi int) ([]PathRule, error) {
 	cleanRoot, err := filepath.EvalSymlinks(filepath.Clean(root))
 	if err != nil {
 		return nil, fmt.Errorf("resolve Landlock root %q: %w", root, err)
@@ -330,11 +332,24 @@ func rootRules(root, protectedSubdir, access string, abi int) ([]PathRule, error
 	// the worst outcome. Refuse instead of pretending to protect it. This
 	// happens when filesystem.root is an ancestor of the project directory
 	// holding the audit trail.
-	if filepath.Dir(protected) != cleanRoot {
+	protectingRoot := protected == cleanRoot
+	if !protectingRoot && filepath.Dir(protected) != cleanRoot {
 		return nil, fmt.Errorf(
 			"cannot protect %q inside Landlock root %q: it is not a direct child, and Landlock grants a whole hierarchy, so granting %q would grant it too; "+
 				"set filesystem.root to the directory that holds the audit trail, or move the audit trail out of the root",
 			protected, cleanRoot, filepath.Dir(protected))
+	}
+	if protectingRoot {
+		hasDirectDeny := false
+		for _, deny := range denyPaths {
+			if filepath.Dir(filepath.Clean(deny)) == cleanRoot {
+				hasDirectDeny = true
+				break
+			}
+		}
+		if !hasDirectDeny {
+			return nil, fmt.Errorf("cannot withhold Landlock root %q without a deny path for one of its direct children", cleanRoot)
+		}
 	}
 	entries, err := os.ReadDir(cleanRoot)
 	if err != nil {
@@ -344,7 +359,7 @@ func rootRules(root, protectedSubdir, access string, abi int) ([]PathRule, error
 	paths := make([]string, 0, len(entries))
 	for _, entry := range entries {
 		child := filepath.Join(cleanRoot, entry.Name())
-		if child == protected {
+		if !protectingRoot && child == protected {
 			continue
 		}
 		if entry.Type()&os.ModeSymlink != 0 {
@@ -355,10 +370,22 @@ func rootRules(root, protectedSubdir, access string, abi int) ([]PathRule, error
 			if !pathInsideRoot(cleanRoot, resolved) {
 				return nil, fmt.Errorf("Landlock root child %q resolves outside Landlock root %q to %q", child, cleanRoot, resolved)
 			}
-			if resolved == protected {
+			if !protectingRoot && resolved == protected {
 				continue
 			}
 			child = resolved
+		}
+		if protectingRoot {
+			covered := false
+			for _, deny := range denyPaths {
+				if pathsOverlap(filepath.Clean(child), filepath.Clean(deny)) {
+					covered = true
+					break
+				}
+			}
+			if covered {
+				continue
+			}
 		}
 		paths = append(paths, child)
 	}

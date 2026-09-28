@@ -9,6 +9,7 @@ import (
 	"errors"
 	"io"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -20,6 +21,100 @@ import (
 
 	_ "modernc.org/sqlite"
 )
+
+// TestSBPLDeniesProjectRootAuditSidecars checks the actual Seatbelt policy for
+// a root-level logging.db. The first child tries to create each absent sidecar;
+// the second tries to overwrite, remove, and rename existing sidecar files.
+func TestSBPLDeniesProjectRootAuditSidecars(t *testing.T) {
+	if err := fsfence.EnsureSandboxExecAvailable(); err != nil {
+		if os.Getenv("NOCKLOCK_SANDBOX_REQUIRE") == "1" {
+			t.Fatalf("sandbox-exec unavailable: %v; NOCKLOCK_SANDBOX_REQUIRE=1 forbids skipping", err)
+		}
+		t.Skipf("sandbox-exec unavailable: %v", err)
+	}
+
+	project, dbPath := rootAuditFixture(t)
+	sidecars := auditSidecarPaths(t, dbPath)
+	sensitive := auditDenyPaths(dbPath, project)
+	profile, _, err := fsfence.GenerateWriteConfinementProfile(sensitive, project, "read-write", false)
+	if err != nil {
+		t.Fatalf("generate root-audit SBPL profile: %v", err)
+	}
+	profilePath, err := fsfence.WriteProfile(profile)
+	if err != nil {
+		t.Fatalf("write root-audit SBPL profile: %v", err)
+	}
+	t.Cleanup(func() { _ = os.Remove(profilePath) })
+	run := func(script string, args ...string) string {
+		t.Helper()
+		argv := []string{"-f", profilePath, "/bin/sh", "-c", script, "audit-sidecar-probe"}
+		argv = append(argv, args...)
+		out, err := exec.Command("sandbox-exec", argv...).CombinedOutput()
+		if err != nil {
+			t.Fatalf("SBPL probe failed: %v\n%s", err, out)
+		}
+		return string(out)
+	}
+
+	createScript := `status=0
+for target do
+  if (set -C; : > "$target") 2>/dev/null; then
+    printf 'CREATED %s\n' "$target"
+    status=1
+  else
+    printf 'DENIED create %s\n' "$target"
+  fi
+done
+exit "$status"`
+	createOut := run(createScript, sidecars...)
+	for _, path := range sidecars {
+		if !strings.Contains(createOut, "DENIED create "+path) {
+			t.Errorf("SBPL did not prove create denial for %q; output:\n%s", path, createOut)
+		}
+		if _, err := os.Lstat(path); !errors.Is(err, os.ErrNotExist) {
+			t.Fatalf("child created audit sidecar %q: %v", path, err)
+		}
+	}
+
+	for _, path := range sidecars {
+		if err := os.WriteFile(path, []byte("audit-fixture"), 0o600); err != nil {
+			t.Fatalf("create audit sidecar fixture %q: %v", path, err)
+		}
+	}
+	mutateScript := `status=0
+for target do
+  if : > "$target" 2>/dev/null; then
+    printf 'OVERWRITE_ALLOWED %s\n' "$target"
+    status=1
+  fi
+  if /bin/rm "$target" 2>/dev/null; then
+    printf 'REMOVE_ALLOWED %s\n' "$target"
+    status=1
+  fi
+  if /bin/mv "$target" "$target.renamed" 2>/dev/null; then
+    printf 'RENAME_ALLOWED %s\n' "$target"
+    status=1
+  fi
+done
+exit "$status"`
+	if out := run(mutateScript, sidecars...); strings.Contains(out, "_ALLOWED ") {
+		t.Fatalf("SBPL permitted an audit sidecar mutation:\n%s", out)
+	}
+	for _, path := range sidecars {
+		if got, err := os.ReadFile(path); err != nil || string(got) != "audit-fixture" {
+			t.Fatalf("sidecar %q changed after child mutation attempts: %q, %v", path, got, err)
+		}
+		if _, err := os.Lstat(path + ".renamed"); !errors.Is(err, os.ErrNotExist) {
+			t.Fatalf("child renamed audit sidecar %q: %v", path, err)
+		}
+	}
+
+	control := filepath.Join(project, "ordinary-root-file")
+	controlOut := run(`: > "$1" && printf 'CONTROL_ALLOWED\n'`, control)
+	if !strings.Contains(controlOut, "CONTROL_ALLOWED") {
+		t.Fatalf("SBPL denied an ordinary project-root write:\n%s", controlOut)
+	}
+}
 
 // TestWrapMacOSFilesystemFenceRecordsOneEngagedState proves the wrap command,
 // not merely the component helper, records precisely one filesystem-fence

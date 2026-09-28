@@ -11,6 +11,30 @@ import (
 	"testing"
 )
 
+func TestAuditFilePaths(t *testing.T) {
+	dbPath := filepath.Join(t.TempDir(), "events.db")
+	want := []string{
+		dbPath,
+		dbPath + "-wal",
+		dbPath + "-shm",
+		dbPath + "-journal",
+		filepath.Join(filepath.Dir(dbPath), "chain-anchor.json"),
+	}
+	got := AuditFilePaths(dbPath)
+	if len(got) != len(want) {
+		t.Fatalf("AuditFilePaths() = %q, want %q", got, want)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Errorf("AuditFilePaths()[%d] = %q, want %q", i, got[i], want[i])
+		}
+	}
+	got[0] = "mutated"
+	if again := AuditFilePaths(dbPath); again[0] != dbPath {
+		t.Fatalf("AuditFilePaths returned shared mutable storage: %q", again)
+	}
+}
+
 // dbPathOf reads the on-disk path of an open logger's SQLite database.
 func dbPathOf(t *testing.T, l *Logger) string {
 	t.Helper()

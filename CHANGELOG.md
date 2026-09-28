@@ -67,6 +67,10 @@ All notable changes to NockLock will be documented in this file.
   writes the event database, SQLite sidecars, and chain anchor; a macOS
   enforcement test now proves child truncate and rename attempts are denied
   while a wrapped session still produces a verifiable audit chain.
+- A root-level configured `logging.db` now denies the database, its SQLite
+  sidecars, and the chain anchor together. Linux Landlock withholds the root
+  grant and grants other existing project entries individually so those audit
+  files cannot be created, changed, removed, or renamed by the child.
 - New projects keep their audit trail outside the project, so the fenced agent
   can finally use its own project root (N10749). Two requirements had been in
   direct conflict: the agent must be able to create and remove files directly in

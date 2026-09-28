@@ -11,6 +11,7 @@ import (
 	"github.com/nocktechnologies/nocklock/internal/config"
 	fsfence "github.com/nocktechnologies/nocklock/internal/fence/fs"
 	"github.com/nocktechnologies/nocklock/internal/fence/fs/landlock"
+	"github.com/nocktechnologies/nocklock/internal/logging"
 	"github.com/spf13/cobra"
 )
 
@@ -233,7 +234,7 @@ func TestWrapFailsClosedWhenEventLogCannotOpen(t *testing.T) {
 	}
 }
 
-func TestAuditDenyPath(t *testing.T) {
+func TestAuditDenyPaths(t *testing.T) {
 	root := t.TempDir()
 	nock := filepath.Join(root, ".nock")
 	if err := os.MkdirAll(nock, 0o755); err != nil {
@@ -243,15 +244,22 @@ func TestAuditDenyPath(t *testing.T) {
 	// Common case: db in a .nock subdir -> deny the whole audit dir (covers the
 	// db and blocks rename/delete of the log).
 	db := filepath.Join(nock, "events.db")
-	if got := auditDenyPath(db, root); got != nock {
-		t.Errorf("subdir case: auditDenyPath = %q, want %q", got, nock)
+	if got := auditDenyPaths(db, root); len(got) != 1 || got[0] != nock {
+		t.Errorf("subdir case: auditDenyPaths = %q, want [%q]", got, nock)
 	}
 
-	// Pathological: db directly in the project root -> deny only the file, never
-	// the root itself.
+	// A database directly in the project root must protect every adjacent audit
+	// file without denying the project root itself.
 	dbInRoot := filepath.Join(root, "events.db")
-	if got := auditDenyPath(dbInRoot, root); got != dbInRoot {
-		t.Errorf("root case: auditDenyPath = %q, want the file %q", got, dbInRoot)
+	got := auditDenyPaths(dbInRoot, root)
+	want := logging.AuditFilePaths(dbInRoot)
+	if len(got) != len(want) {
+		t.Fatalf("root case: auditDenyPaths = %q, want %q", got, want)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Errorf("root case: auditDenyPaths[%d] = %q, want %q", i, got[i], want[i])
+		}
 	}
 }
 
@@ -272,15 +280,22 @@ func TestLinuxEnforcementModePreferredFailsClosed(t *testing.T) {
 // (macOS /tmp -> /private/tmp). Without it, a string compare would see the audit
 // dir and the symlinked root as different and DENY THE WHOLE ROOT, breaking the
 // agent. db sits directly in the real root; root is given as a symlink to it.
-func TestAuditDenyPathSymlinkedRoot(t *testing.T) {
+func TestAuditDenyPathsSymlinkedRoot(t *testing.T) {
 	realRoot := t.TempDir()
 	link := filepath.Join(t.TempDir(), "link")
 	if err := os.Symlink(realRoot, link); err != nil {
 		t.Skipf("symlinks unsupported: %v", err)
 	}
 	db := filepath.Join(realRoot, "events.db")
-	if got := auditDenyPath(db, link); got != db {
-		t.Errorf("symlinked root not recognized: got %q, want the file %q (denying the root would break the agent)", got, db)
+	got := auditDenyPaths(db, link)
+	want := logging.AuditFilePaths(db)
+	if len(got) != len(want) {
+		t.Fatalf("symlinked root not recognized: got %q, want %q", got, want)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Errorf("symlinked root auditDenyPaths[%d] = %q, want %q", i, got[i], want[i])
+		}
 	}
 }
 

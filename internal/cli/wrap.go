@@ -299,8 +299,8 @@ var wrapCmd = &cobra.Command{
 					fsCfg.ProtectedRootSubdir = auditDir
 					fmt.Fprintf(os.Stderr,
 						"NockLock: the audit trail is inside the fence root (%s), so the agent cannot create or remove entries directly in %s.\n"+
-							"NockLock: work inside existing subdirectories is unaffected. To lift the restriction, move %s (events.db, its -wal/-shm sidecars and chain-anchor.json together) outside the fence root while no session is running; 'nocklock state migrate' will do it for you in a later release.\n",
-						auditDir, fsCfg.Root, auditDir)
+							"NockLock: work inside existing subdirectories is unaffected. To lift the restriction, move %s and its SQLite sidecars and chain-anchor.json together outside the fence root while no session is running; configure logging.db for that location.\n",
+						auditDir, fsCfg.Root, dbPath)
 				}
 				switch runtime.GOOS {
 				case "linux":
@@ -1114,11 +1114,11 @@ func linuxEnforcementMode(raw string) linuxEnforcement {
 	return linuxEnforcement(raw)
 }
 
-// auditDenyPath returns the path to add to the filesystem fence's deny list so a
-// fenced child cannot tamper with its own audit log. It denies the whole audit
-// directory (covering the db and blocking rename/delete of the log) unless the
-// log sits directly in the project root — in which case it denies only the db
-// file, so the root itself is never accidentally denied.
+// auditDenyPaths returns the paths to add to the filesystem fence's deny list
+// so a fenced child cannot tamper with its own audit log. It denies the whole
+// audit directory unless the log sits directly in the project root, where the
+// logging package's database, SQLite sidecar, and chain-anchor paths are denied
+// individually so the project root is not included in the deny list.
 //
 // With a default (relative) logging.db the audit directory is outside the
 // project (config.AuditStateDir) and Landlock already denies it by default, so
@@ -1129,25 +1129,25 @@ func linuxEnforcementMode(raw string) linuxEnforcement {
 // The root comparison resolves symlinks (matching the fence's own path
 // canonicalization): on macOS /tmp and /var are symlinks to /private/*, so a
 // string-only compare could see the audit dir and a symlinked root as different
-// and deny the entire root (breaking the agent) — or as equal and skip the dir.
-func auditDenyPath(dbPath, projectRoot string) string {
+// and deny the entire root (breaking the agent) — or as equal and skip protection.
+func auditDenyPaths(dbPath, projectRoot string) []string {
 	auditDir := filepath.Dir(dbPath)
 	if resolvePathBestEffort(auditDir) != resolvePathBestEffort(projectRoot) {
-		return auditDir
+		return []string{auditDir}
 	}
-	return dbPath
+	return logging.AuditFilePaths(dbPath)
 }
 
 // egressChildDenyPaths returns the paths the fenced child must be denied so it
 // cannot tamper with the records the unfenced parent signs into the audit trail:
-// the audit DB (via auditDenyPath) always, plus — on the netns egress path — the
-// WHOLE egress decision-log directory (decisionLogDir, empty otherwise). Denying
-// the directory, not just the file, stops the child (which shares wrap's uid)
-// from truncating the log, creating sibling files, or traversing in to forge the
-// signed egress rows. Factored out so the deny-list assembly is unit-testable
-// without root.
+// the audit DB and its adjacent files (via auditDenyPaths) always, plus the
+// whole egress decision-log directory (decisionLogDir) on the netns path.
+// Denying the directory, not just the file, stops the child (which shares
+// wrap's uid) from truncating the log, creating sibling files, or traversing in
+// to forge the signed egress rows. Factored out so the deny-list assembly is
+// unit-testable without root.
 func egressChildDenyPaths(dbPath, projectRoot, decisionLogDir string) []string {
-	paths := []string{auditDenyPath(dbPath, projectRoot)}
+	paths := auditDenyPaths(dbPath, projectRoot)
 	if decisionLogDir != "" {
 		paths = append(paths, decisionLogDir)
 	}
@@ -1168,7 +1168,7 @@ func egressChildDenyPaths(dbPath, projectRoot, decisionLogDir string) []string {
 // Landlock ruleset skipping a ".nock" child of the fence root, which is how this
 // held before the audit state moved out. A logging.db pointed back inside a
 // granted tree by an absolute path reintroduces the overlap, exactly as it does
-// for the audit DB's own deny (auditDenyPath). Factored out so the path is
+// for the audit DB's own deny (auditDenyPaths). Factored out so the path is
 // unit-testable without root.
 func egressDecisionDir(dbPath, sessionID string) string {
 	return filepath.Join(filepath.Dir(dbPath), "sessions", sessionID, "egress")
