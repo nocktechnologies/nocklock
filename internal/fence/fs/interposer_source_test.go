@@ -3,8 +3,34 @@ package fs
 import (
 	"os"
 	"regexp"
+	"strconv"
 	"testing"
 )
+
+// TestMaxAllowPathsMatchesInterposerMaxPaths keeps Go's maxAllowPaths (and
+// the interposerMaxPathFields budget derived from it) in sync with the C
+// interposer's own #define MAX_PATHS. ProcessConfig's cap check (#10757
+// thread 2) is only correct if this constant actually matches what
+// libfence_fs.c enforces at runtime; a silent drift here would let
+// ProcessConfig either wrongly reject valid configs or wrongly accept ones
+// that still trip the interposer's real cap.
+func TestMaxAllowPathsMatchesInterposerMaxPaths(t *testing.T) {
+	source, err := os.ReadFile("interposer/libfence_fs.c")
+	if err != nil {
+		t.Fatalf("read interposer source: %v", err)
+	}
+	m := regexp.MustCompile(`#define\s+MAX_PATHS\s+(\d+)`).FindStringSubmatch(string(source))
+	if m == nil {
+		t.Fatal("libfence_fs.c: MAX_PATHS #define not found")
+	}
+	n, err := strconv.Atoi(m[1])
+	if err != nil {
+		t.Fatalf("parse MAX_PATHS value %q: %v", m[1], err)
+	}
+	if n != maxAllowPaths {
+		t.Errorf("Go maxAllowPaths = %d, but libfence_fs.c MAX_PATHS = %d; keep them in sync", maxAllowPaths, n)
+	}
+}
 
 func TestInterposerSourceCoversStatFamily(t *testing.T) {
 	source, err := os.ReadFile("interposer/libfence_fs.c")

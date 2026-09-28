@@ -7,6 +7,7 @@ import (
 	"context"
 	"database/sql"
 	"errors"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -152,11 +153,35 @@ func TestWrapMacOSFilesystemFenceDeniesAuditStateTampering(t *testing.T) {
 	if err != nil {
 		t.Fatalf("open parent audit logger: %v", err)
 	}
+	configPath, err := config.FindConfig()
+	if err != nil {
+		_ = parentLogger.Close()
+		t.Fatalf("find project config: %v", err)
+	}
+	cfg, err := config.Load(configPath)
+	if err != nil {
+		_ = parentLogger.Close()
+		t.Fatalf("load project config: %v", err)
+	}
+	const tamperTestSession = "audit-state-tamper-test"
+	if err := recordConfigDigest(parentLogger, cfg, configPath, dbPath, tamperTestSession, resolvedNetworkFenceMode(WrapFlags{}), io.Discard); err != nil {
+		_ = parentLogger.Close()
+		t.Fatalf("write config digest for parent audit event: %v", err)
+	}
+	if err := parentLogger.Log(logging.Event{
+		EventType: logging.EventSessionStart,
+		Category:  "session",
+		Detail:    "start audit-state tamper fixture",
+		SessionID: tamperTestSession,
+	}); err != nil {
+		_ = parentLogger.Close()
+		t.Fatalf("write session start for parent audit event: %v", err)
+	}
 	if err := parentLogger.Log(logging.Event{
 		EventType: logging.EventFilePassed,
 		Category:  "filesystem",
 		Detail:    "prepare WAL tamper test",
-		SessionID: "audit-state-tamper-test",
+		SessionID: tamperTestSession,
 	}); err != nil {
 		_ = parentLogger.Close()
 		t.Fatalf("write parent audit event: %v", err)

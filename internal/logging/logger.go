@@ -2,6 +2,7 @@
 package logging
 
 import (
+	"context"
 	"crypto/ed25519"
 	"crypto/sha256"
 	"database/sql"
@@ -36,6 +37,7 @@ const (
 	EventSessionStart         EventType = "session_start"
 	EventSessionEnd           EventType = "session_end"
 	EventConfigLoaded         EventType = "config_loaded"
+	EventConfigDigest         EventType = "config.digest"
 )
 
 // formatTimestampForChain formats a time.Time as UTC RFC3339 with exactly 9 fractional second digits and trailing Z.
@@ -68,6 +70,7 @@ type QueryOptions struct {
 	Limit      int // 0 = default (100)
 	Offset     int
 	Descending bool // if true, order by timestamp DESC
+	ByID       bool // if true, order by insertion ID instead of timestamp
 }
 
 // Stats holds aggregate counts for events.
@@ -86,6 +89,13 @@ type Stats struct {
 type Logger struct {
 	db     *sql.DB
 	signer *signer // nil when Ed25519 signing is off
+}
+
+// eventTransaction is the common database/sql operation set shared by a
+// regular transaction and a connection held in an explicit SQLite transaction.
+type eventTransaction interface {
+	ExecContext(context.Context, string, ...any) (sql.Result, error)
+	QueryRowContext(context.Context, string, ...any) *sql.Row
 }
 
 // Option configures a Logger at construction.
@@ -377,16 +387,17 @@ func NewLogger(dbPath string, projectRoot string, opts ...Option) (*Logger, erro
 	// WAL mode allows external processes to read concurrently.
 	db.SetMaxOpenConns(1)
 
+	// Set the busy timeout before enabling WAL so concurrent first opens wait
+	// rather than failing while changing the journal mode.
+	if _, err := db.Exec("PRAGMA busy_timeout=5000"); err != nil {
+		db.Close()
+		return nil, fmt.Errorf("failed to set busy timeout: %w", err)
+	}
+
 	// Enable WAL mode for concurrent read/write.
 	if _, err := db.Exec("PRAGMA journal_mode=WAL"); err != nil {
 		db.Close()
 		return nil, fmt.Errorf("failed to enable WAL mode: %w", err)
-	}
-
-	// Set a busy timeout so concurrent operations wait rather than fail.
-	if _, err := db.Exec("PRAGMA busy_timeout=5000"); err != nil {
-		db.Close()
-		return nil, fmt.Errorf("failed to set busy timeout: %w", err)
 	}
 
 	// Zero freed pages so pruned event data is not forensically recoverable.
@@ -449,17 +460,93 @@ func NewLogger(dbPath string, projectRoot string, opts ...Option) (*Logger, erro
 
 // Log records a single event with hash chain. Thread-safe (SQLite WAL handles locking).
 func (l *Logger) Log(event Event) error {
-	ts := formatTimestampForChain(event.Timestamp)
-	blocked := 0
-	if event.Blocked {
-		blocked = 1
-	}
-
 	tx, err := l.db.Begin()
 	if err != nil {
 		return fmt.Errorf("failed to begin log transaction: %w", err)
 	}
 	defer tx.Rollback()
+	if err := l.logInTransaction(tx, event); err != nil {
+		return err
+	}
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("failed to commit log transaction: %w", err)
+	}
+	return nil
+}
+
+// LogAfterLatest records an event built from the latest event of eventType and
+// returns that committed predecessor. The lookup and append share one SQLite
+// BEGIN IMMEDIATE transaction, so concurrent writers cannot observe the same
+// predecessor.
+func (l *Logger) LogAfterLatest(eventType EventType, build func(*Event) (Event, error)) (*Event, error) {
+	if build == nil {
+		return nil, errors.New("log event builder is required")
+	}
+
+	ctx := context.Background()
+	conn, err := l.db.Conn(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("failed to reserve log connection: %w", err)
+	}
+	defer conn.Close()
+	if _, err := conn.ExecContext(ctx, "BEGIN IMMEDIATE"); err != nil {
+		return nil, fmt.Errorf("failed to begin immediate log transaction: %w", err)
+	}
+	committed := false
+	defer func() {
+		if !committed {
+			_, _ = conn.ExecContext(ctx, "ROLLBACK")
+		}
+	}()
+
+	previous, err := latestEvent(ctx, conn, eventType)
+	if err != nil {
+		return nil, err
+	}
+	event, err := build(previous)
+	if err != nil {
+		return nil, err
+	}
+	if err := l.logInTransaction(conn, event); err != nil {
+		return nil, err
+	}
+	if _, err := conn.ExecContext(ctx, "COMMIT"); err != nil {
+		return nil, fmt.Errorf("failed to commit immediate log transaction: %w", err)
+	}
+	committed = true
+	return previous, nil
+}
+
+func latestEvent(ctx context.Context, tx eventTransaction, eventType EventType) (*Event, error) {
+	var event Event
+	var timestamp string
+	var blocked int
+	var storedType string
+	err := tx.QueryRowContext(ctx,
+		"SELECT id, timestamp, event_type, category, detail, blocked, session_id FROM events WHERE event_type = ? ORDER BY id DESC LIMIT 1",
+		string(eventType),
+	).Scan(&event.ID, &timestamp, &storedType, &event.Category, &event.Detail, &blocked, &event.SessionID)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, fmt.Errorf("failed to read previous event: %w", err)
+	}
+	event.EventType = EventType(storedType)
+	event.Blocked = blocked != 0
+	event.Timestamp, err = time.Parse(time.RFC3339, timestamp)
+	if err != nil {
+		return nil, fmt.Errorf("failed to parse previous event timestamp %q: %w", timestamp, err)
+	}
+	return &event, nil
+}
+
+func (l *Logger) logInTransaction(tx eventTransaction, event Event) error {
+	ts := formatTimestampForChain(event.Timestamp)
+	blocked := 0
+	if event.Blocked {
+		blocked = 1
+	}
 	if err := initChainHeadIfNeeded(tx); err != nil {
 		return fmt.Errorf("failed to initialize chain_head: %w", err)
 	}
@@ -468,12 +555,12 @@ func (l *Logger) Log(event Event) error {
 	}
 
 	var prevHashHex string
-	if err := tx.QueryRow("SELECT entry_hash FROM chain_head WHERE id = 1").Scan(&prevHashHex); err != nil {
+	if err := tx.QueryRowContext(context.Background(), "SELECT entry_hash FROM chain_head WHERE id = 1").Scan(&prevHashHex); err != nil {
 		return fmt.Errorf("failed to read chain head: %w", err)
 	}
 
 	// Insert without hash values first
-	result, err := tx.Exec(
+	result, err := tx.ExecContext(context.Background(),
 		`INSERT INTO events (timestamp, event_type, category, detail, blocked, session_id, prev_hash, entry_hash)
 		 VALUES (?, ?, ?, ?, ?, ?, '', '')`,
 		ts, string(event.EventType), event.Category, event.Detail, blocked, event.SessionID,
@@ -502,7 +589,7 @@ func (l *Logger) Log(event Event) error {
 	}
 
 	// Update with computed hashes and signature
-	_, err = tx.Exec(
+	_, err = tx.ExecContext(context.Background(),
 		"UPDATE events SET prev_hash = ?, entry_hash = ?, entry_sig = ? WHERE id = ?",
 		prevHashHex, entryHash, entrySig, eventID,
 	)
@@ -522,7 +609,7 @@ func (l *Logger) Log(event Event) error {
 	if err != nil {
 		return fmt.Errorf("failed to sign chain head: %w", err)
 	}
-	_, err = tx.Exec(
+	_, err = tx.ExecContext(context.Background(),
 		"UPDATE chain_head SET entry_hash = ?, row_count = ?, head_sig = ? WHERE id = 1",
 		entryHash, count, headSig,
 	)
@@ -530,9 +617,6 @@ func (l *Logger) Log(event Event) error {
 		return fmt.Errorf("failed to update chain_head: %w", err)
 	}
 
-	if err := tx.Commit(); err != nil {
-		return fmt.Errorf("failed to commit log transaction: %w", err)
-	}
 	return nil
 }
 
@@ -679,10 +763,14 @@ func (l *Logger) Query(opts QueryOptions) ([]Event, error) {
 		args = append(args, formatTimestampForChain(*opts.Until))
 	}
 
+	orderBy := "timestamp"
+	if opts.ByID {
+		orderBy = "id"
+	}
 	if opts.Descending {
-		query += " ORDER BY timestamp DESC"
+		query += " ORDER BY " + orderBy + " DESC"
 	} else {
-		query += " ORDER BY timestamp ASC"
+		query += " ORDER BY " + orderBy + " ASC"
 	}
 
 	limit := opts.Limit
@@ -1040,17 +1128,17 @@ func detectMissingHashColumns(db *sql.DB) (bool, error) {
 
 // initChainHeadIfNeeded creates the chain_head table if it doesn't exist.
 // Called within a transaction.
-func initChainHeadIfNeeded(tx *sql.Tx) error {
+func initChainHeadIfNeeded(tx eventTransaction) error {
 	// Table already created in schema, just ensure it has a seed row
 	var count int
-	err := tx.QueryRow("SELECT COUNT(*) FROM chain_head").Scan(&count)
+	err := tx.QueryRowContext(context.Background(), "SELECT COUNT(*) FROM chain_head").Scan(&count)
 	if err != nil {
 		return fmt.Errorf("failed to count chain_head: %w", err)
 	}
 
 	if count == 0 {
 		// Seed with genesis state
-		_, err := tx.Exec(
+		_, err := tx.ExecContext(context.Background(),
 			"INSERT INTO chain_head (id, entry_hash, row_count) VALUES (1, ?, 0)",
 			chainGenesisHashHex,
 		)
@@ -1063,9 +1151,9 @@ func initChainHeadIfNeeded(tx *sql.Tx) error {
 }
 
 // countEvents returns the total number of events in the database (within a transaction).
-func countEvents(tx *sql.Tx) (int, error) {
+func countEvents(tx eventTransaction) (int, error) {
 	var count int
-	err := tx.QueryRow("SELECT COUNT(*) FROM events").Scan(&count)
+	err := tx.QueryRowContext(context.Background(), "SELECT COUNT(*) FROM events").Scan(&count)
 	return count, err
 }
 
@@ -1154,10 +1242,10 @@ func signingAlreadyAdopted(db *sql.DB) (bool, error) {
 
 // readHeadSignatureMetadata loads all chain_head fields authenticated by the
 // versioned head signature.
-func readHeadSignatureMetadata(tx *sql.Tx) (headSignatureMetadata, error) {
+func readHeadSignatureMetadata(tx eventTransaction) (headSignatureMetadata, error) {
 	var meta headSignatureMetadata
 	var fingerprint string
-	if err := tx.QueryRow(
+	if err := tx.QueryRowContext(context.Background(),
 		"SELECT pruned_at, pruned_count, signed_genesis_at, unsigned_through_id, signing_pubkey_fingerprint FROM chain_head WHERE id = 1",
 	).Scan(&meta.prunedAt, &meta.prunedCount, &meta.signedGenesisAt, &meta.unsignedThroughID, &fingerprint); err != nil {
 		return headSignatureMetadata{}, err
@@ -1244,12 +1332,12 @@ func adoptSigningIfNeeded(db *sql.DB, s *signer) error {
 // ensureWritableSignerState fails closed: if signing has been adopted for this
 // log but this Logger holds no key, no write may proceed. This makes an
 // unsigned write (or a prune) after adoption impossible, not merely detectable.
-func (l *Logger) ensureWritableSignerState(tx *sql.Tx) error {
+func (l *Logger) ensureWritableSignerState(tx eventTransaction) error {
 	if l.signer != nil {
 		return nil
 	}
 	var genesis *string
-	err := tx.QueryRow("SELECT signed_genesis_at FROM chain_head WHERE id = 1").Scan(&genesis)
+	err := tx.QueryRowContext(context.Background(), "SELECT signed_genesis_at FROM chain_head WHERE id = 1").Scan(&genesis)
 	if err == sql.ErrNoRows {
 		return nil
 	}

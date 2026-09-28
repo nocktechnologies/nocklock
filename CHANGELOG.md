@@ -17,6 +17,10 @@ All notable changes to NockLock will be documented in this file.
 
 ### Added
 
+- Every `wrap` signs a `config.digest` row containing the canonical resolved
+  policy and prior digest. Changed policy fields warn before the child starts;
+  `verify --audit` reports the history and requires each retained post-adoption
+  `session_start` to have its own preceding `config.digest` row.
 - Linux `filesystem.allow_rw` entries grant explicit read-write access while
   existing `filesystem.allow` entries remain read-only. `nocklock verify` keeps
   its temporary probe files outside granted paths, including `/tmp`.
@@ -25,6 +29,8 @@ All notable changes to NockLock will be documented in this file.
 
 ### Changed
 
+- The Linux filesystem fence rejects configurations whose `allow_rw` entries
+  push the shared allow cap or the combined wire budget over its limit.
 - macOS Seatbelt root-write confinement no longer grants the fenced child
   write access to NockLock's audit state directory. The unfenced parent alone
   writes the event database, SQLite sidecars, and chain anchor; a macOS
@@ -178,6 +184,66 @@ All notable changes to NockLock will be documented in this file.
 
 ### Fixed
 
+- Interposer field-budget cap is now enforced post-ABI-detection (#10815).
+  The cap on allow/deny paths (matching libfence_fs.c's MAX_PATHS and field
+  tokenizer budget) previously ran unconditionally in ProcessConfig with
+  headroom reserved for the self-proc grants the __landlock-exec shim injects.
+  A config with linux_enforcement="off", syscall.enforcement="off" (pure
+  userspace interposer, no shim) was rejected at ~253 allow paths even though
+  the shim's injections would never happen. The validation now runs in wrap.go
+  after both the Landlock ABI probe and the syscall-fence decision, so headroom
+  is only reserved when the shim actually engages. A userspace-only config gets
+  the interposer's real 256-path budget. --dry-run and validateWrapRuntimeConfig
+  still catch configs that exceed the interposer's absolute ceiling (>256 per
+  category or >257 combined) via a floor check with reserve=0; the exact check
+  with the real shim reserve runs later in wrap, after the ABI probe.
+
+- claude-code preset: Node runtime introspection no longer breaks under the
+  fence (#10757). With the broad `/proc/` grant removed in #115 (it exposed a
+  same-UID sibling's `/proc/<pid>/environ`), `process.memoryUsage()` threw
+  `EACCES` and `os.cpus()` silently returned an empty array — a throw can crash
+  the agent and 0 CPUs mis-sizes worker pools. The narrow reads Node needs are
+  now granted without any path to another process: the preset allows the
+  system-wide `/proc/cpuinfo`, `/proc/stat` and `/proc/meminfo`, and the wrapped
+  child's OWN `/proc/<pid>/{stat,status,statm}` — the three files, never the
+  whole directory — is granted to both fences self-scoped. Because the
+  `__landlock-exec` shim execve's the child in place (its pid IS the child's),
+  the literal `/proc/self/{stat,status,statm}` Landlock rules bind to the
+  child's own proc dir, and the shim appends the same concrete
+  `/proc/<pid>/{stat,status,statm}` files to the interposer allowlist. Round 2
+  (Gander): granting the whole `/proc/self` directory bound Landlock to the
+  child's `/proc/<pid>` dir inode, and a descendant inherits that rule — so a
+  grandchild could read the wrapped child's own `environ`/`cmdline`/`mem`, the
+  sibling leak #115 removed reopened one level down. Narrowing to the three
+  files closes it: a descendant that inherits the rule can read only those
+  files' identical inodes, never `environ`/`cmdline`/`mem`/`maps`/`fd`, proven
+  by a negative-control test where a grandchild is denied its wrapped parent's
+  `environ`. A sibling's `/proc/<pid>/environ` and `/cmdline` stay denied at the
+  kernel layer too, proven by a `CGO_ENABLED=0` raw-syscall reader test that
+  bypasses the userspace interposer. The Go-side filesystem config now also
+  reserves headroom below the interposer's combined allow+deny field budget
+  (`libfence_fs.c`'s `char *fields[MAX_PATHS + 4]` — allow and deny paths
+  share ONE 260-slot array, not independent 256-slot caps) for these injected
+  self-proc grants, and fails closed with a clear config error instead of
+  silently tripping the interposer's own cap — including the case where the
+  interposer's tokenizer would otherwise drop trailing deny paths — at
+  runtime. Verified empirically (LD_PRELOAD/strace diagnostic, no NockLock
+  fence involved) that Node tolerates the narrower grant: startup also
+  touches `/proc/self/{exe,maps,cgroup}`, but degrades gracefully when denied.
+- Config discovery resolves the project directory before `wrap` and
+  `verify --audit` derive audit state or signed config-digest paths, while
+  preserving the `.nock/config.toml` leaf so projects sharing a symlink target
+  retain separate audit state. Digest verification also keeps that association
+  through teardown rows emitted after `session_end`, so an untampered wrapped
+  session verifies successfully.
+- `verify --audit` now treats sessions that started before the first
+  `config.digest` row as legacy (and reports their count), while still
+  rejecting a post-adoption session without a digest. The signed canonical
+  policy now records the resolved network-fence mode, and each digest records
+  its committed predecessor atomically.
+- `verify --audit` treats setup events before `session_start` as covered by a
+  pending config digest and accepts a missing first digest predecessor only
+  when the signed chain records an authenticated prune boundary.
 - `ResolveDBPath` now fails closed when the audit state root stats as an
   existing directory but cannot be resolved (`EvalSymlinks` erroring on a
   mid-call symlink swap or `ELOOP`), matching the sibling Stat-error branch
@@ -185,6 +251,8 @@ All notable changes to NockLock will be documented in this file.
   unavailable, dropping its candidates out of the scan and letting a legacy
   in-project chain be adopted while a real state-dir chain sat behind the
   unresolvable root (N10860).
+- Concurrent logger opens now set SQLite's busy timeout before enabling WAL,
+  avoiding lock failures during simultaneous first-time database setup.
 - `ResolveDBPath` now resolves the audit state root once and carries that
   canonical path through its candidate scan and final directory setup, so a
   retargeted state-root symlink cannot make it inspect one audit location and

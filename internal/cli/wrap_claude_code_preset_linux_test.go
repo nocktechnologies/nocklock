@@ -5,13 +5,351 @@ package cli
 import (
 	"bytes"
 	"errors"
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"strconv"
+	"strings"
 	"testing"
 	"time"
+
+	"github.com/nocktechnologies/nocklock/internal/config"
 )
+
+// TestClaudeCodePresetGrantsProcSystemFiles is the UNCONDITIONAL guard for the
+// claude-code preset's procfs grants (nocklock #10757). It needs no built binary
+// or node, so it runs on every `go test ./...` — the standing coverage behind
+// the two integration tests below, which self-skip when the binary is absent.
+//
+// os.cpus() reads the system-wide /proc/cpuinfo and /proc/stat; without them it
+// silently returns an empty array. Those files are not per-process, so the
+// preset grants them directly. It must NOT grant the broad "/proc/" tree (that
+// is the same-UID sibling /proc/<pid>/environ leak #115 removed) nor "/proc/self"
+// (config path resolution follows that symlink to the WRAPPER's pid, not the
+// child's — the child's own files are granted by the wrap/shim code path
+// instead, and only the specific files Node needs, never the directory).
+func TestClaudeCodePresetGrantsProcSystemFiles(t *testing.T) {
+	cfg, err := config.LoadProfile("claude-code")
+	if err != nil {
+		t.Fatalf("load claude-code preset: %v", err)
+	}
+	allow := make(map[string]bool, len(cfg.Filesystem.Allow))
+	for _, p := range cfg.Filesystem.Allow {
+		allow[p] = true
+	}
+	for _, want := range []string{"/proc/cpuinfo", "/proc/stat", "/proc/meminfo"} {
+		if !allow[want] {
+			t.Errorf("claude-code preset filesystem.allow is missing %q (os.cpus/memoryUsage need it); got %v", want, cfg.Filesystem.Allow)
+		}
+	}
+	for _, forbidden := range []string{"/proc", "/proc/", "/proc/self", "/proc/self/"} {
+		if allow[forbidden] {
+			t.Errorf("claude-code preset filesystem.allow must not contain %q — it re-opens the sibling /proc/<pid>/environ path (#115) or binds to the wrapper's pid", forbidden)
+		}
+	}
+}
+
+// TestWrapClaudeCodePresetNodeRuntimeIntrospection is the positive acceptance
+// bar for #10757: under the full claude-code fence posture (Landlock + seccomp
+// required, plus the LD_PRELOAD interposer) a Node process can introspect itself
+// — process.memoryUsage().rss > 0, os.cpus().length > 0, and a read of
+// /proc/self/status succeeds — where before the /proc grants it threw EACCES and
+// os.cpus() returned an empty array.
+//
+// It self-skips without a built nocklock binary (with libfence_fs.so beside it)
+// or node; under NOCKLOCK_AUDIT_REQUIRE=1 (CI) a would-be skip HARD-FAILS. The
+// config mirrors the claude-code preset's enforcement posture and adds the system
+// runtime directories node's loader needs (identical rationale to
+// TestWrapComposedDefaultEgressAudit); the preset's own /proc grants are asserted
+// unconditionally by TestClaudeCodePresetGrantsProcSystemFiles above.
+func TestWrapClaudeCodePresetNodeRuntimeIntrospection(t *testing.T) {
+	bin := nocklockBinary(t)
+	requireInterposerBeside(t, bin)
+	node := requireNode(t)
+
+	projectDir := t.TempDir()
+	writeProcTestConfig(t, projectDir, "/usr/", "/lib/", "/lib64/", "/bin/", "/etc/", "/dev/", "/proc/cpuinfo", "/proc/stat", "/proc/meminfo")
+
+	// Report rss, cpu count, and whether /proc/self/status is readable on one
+	// line so a failure shows exactly which introspection call regressed.
+	const script = `const os=require("os");` +
+		`const rss=process.memoryUsage().rss;` +
+		`const cpus=os.cpus().length;` +
+		`require("fs").readFileSync("/proc/self/status");` +
+		`console.log("RESULT rss="+rss+" cpus="+cpus);`
+	cmd := exec.Command(bin, "wrap", "--", node, "-e", script)
+	cmd.Dir = projectDir
+	cmd.Env = os.Environ()
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("wrap node introspection failed: %v\n%s", err, out)
+	}
+	rss, cpus := parseResult(t, out)
+	if rss <= 0 {
+		t.Errorf("process.memoryUsage().rss = %d, want > 0\n%s", rss, out)
+	}
+	if cpus <= 0 {
+		t.Errorf("os.cpus().length = %d, want > 0\n%s", cpus, out)
+	}
+}
+
+// TestWrapClaudeCodePresetBlocksSiblingProcEnviron is the negative control that
+// proves the grants stay narrow AT THE KERNEL LAYER. A CGO_ENABLED=0 reader
+// issues raw Go syscalls (no libc, so the LD_PRELOAD interposer never sees them),
+// yet under the fence it must still be DENIED a same-UID sibling's
+// /proc/<pid>/environ and /proc/<pid>/cmdline — that denial is Landlock, not the
+// userspace fence. The same reader confirms the positive side in the same run:
+// its OWN /proc/self/stat and the granted /proc/cpuinfo read fine.
+//
+// The reader is built into the project root so Landlock (which grants existing
+// root children at ruleset-build time) lets it exec; being static, it needs no
+// /usr grant. Self-skips without the binary, hard-fails under NOCKLOCK_AUDIT_REQUIRE=1.
+func TestWrapClaudeCodePresetBlocksSiblingProcEnviron(t *testing.T) {
+	bin := nocklockBinary(t)
+	requireInterposerBeside(t, bin)
+
+	projectDir := t.TempDir()
+	writeProcTestConfig(t, projectDir, "/proc/cpuinfo", "/proc/stat", "/proc/meminfo")
+	reader := buildProcReader(t, projectDir)
+
+	// A same-UID sibling, started OUTSIDE the fence, whose /proc/<pid> the fenced
+	// reader must not be able to read. `sleep` keeps it alive for the read.
+	sibling := exec.Command("sleep", "30")
+	if err := sibling.Start(); err != nil {
+		t.Fatalf("start sibling process: %v", err)
+	}
+	defer func() {
+		_ = sibling.Process.Kill()
+		_ = sibling.Wait()
+	}()
+	sibPID := strconv.Itoa(sibling.Process.Pid)
+
+	// Order: two positive controls (own dir + granted system file), two negatives
+	// (sibling secrets). The reader prints "READ <p>" or "DENIED <p>" per arg.
+	cmd := exec.Command(bin, "wrap", "--",
+		reader,
+		"/proc/self/stat",
+		"/proc/cpuinfo",
+		"/proc/"+sibPID+"/environ",
+		"/proc/"+sibPID+"/cmdline",
+	)
+	cmd.Dir = projectDir
+	cmd.Env = os.Environ()
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("wrap sibling-proc reader failed: %v\n%s", err, out)
+	}
+	got := string(out)
+
+	for _, allowed := range []string{"/proc/self/stat", "/proc/cpuinfo"} {
+		if !strings.Contains(got, "READ "+allowed) {
+			t.Errorf("expected the fenced reader to READ its own %q, but it did not\n%s", allowed, out)
+		}
+	}
+	for _, denied := range []string{"/proc/" + sibPID + "/environ", "/proc/" + sibPID + "/cmdline"} {
+		if !strings.Contains(got, "DENIED "+denied) {
+			t.Errorf("expected the fenced reader to be DENIED a sibling's %q (Landlock), but it was not\n%s", denied, out)
+		}
+	}
+}
+
+// TestWrapClaudeCodePresetBlocksDescendantParentProcEnviron is the regression
+// test for Gander's round-2 MAJOR finding on #10757: granting the whole
+// /proc/self DIRECTORY (rather than the specific files Node needs) binds
+// Landlock to the wrapped child's /proc/<pid> dir inode, and Landlock rules are
+// inherited by every future descendant — so a grandchild of the wrapped process
+// could read the wrapped process's OWN /proc/<pid>/environ and cmdline, the
+// same-UID sibling leak #115 removed, reopened one level down.
+//
+// The reader (CGO_ENABLED=0, raw syscalls, no LD_PRELOAD) re-execs itself as a
+// child ("--descendant"), and that child — a grandchild relative to `wrap` —
+// tries to read its PARENT's (the wrapped process's) own /proc/<ppid> entries.
+// It must READ stat (the file actually granted, whose grant a descendant
+// legitimately inherits) but be DENIED environ and cmdline (never granted, at
+// any level).
+func TestWrapClaudeCodePresetBlocksDescendantParentProcEnviron(t *testing.T) {
+	bin := nocklockBinary(t)
+	requireInterposerBeside(t, bin)
+
+	projectDir := t.TempDir()
+	writeProcTestConfig(t, projectDir, "/proc/cpuinfo", "/proc/stat", "/proc/meminfo")
+	reader := buildProcReader(t, projectDir)
+
+	cmd := exec.Command(bin, "wrap", "--", reader, "--descendant", "stat", "environ", "cmdline")
+	cmd.Dir = projectDir
+	cmd.Env = os.Environ()
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("wrap descendant-proc reader failed: %v\n%s", err, out)
+	}
+	lines := strings.Split(strings.TrimSpace(string(out)), "\n")
+
+	hasResult := func(verb, suffix string) bool {
+		for _, line := range lines {
+			if strings.HasPrefix(line, verb+" ") && strings.HasSuffix(line, suffix) {
+				return true
+			}
+		}
+		return false
+	}
+
+	if !hasResult("READ", "/stat") {
+		t.Errorf("expected the grandchild to READ the wrapped parent's granted stat file, but it did not\n%s", out)
+	}
+	for _, denied := range []string{"environ", "cmdline"} {
+		if !hasResult("DENIED", "/"+denied) {
+			t.Errorf("expected the grandchild to be DENIED the wrapped parent's %q (Landlock), but it was not\n%s", denied, out)
+		}
+	}
+}
+
+// requireNode returns an absolute path to node, or self-skips (hard-fails under
+// NOCKLOCK_AUDIT_REQUIRE=1). The absolute path matters: with Landlock + seccomp
+// on, the child runs through the __landlock-exec shim, which execve's argv[0]
+// directly (no PATH search).
+func requireNode(t *testing.T) string {
+	t.Helper()
+	node, err := exec.LookPath("node")
+	if err != nil {
+		if auditStrictlyRequired() {
+			t.Fatalf("node runtime-introspection acceptance test needs node on PATH; strict-required mode forbids skipping: %v", err)
+		}
+		t.Skipf("node runtime-introspection acceptance test needs node on PATH: %v", err)
+	}
+	return node
+}
+
+// writeProcTestConfig writes a .nock/config.toml (via the shared
+// writeTestConfig helper) carrying the claude-code enforcement posture
+// (Landlock + seccomp required, hardened interposer) that grants the given
+// filesystem allow paths. Network is disabled (allow_all) so the test needs
+// no proxy or egress; the filesystem fence is the subject.
+func writeProcTestConfig(t *testing.T, projectDir string, allowPaths ...string) {
+	t.Helper()
+	quoted := make([]string, len(allowPaths))
+	for i, p := range allowPaths {
+		quoted[i] = strconv.Quote(p)
+	}
+	cfg := `[project]
+name = "n10757-proc"
+
+[filesystem]
+root = "."
+mode = "read-write"
+linux_enforcement = "required"
+allow = [` + strings.Join(quoted, ", ") + `]
+deny = []
+hardened = true
+
+[network]
+allow_all = true
+
+[syscall]
+enforcement = "required"
+`
+	writeTestConfig(t, projectDir, cfg)
+}
+
+// buildProcReader compiles a static (CGO_ENABLED=0) helper into the project root
+// and returns its path. Pure Go means its file reads are raw syscalls the
+// LD_PRELOAD interposer never intercepts, so a denial it reports is Landlock's.
+// Building it INTO projectDir makes it an existing root child, which Landlock
+// grants execute at ruleset-build time.
+//
+// One invocation mode beyond the plain "read every argv path" default:
+// "--descendant <name>...", which resolves each name against the CALLER's
+// own pid (its own /proc/<pid>/<name>) and re-execs itself with those
+// resolved paths in the default mode — so the actual read happens from a
+// grandchild-of-wrap's perspective, against its PARENT's proc entries.
+func buildProcReader(t *testing.T, projectDir string) string {
+	t.Helper()
+	src := `package main
+
+import (
+	"errors"
+	"fmt"
+	"io/fs"
+	"os"
+	"os/exec"
+	"path/filepath"
+	"strconv"
+)
+
+// readAndPrint reports DENIED only for an actual permission error (Landlock's
+// EACCES/EPERM). Anything else (ENOENT, a process-exit race, EMFILE, a
+// malformed path) is a test-infrastructure problem, not a fence decision, so
+// it is reported as ERROR and made fatal — a negative control must prove the
+// SPECIFIC denial it claims, not just "any error happened".
+func readAndPrint(p string) {
+	if _, err := os.ReadFile(p); err != nil {
+		if errors.Is(err, fs.ErrPermission) {
+			fmt.Println("DENIED", p)
+			return
+		}
+		fmt.Println("ERROR", p, err)
+		os.Exit(1)
+	} else {
+		fmt.Println("READ", p)
+	}
+}
+
+func main() {
+	args := os.Args[1:]
+	if len(args) > 0 && args[0] == "--descendant" {
+		// os.Executable() reads /proc/self/exe, which this fence's narrowed
+		// grant (stat/status/statm only) denies — using it here would make
+		// this negative-control test fail every time it actually runs under
+		// the fence. wrap execs argv[0] directly with no PATH search (see
+		// landlockProcSelfAllowPaths' doc comment on the exec model), so
+		// os.Args[0] is already this binary's own absolute path.
+		self := os.Args[0]
+		pid := os.Getpid()
+		resolved := make([]string, len(args)-1)
+		for i, name := range args[1:] {
+			resolved[i] = filepath.Join("/proc", strconv.Itoa(pid), name)
+		}
+		out, err := exec.Command(self, resolved...).CombinedOutput()
+		os.Stdout.Write(out)
+		if err != nil {
+			os.Exit(1)
+		}
+		return
+	}
+	for _, p := range args {
+		readAndPrint(p)
+	}
+}
+`
+	srcDir := t.TempDir()
+	srcPath := filepath.Join(srcDir, "reader.go")
+	if err := os.WriteFile(srcPath, []byte(src), 0o644); err != nil {
+		t.Fatalf("write reader source: %v", err)
+	}
+	readerPath := filepath.Join(projectDir, "procreader")
+	build := exec.Command("go", "build", "-o", readerPath, srcPath)
+	build.Env = append(os.Environ(), "CGO_ENABLED=0")
+	if out, err := build.CombinedOutput(); err != nil {
+		t.Fatalf("build proc reader: %v\n%s", err, out)
+	}
+	return readerPath
+}
+
+// parseResult pulls rss and cpus off the single "RESULT rss=<n> cpus=<n>" line
+// the node script prints, ignoring NockLock's own stderr banners around it.
+func parseResult(t *testing.T, out []byte) (rss, cpus int) {
+	t.Helper()
+	for _, line := range strings.Split(string(out), "\n") {
+		if strings.HasPrefix(line, "RESULT ") {
+			if _, err := fmt.Sscanf(line, "RESULT rss=%d cpus=%d", &rss, &cpus); err != nil {
+				t.Fatalf("malformed RESULT line %q: %v", line, err)
+			}
+			return rss, cpus
+		}
+	}
+	t.Fatalf("no RESULT line in output:\n%s", out)
+	return 0, 0
+}
 
 // TestWrapClaudeCodePresetDeviceAndSystemPaths is the non-root acceptance bar
 // for N10748 parts (b) and (c): a child wrapped with the claude-code preset —
