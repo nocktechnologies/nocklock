@@ -2078,7 +2078,8 @@ Scored in the elevated shell, one verdict line:
 $etwSession = "nocklock-fileprobe-$runId"
 $p7 = Invoke-LimitedPhase 'probe7'
 # Unknown outcome (no proven run) counts as "may exist", so teardown still stops it by exact name.
-$etwCreated = (-not $p7) -or [bool](@($p7) -match '^create-exit=0$')
+# $script: (not local): teardown reads this from its own block, same as Invoke-LimitedPhase's state.
+$script:etwCreated = (-not $p7) -or [bool](@($p7) -match '^create-exit=0$')
 if (-not $p7) {
   "VERDICT(7): SETUP-FAULT - $limitedFault; not scored"
 } elseif (@($p7) -match '^create-exit=0$') {
@@ -2437,8 +2438,9 @@ function New-ProbePipe([string]$Name, [bool]$GrantSid) {
   }
   New-Object System.IO.Pipes.NamedPipeServerStream($Name, 'In', 1, 'Byte', 'None', 0, 0, $ps)
 }
-$pipeGranted = New-ProbePipe "nocklock-probe-pipe-$runId" $true
-$pipeNoAce   = New-ProbePipe "nocklock-probe-pipe-noace-$runId" $false
+# $script: (not local): teardown disposes these from its own block, same as Invoke-LimitedPhase's state.
+$script:pipeGranted = New-ProbePipe "nocklock-probe-pipe-$runId" $true
+$script:pipeNoAce   = New-ProbePipe "nocklock-probe-pipe-noace-$runId" $false
 
 # INSIDE the container (names re-derived from $runId by the bootstrap):
 # POSITIVE control first: the negative is scored only if the granted pipe connects, so
