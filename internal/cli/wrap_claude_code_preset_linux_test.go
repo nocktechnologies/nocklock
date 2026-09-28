@@ -409,6 +409,89 @@ func TestWrapClaudeCodePresetDeviceAndSystemPaths(t *testing.T) {
 	}
 }
 
+// TestWrapClaudeCodePresetListsRootAndProtectsAudit is the N10769 regression
+// proof. The fresh-project audit DB lives outside the granted root; Landlock
+// cannot grant READ_DIR on a root while excluding an audit DB beneath it.
+func TestWrapClaudeCodePresetListsRootAndProtectsAudit(t *testing.T) {
+	requirePresetUnprivileged(t)
+	bin := nocklockBinary(t)
+	requireInterposerBeside(t, bin)
+	python, err := exec.LookPath("python3")
+	if err != nil {
+		if auditStrictlyRequired() {
+			t.Fatalf("claude-code root-listing proof needs python3; strict-required mode forbids skipping: %v", err)
+		}
+		t.Skipf("claude-code root-listing proof needs python3: %v", err)
+	}
+
+	// Keep the fixture outside /tmp: the preset grants /tmp, which would make
+	// a deny-path assertion vacuous or reject the Landlock ruleset outright.
+	base, err := os.MkdirTemp(mustGetwd(t), "preset-root-list-")
+	if err != nil {
+		t.Fatalf("mkdir fixture: %v", err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(base) })
+	repo := filepath.Join(base, "project")
+	home := filepath.Join(base, "home")
+	for _, dir := range []string{repo, filepath.Join(repo, "sub"), filepath.Join(home, ".claude"), filepath.Join(home, ".cache"), filepath.Join(home, ".ssh"), filepath.Join(home, ".local", "state")} {
+		if err := os.MkdirAll(dir, 0o700); err != nil {
+			t.Fatalf("mkdir %s: %v", dir, err)
+		}
+	}
+	if err := os.WriteFile(filepath.Join(repo, "f.txt"), []byte("project file\n"), 0o600); err != nil {
+		t.Fatalf("write project file: %v", err)
+	}
+	deniedFile := filepath.Join(home, ".ssh", "secret.txt")
+	if err := os.WriteFile(deniedFile, []byte("deny fixture\n"), 0o600); err != nil {
+		t.Fatalf("write deny fixture: %v", err)
+	}
+	t.Setenv("HOME", home)
+	t.Setenv("XDG_STATE_HOME", filepath.Join(home, ".local", "state"))
+	auditDir, err := config.AuditStateDir(repo)
+	if err != nil {
+		t.Fatalf("resolve audit state dir: %v", err)
+	}
+	auditDB := filepath.Join(auditDir, "events.db")
+
+	// ls exercises the interposer; Python runs without LD_PRELOAD, so its
+	// positive and negative checks prove the kernel fence's own behavior.
+	const probe = `import os, sys
+entries = os.listdir('.')
+assert {'f.txt', 'sub'} <= set(entries), entries
+fd = os.open('.', os.O_RDONLY | os.O_DIRECTORY)
+os.close(fd)
+with open('f.txt', 'rb') as f:
+    assert f.read() == b'project file\n'
+for path in sys.argv[1:]:
+    try:
+        with open(path, 'rb') as f:
+            f.read(1)
+    except PermissionError:
+        continue
+    raise AssertionError('protected file was readable: ' + path)
+print('ROOT_LISTED_AUDIT_AND_DENY_BLOCKED')`
+	cmd := exec.Command(bin, "wrap", "--profile", "claude-code", "--",
+		"/bin/sh", "-c", `set -e; ls . >/dev/null; env -u LD_PRELOAD "$1" -c "$2" "$3" "$4"`,
+		"root-list-proof", python, probe, auditDB, deniedFile)
+	cmd.Dir = repo
+	cmd.Env = os.Environ()
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("claude-code root-listing or protection proof failed: %v\n%s", err, out)
+	}
+	if !bytes.Contains(out, []byte("ROOT_LISTED_AUDIT_AND_DENY_BLOCKED")) {
+		t.Fatalf("wrapped probe did not finish its positive and negative checks:\n%s", out)
+	}
+	if _, err := os.Stat(auditDB); err != nil {
+		t.Fatalf("audit DB negative control was missing: %v", err)
+	}
+	for _, path := range []string{auditDB, deniedFile} {
+		if _, err := os.ReadFile(path); err != nil {
+			t.Fatalf("protected-file control %s was not readable outside the fence: %v", path, err)
+		}
+	}
+}
+
 // TestWrapClaudeCodePresetDeniesSiblingProcExposure is the negative control for
 // N10748 round 2 part (c): a child wrapped with the claude-code preset must NOT
 // read a same-UID SIBLING process's /proc/<pid> exposure — neither its `environ`
