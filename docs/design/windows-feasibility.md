@@ -1244,6 +1244,8 @@ namespace NockProbe {
     // descendant PROCESS started after this call: CheckNetIsolation, logman, a Run() container
     // (its own job nests inside this one). Kernel objects those processes already created (an
     // ETW session) outlive them; teardown removes those by exact name. Throws if any step fails.
+    // Task Scheduler may already hold the caller in a job, so this relies on nested jobs
+    // (Windows 8+); a failure fails closed as the positive control's SETUP-FAULT, never an orphan.
     public static void ContainSelf() {
       IntPtr job = CreateJobObject(IntPtr.Zero, null);
       Check(job != IntPtr.Zero);
@@ -1607,12 +1609,13 @@ $verdict1x = if (-not $preClean) {
     "NON-ELEVATED OK - limited-token -a exited 0 and listed the entry (Probe 2: admin not required) [$limitedRc]"
   } elseif ($limListed) {
     "SETUP-FAULT - entry listed after the limited -a, but it did not report exit=0 [limited: $limitedRc]; Probe 2 not scored"
-  } elseif ($elevOk -and $limitedRc -cmatch '^exit=-?\d+$') {
-    # Scored only when the limited -a ran to completion (its exit= line, no ERROR): a body
-    # that threw before or during the add is a setup fault, not a refusal.
+  } elseif ($elevOk -and $limitedRc -cmatch '^exit=-?[1-9]\d*$') {
+    # Scored only when the limited -a ran to completion AND refused (a nonzero exit= line, no
+    # ERROR). A body that threw, or exit=0 with the entry absent, is not a refusal: exit codes
+    # alone are not trusted either way, so those fall through to SETUP-FAULT.
     "ADMIN REQUIRED - limited-token -a ran ($limitedRc) and left no entry; elevated -a listed it (Probe 2: admin required)"
   } elseif ($elevOk) {
-    "SETUP-FAULT - limited -a did not run to completion [limited: $limitedRc]; exemption added ELEVATED, Probe 2 not scored"
+    "SETUP-FAULT - limited -a gave no usable answer (threw, or exit=0 yet no entry) [limited: $limitedRc]; exemption added ELEVATED, Probe 2 not scored"
   } else {
     "SETUP-FAULT - entry absent after limited AND elevated -a [limited: $limitedRc]; Probe 1 not scored"
   }
