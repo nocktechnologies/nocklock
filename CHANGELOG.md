@@ -192,6 +192,9 @@ All notable changes to NockLock will be documented in this file.
   rejecting a post-adoption session without a digest. The signed canonical
   policy now records the resolved network-fence mode, and each digest records
   its committed predecessor atomically.
+- `verify --audit` treats setup events before `session_start` as covered by a
+  pending config digest and accepts a missing first digest predecessor only
+  when the signed chain records an authenticated prune boundary.
 - `ResolveDBPath` now fails closed when the audit state root stats as an
   existing directory but cannot be resolved (`EvalSymlinks` erroring on a
   mid-call symlink swap or `ELOOP`), matching the sibling Stat-error branch
@@ -199,7 +202,6 @@ All notable changes to NockLock will be documented in this file.
   unavailable, dropping its candidates out of the scan and letting a legacy
   in-project chain be adopted while a real state-dir chain sat behind the
   unresolvable root (N10860).
-<<<<<<< HEAD
 - Concurrent logger opens now set SQLite's busy timeout before enabling WAL,
   avoiding lock failures during simultaneous first-time database setup.
 - `ResolveDBPath` now resolves the audit state root once and carries that

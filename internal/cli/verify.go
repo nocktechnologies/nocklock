@@ -251,7 +251,7 @@ func runAuditVerify(ctx context.Context, w io.Writer, pubFlag string) error {
 	if err != nil {
 		return fmt.Errorf("verification failed: %w", err)
 	}
-	history, err := inspectConfigDigestHistory(logger)
+	history, err := inspectConfigDigestHistory(logger, result)
 	if err != nil {
 		return fmt.Errorf("config digest verification failed: %w", err)
 	}

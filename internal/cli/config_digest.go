@@ -232,13 +232,14 @@ type configDigestHistory struct {
 	MissingSessions []string
 }
 
-func inspectConfigDigestHistory(logger *logging.Logger) (configDigestHistory, error) {
+func inspectConfigDigestHistory(logger *logging.Logger, chain *logging.ChainVerifyResult) (configDigestHistory, error) {
 	events, err := allAuditEvents(logger)
 	if err != nil {
 		return configDigestHistory{}, err
 	}
 
 	history := configDigestHistory{}
+	authenticatedPrune := chain != nil && chain.PrunedAt != nil && chain.SigState == "authentic"
 	pendingDigests := make(map[string]int)
 	matchedDigestSessions := make(map[string]bool)
 	legacyStarts := make(map[string]bool)
@@ -253,7 +254,7 @@ func inspectConfigDigestHistory(logger *logging.Logger) (configDigestHistory, er
 				return configDigestHistory{}, fmt.Errorf("decode config.digest audit row %d: %w", event.ID, err)
 			}
 			if previousDigest == "" {
-				if record.PreviousDigest != "" {
+				if record.PreviousDigest != "" && !authenticatedPrune {
 					return configDigestHistory{}, fmt.Errorf("config.digest audit row %d has a predecessor before the first digest", event.ID)
 				}
 			} else if record.PreviousDigest != previousDigest {
@@ -302,6 +303,12 @@ func inspectConfigDigestHistory(logger *logging.Logger) (configDigestHistory, er
 			}
 			if legacyStarts[event.SessionID] {
 				legacySessions[event.SessionID] = true
+				continue
+			}
+			if pendingDigests[event.SessionID] > 0 {
+				// Setup events can be logged after config.digest and before
+				// session_start. The pending digest already covers this session,
+				// including a setup failure that never reaches session_start.
 				continue
 			}
 			missingSessions[event.SessionID] = true

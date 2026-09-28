@@ -12,6 +12,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/nocktechnologies/nocklock/internal/config"
 	"github.com/nocktechnologies/nocklock/internal/logging"
@@ -537,6 +538,82 @@ func TestRunAuditVerifyRejectsSessionWithoutConfigDigest(t *testing.T) {
 	}
 }
 
+func TestRunAuditVerifyAllowsSetupEventsWhileConfigDigestIsPending(t *testing.T) {
+	tests := []struct {
+		name          string
+		digestSession string
+		events        []logging.Event
+		wantMissing   string
+	}{
+		{
+			name:          "setup event before session start",
+			digestSession: "session",
+			events: []logging.Event{
+				{EventType: logging.EventProxyStart, SessionID: "session"},
+				{EventType: logging.EventSessionStart, SessionID: "session"},
+				{EventType: logging.EventFilePassed, SessionID: "session"},
+			},
+		},
+		{
+			name:          "setup failure before session start",
+			digestSession: "session",
+			events: []logging.Event{
+				{EventType: logging.EventProxyStart, SessionID: "session"},
+			},
+		},
+		{
+			name:          "session without digest after adoption",
+			digestSession: "adoption",
+			events: []logging.Event{
+				{EventType: logging.EventProxyStart, SessionID: "missing"},
+			},
+			wantMissing: "missing",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			project, configPath := writeProjectConfig(t, `db = "events.db"`)
+			withWorkingDir(t, project)
+			keyRoot := filepath.Join(t.TempDir(), "xdg-config")
+			t.Setenv("XDG_CONFIG_HOME", keyRoot)
+			dbPath := resolvedAuditDB(t, project)
+			logger, err := logging.NewLogger(dbPath, project, logging.WithSigning(filepath.Join(keyRoot, "nocklock", "signing-ed25519.key")))
+			if err != nil {
+				t.Fatalf("NewLogger: %v", err)
+			}
+			cfg, err := config.Load(configPath)
+			if err != nil {
+				logger.Close()
+				t.Fatal(err)
+			}
+			if err := recordConfigDigest(logger, cfg, configPath, dbPath, tt.digestSession, "proxy", io.Discard); err != nil {
+				logger.Close()
+				t.Fatalf("record config digest: %v", err)
+			}
+			for _, event := range tt.events {
+				if err := logger.Log(event); err != nil {
+					logger.Close()
+					t.Fatalf("log %s for %s: %v", event.EventType, event.SessionID, err)
+				}
+			}
+			if err := logger.Close(); err != nil {
+				t.Fatal(err)
+			}
+
+			var output strings.Builder
+			err = runAuditVerify(context.Background(), &output, "")
+			if tt.wantMissing == "" {
+				if err != nil {
+					t.Fatalf("runAuditVerify rejected setup events covered by the digest: %v\n%s", err, output.String())
+				}
+			} else if err == nil || !strings.Contains(output.String(), tt.wantMissing) {
+				t.Fatalf("runAuditVerify did not report missing digest for %q: %v\n%s", tt.wantMissing, err, output.String())
+			}
+		})
+	}
+}
+
 func TestRunAuditVerifyRejectsPostAdoptionStartReusingLegacyID(t *testing.T) {
 	project, configPath := writeProjectConfig(t, `db = "events.db"`)
 	withWorkingDir(t, project)
@@ -725,6 +802,113 @@ func TestRunAuditVerifyRejectsInvalidConfigDigestPredecessor(t *testing.T) {
 	err = runAuditVerify(context.Background(), &output, "")
 	if err == nil || !strings.Contains(err.Error(), "predecessor before the first digest") {
 		t.Fatalf("runAuditVerify accepted an invalid config digest predecessor: %v\n%s", err, output.String())
+	}
+}
+
+func TestRunAuditVerifyAllowsOnlyTheFirstRetainedDigestPredecessorAfterPrune(t *testing.T) {
+	tests := []struct {
+		name             string
+		thirdPredecessor string
+		unverifiedPrune  bool
+		wantError        string
+	}{
+		{name: "authenticated prune boundary"},
+		{name: "later digest link remains checked", thirdPredecessor: "broken-link", wantError: "predecessor does not match the previous digest"},
+		{name: "unverified prune boundary rejected", unverifiedPrune: true, wantError: "predecessor before the first digest"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			project, configPath := writeProjectConfig(t, `db = "events.db"`)
+			withWorkingDir(t, project)
+			keyRoot := filepath.Join(t.TempDir(), "xdg-config")
+			t.Setenv("XDG_CONFIG_HOME", keyRoot)
+			dbPath := resolvedAuditDB(t, project)
+			logger, err := logging.NewLogger(dbPath, project, logging.WithSigning(filepath.Join(keyRoot, "nocklock", "signing-ed25519.key")))
+			if err != nil {
+				t.Fatalf("NewLogger: %v", err)
+			}
+			cfg, err := config.Load(configPath)
+			if err != nil {
+				logger.Close()
+				t.Fatal(err)
+			}
+
+			logDigest := func(sessionID string, timestamp time.Time, previous string) string {
+				t.Helper()
+				record, err := newConfigDigestRecord(cfg, configPath, dbPath, "proxy")
+				if err != nil {
+					t.Fatalf("new config digest: %v", err)
+				}
+				record.PreviousDigest = previous
+				detail, err := json.Marshal(record)
+				if err != nil {
+					t.Fatalf("marshal config digest: %v", err)
+				}
+				if err := logger.Log(logging.Event{
+					Timestamp: timestamp,
+					EventType: logging.EventConfigDigest,
+					Category:  "config",
+					Detail:    string(detail),
+					SessionID: sessionID,
+				}); err != nil {
+					t.Fatalf("log config digest: %v", err)
+				}
+				return record.Digest
+			}
+
+			now := time.Now().UTC()
+			firstDigest := logDigest("old", now.Add(-48*time.Hour), "")
+			logDigest("retained", now, firstDigest)
+			if tt.thirdPredecessor != "" {
+				logDigest("later", now.Add(time.Second), tt.thirdPredecessor)
+			}
+			pruned, err := logger.Prune(24 * time.Hour)
+			if err != nil {
+				logger.Close()
+				t.Fatalf("Prune: %v", err)
+			}
+			if pruned != 1 {
+				logger.Close()
+				t.Fatalf("Prune removed %d events, want 1", pruned)
+			}
+			if tt.unverifiedPrune {
+				chain, err := logger.VerifyChainSigned(nil, false)
+				if err != nil {
+					logger.Close()
+					t.Fatalf("VerifyChainSigned without a key: %v", err)
+				}
+				if chain.PrunedAt == nil || chain.SigState != "unverified" {
+					logger.Close()
+					t.Fatalf("unverified result = %+v, want a prune with unverified signatures", chain)
+				}
+				_, err = inspectConfigDigestHistory(logger, chain)
+				if err == nil || !strings.Contains(err.Error(), tt.wantError) {
+					logger.Close()
+					t.Fatalf("inspectConfigDigestHistory trusted an unverified prune: %v", err)
+				}
+				if err := logger.Close(); err != nil {
+					t.Fatal(err)
+				}
+				return
+			}
+			if err := logger.Close(); err != nil {
+				t.Fatal(err)
+			}
+
+			var output strings.Builder
+			err = runAuditVerify(context.Background(), &output, "")
+			if tt.wantError == "" {
+				if err != nil {
+					t.Fatalf("runAuditVerify rejected the first retained digest after prune: %v\n%s", err, output.String())
+				}
+				if !strings.Contains(output.String(), "NOTE: chain was re-anchored by a prune") || !strings.Contains(output.String(), "1 row(s)") {
+					t.Fatalf("verification did not report the authenticated prune and retained digest:\n%s", output.String())
+				}
+			} else if err == nil || !strings.Contains(err.Error(), tt.wantError) {
+				t.Fatalf("runAuditVerify did not reject the later broken digest link: %v\n%s", err, output.String())
+			}
+		})
 	}
 }
 
