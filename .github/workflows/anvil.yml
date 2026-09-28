@@ -137,7 +137,7 @@ jobs:
           trap 'chmod -R u+w "${CODEX_DIR}" 2>/dev/null || true; rm -rf "${CODEX_DIR}"; if [[ -n "${OUTPUT_DIR}" ]]; then rm -rf "${OUTPUT_DIR}"; fi' EXIT
           trap 'exit 143' TERM
           trap 'exit 130' INT
-          OUTPUT_DIR="$(mktemp -d "${RUNNER_TEMP}/anvil-codex-output.XXXXXX")"
+          OUTPUT_DIR="$(mktemp -d "${RUNNER_TEMP}/anvil-codex.output.XXXXXX")"
           OUTPUT_FILE="${OUTPUT_DIR}/review.txt"
           (umask 077; : > "${OUTPUT_FILE}")
           chmod 600 "${OUTPUT_FILE}"
