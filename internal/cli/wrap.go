@@ -266,6 +266,7 @@ var wrapCmd = &cobra.Command{
 		var fsFenceCancel context.CancelFunc
 		var fsSandboxPrefix []string
 		var landlockPrefix []string
+		var fsCfg *fsfence.FenceConfig
 		if cfg.Filesystem.Root != "" {
 			// Fence the audit log from the CHILD so the fenced agent can't delete
 			// or corrupt the record of its own actions (the unfenced parent still
@@ -278,7 +279,8 @@ var wrapCmd = &cobra.Command{
 			// tamper events.db directly, so this is consistent, not a new gap.
 			cfg.Filesystem.Deny = append(cfg.Filesystem.Deny, egressChildDenyPaths(dbPath, projectRoot, decisionLogDir)...)
 
-			fsCfg, err := fsfence.ProcessConfig(cfg.Filesystem)
+			var err error
+			fsCfg, err = fsfence.ProcessConfig(cfg.Filesystem)
 			if err != nil {
 				if runtime.GOOS == "darwin" {
 					if logErr := recordMacOSFilesystemFenceState("REFUSED-TO-START", "invalid filesystem configuration", true); logErr != nil {
@@ -340,7 +342,8 @@ var wrapCmd = &cobra.Command{
 							if err != nil {
 								return fmt.Errorf("cannot resolve nocklock executable for Landlock shim: %w", err)
 							}
-							spec, err := landlock.RulesFromConfig(fsCfg, nil, abi)
+							extra := landlock.ExistingExtraAllowPaths(landlockProcSelfAllowPaths()...)
+							spec, err := landlock.RulesFromConfig(fsCfg, extra, abi)
 							if err != nil {
 								return fmt.Errorf("failed to build Landlock rules: %w", err)
 							}
@@ -482,6 +485,20 @@ var wrapCmd = &cobra.Command{
 				}
 				fmt.Fprintf(os.Stderr, "NockLock: Linux syscall fence active — seccomp-BPF (%s)\n", policy.Mode)
 				logEvent(logging.EventFilePassed, "syscall", fmt.Sprintf("seccomp mode=%s socket_families=%d allow_namespaces=%t", policy.Mode, len(policy.AllowedSocketFamilies), policy.AllowNamespaces), false)
+			}
+		}
+
+		// Validate the interposer's field budget now that we know whether the
+		// __landlock-exec shim will engage. The shim injects self-proc allow
+		// entries (allowSelfProcFS) that consume budget; a pure userspace-only
+		// fence (no shim) gets the interposer's full budget.
+		if runtime.GOOS == "linux" && fsCfg != nil {
+			reserve := 0
+			if len(landlockPrefix) > 0 {
+				reserve = len(fsfence.SelfProcFiles())
+			}
+			if err := fsfence.CheckInterposerBudget(fsCfg, reserve); err != nil {
+				return fmt.Errorf("invalid filesystem fence config: %w", err)
 			}
 		}
 
@@ -1020,8 +1037,18 @@ func validateWrapRuntimeConfig(cfg *config.Config) error {
 		if !fsfence.IsSupported() {
 			return fmt.Errorf("filesystem fence configured but not supported on %s", runtime.GOOS)
 		}
-		if _, err := fsfence.ProcessConfig(cfg.Filesystem); err != nil {
+		fsCfg, err := fsfence.ProcessConfig(cfg.Filesystem)
+		if err != nil {
 			return fmt.Errorf("invalid filesystem fence config: %w", err)
+		}
+		// Floor check with reserve=0: catches configs that exceed the
+		// interposer's absolute budget regardless of shim engagement.
+		// The exact check (with the real reserve) runs later in wrap,
+		// after the ABI probe and syscall-fence decision are final.
+		if runtime.GOOS == "linux" {
+			if err := fsfence.CheckInterposerBudget(fsCfg, 0); err != nil {
+				return fmt.Errorf("invalid filesystem fence config: %w", err)
+			}
 		}
 	}
 
@@ -1111,6 +1138,51 @@ func resolvePathBestEffort(p string) string {
 		return resolved
 	}
 	return filepath.Clean(p)
+}
+
+// landlockProcSelfAllowPaths grants the child read-only access to the specific
+// files in fsfence.SelfProcFiles under its OWN /proc/<pid>, via the /proc/self
+// symlink. This is what Node needs for process.memoryUsage() (reads
+// /proc/self/stat) and fs reads of /proc/self/status; without it the calls
+// throw EACCES and can crash the agent.
+//
+// Correctness hinges on the exec model: the __landlock-exec shim builds the
+// Landlock ruleset and then execve's the child IN PLACE (unix.Exec preserves the
+// pid — see landlock_exec.go). So the literal string "/proc/self/<file>",
+// opened when the shim applies the ruleset, binds to a file inode inside the
+// very directory that becomes the child's own /proc/<pid> — never a sibling's
+// or another user's. It must stay the literal "/proc/self/<file>": resolving
+// the symlink (as the config allow list does) would bind it to some other
+// process's pid dir.
+//
+// It grants FILES, never the /proc/<pid> DIRECTORY: a directory-level Landlock
+// rule covers every entry beneath it (RulesFromConfig grants a directory
+// read+readdir+execute over its whole subtree), which would reopen environ,
+// cmdline, mem, maps and fd — the same-UID leak #115 removed. Landlock rules
+// are also inherited by every future descendant of the process they were
+// applied to, so a directory grant would let a GRANDCHILD of the wrapped
+// process read the wrapped process's own environ too — reopening the leak one
+// level down (round 2). A file-level grant is inode-bound to that one file, so
+// an inheriting descendant can only re-read those same few files, never
+// environ/cmdline/mem/maps/fd (see
+// TestWrapClaudeCodePresetBlocksDescendantParentProcEnviron).
+//
+// The grant reaches only the wrapped child's own /proc/<pid>/<file> entries.
+// That never widens the fence boundary — no process outside the wrapped
+// command's own descendants is exposed, and even descendants only inherit
+// read on this same curated file list. (A grandchild that later execs under a
+// DIFFERENT pid does not get its OWN /proc/self grant — Landlock is
+// inode-bound to the original pid's files. Fixing that without re-granting the
+// broad /proc tree #115 removed needs a pid namespace + fresh proc mount,
+// which the syscall fence's allow_namespaces=false posture precludes — out of
+// scope here.)
+func landlockProcSelfAllowPaths() []landlock.AllowPath {
+	files := fsfence.SelfProcFiles()
+	paths := make([]landlock.AllowPath, 0, len(files))
+	for _, f := range files {
+		paths = append(paths, landlock.AllowPath{Path: "/proc/self/" + f, Access: landlock.AccessReadOnly})
+	}
+	return paths
 }
 
 // findLibFenceFS searches only trusted locations for the filesystem fence shared

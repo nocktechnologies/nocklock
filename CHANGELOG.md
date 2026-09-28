@@ -29,6 +29,8 @@ All notable changes to NockLock will be documented in this file.
 
 ### Changed
 
+- The Linux filesystem fence rejects configurations whose `allow_rw` entries
+  push the shared allow cap or the combined wire budget over its limit.
 - macOS Seatbelt root-write confinement no longer grants the fenced child
   write access to NockLock's audit state directory. The unfenced parent alone
   writes the event database, SQLite sidecars, and chain anchor; a macOS
@@ -182,6 +184,52 @@ All notable changes to NockLock will be documented in this file.
 
 ### Fixed
 
+- Interposer field-budget cap is now enforced post-ABI-detection (#10815).
+  The cap on allow/deny paths (matching libfence_fs.c's MAX_PATHS and field
+  tokenizer budget) previously ran unconditionally in ProcessConfig with
+  headroom reserved for the self-proc grants the __landlock-exec shim injects.
+  A config with linux_enforcement="off", syscall.enforcement="off" (pure
+  userspace interposer, no shim) was rejected at ~253 allow paths even though
+  the shim's injections would never happen. The validation now runs in wrap.go
+  after both the Landlock ABI probe and the syscall-fence decision, so headroom
+  is only reserved when the shim actually engages. A userspace-only config gets
+  the interposer's real 256-path budget. --dry-run and validateWrapRuntimeConfig
+  still catch configs that exceed the interposer's absolute ceiling (>256 per
+  category or >257 combined) via a floor check with reserve=0; the exact check
+  with the real shim reserve runs later in wrap, after the ABI probe.
+
+- claude-code preset: Node runtime introspection no longer breaks under the
+  fence (#10757). With the broad `/proc/` grant removed in #115 (it exposed a
+  same-UID sibling's `/proc/<pid>/environ`), `process.memoryUsage()` threw
+  `EACCES` and `os.cpus()` silently returned an empty array — a throw can crash
+  the agent and 0 CPUs mis-sizes worker pools. The narrow reads Node needs are
+  now granted without any path to another process: the preset allows the
+  system-wide `/proc/cpuinfo`, `/proc/stat` and `/proc/meminfo`, and the wrapped
+  child's OWN `/proc/<pid>/{stat,status,statm}` — the three files, never the
+  whole directory — is granted to both fences self-scoped. Because the
+  `__landlock-exec` shim execve's the child in place (its pid IS the child's),
+  the literal `/proc/self/{stat,status,statm}` Landlock rules bind to the
+  child's own proc dir, and the shim appends the same concrete
+  `/proc/<pid>/{stat,status,statm}` files to the interposer allowlist. Round 2
+  (Gander): granting the whole `/proc/self` directory bound Landlock to the
+  child's `/proc/<pid>` dir inode, and a descendant inherits that rule — so a
+  grandchild could read the wrapped child's own `environ`/`cmdline`/`mem`, the
+  sibling leak #115 removed reopened one level down. Narrowing to the three
+  files closes it: a descendant that inherits the rule can read only those
+  files' identical inodes, never `environ`/`cmdline`/`mem`/`maps`/`fd`, proven
+  by a negative-control test where a grandchild is denied its wrapped parent's
+  `environ`. A sibling's `/proc/<pid>/environ` and `/cmdline` stay denied at the
+  kernel layer too, proven by a `CGO_ENABLED=0` raw-syscall reader test that
+  bypasses the userspace interposer. The Go-side filesystem config now also
+  reserves headroom below the interposer's combined allow+deny field budget
+  (`libfence_fs.c`'s `char *fields[MAX_PATHS + 4]` — allow and deny paths
+  share ONE 260-slot array, not independent 256-slot caps) for these injected
+  self-proc grants, and fails closed with a clear config error instead of
+  silently tripping the interposer's own cap — including the case where the
+  interposer's tokenizer would otherwise drop trailing deny paths — at
+  runtime. Verified empirically (LD_PRELOAD/strace diagnostic, no NockLock
+  fence involved) that Node tolerates the narrower grant: startup also
+  touches `/proc/self/{exe,maps,cgroup}`, but degrades gracefully when denied.
 - Config discovery resolves the project directory before `wrap` and
   `verify --audit` derive audit state or signed config-digest paths, while
   preserving the `.nock/config.toml` leaf so projects sharing a symlink target
