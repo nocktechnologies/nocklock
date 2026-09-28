@@ -80,6 +80,13 @@ The transcript carries the verdicts: `LAUNCHER-ENV:`, `LIMITED-TOKEN:`,
   `0xC0000142`, `STATUS_DLL_INIT_FAILED`). A `SETUP-FAULT` that names a
   launch prints its exit code in hex; a negative one is an NTSTATUS, meaning that
   process did not start (`0xC0000142`) or crashed (e.g. `0xC0000005`).
+- cmd's exit code alone does not prove the target tool ran: when cmd cannot start it
+  (access denied on the exe, or the exe missing) cmd exits with its own code. Each
+  capture carries a line only the tool writes: curl's `CURL_DONE exit=<n>` (from
+  `--write-out`), python's `PYTHON_RAN`, and a SID in the whoami capture. Without it,
+  the launch is a `SETUP-FAULT` that says the tool did not run, never a network or
+  probe result. A real curl failure keeps its `CURL_DONE exit=<n>` line (e.g. `7`
+  refused, `28` timed out).
 
 - The scaffold's tool check prints lines for every probe in the doc; a
   `SETUP-FAULT: Probe 5a requires ...` line concerns a probe this run does not execute.

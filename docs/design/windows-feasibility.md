@@ -1741,21 +1741,24 @@ $verdict1x = if (-not $preClean) {
 # zero-capability container (the first desktop run's launch exited 0xC0000142,
 # STATUS_DLL_INIT_FAILED, while cmd.exe started). Never run those curls in this shell: an
 # outer curl answers nothing about the container. cmd writes each command's output (curl's
-# error text included) into the granted $out dir and the launcher returns that command's own
-# exit code; both are printed verbatim as inside(1) lines, so the verdict is read from the
-# recorded output, not inferred. An exit code outside curl's 0-255 is not curl's answer (a
-# negative one is an NTSTATUS: the process did not start, or crashed; 9009 is cmd's "not
-# recognized"), so it is a SETUP-FAULT, recorded in hex.
+# error text included) into the granted $out dir, curl's --write-out appends
+# `CURL_DONE exit=<curl's exit code>`, and the launcher returns cmd's exit code; all are printed
+# verbatim as inside(1) lines, so the verdict is read from the recorded output, not inferred.
+# cmd's exit code alone does not prove curl ran: when cmd cannot start curl.exe (access denied
+# on the exe, or the exe missing) it exits with its own code, which can fall inside curl's 0-255.
+# Only curl writes CURL_DONE, so a capture without `CURL_DONE exit=<launch exit>` is a
+# SETUP-FAULT, recorded in hex, never a network result.
 $log1 = @(); $fault1 = @()
 foreach ($c in @(@('8899',    'curl.exe -sS -m 5 http://127.0.0.1:8899/'),      # MUST succeed, or Phase 1 is dead
                  @('example', 'curl.exe -sS -m 5 https://example.com/'),        # MUST fail (Block Outbound Default Rule)
                  @('9999',    'curl.exe -sS -m 5 http://127.0.0.1:9999/'))) {   # unrelated loopback port: EXPECTED reachable
   $capture = Join-Path $out.FullName "_inside-1-$($c[0]).txt"
   try {
-    $rc = [NockProbe.AC]::Run($sid, @(), ('cmd.exe /c ' + $c[1] + ' > "' + $capture + '" 2>&1'), 60000)
-    $log1 += @(Get-Content $capture -ErrorAction SilentlyContinue) + "$($c[0]) exit=$rc"
-    if ($rc -lt 0 -or $rc -gt 255 -or -not (Test-Path $capture)) {
-      $fault1 += '{0} launch exit={1} (0x{1:X8}), capture written={2}' -f $c[0], $rc, (Test-Path $capture)
+    $rc = [NockProbe.AC]::Run($sid, @(), ('cmd.exe /c ' + $c[1] + ' -w "\nCURL_DONE exit=%{exitcode}\n" > "' + $capture + '" 2>&1'), 60000)
+    $got = @(Get-Content $capture -ErrorAction SilentlyContinue)
+    $log1 += $got + "$($c[0]) exit=$rc"
+    if (-not ($got -ccontains "CURL_DONE exit=$rc")) {
+      $fault1 += '{0} curl did not run (no CURL_DONE exit={1}; cmd text above): launch exit={1} (0x{1:X8})' -f $c[0], $rc
     }
   } catch {
     $fault1 += '{0} launch threw {1} HResult={2} {3}' -f $c[0], $_.Exception.GetBaseException().GetType().Name, (Get-BaseHResult $_), $_.Exception.GetBaseException().Message
@@ -1766,25 +1769,29 @@ $log1 | ForEach-Object { "inside(1): $_" }
 # and exits, so the claim (bind + listen inside, outbound-only scope below) is its exit code
 # and nothing is left running to reap. A per-user python (e.g. under %LOCALAPPDATA%\Programs)
 # is unreadable to a zero-capability container: cmd's error text then shows in the capture.
+# python prints PYTHON_RAN first: a capture without it means cmd never started python, a
+# SETUP-FAULT, never the bind's answer.
 $capture = Join-Path $out.FullName '_inside-1-9998.txt'
 $bind9998 = try {
-  $rc = [NockProbe.AC]::Run($sid, @(), ('cmd.exe /c python -c "import socket; s = socket.socket(); ' +
+  $rc = [NockProbe.AC]::Run($sid, @(), ('cmd.exe /c python -c "print(''PYTHON_RAN'', flush=True); import socket; s = socket.socket(); ' +
     's.bind((''127.0.0.1'', 9998)); s.listen(1); print(''bind+listen OK'', s.getsockname())" > "' + $capture + '" 2>&1'), 60000)
   'exit={0} (0x{0:X8})' -f $rc
 } catch {
   'threw {0} HResult={1} {2}' -f $_.Exception.GetBaseException().GetType().Name, (Get-BaseHResult $_), $_.Exception.GetBaseException().Message
 }
-Get-Content $capture -ErrorAction SilentlyContinue | ForEach-Object { "inside(1) 9998: $_" }
+$got = @(Get-Content $capture -ErrorAction SilentlyContinue)
+$got | ForEach-Object { "inside(1) 9998: $_" }
+if (-not ($got -ccontains 'PYTHON_RAN')) { $bind9998 = "SETUP-FAULT - python did not run (no PYTHON_RAN), launch $bind9998" }
 "inside(1) 9998 bind+listen: $bind9998"
 $exempt1 = Test-ExemptListed        # read BEFORE Probe 1's teardown, like everything scored below
 
 # Probe 1's own teardown (see Teardown below), before the next probe runs.
 $job8899, $job9999 | Stop-Job -PassThru | Remove-Job
 
-# Nothing is scored unless every curl launch returned curl's own exit code with a capture
-# (not denied, untracked, timed out or an NTSTATUS), BOTH outside listeners answered, and this
-# run's exemption is listed: an inside curl that failed against a dead listener or a missing
-# exemption is a setup fault.
+# Nothing is scored unless every curl launch carried its matching CURL_DONE line (so curl.exe
+# ran: not denied, missing, untracked, timed out or an NTSTATUS), BOTH outside listeners
+# answered, and this run's exemption is listed: an inside curl that failed against a dead
+# listener or a missing exemption is a setup fault.
 $unscored1 = @($fault1)
 foreach ($port in @(8899, 9999)) { if (-not $outsideLive[$port]) { $unscored1 += "outside $port listener never answered" } }
 if (-not $exempt1) { $unscored1 += "this run's loopback exemption is not listed" }
@@ -1912,6 +1919,7 @@ $step = 'run'
 # Two launches through cmd.exe (not powershell.exe, which did not start in a zero-capability
 # container), each with its own exit code and its stderr kept: `whoami /groups` for the token,
 # `set` for the container's own environment, so the verdict shows TEMP/LOCALAPPDATA were redirected.
+# `set` is a cmd builtin, so it ran whenever cmd did; whoami.exe is not (see the SETUP-FAULT arm).
 $rcW = [NockProbe.AC]::Run($sid3, @(), ('cmd.exe /c whoami /groups > "' + (Join-Path $d3.FullName 'whoami-inside.txt') + '" 2>&1'), 60000)
 $rcE = [NockProbe.AC]::Run($sid3, @(), ('cmd.exe /c set > "' + (Join-Path $d3.FullName 'env-inside.txt') + '" 2>&1'), 60000)
 ('launch=OK whoami exit={0} (0x{0:X8}); set exit={1} (0x{1:X8})' -f $rcW, $rcE) | Out-File $log -Append -Encoding utf8
@@ -1952,7 +1960,9 @@ if (-not $p3) {
 } elseif (-not ($p3 -cmatch '^launch=OK whoami exit=0 .*; set exit=0 ')) {
   # A capture whose launch exited nonzero measured nothing; the hex names it (an NTSTATUS
   # such as 0xC0000142 means that process did not start; 0xC0000005 that it crashed).
-  "VERDICT(3): SETUP-FAULT - inside capture failed: $((@($p3) -cmatch '^launch=OK') -join '; '); not scored"
+  # Only whoami prints SIDs, so `whoami.exe ran: False` means cmd could not start it (access
+  # denied on the exe, or missing); cmd's own error is in the inside(3) whoami lines above.
+  "VERDICT(3): SETUP-FAULT - inside capture failed: $((@($p3) -cmatch '^launch=OK') -join '; '); whoami.exe ran: $([bool](@($w) -cmatch 'S-1-\d')); not scored"
 } elseif (-not (($w | Select-String -SimpleMatch 'S-1-16-4096') -and ($w | Select-String -Pattern 'S-1-15-2-1\b'))) {
   "VERDICT(3): INDETERMINATE - launched, but p3\$inv3\whoami-inside.txt shows no Low IL (S-1-16-4096) plus ALL APPLICATION PACKAGES (S-1-15-2-1)"
 } elseif (-not $redirected) {

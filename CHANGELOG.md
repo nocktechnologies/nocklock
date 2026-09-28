@@ -41,7 +41,11 @@ All notable changes to NockLock will be documented in this file.
   zero-capability container. Probe 1 launches each loopback curl on its own and
   checks the 9998 bind + listen with a python that exits; Probe 3 captures
   `whoami /groups` and `set` with their errors and exit codes. SETUP-FAULT lines
-  print exit codes in hex. The launcher's environment block now accounts for
+  print exit codes in hex. A launch counts as the tool's answer only when its
+  capture holds a line the tool itself writes (curl's `--write-out`
+  `CURL_DONE exit=<n>`, python's `PYTHON_RAN`, a SID from whoami): cmd failing to
+  start the tool (access denied on the exe, or the exe missing) is a SETUP-FAULT,
+  never `PHASE 1 DEAD` or another probe verdict. The launcher's environment block now accounts for
   Windows' own AppContainer redirection, which had doubled the
   `Packages\<moniker>\AC` path, and the environment self-check fails when
   `TEMP` or `LOCALAPPDATA` does not exist. The first run's output is committed
