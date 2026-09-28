@@ -1099,6 +1099,7 @@ namespace NockProbe {
     [DllImport("kernel32.dll", SetLastError = true)] static extern bool TerminateJobObject(IntPtr job, uint code);
     [DllImport("kernel32.dll", SetLastError = true)] static extern bool SetInformationJobObject(IntPtr job, int cls, ref JOBOBJECT_EXTENDED_LIMIT_INFORMATION info, uint len);
     [DllImport("kernel32.dll", SetLastError = true)] static extern uint ResumeThread(IntPtr thread);
+    [DllImport("kernel32.dll")] static extern IntPtr GetCurrentProcess();
     [DllImport("kernel32.dll", SetLastError = true)] static extern IntPtr OpenProcess(uint access, bool inherit, int pid);
     [DllImport("advapi32.dll", SetLastError = true)] static extern bool OpenProcessToken(IntPtr proc, uint access, out IntPtr tok);
     [DllImport("advapi32.dll", SetLastError = true)]
@@ -1163,14 +1164,12 @@ namespace NockProbe {
     // itself an AppContainer, see BuildEnvironment).
     // Waits up to timeoutMs and returns the exit code. The child starts suspended inside an
     // anonymous job, so a timeout kills its WHOLE tree (TerminateJobObject), not just the
-    // direct child, then throws. KILL_ON_JOB_CLOSE is opt-in (killOnClose): off by default
-    // because on a normal return descendants a probe keeps on purpose (Probe 1's 9998
-    // listener, launched from the elevated shell) must survive and are reaped by teardown's
-    // verified-identity stop. Launches from inside the limited task (Probe 3) pass true: if
-    // the task is stopped mid-Run, this process dies before its own TerminateJobObject, and
-    // the kernel closing the job handle then kills the container tree instead of orphaning it.
-    public static int Run(string packageSid, string[] capabilitySids, string cmdLine, int timeoutMs,
-                          bool killOnClose = false) {
+    // direct child, then throws. This job has no KILL_ON_JOB_CLOSE, deliberately: on a normal
+    // return, descendants a probe keeps on purpose (Probe 1's 9998 listener) survive and are
+    // reaped by teardown's verified-identity stop. The case where the CALLER dies mid-Run
+    // (the limited task stopped on a timeout) is covered one level up: _limited.ps1 first
+    // puts itself in a kill-on-close job (ContainSelf), and this job nests inside it.
+    public static int Run(string packageSid, string[] capabilitySids, string cmdLine, int timeoutMs) {
       IntPtr acSid = IntPtr.Zero, caps = IntPtr.Zero, sc = IntPtr.Zero, list = IntPtr.Zero, env = IntPtr.Zero;
       IntPtr[] capPtrs = new IntPtr[capabilitySids.Length];
       bool listInit = false;
@@ -1211,7 +1210,7 @@ namespace NockProbe {
         IntPtr job = IntPtr.Zero;
         try {
           job = CreateJobObject(IntPtr.Zero, null);
-          if (job == IntPtr.Zero || (killOnClose && !SetKillOnClose(job)) || !AssignProcessToJobObject(job, pi.hProcess)) {
+          if (job == IntPtr.Zero || !AssignProcessToJobObject(job, pi.hProcess)) {
             int err = Marshal.GetLastWin32Error();
             TerminateProcess(pi.hProcess, 1);                               // never let an untracked child run
             Marshal.ThrowExceptionForHR(unchecked((int)0x80070000) | err);
@@ -1239,13 +1238,19 @@ namespace NockProbe {
       }
     }
 
-    // Sets JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE (0x2000), every other limit left zero.
-    // False on failure, with GetLastError intact for the caller.
-    static bool SetKillOnClose(IntPtr job) {
+    // Puts the CALLING process in a new anonymous job with JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE
+    // and never closes the handle. However the caller dies (normal exit, or Stop-ScheduledTask
+    // terminating the limited task), the kernel closes that last handle and kills every
+    // descendant started after this call: CheckNetIsolation, logman, a Run() container (its
+    // own job nests inside this one). Throws if any step fails.
+    public static void ContainSelf() {
+      IntPtr job = CreateJobObject(IntPtr.Zero, null);
+      Check(job != IntPtr.Zero);
       JOBOBJECT_EXTENDED_LIMIT_INFORMATION li = new JOBOBJECT_EXTENDED_LIMIT_INFORMATION();
-      li.LimitFlags = 0x2000;
-      return SetInformationJobObject(job, 9, ref li,                     // JobObjectExtendedLimitInformation
-        (uint)Marshal.SizeOf(typeof(JOBOBJECT_EXTENDED_LIMIT_INFORMATION)));
+      li.LimitFlags = 0x2000;                                            // KILL_ON_JOB_CLOSE, nothing else
+      Check(SetInformationJobObject(job, 9, ref li,                      // JobObjectExtendedLimitInformation
+        (uint)Marshal.SizeOf(typeof(JOBOBJECT_EXTENDED_LIMIT_INFORMATION))));
+      Check(AssignProcessToJobObject(job, GetCurrentProcess()));
     }
 
     // A live process's token: AppContainer flag, package SID, integrity-level SID
@@ -1410,8 +1415,15 @@ $step      = 'setup'
 whoami /groups | Out-File -FilePath (Join-Path $lim "$inv.token.txt") -Encoding utf8
 "PHASE $phase" | Out-File -FilePath $log -Encoding utf8
 try {
+  # CONTAIN FIRST: this process joins a kill-on-close job, so when a timed-out phase is
+  # stopped (Invoke-LimitedPhase), every child it started dies with it instead of carrying
+  # on alone. The runner scores no phase whose log lacks `contained=OK`.
+  $step = 'contain'
+  [void][Reflection.Assembly]::Load([IO.File]::ReadAllBytes((Join-Path $probeRoot '_launcher.dll')))
+  [NockProbe.AC]::ContainSelf()
+  'contained=OK' | Out-File $log -Append -Encoding utf8
   switch ($phase) {
-    'control' { }   # the whoami above is the whole positive control
+    'control' { }   # the whoami above plus contained=OK is the whole positive control
     'exempt'  {     # Probe 1's non-elevated exemption step
       CheckNetIsolation.exe LoopbackExempt -a "-n=$moniker" 2>&1 | Out-File $log -Append -Encoding utf8
       "exit=$LASTEXITCODE" | Out-File $log -Append -Encoding utf8
@@ -1449,23 +1461,25 @@ $settings = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoi
 Register-ScheduledTask -TaskName $taskName -Action $action -Principal $principal -Settings $settings -ErrorAction Stop | Out-Null
 $taskCreated = $true
 
-# Stops the task and WAITS (up to 30 s) until it is no longer Running; returns its state.
+# Stops the task and WAITS (up to 30 s) until no instance is Running or Queued (a queued
+# instance would start later and pick up whatever request.txt then holds); returns the state.
 function Stop-LimitedTask {
   Stop-ScheduledTask -TaskName $taskName -ErrorAction SilentlyContinue
-  for ($i = 0; ($st = (Get-ScheduledTask -TaskName $taskName).State) -eq 'Running' -and $i -lt 30; $i++) { Start-Sleep 1 }
+  for ($i = 0; ($st = (Get-ScheduledTask -TaskName $taskName).State) -in @('Running','Queued') -and $i -lt 30; $i++) { Start-Sleep 1 }
   $st
 }
 
 # Runs one _limited.ps1 phase under a fresh invocation id ($limitedInv, "<phase>-<GUID>")
 # and returns that invocation's log lines ONLY if it completed (its own <id>.done present)
 # AND its own token is proven limited: Medium Mandatory Level (S-1-16-8192) present, High
-# Mandatory Level (S-1-16-12288) absent. Otherwise returns $null with the reason in
+# Mandatory Level (S-1-16-12288) absent, AND it ran contained (`contained=OK` in its own
+# log: its children die with it if it is stopped). Otherwise returns $null with the reason in
 # $limitedFault; callers turn $null into SETUP-FAULT, never into a scored result.
 # `schtasks /Run` returns immediately, hence the bounded poll.
 function Invoke-LimitedPhase {
   param([string]$Phase, [int]$TimeoutSec = 120)
-  # A failed positive control (or a timed-out task that would not stop) fails every
-  # later phase at once, instead of each waiting out its own timeout or overlapping it.
+  # A failed positive control, or any timeout, fails every later phase at once, instead of
+  # each waiting out its own timeout or overlapping a task instance that will not stop.
   $script:limitedInv = $null         # never left pointing at an earlier invocation
   if ($script:limitedDead) { $script:limitedFault = "limited task unusable ($script:limitedDead)"; return $null }
   $script:limitedFault = $null
@@ -1475,8 +1489,9 @@ function Invoke-LimitedPhase {
   $token = Join-Path $limitedDir "$inv.token.txt"
   # A timed-out earlier phase may still be running: stop it before handing over the new
   # request, so no old instance can pick it up.
-  if ((Stop-LimitedTask) -eq 'Running') {
-    $script:limitedFault = "an earlier instance of $taskName is still running 30 s after Stop-ScheduledTask"
+  if (($st = Stop-LimitedTask) -in @('Running','Queued')) {
+    $script:limitedFault = "an earlier instance of $taskName is still $st 30 s after Stop-ScheduledTask"
+    $script:limitedDead  = $script:limitedFault
     return $null
   }
   Set-Content -Path (Join-Path $limitedDir 'request.txt') -Value @($Phase, $inv)
@@ -1486,12 +1501,13 @@ function Invoke-LimitedPhase {
   if (-not (Test-Path $done)) {
     # TIMEOUT. Stop the task and wait until it is no longer Running BEFORE returning, so a
     # late phase cannot keep adding exemptions / profiles / ETW sessions while the caller's
-    # fallback or teardown runs. Probe 3's container child dies with it (kill-on-close job).
+    # fallback or teardown runs; its children die with it (ContainSelf's kill-on-close job).
     # Always $null, even if .done lands after the stop: a timed-out phase is never scored.
+    # Every later phase fails fast too: the likely cause (console logged off) or a task that
+    # will not stop would only repeat the wait or overlap it.
     $st = Stop-LimitedTask
-    $script:limitedFault = "timeout: phase $Phase ($inv) wrote no .done within $TimeoutSec s (task not started — console session logged off?); task stopped, state $st"
-    # A task that will not stop must not run alongside anything else: fail every later phase.
-    if ($st -eq 'Running') { $script:limitedDead = $script:limitedFault }
+    $script:limitedFault = "timeout: phase $Phase ($inv) wrote no .done within $TimeoutSec s (task not started — console session logged off?); after Stop-ScheduledTask the task is $st"
+    $script:limitedDead  = $script:limitedFault
     return $null
   }
   $medium = [bool](Select-String -Path $token -SimpleMatch 'S-1-16-8192' -ErrorAction SilentlyContinue)
@@ -1500,7 +1516,12 @@ function Invoke-LimitedPhase {
     $script:limitedFault = "phase $Phase ($inv) token not proven limited (Medium present=$medium, High present=$high)"
     return $null
   }
-  Get-Content (Join-Path $limitedDir "$inv.log")
+  $lines = Get-Content (Join-Path $limitedDir "$inv.log")
+  if ($lines -notcontains 'contained=OK') {
+    $script:limitedFault = "phase $Phase ($inv) did not run contained: $((@($lines) -cmatch '^ERROR:') -join '; ')"
+    return $null
+  }
+  $lines
 }
 
 # POSITIVE CONTROL. limited\control-<GUID>.token.txt is kept verbatim as evidence (the
@@ -1559,13 +1580,16 @@ foreach ($port in @(8899, 9999)) {
 CheckNetIsolation.exe LoopbackExempt -d "-n=$moniker" | Out-Null
 $preClean    = -not (Test-ExemptListed)
 $nonElevated = if ($preClean) { Invoke-LimitedPhase 'exempt' }
-$limitedRc   = (@($nonElevated) -match '^(exit=|ERROR:)') -join '; '
-# Scored on the limited -a's own exit code (exactly `exit=0`, no ERROR line) AND the
-# entry being present afterwards — never on the log merely being non-empty.
-$limOk  = $preClean -and $limitedRc -eq 'exit=0' -and (Test-ExemptListed)
-$elevOk = $false
-if (-not $limOk) {
-  # Not proven limited, or the limited -a failed or did not list it: add it ELEVATED so the
+# Case-sensitive: only the phase's own `exit=` / `ERROR:` lines, never CheckNetIsolation's "Error:" text.
+$limitedRc   = (@($nonElevated) -cmatch '^(exit=|ERROR:)') -join '; '
+# Presence is read right after the limited attempt, BEFORE any elevated retry can add it.
+# NON-ELEVATED OK needs the limited -a's own exit code (exactly `exit=0`, no ERROR line)
+# AND the entry present — never the log merely being non-empty.
+$limListed = [bool]$nonElevated -and (Test-ExemptListed)
+$limOk     = $limListed -and $limitedRc -ceq 'exit=0'
+$elevOk    = $false
+if ($preClean -and -not $limListed) {
+  # Not proven limited, or the limited -a left no entry: add it ELEVATED so the
   # rest of Probe 1 can still run.
   CheckNetIsolation.exe LoopbackExempt -a "-n=$moniker" | Out-Null
   $elevOk = Test-ExemptListed
@@ -1573,13 +1597,15 @@ if (-not $limOk) {
 $verdict1x = if (-not $preClean) {
     "SETUP-FAULT - this run's entry still listed after -d, so a limited add cannot be measured; Probe 2 not scored"
   } elseif (-not $nonElevated -and $elevOk) {
-    "SETUP-FAULT - limited token not proven ($limitedFault); exemption added ELEVATED, Probe 2 not scored"
+    "SETUP-FAULT - limited phase not proven ($limitedFault); exemption added ELEVATED, Probe 2 not scored"
   } elseif (-not $nonElevated) {
-    "SETUP-FAULT - limited token not proven ($limitedFault) and elevated -a did not list the entry; Probe 1 not scored"
+    "SETUP-FAULT - limited phase not proven ($limitedFault) and elevated -a did not list the entry; Probe 1 not scored"
   } elseif ($limOk) {
     "NON-ELEVATED OK - limited-token -a exited 0 and listed the entry (Probe 2: admin not required) [$limitedRc]"
+  } elseif ($limListed) {
+    "SETUP-FAULT - entry listed after the limited -a, but it did not report exit=0 [limited: $limitedRc]; Probe 2 not scored"
   } elseif ($elevOk) {
-    "ADMIN REQUIRED - limited-token -a failed or did not list the entry, elevated -a did (Probe 2: admin required) [limited: $limitedRc]"
+    "ADMIN REQUIRED - entry absent after the limited-token -a, elevated -a listed it (Probe 2: admin required) [limited: $limitedRc]"
   } else {
     "SETUP-FAULT - entry absent after limited AND elevated -a [limited: $limitedRc]; Probe 1 not scored"
   }
@@ -1649,7 +1675,7 @@ teardown.
 
 | State touched | Detail |
 |---|---|
-| Creates | 2 outer jobs (`$job8899`, `$job9999`); 1 inside listener process (identity in `own-listener.txt`); loopback exemption (machine-wide; removed and proven absent before each measured attempt, then added by the limited task or the elevated retry, kept until global teardown); `limited\exempt-<GUID>.*` files under `$probeRoot` (one run of the scaffold's scheduled task) |
+| Creates | 2 outer jobs (`$job8899`, `$job9999`); 1 inside listener process (identity in `own-listener.txt`); loopback exemption (machine-wide; removed and proven absent before each measured attempt, then added by the limited task or the elevated retry, kept until global teardown); `limited\exempt-<GUID>.*` files under `$probeRoot` (one run of the scaffold's scheduled task, when the pre-clean succeeds) |
 | Removes | the 2 outer jobs (by handle); inside listener (by verified PID+StartTime+Path) |
 | Must never touch | other user jobs; loopback exemptions not created by this run; scheduled tasks other than `nocklock-probe-limited-$runId` |
 
@@ -1702,8 +1728,7 @@ documents `E_ACCESSDENIED`).
 The `probe3` body inside `_limited.ps1`:
 
 ```powershell
-$step = 'load'
-[void][Reflection.Assembly]::Load([IO.File]::ReadAllBytes((Join-Path $probeRoot '_launcher.dll')))
+# The launcher is already loaded: _limited.ps1's contain step loaded it.
 $step = 'createprofile'
 $sid3 = [NockProbe.AC]::CreateProfile("nocklock-p3-$runId")      # throws -> ERROR line (caught above)
 "profile=CREATED sid=$sid3" | Out-File $log -Append -Encoding utf8
@@ -1714,7 +1739,7 @@ $step = 'run'
 # `set` records the container's own environment, so the verdict shows TEMP/LOCALAPPDATA were redirected.
 $rc = [NockProbe.AC]::Run($sid3, @(),
   ('cmd.exe /c whoami /all > "' + (Join-Path $d3.FullName 'whoami-inside.txt') +
-   '" & set > "' + (Join-Path $d3.FullName 'env-inside.txt') + '"'), 60000, $true)   # kill-on-close: a stopped task takes the container with it
+   '" & set > "' + (Join-Path $d3.FullName 'env-inside.txt') + '"'), 60000)
 "launch=OK exit=$rc" | Out-File $log -Append -Encoding utf8
 ```
 
@@ -1735,7 +1760,7 @@ if (-not $p3) {
   "VERDICT(3): SETUP-FAULT - $limitedFault; not scored"
 } elseif ($p3 | Select-String -Pattern '^ERROR: step=(createprofile|run) HResult=0x80070005') {
   # CreateProfile or Run itself was DENIED under the limited token: the answer is "needs admin".
-  # A denial on load/grant is a setup problem and falls through to INDETERMINATE.
+  # A denial on grant is a setup problem and falls through to INDETERMINATE.
   "VERDICT(3): FAILS UNELEVATED - $p3err"
 } elseif (-not ($p3 | Select-String -SimpleMatch 'launch=OK')) {
   # Any other failure (launcher did not compile, timeout, ...) is not a denial.
