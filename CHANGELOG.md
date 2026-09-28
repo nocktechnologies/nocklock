@@ -22,6 +22,10 @@ All notable changes to NockLock will be documented in this file.
   that clients ignoring `HTTP_PROXY` can reach any host. Set
   `network.require_enforced = true` or pass `--require-enforced-egress` to
   refuse sessions without enforced egress.
+- A strict Linux claude-code preset regression proof checks that `ls .` and
+  `os.listdir('.')` can read a fresh project's root while the relocated audit
+  database and a path outside the allowlist (default-deny) remain inaccessible
+  to the wrapped child.
 - Every `wrap` signs a `config.digest` row containing the canonical resolved
   policy and prior digest. Changed policy fields warn before the child starts;
   `verify --audit` reports the history and requires each retained post-adoption
