@@ -74,6 +74,66 @@ var wrapCmd = &cobra.Command{
 			return fmt.Errorf("--net-fence=netns requires Linux kernel network namespaces; refusing to run without the kernel-enforced egress floor")
 		}
 
+		// Generate a session ID for event logging.
+		sessionID := uuid.New().String()
+
+		// Open the event logger. The audit trail is not optional — NockLock's
+		// guarantee is that every fence decision is recorded — so a logger that
+		// cannot open FAILS CLOSED: the agent does not start. This is the same
+		// posture as the network fence (cf. the removed --allow-unfenced flag):
+		// running unrecorded would silently break the "every decision is recorded"
+		// promise, which is worse than not running at all.
+		dbPath, projectRoot, dbErr := config.ResolveDBPath(cfg, configPath)
+		if dbErr != nil {
+			cmd.SilenceUsage = true
+			return fmt.Errorf("could not resolve the event log location: %w\nThe audit trail is required — refusing to run unrecorded", dbErr)
+		}
+		auditDir, auditDirErr := resolveAuditDirectory(filepath.Dir(dbPath))
+		if auditDirErr != nil {
+			cmd.SilenceUsage = true
+			return fmt.Errorf("refusing to start: cannot resolve logging.db directory %s: %w; fix the audit directory path and permissions", filepath.Dir(dbPath), auditDirErr)
+		}
+		resolvedProjectRoot, projectRootErr := filepath.EvalSymlinks(filepath.Clean(projectRoot))
+		if projectRootErr != nil {
+			cmd.SilenceUsage = true
+			return fmt.Errorf("refusing to start: cannot resolve project root %s: %w; fix the project directory path and permissions", projectRoot, projectRootErr)
+		}
+		if filepath.Clean(auditDir) == filepath.Clean(resolvedProjectRoot) {
+			cmd.SilenceUsage = true
+			root := filepath.Clean(resolvedProjectRoot)
+			refusal := fmt.Errorf(
+				"refusing to start: logging.db resolves to the project root %s; move it with its SQLite sidecars and chain anchor under %s/.nock/ and set [logging] db = \".nock/events.db\", or use the NockLock state directory with [logging] db = \"events.db\"",
+				root, root,
+			)
+			if wrapFlags.DryRun {
+				return refusal
+			}
+			logger, logErr := logging.NewLogger(dbPath, projectRoot, signingLoggerOpts()...)
+			if logErr != nil {
+				return fmt.Errorf("%w; could not record the refusal in the audit log: %v", refusal, logErr)
+			}
+			logErr = logger.Log(logging.Event{
+				Timestamp: time.Now(),
+				EventType: logging.EventFileBlocked,
+				Category:  "filesystem",
+				Detail:    "refused root-level logging.db before launching child",
+				Blocked:   true,
+				SessionID: sessionID,
+			})
+			var anchorErr error
+			if logErr == nil {
+				anchor, emitErr := logger.EmitAnchor()
+				anchorErr = emitErr
+				if anchorErr == nil {
+					anchorErr = logging.WriteAnchor(logging.DefaultAnchorPath(dbPath), anchor)
+				}
+			}
+			closeErr := logger.Close()
+			if logErr != nil || anchorErr != nil || closeErr != nil {
+				return fmt.Errorf("%w; could not finalize the refusal audit entry: %v", refusal, errors.Join(logErr, anchorErr, closeErr))
+			}
+			return refusal
+		}
 		if wrapFlags.DryRun {
 			fmt.Fprintln(os.Stdout, effectiveCfg.EffectivePolicy())
 			if useNetns {
@@ -86,19 +146,6 @@ var wrapCmd = &cobra.Command{
 			return nil
 		}
 
-		// Generate a session ID for event logging.
-		sessionID := uuid.New().String()
-
-		// Open the event logger. The audit trail is not optional — NockLock's
-		// guarantee is that every fence decision is recorded — so a logger that
-		// cannot open FAILS CLOSED: the agent does not start. This is the same
-		// posture as the network fence (cf. the removed --allow-unfenced flag):
-		// running unrecorded would silently break the "every decision is recorded"
-		// promise, which is worse than not running at all.
-		dbPath, projectRoot, dbErr := config.ResolveDBPath(cfg, configPath)
-		if dbErr != nil {
-			return fmt.Errorf("could not resolve the event log location: %w\nThe audit trail is required — refusing to run unrecorded", dbErr)
-		}
 		// Sign the audit trail with the NockLock-managed Ed25519 key so each
 		// recorded decision is authentic, not merely internally consistent. The
 		// key is generated 0600 on first use. If its path cannot be resolved we
@@ -275,7 +322,7 @@ var wrapCmd = &cobra.Command{
 			// Like the audit DB, the decision log's integrity against the child
 			// requires the fs fence ON; with no fs fence the child can already
 			// tamper events.db directly, so this is consistent, not a new gap.
-			cfg.Filesystem.Deny = append(cfg.Filesystem.Deny, egressChildDenyPaths(dbPath, projectRoot, decisionLogDir)...)
+			cfg.Filesystem.Deny = append(cfg.Filesystem.Deny, egressChildDenyPaths(dbPath, decisionLogDir)...)
 
 			var err error
 			fsCfg, err = fsfence.ProcessConfig(cfg.Filesystem)
@@ -299,8 +346,8 @@ var wrapCmd = &cobra.Command{
 					fsCfg.ProtectedRootSubdir = auditDir
 					fmt.Fprintf(os.Stderr,
 						"NockLock: the audit trail is inside the fence root (%s), so the agent cannot create or remove entries directly in %s.\n"+
-							"NockLock: work inside existing subdirectories is unaffected. To lift the restriction, move %s (events.db, its -wal/-shm sidecars and chain-anchor.json together) outside the fence root while no session is running; 'nocklock state migrate' will do it for you in a later release.\n",
-						auditDir, fsCfg.Root, auditDir)
+							"NockLock: work inside existing subdirectories is unaffected. To lift the restriction, move %s and its SQLite sidecars and chain-anchor.json together outside the fence root while no session is running; configure logging.db for that location.\n",
+						auditDir, fsCfg.Root, dbPath)
 				}
 				switch runtime.GOOS {
 				case "linux":
@@ -1114,40 +1161,15 @@ func linuxEnforcementMode(raw string) linuxEnforcement {
 	return linuxEnforcement(raw)
 }
 
-// auditDenyPath returns the path to add to the filesystem fence's deny list so a
-// fenced child cannot tamper with its own audit log. It denies the whole audit
-// directory (covering the db and blocking rename/delete of the log) unless the
-// log sits directly in the project root — in which case it denies only the db
-// file, so the root itself is never accidentally denied.
-//
-// With a default (relative) logging.db the audit directory is outside the
-// project (config.AuditStateDir) and Landlock already denies it by default, so
-// this deny is what carries the protection into the LD_PRELOAD interposer,
-// which is allow/deny-list driven rather than default-deny. It still matters:
-// the two enforcement paths must agree.
-//
-// The root comparison resolves symlinks (matching the fence's own path
-// canonicalization): on macOS /tmp and /var are symlinks to /private/*, so a
-// string-only compare could see the audit dir and a symlinked root as different
-// and deny the entire root (breaking the agent) — or as equal and skip the dir.
-func auditDenyPath(dbPath, projectRoot string) string {
-	auditDir := filepath.Dir(dbPath)
-	if resolvePathBestEffort(auditDir) != resolvePathBestEffort(projectRoot) {
-		return auditDir
-	}
-	return dbPath
-}
-
-// egressChildDenyPaths returns the paths the fenced child must be denied so it
-// cannot tamper with the records the unfenced parent signs into the audit trail:
-// the audit DB (via auditDenyPath) always, plus — on the netns egress path — the
-// WHOLE egress decision-log directory (decisionLogDir, empty otherwise). Denying
-// the directory, not just the file, stops the child (which shares wrap's uid)
-// from truncating the log, creating sibling files, or traversing in to forge the
-// signed egress rows. Factored out so the deny-list assembly is unit-testable
-// without root.
-func egressChildDenyPaths(dbPath, projectRoot, decisionLogDir string) []string {
-	paths := []string{auditDenyPath(dbPath, projectRoot)}
+// egressChildDenyPaths returns the audit directory and, on the netns path, the
+// whole egress decision-log directory the fenced child must be denied so it
+// cannot tamper with the records the unfenced parent signs into the audit trail.
+// Denying the directory, not just the file, stops the child (which shares
+// wrap's uid) from truncating the log, creating sibling files, or traversing in
+// to forge the signed egress rows. A project-root audit directory is refused
+// before this list is built.
+func egressChildDenyPaths(dbPath, decisionLogDir string) []string {
+	paths := []string{filepath.Dir(dbPath)}
 	if decisionLogDir != "" {
 		paths = append(paths, decisionLogDir)
 	}
@@ -1168,7 +1190,7 @@ func egressChildDenyPaths(dbPath, projectRoot, decisionLogDir string) []string {
 // Landlock ruleset skipping a ".nock" child of the fence root, which is how this
 // held before the audit state moved out. A logging.db pointed back inside a
 // granted tree by an absolute path reintroduces the overlap, exactly as it does
-// for the audit DB's own deny (auditDenyPath). Factored out so the path is
+// for the audit DB's own deny. Factored out so the path is
 // unit-testable without root.
 func egressDecisionDir(dbPath, sessionID string) string {
 	return filepath.Join(filepath.Dir(dbPath), "sessions", sessionID, "egress")
@@ -1339,4 +1361,27 @@ func pathIsWithinDir(path, dir string) bool {
 		return false
 	}
 	return rel == "." || (rel != ".." && !strings.HasPrefix(rel, ".."+string(os.PathSeparator)))
+}
+
+// resolveAuditDirectory resolves the nearest existing ancestor of a fresh audit
+// directory, preserving its missing suffix. Existing but broken symlinks and
+// errors other than ENOENT must not bypass the project-root refusal.
+func resolveAuditDirectory(path string) (string, error) {
+	path = filepath.Clean(path)
+	resolved, err := filepath.EvalSymlinks(path)
+	if err == nil || !errors.Is(err, os.ErrNotExist) {
+		return resolved, err
+	}
+	if _, statErr := os.Lstat(path); !errors.Is(statErr, os.ErrNotExist) {
+		return "", err
+	}
+	parent := filepath.Dir(path)
+	if parent == path {
+		return "", err
+	}
+	resolved, err = resolveAuditDirectory(parent)
+	if err != nil {
+		return "", err
+	}
+	return filepath.Join(resolved, filepath.Base(path)), nil
 }

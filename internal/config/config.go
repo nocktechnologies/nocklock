@@ -478,13 +478,9 @@ func validateAuditDBLocation(cfg *Config, configPath string) error {
 		return fmt.Errorf("logging.db %q cannot be checked: the project root %q could not be resolved: %w", db, projectRoot, err)
 	}
 	if withinDir(absRoot, db) {
-		// Inside the project is allowed, but NOT directly in its top level. The
-		// fence protects an in-project audit trail by withholding the grant on
-		// the root and granting each child except the audit directory, which
-		// only works when the audit directory IS a child. With the log sitting
-		// in the root itself there is nothing to skip: Landlock grants whole
-		// hierarchies, so any rule that let the agent work would also expose the
-		// log. Say so here rather than failing later while building the ruleset.
+		// Absolute logs directly in the project root or a distinct
+		// filesystem.root cannot be protected while granting that root. Refuse
+		// them here, before a command relies on this path for audit writes.
 		dbDir := resolveExisting(filepath.Dir(db))
 		tops := []string{absRoot}
 		// filesystem.root need not be the project root, and it is the one the
@@ -496,13 +492,24 @@ func validateAuditDBLocation(cfg *Config, configPath string) error {
 				}
 			}
 		}
+		projectRoot := resolveExisting(absRoot)
 		for _, top := range tops {
-			if dbDir == resolveExisting(top) {
+			resolvedTop := resolveExisting(top)
+			if dbDir == resolvedTop {
+				if resolvedTop == projectRoot {
+					root := filepath.Clean(resolvedTop)
+					return fmt.Errorf(
+						"logging.db resolves to the project root %s; move it with its SQLite sidecars and chain anchor under %s/.nock/ "+
+							"and set [logging] db = \".nock/events.db\", or use the NockLock state directory with [logging] db = \"events.db\"",
+						root, root,
+					)
+				}
+				root := filepath.Clean(top)
 				return fmt.Errorf(
 					"logging.db %q sits directly in %s. Put it in a subdirectory (for example %q) "+
 						"or leave logging.db as a bare filename so the event log goes to NockLock's audit "+
 						"state directory outside the project, which is the recommended setting",
-					db, top, filepath.Join(Dir, filepath.Base(db)))
+					db, root, filepath.Join(Dir, filepath.Base(db)))
 			}
 		}
 		return nil

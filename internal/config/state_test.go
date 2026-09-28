@@ -424,11 +424,8 @@ func TestRelativeXDGStateHomeIsIgnored(t *testing.T) {
 	}
 }
 
-// TestLoadRejectsAuditLogDirectlyInProjectRoot: the fence protects an in-project
-// audit trail by withholding the grant on the root and granting each child
-// except the audit directory. With the log in the root itself there is nothing
-// to skip, so this is refused at config load rather than failing later while
-// building the ruleset.
+// TestLoadRejectsAuditLogDirectlyInProjectRoot verifies that a root-level log
+// fails closed with the same relocation instructions as wrap's symlink check.
 func TestLoadRejectsAuditLogDirectlyInProjectRoot(t *testing.T) {
 	project := resolvedTempDir(t)
 	nockDir := filepath.Join(project, ".nock")
@@ -443,7 +440,8 @@ func TestLoadRejectsAuditLogDirectlyInProjectRoot(t *testing.T) {
 
 	if _, err := Load(configPath); err == nil {
 		t.Fatal("expected an audit log directly in the project root to be rejected")
-	} else if !strings.Contains(err.Error(), "directly in") {
+	} else if !strings.Contains(err.Error(), "logging.db resolves to the project root") ||
+		!strings.Contains(err.Error(), `[logging] db = "events.db"`) {
 		t.Fatalf("expected a root-level audit log error, got: %v", err)
 	}
 }

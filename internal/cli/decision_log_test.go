@@ -164,12 +164,12 @@ func TestDecisionLogScannerStopsOnSinkError(t *testing.T) {
 // With no decision-log dir (non-netns), only the audit path is denied.
 func TestEgressChildDenyPaths(t *testing.T) {
 	projectRoot := t.TempDir()
-	// Audit dir distinct from the project root so auditDenyPath returns the dir.
+	// A valid audit DB lives below the project root, so its directory is denied.
 	dbPath := filepath.Join(projectRoot, ".nock", "events.db")
 
 	// netns path: decision-log dir present -> must be denied alongside the audit path.
 	decisionDir := t.TempDir()
-	got := egressChildDenyPaths(dbPath, projectRoot, decisionDir)
+	got := egressChildDenyPaths(dbPath, decisionDir)
 	if !containsPath(got, decisionDir) {
 		t.Errorf("netns deny list %v does not include the decision-log dir %q", got, decisionDir)
 	}
@@ -178,7 +178,7 @@ func TestEgressChildDenyPaths(t *testing.T) {
 	}
 
 	// non-netns path: no decision-log dir -> only the audit path is denied.
-	got = egressChildDenyPaths(dbPath, projectRoot, "")
+	got = egressChildDenyPaths(dbPath, "")
 	if len(got) != 1 {
 		t.Fatalf("non-netns deny list should hold exactly the audit path, got %v", got)
 	}
