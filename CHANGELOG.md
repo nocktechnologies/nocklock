@@ -29,6 +29,8 @@ All notable changes to NockLock will be documented in this file.
 
 ### Changed
 
+- Anvil security reviews use the signed Codex CLI on `codex-signed` macOS
+  runners, with a 15-minute review timeout and a 25-minute job timeout.
 - macOS Seatbelt root-write confinement no longer grants the fenced child
   write access to NockLock's audit state directory. The unfenced parent alone
   writes the event database, SQLite sidecars, and chain anchor; a macOS

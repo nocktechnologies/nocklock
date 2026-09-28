@@ -11,21 +11,31 @@ permissions:
 
 jobs:
   anvil-review:
-    # Trust gate: this job mounts the runner-wide shared Codex (ChatGPT Pro)
-    # credential and runs a model over attacker-controlled PR diff on a
-    # self-hosted runner. Only ever expose that credential to PRs that
-    # originate from a branch in THIS repo (never a fork) and are authored by a
-    # trusted collaborator. A fork PR or an outside contributor must never be
-    # able to trigger a run that provisions the shared session.
+    # Only expose Anvil's dedicated Codex credential to trusted, same-repo PRs.
     if: >-
       github.event.repository.private == true &&
       github.event.pull_request.draft == false &&
       github.event.pull_request.user.login != 'dependabot[bot]' &&
       github.event.pull_request.head.repo.full_name == github.repository &&
       contains(fromJSON('["OWNER","MEMBER","COLLABORATOR"]'), github.event.pull_request.author_association)
-    runs-on: [self-hosted, macOS, ARM64]
+    runs-on: [self-hosted, macOS, ARM64, codex-signed]
+    timeout-minutes: 25
 
     steps:
+      - name: Reclaim stale Anvil Codex copies
+        run: |
+          for stale_dir in "${RUNNER_TEMP}"/anvil-codex.*; do
+            [[ -d "${stale_dir}" && ! -L "${stale_dir}" ]] || continue
+            echo "::warning::Removing stale Anvil Codex copy: ${stale_dir}"
+            chflags -R nouchg "${stale_dir}" 2>/dev/null || true
+            chmod -RN "${stale_dir}" 2>/dev/null || true
+            chmod -R u+rwX "${stale_dir}" 2>/dev/null || true
+            if ! rm -rf "${stale_dir}" || [[ -e "${stale_dir}" ]]; then
+              echo "::error::Anvil runner could not remove a stale Codex copy; skipping the review."
+              exit 1
+            fi
+          done
+
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4
         with:
           fetch-depth: 0
@@ -34,142 +44,238 @@ jobs:
         id: shared-codex-auth
         run: |
           SHARED_AUTH_FILE="${HOME}/.codex/auth.json"
-          if [[ ! -f "${SHARED_AUTH_FILE}" ]]; then
-            echo "::error::Shared Codex auth file is missing at ${SHARED_AUTH_FILE}. Restore ChatGPT Pro auth on the self-hosted runner before running Anvil."
+          if [[ -f "${SHARED_AUTH_FILE}" ]]; then
+            echo "auth_present=true" >> "$GITHUB_OUTPUT"
+            shasum -a 256 "${SHARED_AUTH_FILE}" | awk '{print "auth_sha="$1}' >> "$GITHUB_OUTPUT"
+          else
+            echo "auth_present=false" >> "$GITHUB_OUTPUT"
+            echo "auth_sha=missing" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Locate signed Codex CLI
+        run: |
+          CODEX_CANDIDATES=(
+            "/Applications/ChatGPT.app/Contents/Resources/codex-cli/CodexCLI.app/Contents/MacOS/codex"
+            "/Applications/ChatGPT.app/Contents/Resources/codex"
+          )
+          CODEX_SOURCE=""
+          for candidate in "${CODEX_CANDIDATES[@]}"; do
+            if [[ -L "${candidate}" ]]; then
+              echo "::error::Codex CLI candidate is a symlink; refusing to run it."
+              exit 1
+            fi
+            if [[ -x "${candidate}" ]]; then
+              CODEX_SOURCE="${candidate}"
+              break
+            fi
+          done
+          if [[ -z "${CODEX_SOURCE}" ]]; then
+            echo "::error::Signed Codex CLI not found in ChatGPT.app (expected codex-cli/CodexCLI.app/Contents/MacOS/codex or Contents/Resources/codex). Install or update the OpenAI desktop app on this runner."
             exit 1
           fi
-          echo "auth_present=true" >> "$GITHUB_OUTPUT"
-          shasum -a 256 "${SHARED_AUTH_FILE}" | awk '{print "auth_sha="$1}' >> "$GITHUB_OUTPUT"
+          echo "CODEX_SOURCE=${CODEX_SOURCE}" >> "$GITHUB_ENV"
 
-      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020  # v4
-        with:
-          node-version: '20'
-
-      - name: Install Codex CLI
-        run: npm install -g @openai/codex@0.118.0
-
-      - name: Prepare isolated Codex home
+      - name: Prepare and verify dedicated Anvil Codex home
         run: |
-          CODEX_HOME="${RUNNER_TEMP}/anvil-codex-home-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+          CODEX_HOME="${HOME}/.codex-anvil"
+          if [[ -L "${CODEX_HOME}" ]]; then
+            echo "::error::Dedicated Anvil CODEX_HOME must not be a symlink."
+            exit 1
+          fi
           mkdir -p "${CODEX_HOME}"
           chmod 700 "${CODEX_HOME}"
+          ANVIL_AUTH_FILE="${CODEX_HOME}/auth.json"
+          if [[ ! -f "${ANVIL_AUTH_FILE}" ]]; then
+            echo "::error::Dedicated Anvil auth is missing at ${ANVIL_AUTH_FILE}. Configure Anvil Codex auth on the signed-codex runner."
+            exit 1
+          fi
+          if [[ -L "${ANVIL_AUTH_FILE}" ]]; then
+            echo "::error::Dedicated Anvil auth.json must not be a symlink."
+            exit 1
+          fi
+          if [[ ! -O "${ANVIL_AUTH_FILE}" ]]; then
+            echo "::error::Dedicated Anvil auth.json must be owned by the runner user."
+            exit 1
+          fi
+          if [[ ! -r "${ANVIL_AUTH_FILE}" || ! -w "${ANVIL_AUTH_FILE}" ]]; then
+            echo "::error::Dedicated Anvil auth must be readable and writable so OAuth token rotation can persist."
+            exit 1
+          fi
+          chmod 600 "${ANVIL_AUTH_FILE}"
           echo "CODEX_HOME=${CODEX_HOME}" >> "$GITHUB_ENV"
-
-      - name: Copy shared Codex auth into isolated home
-        run: |
-          SHARED_AUTH_FILE="${HOME}/.codex/auth.json"
-          if [[ ! -f "${SHARED_AUTH_FILE}" ]]; then
-            echo "::error::Shared Codex auth file is missing at ${SHARED_AUTH_FILE}. Restore ChatGPT Pro auth on the self-hosted runner before running Anvil."
-            exit 1
-          fi
-          cp "${SHARED_AUTH_FILE}" "${CODEX_HOME}/auth.json"
-          chmod 600 "${CODEX_HOME}/auth.json"
-
-      - name: Verify isolated Codex auth copy
-        run: |
-          if [[ ! -f "${CODEX_HOME}/auth.json" ]]; then
-            echo "::error::Shared Codex auth was not copied under CODEX_HOME."
-            exit 1
-          fi
-          SHARED_AUTH_FILE="${HOME}/.codex/auth.json"
-          SHARED_AUTH_SHA="$(shasum -a 256 "${SHARED_AUTH_FILE}" | awk '{print $1}')"
-          COPIED_AUTH_SHA="$(shasum -a 256 "${CODEX_HOME}/auth.json" | awk '{print $1}')"
-          if [[ "${COPIED_AUTH_SHA}" != "${{ steps.shared-codex-auth.outputs.auth_sha }}" ]]; then
-            echo "::error::Isolated Codex auth copy does not match the recorded shared auth."
-            exit 1
-          fi
-          if [[ "${SHARED_AUTH_SHA}" != "${{ steps.shared-codex-auth.outputs.auth_sha }}" ]]; then
-            echo "::error::Shared Codex auth changed while preparing isolated CODEX_HOME."
-            exit 1
-          fi
-          echo "Codex auth copied into isolated CODEX_HOME."
 
       - name: Run Codex security review
         id: anvil
+        timeout-minutes: 15
         env:
+          ANVIL_CODEX_MODEL: ${{ vars.ANVIL_CODEX_MODEL }}
+          ANVIL_DEFAULT_CODEX_MODEL: "gpt-5.5"
           PR_BASE_REF: ${{ github.event.pull_request.base.ref }}
           PR_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
           PR_NUMBER: ${{ github.event.pull_request.number }}
         run: |
-          set +e
-          # Codex 0.118 rejects --base + positional PROMPT together. Pre-compute
-          # the diff into a file and pass scope inside the prompt instead.
-          git fetch --no-tags origin "$PR_BASE_REF" >/dev/null 2>&1
+          set -e
+          trap 'rc=$?; echo "::error::review step aborted at line $LINENO (exit $rc)"' ERR
+
+          case "${CODEX_SOURCE}" in
+            */Contents/MacOS/codex) CODEX_BIN_REL="Contents/MacOS/codex" ;;
+            */Contents/Resources/codex) CODEX_BIN_REL="Contents/Resources/codex" ;;
+            *)
+              echo "::error::Codex CLI path '${CODEX_SOURCE}' is not inside the expected signed ChatGPT.app bundle."
+              exit 1
+              ;;
+          esac
+          CODEX_SOURCE_APP="${CODEX_SOURCE%"/${CODEX_BIN_REL}"}"
+          if [[ -L "${CODEX_SOURCE_APP}" ]]; then
+            echo "::error::ChatGPT.app Codex bundle must not be a symlink."
+            exit 1
+          fi
+
+          CODEX_DIR="$(mktemp -d "${RUNNER_TEMP}/anvil-codex.XXXXXX")"
+          trap 'chmod -R u+w "${CODEX_DIR}"; rm -rf "${CODEX_DIR}"' EXIT
+          trap 'exit 143' TERM
+          trap 'exit 130' INT
+          CODEX_APP="${CODEX_DIR}/$(basename "${CODEX_SOURCE_APP}")"
+          cp -R "${CODEX_SOURCE_APP}" "${CODEX_APP}"
+          if [[ ! -O "${CODEX_APP}" ]]; then
+            echo "::error::Copied Codex app must be owned by the Anvil runner."
+            exit 1
+          fi
+          CODEX_CONTENTS="${CODEX_APP}/Contents"
+          CODEX_BIN="${CODEX_APP}/${CODEX_BIN_REL}"
+          CODEX_BIN_DIR="$(dirname "${CODEX_BIN}")"
+          if [[ -L "${CODEX_APP}" || -L "${CODEX_CONTENTS}" || -L "${CODEX_BIN_DIR}" || -L "${CODEX_BIN}" ]]; then
+            echo "::error::Copied Codex app path contains a symlink; refusing to run it."
+            exit 1
+          fi
+          chmod -R a-w "${CODEX_APP}"
+          DEDICATED_AUTH_BEFORE="${CODEX_DIR}/dedicated-auth-before.json"
+          cp "${CODEX_HOME}/auth.json" "${DEDICATED_AUTH_BEFORE}"
+          chmod 400 "${DEDICATED_AUTH_BEFORE}"
+          SHARED_AUTH="${HOME}/.codex/auth.json"
+          SHARED_AUTH_BEFORE="${CODEX_DIR}/shared-auth-before.json"
+          if [[ -f "${SHARED_AUTH}" ]]; then
+            cp "${SHARED_AUTH}" "${SHARED_AUTH_BEFORE}"
+            chmod 400 "${SHARED_AUTH_BEFORE}"
+          fi
+          chmod 500 "${CODEX_DIR}"
+
+          OPENAI_TEAM_ID="2DC432GLL2"
+          if ! codesign --verify "${CODEX_BIN}"; then
+            echo "::error::Codex CLI signature verification failed."
+            exit 1
+          fi
+          TEAM_ID="$(codesign -dv --verbose=4 "${CODEX_BIN}" 2>&1 | awk -F= '/^TeamIdentifier=/ {print $2; exit}')"
+          if [[ "${TEAM_ID}" != "${OPENAI_TEAM_ID}" ]]; then
+            echo "::error::Codex CLI is signed by unexpected TeamIdentifier '${TEAM_ID:-missing}'; expected OpenAI ${OPENAI_TEAM_ID}."
+            exit 1
+          fi
+          if ! /usr/sbin/spctl -a -vv --type execute "${CODEX_APP}"; then
+            echo "::error::Codex CLI failed Gatekeeper assessment."
+            exit 1
+          fi
+          if ! SMOKE_OUTPUT="$("${CODEX_BIN}" --version 2>&1)"; then
+            echo "::error::Signed Codex CLI smoke test failed: ${SMOKE_OUTPUT:-no output}."
+            exit 1
+          fi
+          echo "codex smoke test OK: ${SMOKE_OUTPUT}"
+
+          if ! git fetch --no-tags origin "${PR_BASE_REF}"; then
+            echo "::error::Could not fetch base ref '${PR_BASE_REF}'; refusing to review."
+            exit 1
+          fi
           mkdir -p .anvil
-          git diff "origin/${PR_BASE_REF}...${PR_HEAD_SHA}" > .anvil/pr-diff.patch
-          DIFF_LINES=$(wc -l < .anvil/pr-diff.patch | tr -d ' ')
+          if ! git diff "origin/${PR_BASE_REF}...${PR_HEAD_SHA}" > .anvil/pr-diff.patch; then
+            echo "::error::Could not create the PR diff; refusing to review."
+            exit 1
+          fi
+          DIFF_LINES="$(wc -l < .anvil/pr-diff.patch | tr -d ' ')"
+          if [[ "${DIFF_LINES}" -eq 0 ]]; then
+            echo "::error::PR diff is empty; refusing to report a verdict without reviewing changes."
+            exit 1
+          fi
+
+          # This is a private repository, so checkout needs credentials to fetch
+          # the base ref. Remove them before Codex reads PR-controlled content.
+          git config --local --unset-all http.https://github.com/.extraheader || true
+
           PROMPT="Security-focused adversarial review of PR #${PR_NUMBER}.
 
           Diff scope: changes between origin/${PR_BASE_REF} and HEAD (${PR_HEAD_SHA}).
           Pre-computed diff file: .anvil/pr-diff.patch (${DIFF_LINES} lines).
-          Read that file first, then read the surrounding source for any region
-          you need full context on.
+          Read that file first, then read surrounding source as needed.
 
-          Check for: injection vulnerabilities (SQL, XSS, SSRF, command injection),
-          auth/authz bypasses, insecure data handling, hard-coded secrets, CSRF
-          issues, logic errors in security-critical paths. Report ALL findings
-          with file and line references. Be thorough and adversarial."
-          NO_COLOR=1 codex review \
-            -c model="o4-mini" \
-            -c 'sandbox_permissions=["workspace-read-access"]' \
-            "$PROMPT" \
-            > /tmp/anvil-output.txt 2>&1
-          CODEX_EXIT=$?
-          echo "codex_exit=$CODEX_EXIT" >> "$GITHUB_OUTPUT"
-          # Defense-in-depth: strip any shared Codex auth material from the
-          # captured output before it is reflected into a PR comment, in case a
-          # prompt-injection payload in the PR coerces the reviewer into echoing
-          # credential bytes. Never fails the job; a missing/unreadable auth
-          # file simply yields no redactions.
-          python3 - "${HOME}/.codex/auth.json" /tmp/anvil-output.txt <<'PY'
-          import json, sys
-          auth_path, out_path = sys.argv[1], sys.argv[2]
+          Check for injection, auth/authz bypasses, insecure data handling,
+          hard-coded secrets, CSRF, and logic errors in security-critical paths.
+          Report every finding with file and line references. Be adversarial."
+          MODEL_LABEL="${ANVIL_CODEX_MODEL:-${ANVIL_DEFAULT_CODEX_MODEL}}"
+          echo "model_label=${MODEL_LABEL}" >> "$GITHUB_OUTPUT"
+
+          CODEX_EXIT=0
+          NO_COLOR=1 "${CODEX_BIN}" review \
+            -c 'sandbox_mode="read-only"' \
+            -c "model=${MODEL_LABEL}" \
+            "${PROMPT}" > "${RUNNER_TEMP}/anvil-output.txt" 2>&1 || CODEX_EXIT=$?
+          echo "codex_exit=${CODEX_EXIT}" >> "$GITHUB_OUTPUT"
+
+          python3 - \
+            "${CODEX_DIR}/dedicated-auth-before.json" \
+            "${CODEX_HOME}/auth.json" \
+            "${CODEX_DIR}/shared-auth-before.json" \
+            "${HOME}/.codex/auth.json" \
+            "${RUNNER_TEMP}/anvil-output.txt" <<'PY'
+          import json
+          import sys
+
+          auth_paths, output_path = sys.argv[1:-1], sys.argv[-1]
           try:
-              with open(out_path, "r", errors="replace") as fh:
-                  data = fh.read()
+              with open(output_path, "r", errors="replace") as stream:
+                  output = stream.read()
           except OSError:
               sys.exit(0)
           secrets = set()
-          try:
-              with open(auth_path) as fh:
-                  auth = json.load(fh)
-          except Exception:
-              auth = None
-          def walk(node):
+
+          def collect(node):
               if isinstance(node, dict):
                   for value in node.values():
-                      walk(value)
+                      collect(value)
               elif isinstance(node, list):
                   for value in node:
-                      walk(value)
+                      collect(value)
               elif isinstance(node, str) and len(node) >= 8:
                   secrets.add(node)
-          walk(auth)
+
+          for auth_path in auth_paths:
+              try:
+                  with open(auth_path) as stream:
+                      collect(json.load(stream))
+              except (OSError, ValueError):
+                  pass
           for secret in sorted(secrets, key=len, reverse=True):
-              data = data.replace(secret, "[REDACTED-CODEX-AUTH]")
-          with open(out_path, "w") as fh:
-              fh.write(data)
-          sys.stderr.write("anvil: redacted %d shared-auth value(s) from output\n" % len(secrets))
+              output = output.replace(secret, "[REDACTED-CODEX-AUTH]")
+          with open(output_path, "w") as stream:
+              stream.write(output)
           PY
+          echo "model=${MODEL_LABEL}; codex exit=${CODEX_EXIT}"
+          REVIEW_MARKER="ANVIL_REVIEW_EOF_$(uuidgen | tr -d '-')"
           {
-            echo 'review<<ANVIL_REVIEW_EOF'
-            head -c 60000 /tmp/anvil-output.txt
-            echo 'ANVIL_REVIEW_EOF'
+            echo "review<<${REVIEW_MARKER}"
+            head -c 60000 "${RUNNER_TEMP}/anvil-output.txt"
+            printf '\n%s\n' "${REVIEW_MARKER}"
           } >> "$GITHUB_OUTPUT"
-          # Always exit 0 here so the comment-posting step runs. The final
-          # step re-surfaces the codex exit code as the job result.
-          exit 0
 
       - name: Post Anvil review comment
-        if: always()
+        if: always() && steps.anvil.outcome == 'success'
         uses: actions/github-script@f28e40c7f34bde8b3046d885e986cb6290c5673b  # v7
         env:
           ANVIL_REVIEW: ${{ steps.anvil.outputs.review }}
           ANVIL_EXIT: ${{ steps.anvil.outputs.codex_exit }}
+          ANVIL_MODEL: ${{ steps.anvil.outputs.model_label }}
         with:
           script: |
             const output = process.env.ANVIL_REVIEW || '';
             const exitCode = process.env.ANVIL_EXIT || '0';
+            const model = process.env.ANVIL_MODEL || 'gpt-5.5';
             const header = exitCode === '0'
               ? '## 🔨 Anvil Security Review (Codex)'
               : `## 🔨 Anvil Security Review (Codex) — FAILED (codex exit ${exitCode})`;
@@ -177,10 +283,10 @@ jobs:
               header,
               '',
               '```',
-              output || 'No output captured — verify shared ChatGPT Pro auth is present on the runner.',
+              output || 'No output captured — verify dedicated Anvil auth and the signed Codex app on the runner.',
               '```',
               '',
-              '*Adversarial security audit powered by OpenAI Codex o4-mini. Does not replace human review.*',
+              `*Adversarial security audit (${model}). Does not replace human review.*`,
             ].join('\n');
             await github.rest.issues.createComment({
               issue_number: context.issue.number,
@@ -190,7 +296,7 @@ jobs:
             });
 
       - name: Verify shared Codex auth untouched
-        if: always()
+        if: always() && steps.shared-codex-auth.outcome == 'success'
         env:
           AUTH_PRESENT_BEFORE: ${{ steps.shared-codex-auth.outputs.auth_present }}
           AUTH_SHA_BEFORE: ${{ steps.shared-codex-auth.outputs.auth_sha }}
@@ -215,26 +321,10 @@ jobs:
           fi
           echo "Shared Codex auth unchanged."
 
-      - name: Cleanup isolated Codex home
-        if: always()
-        run: |
-          case "${CODEX_HOME:-}" in
-            "${RUNNER_TEMP}/"*)
-              if [[ -d "${CODEX_HOME}" ]]; then
-                chmod -R u+rwX "${CODEX_HOME}" 2>/dev/null || true
-                rm -rf "${CODEX_HOME}"
-              fi
-              ;;
-            *)
-              echo "::error::Refusing to clean unexpected CODEX_HOME path: ${CODEX_HOME:-unset}"
-              exit 1
-              ;;
-          esac
-
       - name: Fail job if Codex errored
         if: steps.anvil.outputs.codex_exit != '0'
         env:
           CODEX_EXIT: ${{ steps.anvil.outputs.codex_exit }}
         run: |
-          echo "::error::Codex security review exited ${CODEX_EXIT} — see PR comment for captured output."
+          echo "::error::Codex security review exited ${CODEX_EXIT}; see the Anvil review comment for captured output."
           exit 1
