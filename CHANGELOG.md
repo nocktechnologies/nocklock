@@ -29,9 +29,10 @@ All notable changes to NockLock will be documented in this file.
 
 ### Changed
 
-- Anvil security reviews now admit `nock-fleet[bot]` by exact login while
-  retaining the same-repository and existing association gates. Reviews pass
-  only on `ANVIL_NO_FINDINGS`; finding lines and unparseable output fail closed.
+- Anvil security reviews now admit `nock-fleet[bot]` by exact login on
+  same-repo heads while preserving the private-repository association gate for
+  other authors. Reviews pass only on `ANVIL_NO_FINDINGS`; finding lines and
+  unparseable output fail closed.
   Redacted output is retained outside runner temp with 0700 directories and
   0600 files, keeping the newest 50 per repository. Codex runs in a bounded
   process group so timeout cleanup can remove its temporary copies.

@@ -11,15 +11,17 @@ permissions:
 
 jobs:
   anvil-review:
-    # Only expose Anvil's dedicated Codex credential to trusted, same-repo PRs.
+    # A public-repo exception is limited to the exact fleet bot on a same-repo head.
     if: >-
-      github.event.repository.private == true &&
       github.event.pull_request.draft == false &&
       github.event.pull_request.user.login != 'dependabot[bot]' &&
       github.event.pull_request.head.repo.full_name == github.repository &&
       (
         github.event.pull_request.user.login == 'nock-fleet[bot]' ||
-        contains(fromJSON('["OWNER","MEMBER","COLLABORATOR"]'), github.event.pull_request.author_association)
+        (
+          github.event.repository.private == true &&
+          contains(fromJSON('["OWNER","MEMBER","COLLABORATOR"]'), github.event.pull_request.author_association)
+        )
       )
     runs-on: [self-hosted, macOS, ARM64, codex-signed]
     timeout-minutes: 25
