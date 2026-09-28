@@ -1059,6 +1059,17 @@ namespace NockProbe {
     struct STARTUPINFOEX { public STARTUPINFO StartupInfo; public IntPtr lpAttributeList; }
     [StructLayout(LayoutKind.Sequential)]
     struct PROCESS_INFORMATION { public IntPtr hProcess, hThread; public int dwProcessId, dwThreadId; }
+    // JOBOBJECT_EXTENDED_LIMIT_INFORMATION with BasicLimitInformation and IoInfo inlined
+    // (same layout on x86 and x64: the IoInfo ulongs realign exactly as the nested struct pads).
+    [StructLayout(LayoutKind.Sequential)]
+    struct JOBOBJECT_EXTENDED_LIMIT_INFORMATION {
+      public long PerProcessUserTimeLimit, PerJobUserTimeLimit; public uint LimitFlags;
+      public UIntPtr MinimumWorkingSetSize, MaximumWorkingSetSize; public uint ActiveProcessLimit;
+      public UIntPtr Affinity; public uint PriorityClass, SchedulingClass;
+      public ulong ReadOperationCount, WriteOperationCount, OtherOperationCount,
+                   ReadTransferCount, WriteTransferCount, OtherTransferCount;
+      public UIntPtr ProcessMemoryLimit, JobMemoryLimit, PeakProcessMemoryUsed, PeakJobMemoryUsed;
+    }
 
     [DllImport("userenv.dll", CharSet = CharSet.Unicode)]
     static extern int CreateAppContainerProfile(string name, string display, string desc, IntPtr caps, uint capCount, out IntPtr sid);
@@ -1086,7 +1097,7 @@ namespace NockProbe {
     static extern IntPtr CreateJobObject(IntPtr sa, string name);
     [DllImport("kernel32.dll", SetLastError = true)] static extern bool AssignProcessToJobObject(IntPtr job, IntPtr proc);
     [DllImport("kernel32.dll", SetLastError = true)] static extern bool TerminateJobObject(IntPtr job, uint code);
-    [DllImport("kernel32.dll", SetLastError = true)] static extern bool SetInformationJobObject(IntPtr job, int cls, IntPtr info, uint len);
+    [DllImport("kernel32.dll", SetLastError = true)] static extern bool SetInformationJobObject(IntPtr job, int cls, ref JOBOBJECT_EXTENDED_LIMIT_INFORMATION info, uint len);
     [DllImport("kernel32.dll", SetLastError = true)] static extern uint ResumeThread(IntPtr thread);
     [DllImport("kernel32.dll", SetLastError = true)] static extern IntPtr OpenProcess(uint access, bool inherit, int pid);
     [DllImport("advapi32.dll", SetLastError = true)] static extern bool OpenProcessToken(IntPtr proc, uint access, out IntPtr tok);
@@ -1228,18 +1239,13 @@ namespace NockProbe {
       }
     }
 
-    // Sets JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE (0x2000) through a zeroed
-    // JOBOBJECT_EXTENDED_LIMIT_INFORMATION (144 bytes on x64, 112 on x86; LimitFlags sits at
-    // offset 16, after the two LARGE_INTEGER time limits, on both). False on failure, with
-    // GetLastError intact for the caller.
+    // Sets JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE (0x2000), every other limit left zero.
+    // False on failure, with GetLastError intact for the caller.
     static bool SetKillOnClose(IntPtr job) {
-      int len = IntPtr.Size == 8 ? 144 : 112;
-      IntPtr info = Marshal.AllocHGlobal(len);
-      try {
-        for (int i = 0; i < len; i++) Marshal.WriteByte(info, i, 0);
-        Marshal.WriteInt32(info, 16, 0x2000);
-        return SetInformationJobObject(job, 9, info, (uint)len);          // JobObjectExtendedLimitInformation
-      } finally { Marshal.FreeHGlobal(info); }
+      JOBOBJECT_EXTENDED_LIMIT_INFORMATION li = new JOBOBJECT_EXTENDED_LIMIT_INFORMATION();
+      li.LimitFlags = 0x2000;
+      return SetInformationJobObject(job, 9, ref li,                     // JobObjectExtendedLimitInformation
+        (uint)Marshal.SizeOf(typeof(JOBOBJECT_EXTENDED_LIMIT_INFORMATION)));
     }
 
     // A live process's token: AppContainer flag, package SID, integrity-level SID
@@ -1443,6 +1449,13 @@ $settings = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoi
 Register-ScheduledTask -TaskName $taskName -Action $action -Principal $principal -Settings $settings -ErrorAction Stop | Out-Null
 $taskCreated = $true
 
+# Stops the task and WAITS (up to 30 s) until it is no longer Running; returns its state.
+function Stop-LimitedTask {
+  Stop-ScheduledTask -TaskName $taskName -ErrorAction SilentlyContinue
+  for ($i = 0; ($st = (Get-ScheduledTask -TaskName $taskName).State) -eq 'Running' -and $i -lt 30; $i++) { Start-Sleep 1 }
+  $st
+}
+
 # Runs one _limited.ps1 phase under a fresh invocation id ($limitedInv, "<phase>-<GUID>")
 # and returns that invocation's log lines ONLY if it completed (its own <id>.done present)
 # AND its own token is proven limited: Medium Mandatory Level (S-1-16-8192) present, High
@@ -1460,11 +1473,9 @@ function Invoke-LimitedPhase {
   $script:limitedInv = $inv
   $done  = Join-Path $limitedDir "$inv.done"
   $token = Join-Path $limitedDir "$inv.token.txt"
-  # A timed-out earlier phase may still be running: stop it and WAIT until it is gone
-  # before handing over the new request, so no old instance can pick it up.
-  Stop-ScheduledTask -TaskName $taskName -ErrorAction SilentlyContinue
-  for ($i = 0; ($st = (Get-ScheduledTask -TaskName $taskName).State) -eq 'Running' -and $i -lt 30; $i++) { Start-Sleep 1 }
-  if ($st -eq 'Running') {
+  # A timed-out earlier phase may still be running: stop it before handing over the new
+  # request, so no old instance can pick it up.
+  if ((Stop-LimitedTask) -eq 'Running') {
     $script:limitedFault = "an earlier instance of $taskName is still running 30 s after Stop-ScheduledTask"
     return $null
   }
@@ -1477,8 +1488,7 @@ function Invoke-LimitedPhase {
     # late phase cannot keep adding exemptions / profiles / ETW sessions while the caller's
     # fallback or teardown runs. Probe 3's container child dies with it (kill-on-close job).
     # Always $null, even if .done lands after the stop: a timed-out phase is never scored.
-    Stop-ScheduledTask -TaskName $taskName -ErrorAction SilentlyContinue
-    for ($i = 0; ($st = (Get-ScheduledTask -TaskName $taskName).State) -eq 'Running' -and $i -lt 30; $i++) { Start-Sleep 1 }
+    $st = Stop-LimitedTask
     $script:limitedFault = "timeout: phase $Phase ($inv) wrote no .done within $TimeoutSec s (task not started — console session logged off?); task stopped, state $st"
     # A task that will not stop must not run alongside anything else: fail every later phase.
     if ($st -eq 'Running') { $script:limitedDead = $script:limitedFault }
