@@ -955,14 +955,33 @@ or `Assert-AccessDenied` crosses into it — every "from INSIDE the container"
 snippet below assumes they have been re-established there. `run-probe.ps1` does this
 by writing a bootstrap `_inside.ps1` into `$probeRoot` (which it ACLs to the
 package SID, like any other granted path) that re-derives all paths from
-`$PSScriptRoot` and re-defines `Get-BaseHResult` and `Assert-AccessDenied`:
+`$PSScriptRoot`, re-defines `Get-BaseHResult`, `Assert-AccessDenied` and
+`Write-ProcessIdentity`, and runs the phase named by `-Phase`. The whole of `_inside.ps1`:
 
 ```powershell
+param([string]$Phase)
 $probeRoot = $PSScriptRoot
 $runId     = (Split-Path -Leaf $probeRoot) -replace '^nocklock-probe-',''
 $moniker   = "nocklock-probe-$runId"
 $out       = Get-Item (Join-Path $probeRoot 'out')
+<Get-BaseHResult, Assert-AccessDenied and Write-ProcessIdentity, copied verbatim from the scaffold above>
+# The launcher returns only the exit code, so every line the phase emits (curl's stderr
+# included) is appended to $out\_inside-<phase>.log for the outer session to read. An
+# unknown phase or a body that throws leaves an ERROR line, never an empty log.
+& {
+  try {
+    switch ($Phase) {
+      '1'     { <Probe 1's inside body, below> }
+      default { throw "unknown phase '$Phase'" }
+    }
+  } catch {
+    'ERROR: phase={0} type={1} HResult={2} {3}' -f $Phase, $_.Exception.GetBaseException().GetType().Name, (Get-BaseHResult $_), $_.Exception.GetBaseException().Message
+  }
+} *>&1 | ForEach-Object { "$_" } | Out-File -FilePath (Join-Path $out.FullName "_inside-$Phase.log") -Append -Encoding utf8
 ```
+
+`run-probe.ps1` assembles Probe 1 only; the other inside probes (4a/4b, 5, 6, 10, 11)
+add their own `-Phase` arm when they are assembled.
 
 Probes that need additional paths (e.g. Probe 4's `$project`, `$sentinel`) derive
 them from `$probeRoot` the same way. Each inside-container step runs as:
@@ -981,8 +1000,8 @@ picks its half unambiguously. Read the inside-container snippets as the *body* o
 that bootstrap, not as commands typed into the outer shell.
 
 Because the launcher returns only the exit code, not the child's stdout, `_inside.ps1` tees
-its verdict lines to `$out\_inside-<phase>.log` (`Start-Transcript` on entry, or
-`Out-File -Append` per line) and the outer session reads those logs to score each
+its verdict lines to `$out\_inside-<phase>.log` (the whole phase piped through
+`Out-File -Append`, above) and the outer session reads those logs to score each
 inside probe. Every "from INSIDE the container" verdict below — Probe 4's Phase 4a
 `Assert-AccessDenied` results, Probe 10's spawn, and the rest — reaches the operator
 this way; a container that just exits with nothing captured is a setup-vs-result
@@ -1000,6 +1019,15 @@ stamps (`[Environment]::OSVersion`, build number, edition, architecture, and
 whether the session is elevated). That `run-probe.ps1` is where the shared
 `$probeRoot` / `$moniker` / `Assert-AccessDenied` scaffold and the teardown blocks
 below belong — the reader should not hand-assemble them.
+
+[`docs/probes/n10825/run-probe.ps1`](../probes/n10825/run-probe.ps1) assembles Probes 1,
+2 and 3 from the blocks below, verbatim, inside one `try { … } finally { <global
+teardown> }`; its [README](../probes/n10825/README.md) has the operator commands. It
+writes `output.txt` (environment stamps, plus the BEFORE and AFTER listing of loopback
+exemptions, probe ports, `nocklock-probe-*` tasks and `nocklock-*` AppContainer profiles)
+into the directory it is run from, never under `$probeRoot`, which the teardown deletes.
+Placeholders such as `<Probe 3 body, below>` are expanded there with the named block; a
+change to any block here must land in `run-probe.ps1` in the same commit.
 
 **Box setup** (DISPOSABLE-BOX ONLY — run on a throwaway VM, never on the
 desktop):
@@ -1355,6 +1383,7 @@ try {
 }
 $sid                                               # record this SID string; the icacls probes need it
 icacls $launcherDll /grant "*${sid}:(R)"          # Probe 10(a) loads it inside the container
+icacls (Join-Path $probeRoot '_inside.ps1') /grant "*${sid}:(R)"   # every inside launch runs it
 # One SID-writable drop dir, created and ACL'd from the OUTER shell (which holds
 # WRITE_DAC; the Low-IL container does not). Inside-container steps hand their verdict
 # logs and any value back out through it — every inside probe's `_inside-<phase>.log`
@@ -1457,6 +1486,7 @@ try {
     }
     'probe3'  { <Probe 3 body, below> }
     'probe7'  { <Probe 7 body, below> }
+    default   { throw "unknown phase '$phase'" }   # never a silent no-op the runner would accept
   }
 } catch {
   $e = $_.Exception.GetBaseException()
@@ -1574,8 +1604,11 @@ if (Invoke-LimitedPhase 'control') {
   "LIMITED-TOKEN: SETUP-FAULT — $limitedFault; run aborted"
   Stop-RunIfStuck
 } else {
+  # An unproven token aborts the run HERE, before any probe makes a machine-wide change
+  # (listeners, exemption): the teardown then has only the task and the profile to remove.
   $script:limitedDead = $limitedFault
-  "LIMITED-TOKEN: FAIL — $limitedFault; Probe 1's exemption step, Probe 3 and Probe 7 will record SETUP-FAULT"
+  "LIMITED-TOKEN: FAIL — $limitedFault; run aborted before any probe"
+  throw "SETUP-FAULT: run aborted - limited-token positive control failed"
 }
 ```
 
@@ -1669,9 +1702,38 @@ $verdict1x = if (-not $preClean) {
   }
 "VERDICT(1-exempt): $verdict1x"
 
-# then, inside a ZERO-capability container (desktop path: the launcher from the
-# elevated shell, [NockProbe.AC]::Run($sid, @(), <_inside.ps1 -Phase 1>, ...)). Capture the verbatim curl error text and
-# exit code for each — the verdict is read from the recorded output, not inferred:
+# then, inside a ZERO-capability container: `_inside.ps1 -Phase 1` (its body is the next
+# block), launched by the launcher from the elevated shell. Never run those curls in this
+# shell: an outer curl answers nothing about the container. The launcher returns only the
+# exit code, so the curl text and exit codes come back through $out\_inside-1.log and are
+# printed verbatim: the verdict is read from the recorded output, not inferred.
+$launch1 = $null
+try {
+  $launch1 = 'exit=' + [NockProbe.AC]::Run($sid, @(), ('powershell -NoProfile -ExecutionPolicy Bypass -File "' +
+    (Join-Path $probeRoot '_inside.ps1') + '" -Phase 1'), 300000)
+} catch {
+  $launch1 = 'threw {0} HResult={1} {2}' -f $_.Exception.GetBaseException().GetType().Name, (Get-BaseHResult $_), $_.Exception.GetBaseException().Message
+}
+"inside(1) launch: $launch1"
+$log1 = Get-Content (Join-Path $out.FullName '_inside-1.log') -ErrorAction SilentlyContinue
+$log1 | ForEach-Object { "inside(1): $_" }
+# A launch that did not return an exit code (denied, untracked, timed out) is never scored,
+# even when a partial log came back.
+if ($launch1 -notlike 'exit=*' -or -not $log1) {
+  "VERDICT(1): SETUP-FAULT - inside launch: $launch1; _inside-1.log lines: $(@($log1).Count); not scored"
+} else {
+  "VERDICT(1): read the inside(1) lines above against the outside controls: 8899 MUST succeed, example.com MUST fail, 9999 against its outside control (see the doc's Probe 1 rules)"
+}
+
+# Probe 1's own teardown (see Teardown below), before the next probe runs.
+$job8899, $job9999 | Stop-Job -PassThru | Remove-Job
+Stop-VerifiedProcess -IdentityFile (Join-Path $out.FullName 'own-listener.txt')
+```
+
+The `_inside.ps1` Phase 1 body (INSIDE the container; `$probeRoot` and `$out` come from
+the bootstrap). Capture the verbatim curl error text and exit code for each:
+
+```powershell
 curl.exe -sS -m 5 http://127.0.0.1:8899/ 2>&1; "8899 exit=$LASTEXITCODE"  # MUST succeed, or Phase 1 is dead
 curl.exe -sS -m 5 https://example.com/   2>&1; "example exit=$LASTEXITCODE"  # MUST fail (Block Outbound Default Rule)
 curl.exe -sS -m 5 http://127.0.0.1:9999/ 2>&1; "9999 exit=$LASTEXITCODE"  # unrelated loopback port: EXPECTED reachable
@@ -1749,6 +1811,9 @@ the session:
 
 ```powershell
 CheckNetIsolation.exe LoopbackExempt -s      # entry present in this session?
+# Probe 2 computes nothing of its own: it restates Probe 1's one verdict next to the -s read.
+if ($verdict1x) { "VERDICT(2): from VERDICT(1-exempt) - $verdict1x; this run's entry listed by -s: $(Test-ExemptListed)" }
+else            { "VERDICT(2): not scored - Probe 1 did not reach its exemption step" }
 ```
 
 Report Probe 1's `VERDICT(1-exempt)` line (it carries the limited-token exit code)
