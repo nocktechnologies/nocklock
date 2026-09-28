@@ -241,14 +241,11 @@ func inspectConfigDigestHistory(logger *logging.Logger, chain *logging.ChainVeri
 	history := configDigestHistory{}
 	authenticatedPrune := chain != nil && chain.PrunedAt != nil && chain.SigState == "authentic"
 	pendingDigests := make(map[string]int)
-	matchedDigestSessions := make(map[string]bool)
-	legacyStarts := make(map[string]bool)
 	legacySessions := make(map[string]bool)
 	missingSessions := make(map[string]bool)
 	var previousDigest string
 	for _, event := range events {
-		switch event.EventType {
-		case logging.EventConfigDigest:
+		if event.EventType == logging.EventConfigDigest {
 			record, err := decodeConfigDigest(&event)
 			if err != nil {
 				return configDigestHistory{}, fmt.Errorf("decode config.digest audit row %d: %w", event.ID, err)
@@ -270,49 +267,30 @@ func inspectConfigDigestHistory(logger *logging.Logger, chain *logging.ChainVeri
 				history.LastChange = &changedAt
 			}
 			previousDigest = record.Digest
-
-		case logging.EventSessionStart:
-			if event.SessionID == "" {
-				continue
-			}
-			if history.Rows == 0 {
-				legacyStarts[event.SessionID] = true
-				legacySessions[event.SessionID] = true
-				continue
-			}
-			if pendingDigests[event.SessionID] == 0 {
-				matchedDigestSessions[event.SessionID] = false
-				missingSessions[event.SessionID] = true
-				continue
-			}
-			pendingDigests[event.SessionID]--
-			matchedDigestSessions[event.SessionID] = true
-
-		default:
-			if event.SessionID == "" {
-				continue
-			}
-			if history.Rows == 0 {
-				legacySessions[event.SessionID] = true
-				continue
-			}
-			if matchedDigestSessions[event.SessionID] {
-				// Teardown events such as proxy_stop are logged after session_end,
-				// so a verified digest remains valid for the session's later rows.
-				continue
-			}
-			if legacyStarts[event.SessionID] {
-				legacySessions[event.SessionID] = true
-				continue
-			}
-			if pendingDigests[event.SessionID] > 0 {
-				// Setup events can be logged after config.digest and before
-				// session_start. The pending digest already covers this session,
-				// including a setup failure that never reaches session_start.
-				continue
-			}
-			missingSessions[event.SessionID] = true
+			continue
 		}
+
+		if event.EventType != logging.EventSessionStart {
+			if event.SessionID != "" && history.Rows == 0 {
+				legacySessions[event.SessionID] = true
+			}
+			continue
+		}
+		if history.Rows == 0 {
+			if event.SessionID != "" {
+				legacySessions[event.SessionID] = true
+			}
+			continue
+		}
+		sessionID := event.SessionID
+		if sessionID == "" {
+			sessionID = "(empty)"
+		}
+		if pendingDigests[event.SessionID] == 0 {
+			missingSessions[sessionID] = true
+			continue
+		}
+		pendingDigests[event.SessionID]--
 	}
 	history.LegacySessions = len(legacySessions)
 	for sessionID := range missingSessions {

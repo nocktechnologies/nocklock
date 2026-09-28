@@ -478,6 +478,10 @@ func TestRunAuditVerifyTreatsPreAdoptionSessionsAsLegacy(t *testing.T) {
 		logger.Close()
 		t.Fatal(err)
 	}
+	if err := logger.Log(logging.Event{EventType: logging.EventSessionStart, Category: "session", Detail: "empty legacy ID"}); err != nil {
+		logger.Close()
+		t.Fatalf("log legacy start with empty session ID: %v", err)
+	}
 	cfg, err := config.Load(configPath)
 	if err != nil {
 		logger.Close()
@@ -565,9 +569,17 @@ func TestRunAuditVerifyAllowsSetupEventsWhileConfigDigestIsPending(t *testing.T)
 			name:          "session without digest after adoption",
 			digestSession: "adoption",
 			events: []logging.Event{
-				{EventType: logging.EventProxyStart, SessionID: "missing"},
+				{EventType: logging.EventSessionStart, SessionID: "missing"},
 			},
 			wantMissing: "missing",
+		},
+		{
+			name:          "session start with empty ID after adoption",
+			digestSession: "adoption",
+			events: []logging.Event{
+				{EventType: logging.EventSessionStart},
+			},
+			wantMissing: "(empty)",
 		},
 	}
 
@@ -909,6 +921,98 @@ func TestRunAuditVerifyAllowsOnlyTheFirstRetainedDigestPredecessorAfterPrune(t *
 				t.Fatalf("runAuditVerify did not reject the later broken digest link: %v\n%s", err, output.String())
 			}
 		})
+	}
+}
+
+func TestRunAuditVerifyIgnoresRetainedRowsForPrunedSession(t *testing.T) {
+	project, configPath := writeProjectConfig(t, `db = "events.db"`)
+	withWorkingDir(t, project)
+	keyRoot := filepath.Join(t.TempDir(), "xdg-config")
+	t.Setenv("XDG_CONFIG_HOME", keyRoot)
+	dbPath := resolvedAuditDB(t, project)
+	logger, err := logging.NewLogger(dbPath, project, logging.WithSigning(filepath.Join(keyRoot, "nocklock", "signing-ed25519.key")))
+	if err != nil {
+		t.Fatalf("NewLogger: %v", err)
+	}
+	cfg, err := config.Load(configPath)
+	if err != nil {
+		logger.Close()
+		t.Fatal(err)
+	}
+
+	logDigest := func(sessionID string, timestamp time.Time, previous string) string {
+		t.Helper()
+		record, err := newConfigDigestRecord(cfg, configPath, dbPath, "proxy")
+		if err != nil {
+			t.Fatalf("new config digest: %v", err)
+		}
+		record.PreviousDigest = previous
+		detail, err := json.Marshal(record)
+		if err != nil {
+			t.Fatalf("marshal config digest: %v", err)
+		}
+		if err := logger.Log(logging.Event{
+			Timestamp: timestamp,
+			EventType: logging.EventConfigDigest,
+			Category:  "config",
+			Detail:    string(detail),
+			SessionID: sessionID,
+		}); err != nil {
+			t.Fatalf("log config digest: %v", err)
+		}
+		return record.Digest
+	}
+
+	now := time.Now().UTC()
+	oldDigest := logDigest("old", now.Add(-49*time.Hour), "")
+	if err := logger.Log(logging.Event{
+		Timestamp: now.Add(-48 * time.Hour),
+		EventType: logging.EventSessionStart,
+		Category:  "session",
+		Detail:    "old session start",
+		SessionID: "old",
+	}); err != nil {
+		logger.Close()
+		t.Fatalf("log old session start: %v", err)
+	}
+	logDigest("new", now.Add(-23*time.Hour), oldDigest)
+	if err := logger.Log(logging.Event{
+		Timestamp: now.Add(-22 * time.Hour),
+		EventType: logging.EventSessionStart,
+		Category:  "session",
+		Detail:    "new session start",
+		SessionID: "new",
+	}); err != nil {
+		logger.Close()
+		t.Fatalf("log newer session start: %v", err)
+	}
+	if err := logger.Log(logging.Event{
+		Timestamp: now,
+		EventType: logging.EventSessionEnd,
+		Category:  "session",
+		Detail:    "old session end",
+		SessionID: "old",
+	}); err != nil {
+		logger.Close()
+		t.Fatalf("log old session end: %v", err)
+	}
+
+	pruned, err := logger.Prune(24 * time.Hour)
+	if err != nil {
+		logger.Close()
+		t.Fatalf("Prune: %v", err)
+	}
+	if pruned != 2 {
+		logger.Close()
+		t.Fatalf("Prune removed %d events, want old digest and old start", pruned)
+	}
+	if err := logger.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	var output strings.Builder
+	if err := runAuditVerify(context.Background(), &output, ""); err != nil {
+		t.Fatalf("runAuditVerify rejected retained rows for a pruned session: %v\n%s", err, output.String())
 	}
 }
 

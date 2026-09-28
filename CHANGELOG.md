@@ -19,7 +19,8 @@ All notable changes to NockLock will be documented in this file.
 
 - Every `wrap` signs a `config.digest` row containing the canonical resolved
   policy and prior digest. Changed policy fields warn before the child starts;
-  `verify --audit` reports the history and rejects a session missing that row.
+  `verify --audit` reports the history and requires each retained post-adoption
+  `session_start` to have its own preceding `config.digest` row.
 - Linux `filesystem.allow_rw` entries grant explicit read-write access while
   existing `filesystem.allow` entries remain read-only. `nocklock verify` keeps
   its temporary probe files outside granted paths, including `/tmp`.
