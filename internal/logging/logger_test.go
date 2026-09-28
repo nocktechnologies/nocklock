@@ -204,7 +204,7 @@ func TestLog_AllEventTypes(t *testing.T) {
 		EventNetworkBlocked, EventNetworkPassed,
 		EventProxyStart, EventProxyStop, EventNetworkError,
 		EventSessionStart, EventSessionEnd,
-		EventConfigLoaded,
+		EventConfigLoaded, EventConfigDigest,
 	}
 
 	for _, et := range allTypes {

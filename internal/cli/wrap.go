@@ -136,6 +136,13 @@ var wrapCmd = &cobra.Command{
 			pushAnchorOffBox(os.Stderr, anchor, logger.SigningPublicKey())
 		}()
 
+		// Record the resolved policy before any child setup or launch. The config
+		// file lives inside the project root by default, so the fenced child can
+		// change it for a later run; this signed row makes that change visible.
+		if err := recordConfigDigest(logger, &effectiveCfg, configPath, dbPath, sessionID, resolvedNetworkFenceMode(wrapFlags), cmd.ErrOrStderr()); err != nil {
+			return fmt.Errorf("could not record the effective config digest: %w\nThe audit trail is required — refusing to run unrecorded", err)
+		}
+
 		// logEvent records one event. logger is guaranteed non-nil here (the open
 		// above fails closed), so no nil guard is needed.
 		logEvent := func(eventType logging.EventType, category, detail string, blocked bool) {
@@ -906,6 +913,13 @@ func effectiveWrapConfig(cfg *config.Config, flags WrapFlags) config.Config {
 	// CLI flag is additive: if either config-file or flag permits private ranges, allow them.
 	effective.Network.AllowPrivateRanges = cfg.Network.AllowPrivateRanges || flags.AllowPrivateRanges
 	return effective
+}
+
+func resolvedNetworkFenceMode(flags WrapFlags) string {
+	if flags.NetFence == "netns" {
+		return "netns"
+	}
+	return "proxy"
 }
 
 func composeChildArgv(args []string, prefixes ...[]string) []string {
