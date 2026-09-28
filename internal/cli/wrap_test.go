@@ -1,6 +1,8 @@
 package cli
 
 import (
+	"context"
+	"fmt"
 	"io"
 	"os"
 	"path/filepath"
@@ -234,35 +236,6 @@ func TestWrapFailsClosedWhenEventLogCannotOpen(t *testing.T) {
 	}
 }
 
-func TestAuditDenyPaths(t *testing.T) {
-	root := t.TempDir()
-	nock := filepath.Join(root, ".nock")
-	if err := os.MkdirAll(nock, 0o755); err != nil {
-		t.Fatal(err)
-	}
-
-	// Common case: db in a .nock subdir -> deny the whole audit dir (covers the
-	// db and blocks rename/delete of the log).
-	db := filepath.Join(nock, "events.db")
-	if got := auditDenyPaths(db, root); len(got) != 1 || got[0] != nock {
-		t.Errorf("subdir case: auditDenyPaths = %q, want [%q]", got, nock)
-	}
-
-	// A database directly in the project root must protect every adjacent audit
-	// file without denying the project root itself.
-	dbInRoot := filepath.Join(root, "events.db")
-	got := auditDenyPaths(dbInRoot, root)
-	want := logging.AuditFilePaths(dbInRoot)
-	if len(got) != len(want) {
-		t.Fatalf("root case: auditDenyPaths = %q, want %q", got, want)
-	}
-	for i := range want {
-		if got[i] != want[i] {
-			t.Errorf("root case: auditDenyPaths[%d] = %q, want %q", i, got[i], want[i])
-		}
-	}
-}
-
 // TestLinuxEnforcementModePreferredFailsClosed verifies empty/preferred/required
 // all resolve to required, while off remains off.
 func TestLinuxEnforcementModePreferredFailsClosed(t *testing.T) {
@@ -276,27 +249,171 @@ func TestLinuxEnforcementModePreferredFailsClosed(t *testing.T) {
 	}
 }
 
-// A symlinked project root must be recognized as the root via symlink resolution
-// (macOS /tmp -> /private/tmp). Without it, a string compare would see the audit
-// dir and the symlinked root as different and DENY THE WHOLE ROOT, breaking the
-// agent. db sits directly in the real root; root is given as a symlink to it.
-func TestAuditDenyPathsSymlinkedRoot(t *testing.T) {
-	realRoot := t.TempDir()
-	link := filepath.Join(t.TempDir(), "link")
-	if err := os.Symlink(realRoot, link); err != nil {
-		t.Skipf("symlinks unsupported: %v", err)
-	}
-	db := filepath.Join(realRoot, "events.db")
-	got := auditDenyPaths(db, link)
-	want := logging.AuditFilePaths(db)
-	if len(got) != len(want) {
-		t.Fatalf("symlinked root not recognized: got %q, want %q", got, want)
-	}
-	for i := range want {
-		if got[i] != want[i] {
-			t.Errorf("symlinked root auditDenyPaths[%d] = %q, want %q", i, got[i], want[i])
+const wrapChildMarkerArg = "nocklock-test-child-marker="
+
+// TestWrapChildLaunchMarker is invoked as a child by the wrap audit-path tests.
+func TestWrapChildLaunchMarker(t *testing.T) {
+	for _, arg := range os.Args {
+		if marker, ok := strings.CutPrefix(arg, wrapChildMarkerArg); ok {
+			if err := os.WriteFile(marker, []byte("launched"), 0o600); err != nil {
+				t.Fatalf("write child launch marker: %v", err)
+			}
+			return
 		}
 	}
+}
+
+func TestWrapRefusesProjectRootAuditDBBeforeLaunchingChild(t *testing.T) {
+	projectRoot := resolvedTempDir(t)
+	dbPath := filepath.Join(projectRoot, "events.db")
+	marker, err := runWrapWithAuditDB(t, projectRoot, dbPath)
+	if err == nil || !strings.Contains(err.Error(), "logging.db resolves to the project root") {
+		t.Fatalf("wrap error = %v, want a project-root logging.db refusal", err)
+	}
+	if !strings.Contains(err.Error(), `[logging] db = ".nock/events.db"`) ||
+		!strings.Contains(err.Error(), `[logging] db = "events.db"`) {
+		t.Fatalf("refusal does not name both logging.db fixes: %v", err)
+	}
+	if _, statErr := os.Stat(marker); !os.IsNotExist(statErr) {
+		t.Fatalf("child launch marker exists or could not be checked (%v); wrap must refuse before launching the child", statErr)
+	}
+}
+
+func TestWrapRefusesSymlinkedProjectRootAuditDBBeforeLaunchingChild(t *testing.T) {
+	projectRoot := resolvedTempDir(t)
+	dbPath := filepath.Join(projectRoot, "events.db")
+	if err := os.WriteFile(dbPath, nil, 0o600); err != nil {
+		t.Fatalf("create root audit DB: %v", err)
+	}
+	if err := os.Symlink(".", filepath.Join(projectRoot, "logs")); err != nil {
+		t.Skipf("symlinks unavailable: %v", err)
+	}
+	auditDir, err := filepath.EvalSymlinks(filepath.Join(projectRoot, "logs"))
+	if err != nil {
+		t.Fatalf("resolve symlinked audit directory: %v", err)
+	}
+	resolvedRoot, err := filepath.EvalSymlinks(projectRoot)
+	if err != nil {
+		t.Fatalf("resolve project root: %v", err)
+	}
+	if filepath.Clean(auditDir) != filepath.Clean(resolvedRoot) {
+		t.Fatalf("symlinked audit directory resolves to %q, want project root %q", auditDir, resolvedRoot)
+	}
+
+	marker, err := runWrapWithAuditDB(t, projectRoot, filepath.Join("logs", "events.db"))
+	if err == nil || !strings.Contains(err.Error(), "logging.db resolves to the project root") {
+		t.Fatalf("wrap error = %v, want a project-root logging.db refusal", err)
+	}
+	if _, statErr := os.Stat(marker); !os.IsNotExist(statErr) {
+		t.Fatalf("child launch marker exists or could not be checked (%v); wrap must refuse before launching the child", statErr)
+	}
+	assertRootAuditRefusalLogged(t, dbPath)
+}
+
+func TestWrapAcceptsAuditDBInProjectNockDirectory(t *testing.T) {
+	projectRoot := resolvedTempDir(t)
+	nockDir := filepath.Join(projectRoot, config.Dir)
+	if err := os.MkdirAll(nockDir, 0o700); err != nil {
+		t.Fatalf("create .nock directory: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(nockDir, "events.db"), nil, 0o600); err != nil {
+		t.Fatalf("create .nock audit DB: %v", err)
+	}
+	marker, err := runWrapWithAuditDB(t, projectRoot, filepath.Join(config.Dir, "events.db"))
+	assertWrapChildLaunched(t, marker, err)
+}
+
+func TestWrapAcceptsAuditDBInStateDirectory(t *testing.T) {
+	projectRoot := resolvedTempDir(t)
+	marker, err := runWrapWithAuditDB(t, projectRoot, "events.db")
+	if err != nil {
+		t.Fatalf("wrap rejected state-directory audit DB: %v", err)
+	}
+	assertChildMarker(t, marker)
+	configPath := filepath.Join(projectRoot, config.Dir, config.File)
+	cfg, err := config.Load(configPath)
+	if err != nil {
+		t.Fatalf("load config: %v", err)
+	}
+	dbPath, _, err := config.ResolveDBPath(cfg, configPath)
+	if err != nil {
+		t.Fatalf("resolve state-directory audit DB: %v", err)
+	}
+	stateRoot := os.Getenv("XDG_STATE_HOME")
+	if rel, err := filepath.Rel(stateRoot, dbPath); err != nil || rel == ".." || strings.HasPrefix(rel, ".."+string(os.PathSeparator)) {
+		t.Fatalf("audit DB %q is outside configured state root %q", dbPath, stateRoot)
+	}
+}
+
+func runWrapWithAuditDB(t *testing.T, projectRoot, db string) (string, error) {
+	t.Helper()
+	t.Setenv("XDG_STATE_HOME", trustedStateRoot(t))
+	contents := fmt.Sprintf(`[filesystem]
+root = ""
+
+[network]
+allow_all = true
+
+[syscall]
+enforcement = "off"
+
+[logging]
+db = %q
+`, db)
+	writeTestConfig(t, projectRoot, contents)
+	withWorkingDir(t, projectRoot)
+	child, err := os.Executable()
+	if err != nil {
+		t.Fatalf("locate test binary: %v", err)
+	}
+	marker := filepath.Join(t.TempDir(), "child-launched")
+	cmd := &cobra.Command{}
+	cmd.SetContext(context.Background())
+	err = wrapCmd.RunE(cmd, []string{
+		"--", child, "-test.run=^TestWrapChildLaunchMarker$", wrapChildMarkerArg + marker,
+	})
+	return marker, err
+}
+
+func assertWrapChildLaunched(t *testing.T, marker string, err error) {
+	t.Helper()
+	if err != nil {
+		t.Fatalf("wrap rejected an accepted audit DB location: %v", err)
+	}
+	assertChildMarker(t, marker)
+}
+
+func assertChildMarker(t *testing.T, marker string) {
+	t.Helper()
+	data, err := os.ReadFile(marker)
+	if err != nil {
+		t.Fatalf("read child launch marker: %v", err)
+	}
+	if string(data) != "launched" {
+		t.Fatalf("child launch marker = %q, want %q", data, "launched")
+	}
+}
+
+func assertRootAuditRefusalLogged(t *testing.T, dbPath string) {
+	t.Helper()
+	logger, err := logging.NewLogger(dbPath, filepath.Dir(dbPath))
+	if err != nil {
+		t.Fatalf("open root audit log: %v", err)
+	}
+	defer logger.Close()
+	rows, err := logger.Query(logging.QueryOptions{})
+	if err != nil {
+		t.Fatalf("read root audit log: %v", err)
+	}
+	for _, row := range rows {
+		if row.EventType == logging.EventFileBlocked && row.Blocked && strings.Contains(row.Detail, "refused root-level logging.db") {
+			if _, err := os.Stat(logging.DefaultAnchorPath(dbPath)); err != nil {
+				t.Fatalf("root audit refusal has no chain anchor: %v", err)
+			}
+			return
+		}
+	}
+	t.Fatalf("root audit log has no blocked refusal event: %+v", rows)
 }
 
 func TestFindTrustedLibFenceFSRejectsProjectRelativeLibrary(t *testing.T) {

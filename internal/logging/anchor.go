@@ -194,20 +194,6 @@ func DefaultAnchorPath(dbPath string) string {
 	return filepath.Join(filepath.Dir(dbPath), "chain-anchor.json")
 }
 
-// AuditFilePaths returns the paths next to dbPath where the local audit trail
-// can be written: the database, SQLite journal/WAL sidecars, and chain anchor.
-// Keep this inventory with the logging writers so filesystem fences can
-// protect the same files the audit layer creates.
-func AuditFilePaths(dbPath string) []string {
-	return []string{
-		dbPath,
-		dbPath + "-wal",
-		dbPath + "-shm",
-		dbPath + "-journal",
-		DefaultAnchorPath(dbPath),
-	}
-}
-
 // MarshalAnchor renders an anchor as compact JSON (no trailing newline).
 func MarshalAnchor(a *Anchor) ([]byte, error) {
 	return json.Marshal(a)

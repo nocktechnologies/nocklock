@@ -456,6 +456,12 @@ the filename does not hide an existing default-name chain: if both the old
 default location and the newly configured destination are candidates, NockLock
 refuses to guess which chain is authoritative and names both paths. Likewise,
 an existing legacy `.nock/events.db` remains visible after a rename.
+`nocklock wrap` refuses to start if the resolved `logging.db` directory is the
+project root: Landlock cannot protect the database's sidecars and chain anchor
+while granting that root. Move the database, sidecars, and chain anchor
+together under `.nock/` with
+`[logging] db = ".nock/events.db"`, or use the NockLock state directory with
+`[logging] db = "events.db"`.
 `nocklock doctor` warns if an absolute path lands back inside
 `filesystem.root`, where the agent can reach it.
 

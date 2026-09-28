@@ -64,25 +64,23 @@ type FenceConfig struct {
 	AllowRWPaths []string
 	DenyPaths    []string
 
-	// ProtectedRootSubdir changes how the root is granted when audit files live
-	// inside Root. For a direct child directory, the fence grants each existing
-	// root child except that directory. When it equals Root, DenyPaths identify
-	// the protected direct-child files, which are skipped while other existing
-	// root children keep their access. In both cases Root itself is not granted,
-	// so the child cannot create or remove entries directly in Root.
+	// ProtectedRootSubdir, when set, is a directory INSIDE Root that must not
+	// become writable — in practice a legacy in-project audit directory. It
+	// changes how the root is granted: instead of one rule on Root, the fence
+	// grants each of Root's existing children and skips this one, so the child
+	// keeps its existing access but cannot create or remove entries directly in
+	// Root itself.
 	//
 	// That trade is forced, not chosen. Landlock resolves an access by walking
 	// UPWARD from the accessed file and allowing as soon as any ancestor rule
 	// grants it, so a rule on Root cannot be narrowed by a rule underneath it:
-	// granting Root would grant the protected audit data too. Leave it empty
-	// whenever the audit state lives outside Root, which is the default, and the
-	// root is granted as one hierarchy.
+	// granting Root would grant this directory too. Leave it empty whenever the
+	// audit state lives outside Root, which is the default, and the root is
+	// granted as one hierarchy.
 	//
-	// A protected subdirectory must be a DIRECT child of Root: skipping one
-	// entry protects only that entry, so a directory further down would be
-	// reached through the grant on the child above it. When this field equals
-	// Root, at least one direct-child DenyPath is required. Rule generation
-	// refuses other shapes rather than pretend they are protected.
+	// It must be a DIRECT child of Root: skipping one entry protects only that
+	// entry, so a directory further down would be reached through the grant on
+	// the child above it. Rule generation refuses rather than pretend otherwise.
 	//
 	// Landlock-only. It shapes the kernel ruleset and is deliberately absent
 	// from Serialize, because the LD_PRELOAD interposer and the macOS Seatbelt
