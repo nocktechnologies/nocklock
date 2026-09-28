@@ -53,6 +53,10 @@ func TestLandlockProtectsRootAuditSidecars(t *testing.T) {
 			t.Fatalf("audit location changed during test: (%q, %q)", resolvedDB, resolvedProject)
 		}
 		cfg.Filesystem.Root = project
+		// Keep unrelated host paths out of this focused ruleset: CI may not have
+		// the default ~/.claude allow path, and neither it nor /tmp is needed by
+		// the project-root audit enforcement probe.
+		cfg.Filesystem.Allow = nil
 		cfg.Filesystem.Deny = append(cfg.Filesystem.Deny, auditDenyPaths(dbPath, project)...)
 		resolved, err := fsfence.ProcessConfig(cfg.Filesystem)
 		if err != nil {
