@@ -1024,7 +1024,8 @@ below belong — the reader should not hand-assemble them.
 2 and 3 from the blocks below, verbatim, inside one `try { … } finally { <global
 teardown> }`; its [README](../probes/n10825/README.md) has the operator commands. It
 writes `output.txt` (environment stamps, plus the BEFORE and AFTER listing of loopback
-exemptions, probe ports, `nocklock-probe-*` tasks and `nocklock-*` AppContainer profiles)
+exemptions, probe ports, `nocklock-probe-*` tasks, `nocklock-*`/`agent-escape-*` AppContainer
+profiles and `%TEMP%\nocklock-probe-*` probe roots)
 into the directory it is run from, never under `$probeRoot`, which the teardown deletes.
 Placeholders such as `<Probe 3 body, below>` are expanded there with the named block; a
 change to any block here must land in `run-probe.ps1` in the same commit.
@@ -1637,6 +1638,7 @@ $script:job9999 = Start-Job { python -m http.server 9999 --bind 127.0.0.1 --dire
 # terminal A - POSITIVE CONTROLS from OUTSIDE the container: poll each listener
 # up to 10 s (1 s intervals) to confirm it is live before reading inside verdicts.
 # If a listener never answers, record SETUP-FAULT — the inside verdict is unscored.
+$outsideLive = @{}                   # per port; VERDICT(1) reads it
 foreach ($port in @(8899, 9999)) {
   $up = $false
   for ($i = 0; $i -lt 10; $i++) {
@@ -1644,6 +1646,7 @@ foreach ($port in @(8899, 9999)) {
     if ($LASTEXITCODE -eq 0) { $up = $true; break }
     Start-Sleep 1
   }
+  $outsideLive[$port] = $up
   if ($up) { "outside $port -> live" }
   else     { "outside $port -> SETUP-FAULT (listener not ready after 10 s)" }
 }
@@ -1716,17 +1719,30 @@ try {
 "inside(1) launch: $launch1"
 $log1 = Get-Content (Join-Path $out.FullName '_inside-1.log') -ErrorAction SilentlyContinue
 $log1 | ForEach-Object { "inside(1): $_" }
-# A launch that did not return an exit code (denied, untracked, timed out) is never scored,
-# even when a partial log came back.
-if ($launch1 -notlike 'exit=*' -or -not $log1) {
-  "VERDICT(1): SETUP-FAULT - inside launch: $launch1; _inside-1.log lines: $(@($log1).Count); not scored"
-} else {
-  "VERDICT(1): read the inside(1) lines above against the outside controls: 8899 MUST succeed, example.com MUST fail, 9999 against its outside control (see the doc's Probe 1 rules)"
-}
+$exempt1 = Test-ExemptListed        # read BEFORE Probe 1's teardown, like everything scored below
 
 # Probe 1's own teardown (see Teardown below), before the next probe runs.
 $job8899, $job9999 | Stop-Job -PassThru | Remove-Job
 Stop-VerifiedProcess -IdentityFile (Join-Path $out.FullName 'own-listener.txt')
+
+# Nothing is scored unless the launch returned an exit code (not denied, untracked or timed
+# out) with a log, BOTH outside listeners answered, and this run's exemption is listed: an
+# inside curl that failed against a dead listener or a missing exemption is a setup fault.
+$unscored1 = @()
+if ($launch1 -notlike 'exit=*' -or -not $log1) { $unscored1 += "inside launch: $launch1, _inside-1.log lines: $(@($log1).Count)" }
+foreach ($port in @(8899, 9999)) { if (-not $outsideLive[$port]) { $unscored1 += "outside $port listener never answered" } }
+if (-not $exempt1) { $unscored1 += "this run's loopback exemption is not listed" }
+$inside8899 = @(@($log1) -cmatch '^8899 exit=')
+if ($log1 -and $inside8899.Count -ne 1) { $unscored1 += "_inside-1.log holds $($inside8899.Count) '8899 exit=' lines, not 1" }
+if ($unscored1.Count) {
+  "VERDICT(1): SETUP-FAULT - $($unscored1 -join '; '); not scored"
+} elseif ($inside8899[0] -cne '8899 exit=0') {
+  # The doc's stop rule: the first curl failing means Phase 1 is dead; do not run the rest.
+  "VERDICT(1): PHASE 1 DEAD - the zero-capability container could not reach the live 8899 listener ($($inside8899 -join '; ')); remaining probes not run"
+  throw 'Probe 1: Phase 1 dead (8899 unreachable from the container); run stopped as the doc requires'
+} else {
+  "VERDICT(1): 8899 reached; read example.com (MUST fail) and 9999 (against its outside control) from the inside(1) lines above, per the doc's Probe 1 rules"
+}
 ```
 
 The `_inside.ps1` Phase 1 body (INSIDE the container; `$probeRoot` and `$out` come from

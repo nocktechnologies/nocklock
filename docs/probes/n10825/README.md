@@ -22,6 +22,8 @@ assembled yet, and on `-Mode Desktop` it refuses the DISPOSABLE-BOX ONLY probes 
 - `python` and `curl.exe` on `PATH` (Probe 1). Nothing is installed or downloaded in Desktop mode.
 - Ports 8899, 9999 and 9998 free (else Probe 1 records SETUP-FAULT and is not run).
 - Run it in the foreground and let it finish: the global teardown runs in a `finally`.
+  Do not press Ctrl+C (see "If the run was interrupted").
+- 64-bit `powershell.exe` (the default). The script refuses a 32-bit host.
 
 ## Operator commands
 
@@ -65,7 +67,7 @@ assembled yet, and on `-Mode Desktop` it refuses the DISPOSABLE-BOX ONLY probes 
 edition, architecture, PowerShell version, user, `elevated=`), then the BEFORE and AFTER
 state listings: loopback exemptions, listeners on 8899/9999/9998, `nocklock-probe-*`
 scheduled tasks, `nocklock-*` / `agent-escape-*` AppContainer profiles (registry
-mappings and package folders) and whether `$probeRoot` exists. Then one `AFTER==BEFORE`
+mappings and package folders) and every `%TEMP%\nocklock-probe-*` probe root. Then one `AFTER==BEFORE`
 or `AFTER!=BEFORE` line per category, and the final `RUN:` line.
 
 The transcript carries the verdicts: `LAUNCHER-ENV:`, `LIMITED-TOKEN:`,
@@ -76,8 +78,32 @@ The transcript carries the verdicts: `LAUNCHER-ENV:`, `LIMITED-TOKEN:`,
   `SETUP-FAULT: Probe 5a requires ...` line concerns a probe this run does not execute.
 - Exit code 0 and `RUN: COMPLETE` means every probe that ran is recorded and the machine
   state is back to BEFORE. Exit code 1 means `RUN: FAILED`, with the reason on that line.
-  Exit code 2 means the probe selection was refused and nothing was changed.
+  Exit code 2 means the run was refused and nothing on the machine was changed.
+- `VERDICT(1): PHASE 1 DEAD` means the container could not reach the live 8899 listener.
+  As the doc requires, the run stops there (`RUN: FAILED - aborted`) and teardown still runs.
 - `TEARDOWN: SETUP-FAULT` means the limited-token task would not stop. The run then keeps
   the task, the probe root, the profiles and the exemption, and prints each by exact name
   with `RECOVERY` commands. Run those by hand once the task reads Ready or Disabled; until
   then it is a failed run.
+
+## If the run was interrupted
+
+A Ctrl+C, a dropped SSH session or a killed `powershell.exe` can end the run before its
+teardown finishes. Take `run_id` from `output.txt` and, in an elevated PowerShell, remove
+this run's state by exact name. Stop the task first, and run the rest only once it reads
+Ready or Disabled:
+
+```powershell
+$runId = '<run_id from output.txt>'
+Stop-ScheduledTask -TaskName "nocklock-probe-limited-$runId"; (Get-ScheduledTask -TaskName "nocklock-probe-limited-$runId").State
+Unregister-ScheduledTask -TaskName "nocklock-probe-limited-$runId" -Confirm:$false
+CheckNetIsolation.exe LoopbackExempt -d "-n=nocklock-probe-$runId"
+$probeRoot = Join-Path $env:TEMP "nocklock-probe-$runId"
+[void][Reflection.Assembly]::Load([IO.File]::ReadAllBytes("$probeRoot\_launcher.dll"))
+foreach ($n in "nocklock-probe-$runId", "nocklock-p3-$runId") { '{0} -> 0x{1:X8}' -f $n, [NockProbe.AC]::DeleteProfile($n) }
+Remove-Item -Recurse -Force $probeRoot
+```
+
+Stop any `python` still listening on 8899, 9999 or 9998 only after checking that its
+command line serves `$probeRoot`
+(`Get-CimInstance Win32_Process -Filter "Name='python.exe'" | Select ProcessId, CommandLine`).

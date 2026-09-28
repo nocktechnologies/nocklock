@@ -27,30 +27,36 @@ param(
   [string[]]$Probes = @('1', '2', '3')
 )
 
-# --- Probe selection: refuse before anything is created -------------------------------
+# --- output.txt: environment stamps and the BEFORE/AFTER state -------------------------
+# Lives in the current directory, NOT under $probeRoot (the teardown deletes that).
+# Rewritten first, so a refused run never leaves an earlier run's output.txt behind.
+# Every line also goes to stdout, so the transcript carries it too.
+$outputTxt = Join-Path (Get-Location).Path 'output.txt'
+Set-Content -Path $outputTxt -Value '# NockLock N10825 Windows probes (run-probe.ps1)' -Encoding UTF8
+function Write-Evidence { process { $_; $_ | Out-File -FilePath $outputTxt -Append -Encoding utf8 } }
+
+# --- Refusals: before anything on the machine is touched -------------------------------
 # `-File run-probe.ps1 -Probes 1,2,3` binds one string '1,2,3', hence the split.
 $probeList = @()
 foreach ($p in @($Probes -split ',').Trim()) {
-  if ($p -notmatch '^(1[01]|[1-9])$') { "REFUSED: -Probes entry '$p' is not a probe number 1-11. Nothing was changed."; exit 2 }
+  if ($p -notmatch '^(1[01]|[1-9])$') { "REFUSED: -Probes entry '$p' is not a probe number 1-11. Nothing was changed." | Write-Evidence; exit 2 }
   $probeList += [int]$p
 }
 $disposableOnly = @{ 8 = 'installs user-scope packages'; 9 = 'disables the firewall' }   # doc: Probe classification
 foreach ($p in $probeList) {
   if ($Mode -eq 'Desktop' -and $disposableOnly.ContainsKey($p)) {
-    "REFUSED: Probe $p is DISPOSABLE-BOX ONLY ($($disposableOnly[$p])); never on the desktop. Nothing was changed."; exit 2
+    "REFUSED: Probe $p is DISPOSABLE-BOX ONLY ($($disposableOnly[$p])); never on the desktop. Nothing was changed." | Write-Evidence; exit 2
   }
-  if (@(1, 2, 3) -notcontains $p) { "REFUSED: Probe $p is not assembled into this run-probe.ps1 (Probes 1, 2, 3). Nothing was changed."; exit 2 }
+  if (@(1, 2, 3) -notcontains $p) { "REFUSED: Probe $p is not assembled into this run-probe.ps1 (Probes 1, 2, 3). Nothing was changed." | Write-Evidence; exit 2 }
 }
 if ($probeList -contains 2 -and $probeList -notcontains 1) {
-  "REFUSED: Probe 2 is scored from Probe 1's VERDICT(1-exempt); pass -Probes 1,2. Nothing was changed."; exit 2
+  "REFUSED: Probe 2 is scored from Probe 1's VERDICT(1-exempt); pass -Probes 1,2. Nothing was changed." | Write-Evidence; exit 2
 }
-
-# --- output.txt: environment stamps and the BEFORE/AFTER state -------------------------
-# Lives in the current directory, NOT under $probeRoot (the teardown deletes that).
-# Every line also goes to stdout, so the transcript carries it too.
-$outputTxt = Join-Path (Get-Location).Path 'output.txt'
-Set-Content -Path $outputTxt -Value '# NockLock N10825 Windows probes (run-probe.ps1)' -Encoding UTF8
-function Write-Evidence { process { $_; $_ | Out-File -FilePath $outputTxt -Append -Encoding utf8 } }
+# Stop-VerifiedProcess matches Process.Path, which a 32-bit host reads as empty for a
+# 64-bit process: the identity check would then never match and a listener would be left.
+if ([Environment]::Is64BitOperatingSystem -and -not [Environment]::Is64BitProcess) {
+  "REFUSED: 32-bit PowerShell on 64-bit Windows; run the 64-bit powershell.exe. Nothing was changed." | Write-Evidence; exit 2
+}
 
 # Everything this run could leave behind, listed from the machine (not from this run's
 # variables) so a leftover from an earlier run shows up in BEFORE too.
@@ -69,7 +75,8 @@ function Get-ProbeState {
                    @(Get-ChildItem (Join-Path $env:LOCALAPPDATA 'Packages') -Directory -ErrorAction SilentlyContinue |
                      Where-Object { $_.Name -like 'nocklock-*' -or $_.Name -like 'agent-escape-*' } |
                      ForEach-Object { "folder:$($_.Name)" }) | Sort-Object -Unique)
-    probeRoot  = @("$probeRoot exists=$(Test-Path $probeRoot)")
+    probeRoots = @(Get-ChildItem $env:TEMP -Directory -Filter 'nocklock-probe-*' -ErrorAction SilentlyContinue |
+                   ForEach-Object { $_.FullName } | Sort-Object)
   }
 }
 function Write-State([string]$When, $State) {
@@ -111,7 +118,8 @@ Test-Path $probeRoot
 New-Item -ItemType Directory -Path $probeRoot -ErrorAction Stop | Out-Null
 
 # From here on the probe root is this run's own, so the global teardown may delete it.
-# It runs in the finally, whatever happens in between (a throw, an abort, Ctrl+C).
+# It runs in the finally after a throw or an abort. Do NOT press Ctrl+C: output from a
+# finally on a stopped pipeline can end the teardown early (README: interrupted runs).
 $runError = $null
 $exitCode = 1
 try {
@@ -790,6 +798,7 @@ function Write-ProcessIdentity {
       # terminal A - POSITIVE CONTROLS from OUTSIDE the container: poll each listener
       # up to 10 s (1 s intervals) to confirm it is live before reading inside verdicts.
       # If a listener never answers, record SETUP-FAULT — the inside verdict is unscored.
+      $outsideLive = @{}                   # per port; VERDICT(1) reads it
       foreach ($port in @(8899, 9999)) {
         $up = $false
         for ($i = 0; $i -lt 10; $i++) {
@@ -797,6 +806,7 @@ function Write-ProcessIdentity {
           if ($LASTEXITCODE -eq 0) { $up = $true; break }
           Start-Sleep 1
         }
+        $outsideLive[$port] = $up
         if ($up) { "outside $port -> live" }
         else     { "outside $port -> SETUP-FAULT (listener not ready after 10 s)" }
       }
@@ -869,17 +879,30 @@ function Write-ProcessIdentity {
       "inside(1) launch: $launch1"
       $log1 = Get-Content (Join-Path $out.FullName '_inside-1.log') -ErrorAction SilentlyContinue
       $log1 | ForEach-Object { "inside(1): $_" }
-      # A launch that did not return an exit code (denied, untracked, timed out) is never scored,
-      # even when a partial log came back.
-      if ($launch1 -notlike 'exit=*' -or -not $log1) {
-        "VERDICT(1): SETUP-FAULT - inside launch: $launch1; _inside-1.log lines: $(@($log1).Count); not scored"
-      } else {
-        "VERDICT(1): read the inside(1) lines above against the outside controls: 8899 MUST succeed, example.com MUST fail, 9999 against its outside control (see the doc's Probe 1 rules)"
-      }
+      $exempt1 = Test-ExemptListed        # read BEFORE Probe 1's teardown, like everything scored below
 
       # Probe 1's own teardown (see Teardown below), before the next probe runs.
       $job8899, $job9999 | Stop-Job -PassThru | Remove-Job
       Stop-VerifiedProcess -IdentityFile (Join-Path $out.FullName 'own-listener.txt')
+
+      # Nothing is scored unless the launch returned an exit code (not denied, untracked or timed
+      # out) with a log, BOTH outside listeners answered, and this run's exemption is listed: an
+      # inside curl that failed against a dead listener or a missing exemption is a setup fault.
+      $unscored1 = @()
+      if ($launch1 -notlike 'exit=*' -or -not $log1) { $unscored1 += "inside launch: $launch1, _inside-1.log lines: $(@($log1).Count)" }
+      foreach ($port in @(8899, 9999)) { if (-not $outsideLive[$port]) { $unscored1 += "outside $port listener never answered" } }
+      if (-not $exempt1) { $unscored1 += "this run's loopback exemption is not listed" }
+      $inside8899 = @(@($log1) -cmatch '^8899 exit=')
+      if ($log1 -and $inside8899.Count -ne 1) { $unscored1 += "_inside-1.log holds $($inside8899.Count) '8899 exit=' lines, not 1" }
+      if ($unscored1.Count) {
+        "VERDICT(1): SETUP-FAULT - $($unscored1 -join '; '); not scored"
+      } elseif ($inside8899[0] -cne '8899 exit=0') {
+        # The doc's stop rule: the first curl failing means Phase 1 is dead; do not run the rest.
+        "VERDICT(1): PHASE 1 DEAD - the zero-capability container could not reach the live 8899 listener ($($inside8899 -join '; ')); remaining probes not run"
+        throw 'Probe 1: Phase 1 dead (8899 unreachable from the container); run stopped as the doc requires'
+      } else {
+        "VERDICT(1): 8899 reached; read example.com (MUST fail) and 9999 (against its outside control) from the inside(1) lines above, per the doc's Probe 1 rules"
+      }
     }
   }
   if ($probeList -contains 2) {
