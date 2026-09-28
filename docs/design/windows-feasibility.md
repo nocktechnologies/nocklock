@@ -1111,6 +1111,18 @@ namespace NockProbe {
       if (!ok) Marshal.ThrowExceptionForHR(unchecked((int)0x80070000) | Marshal.GetLastWin32Error());
     }
 
+    // Run() throws this — never Check()'s HRESULT_FROM_WIN32 shape — when CreateProcess
+    // already succeeded and the job-object step failed afterward: that is this harness
+    // failing to track a child it already started, not a denial of the launch itself. Left
+    // at the CLR default HResult (0x80131500), which cannot collide with an
+    // HRESULT_FROM_WIN32(err) value (always 0x8007xxxx), so callers can tell "the launch
+    // was denied" from "the launch worked but our bookkeeping didn't" by type, not by
+    // reading the same access-denied HResult two different ways.
+    public class JobAssignException : Exception {
+      public JobAssignException(int win32Error)
+        : base("job object assignment failed after CreateProcess succeeded; Win32 error " + win32Error) { }
+    }
+
     // CreateAppContainerProfile with no capabilities; returns the package SID string.
     // Throws if the profile already exists: with a GUID moniker that is a bug, not a profile to adopt.
     public static string CreateProfile(string name) {
@@ -1213,7 +1225,7 @@ namespace NockProbe {
           if (job == IntPtr.Zero || !AssignProcessToJobObject(job, pi.hProcess)) {
             int err = Marshal.GetLastWin32Error();
             TerminateProcess(pi.hProcess, 1);                               // never let an untracked child run
-            Marshal.ThrowExceptionForHR(unchecked((int)0x80070000) | err);
+            throw new JobAssignException(err);                             // setup fault, not a launch denial
           }
           ResumeThread(pi.hThread);
           if (WaitForSingleObject(pi.hProcess, (uint)timeoutMs) != 0) {
@@ -1449,8 +1461,12 @@ try {
 } catch {
   $e = $_.Exception.GetBaseException()
   # $step (set by a phase body before each call) says WHICH call failed, so a denial on
-  # a setup step is never read as the answer to the probe's question.
-  ('ERROR: step={0} HResult=0x{1:X8} {2}' -f $step, $e.HResult, $e.Message) | Out-File $log -Append -Encoding utf8
+  # a setup step is never read as the answer to the probe's question. type= is recorded
+  # alongside HResult so a JobAssignException (Run() succeeded at CreateProcess but failed
+  # to job-track the child) is never read by its HResult alone: that value is the CLR
+  # default (0x80131500), not HRESULT_FROM_WIN32, but the type name is what the scoring
+  # below actually keys on.
+  ('ERROR: step={0} type={1} HResult=0x{2:X8} {3}' -f $step, $e.GetType().Name, $e.HResult, $e.Message) | Out-File $log -Append -Encoding utf8
 } finally {
   # Completion sentinel, written LAST: the outer session never scores a half-written log.
   Set-Content -Path (Join-Path $lim "$inv.done") -Value 'done'
@@ -1801,9 +1817,17 @@ $env3 = "container " + (Test-Redirected $e3 $ac3)
 $p3err = (@($p3) -match '^ERROR:') -join '; '
 if (-not $p3) {
   "VERDICT(3): SETUP-FAULT - $limitedFault; not scored"
-} elseif ($p3 | Select-String -Pattern '^ERROR: step=(createprofile|run) HResult=0x80070005') {
+} elseif ($p3 | Select-String -Pattern '^ERROR: step=run type=JobAssignException') {
+  # CreateProcess succeeded; only the job-tracking step after it failed. That is this
+  # harness failing to keep its own bookkeeping, not the AppContainer launch being denied,
+  # so it must never fall into the FAILS UNELEVATED arm below even though Run() also
+  # threw from this same $step.
+  "VERDICT(3): SETUP-FAULT - $p3err; not scored"
+} elseif ($p3 | Select-String -Pattern '^ERROR: step=(createprofile|run) .*HResult=0x80070005') {
   # CreateProfile or Run itself was DENIED under the limited token: the answer is "needs admin".
-  # A denial on grant is a setup problem and falls through to INDETERMINATE.
+  # A denial on grant is a setup problem and falls through to INDETERMINATE. `.*` between
+  # step= and HResult= tolerates the type= field (or any future field) landing between them
+  # instead of silently stopping matching the day the log format grows a column.
   "VERDICT(3): FAILS UNELEVATED - $p3err"
 } elseif (-not ($p3 | Select-String -SimpleMatch 'launch=OK')) {
   # Any other failure (grant, a Run timeout, ...) is not a denial. A launcher that did not
@@ -2247,7 +2271,13 @@ if (-not $verdictA) {
     $curlRc = [NockProbe.AC]::Run($s2, @('S-1-15-3-1'), 'curl.exe -sS -m 5 https://example.com/', 30000)
   } catch {
     $e = $_.Exception.GetBaseException(); $h = Get-BaseHResult $_
-    if ($h -eq '0x80070005') {
+    if ($e -is [NockProbe.AC+JobAssignException]) {
+      # CreateProcess succeeded (the container accepted the launch); only this harness's
+      # own job-tracking step failed afterward. That is a setup fault, never a containment
+      # verdict, and it must be checked before the HResult compare below: a job-assign
+      # failure can carry the very same Win32 ACCESS_DENIED that a real launch denial does.
+      $verdictA = "VERDICT(a): SETUP-FAULT - job assignment failed after CreateProcess succeeded ($($e.Message)); not scored"
+    } elseif ($h -eq '0x80070005') {
       $verdictA = "VERDICT(a): CONTAINED - profile created, but launching into it was denied (E_ACCESSDENIED)"
     } else {
       $verdictA = "VERDICT(a): INDETERMINATE - profile created, launch failed, not a denial -> $($e.GetType().FullName) HResult=$h $($e.Message)"
@@ -2389,7 +2419,10 @@ if ($state -eq 'REUSED') {
 
 Every 10(a) path prints exactly one `VERDICT(a)` line: CONTAINED only for an
 E_ACCESSDENIED profile-creation or launch denial; ESCAPED when the re-contained
-child reaches the internet; INDETERMINATE for anything else (including a curl
+child reaches the internet; SETUP-FAULT when CreateProcess succeeded but this
+harness's own job-tracking step failed afterward (a `JobAssignException`, never
+scored as containment even though it can carry the same Win32 ACCESS_DENIED a
+real denial does); INDETERMINATE for anything else (including a curl
 that launched but failed, or a launcher that would not load inside the
 container), with the error or exit code printed. Every 10(b) path likewise prints
 exactly one `VERDICT(b)` line: CONTAINED, ESCAPED, or INDETERMINATE.
@@ -2498,9 +2531,15 @@ if ($pipeNoAce)   { $pipeNoAce.Dispose() }
 $job8899, $job9999 | Where-Object { $_ } | Remove-Job -Force -ErrorAction SilentlyContinue   # Probe 1's listeners, by handle (an abort skips its own teardown)
 if ($etwCreated) { logman stop $etwSession -ets 2>$null }  # only if THIS run created it
 # Reap spawned processes BEFORE deleting $probeRoot (identity files live there).
-foreach ($idFile in (Get-ChildItem -Path $probeRoot -Filter '*.txt' -Recurse -ErrorAction SilentlyContinue |
-    Where-Object { $_.Name -match '(own-listener|wmi-child)\.txt$' })) {
-  Stop-VerifiedProcess -IdentityFile $idFile.FullName
+# Walks the two well-known identity-file paths directly — own-listener.txt (Probe 1) and
+# wmi-child.txt (Probe 10b) are the only ones this scaffold ever writes, both under
+# $probeRoot\out. Built from $probeRoot, not $out: $out isn't assigned until after the
+# launcher compile/CreateProfile step (which can fail and re-throw before that
+# assignment), and this loop must still run — and reach the cleanup below it — on that
+# early-abort path. Never a *.txt scan of $probeRoot either: that would risk reaping (or
+# misreading) a probe's own log or output file that happens to share the directory.
+foreach ($idFile in @((Join-Path $probeRoot 'out\own-listener.txt'), (Join-Path $probeRoot 'out\wmi-child.txt'))) {
+  Stop-VerifiedProcess -IdentityFile $idFile
 }
 # Probe 9 (VM only): restore firewall to the recorded per-profile state
 if (-not $quiet) {
