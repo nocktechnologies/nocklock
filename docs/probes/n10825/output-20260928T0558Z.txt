@@ -1,0 +1,310 @@
+# First desktop run of run-probe.ps1 (script 30b25dfd), 2026-09-28 05:58Z, run_id aed59e49de2d4341b90a7cba9f9590b3.
+# Verbatim byte copies of the two files the run produced, in this order (SHA-256 of each source file):
+# 1. output.txt                 0a96bbbc4f80e42f5e6c554ac4ac758704c8b78262e1ca866b4aca4b702fd640 (UTF-8 with BOM, CRLF)
+# 2. probe-20260928T0600Z.log   e1c605a500e87791c740865e57f2b197c04a559cd81f881766bc9ef6962c7cf7 (the transcript)
+
+===== output.txt =====
+﻿# NockLock N10825 Windows probes (run-probe.ps1)
+date_utc=2026-09-28T05:58:29Z
+script_sha256=30B25DFDEF525D450EA7E2C5D68BD85E1C9755F84C7B30D5D21CA20142805FE7
+run_id=aed59e49de2d4341b90a7cba9f9590b3 mode=Desktop probes=1,2,3
+os_version=Microsoft Windows NT 10.0.26200.0
+os_build=26200.9550
+os_edition=Professional (Microsoft Windows 11 Pro)
+os_arch=64-bit process_64bit=True
+ps=5.1.26100.9549
+user=Kevins-Desktop\kkwil elevated=True
+STATE(BEFORE) exemptions: (none)
+STATE(BEFORE) ports: (none)
+STATE(BEFORE) tasks: (none)
+STATE(BEFORE) profiles: (none)
+STATE(BEFORE) probeRoots: (none)
+STATE(AFTER) exemptions: (none)
+STATE(AFTER) ports: (none)
+STATE(AFTER) tasks: (none)
+STATE(AFTER) profiles: (none)
+STATE(AFTER) probeRoots: (none)
+AFTER==BEFORE: exemptions
+AFTER==BEFORE: ports
+AFTER==BEFORE: tasks
+AFTER==BEFORE: profiles
+AFTER==BEFORE: probeRoots
+RUN: COMPLETE - AFTER == BEFORE for every listed category
+
+===== probe-20260928T0600Z.log =====
+date_utc=2026-09-28T05:58:29Z
+script_sha256=30B25DFDEF525D450EA7E2C5D68BD85E1C9755F84C7B30D5D21CA20142805FE7
+run_id=aed59e49de2d4341b90a7cba9f9590b3 mode=Desktop probes=1,2,3
+os_version=Microsoft Windows NT 10.0.26200.0
+os_build=26200.9550
+os_edition=Professional (Microsoft Windows 11 Pro)
+os_arch=64-bit process_64bit=True
+ps=5.1.26100.9549
+user=Kevins-Desktop\kkwil elevated=True
+STATE(BEFORE) exemptions: (none)
+STATE(BEFORE) ports: (none)
+STATE(BEFORE) tasks: (none)
+STATE(BEFORE) profiles: (none)
+STATE(BEFORE) probeRoots: (none)
+
+List Loopback Exempted AppContainers 
+
+OK.
+
+Data Collector Set                      Type                          Status
+-------------------------------------------------------------------------------
+Circular Kernel Context Logger          Trace                         Running 
+Eventlog-Security                       Trace                         Running 
+CimFSUnionFS-Filter                     Trace                         Running 
+DiagLog                                 Trace                         Running 
+Diagtrack-Listener                      Trace                         Running 
+EventLog-Application                    Trace                         Running 
+EventLog-System                         Trace                         Running 
+FilterMgr-Logger                        Trace                         Running 
+iclsClient                              Trace                         Running 
+iclsProxy                               Trace                         Running 
+IntelRST                                Trace                         Running 
+LwtNetLog                               Trace                         Running 
+Microsoft-Windows-Rdp-Graphics-RdpIdd-Trace Trace                         Running 
+NetCore                                 Trace                         Running 
+NtfsLog                                 Trace                         Running 
+PlatformLicenseManagerService           Trace                         Running 
+RadioMgr                                Trace                         Running 
+Admin_PS_Provider                       Trace                         Running 
+ReFSLog                                 Trace                         Running 
+UBPM                                    Trace                         Running 
+WdiContextLog                           Trace                         Running 
+WiFiDriverIHVSession                    Trace                         Running 
+WiFiSession                             Trace                         Running 
+ScreenOnPowerStudyTraceSession          Trace                         Running 
+SleepStudyTraceSession                  Trace                         Running 
+CldFltLog                               Trace                         Running 
+MpWppCoreTracing-20260926-003201-00000003-100000000 Trace                         Running 
+NVIDIA-NVTOPPS-NOCAT                    Trace                         Running 
+NVIDIA-NVTOPPS-NOCAT-SDK                Trace                         Running 
+NVIDIA-NVTOPPS-FILTER                   Trace                         Running 
+1DSListener                             Trace                         Running 
+Windows-Compat-Inventory-InstallMon     Trace                         Running 
+ETWSENSORTraceSession{F86D80AD-974D-41CC-B1D3-2C4203B8AC09}{2C5AFEDD-2A68-41A7-980A-0B2DD385B687} Trace                         Running 
+WPR_initiated_DiagTrackMiniLogger_WPR System Collector Trace                         Running 
+DtpMsbSession                           Trace                         Running 
+DtpSleepStudySession                    Trace                         Running 
+DtpEnergyEstimationSession              Trace                         Running 
+8696EAC4-1288-4288-A4EE-49EE431B0AD9    Trace                         Running 
+AppDomainStatistics_Activity-{5BD54C15-D8A4-4089-AB87-E5BE3348E0E4} Trace                         Running 
+IntelligenceEvents_Activity-{FE327C96-3A32-4D73-A695-FE13C1301CFE} Trace                         Running 
+ExternalProvider_Session-{3AE2EFD0-4B5C-4EE7-B4DB-5781A6D0FCB3} Trace                         Running 
+UpdateSessionOrchestration              Trace                         Running 
+MoUxCoreWorker                          Trace                         Running 
+WinDiag-Realtime-Session                Trace                         Running 
+SHS-09262026-005239-7-1ff               Trace                         Running 
+WINNETESP                               Trace                         Running 
+Steam Event Tracing                     Trace                         Running 
+WPR_initiated_DiagTrackMiniLogger_OneTrace_User_Logger_20260925_1_EC_0 Trace                         Running 
+
+The command completed successfully.
+
+Domain Profile Settings: 
+----------------------------------------------------------------------
+State                                 ON
+
+Private Profile Settings: 
+----------------------------------------------------------------------
+State                                 ON
+
+Public Profile Settings: 
+----------------------------------------------------------------------
+State                                 ON
+Ok.
+
+False
+curl.exe -> C:\Windows\system32\curl.exe
+git -> C:\Program Files\Git\cmd\git.exe
+node -> C:\Program Files\nodejs\node.exe
+python -> C:\Users\kkwil\AppData\Local\Programs\Python\Python312\python.exe
+npm -> C:\Program Files\nodejs\npm.ps1
+pip -> C:\Users\kkwil\AppData\Local\Programs\Python\Python312\Scripts\pip.exe
+nslookup -> C:\Windows\system32\nslookup.exe
+BEFORE: loopbackexempt_count=0 ports_in_use(8899,9999,9998)=0 (documented desktop baseline: 0, 0)
+S-1-15-2-4050154218-862018945-726142581-281265089-1345647311-1751157957-3938723835
+processed file: C:\Users\kkwil\AppData\Local\Temp\nocklock-probe-aed59e49de2d4341b90a7cba9f9590b3\_launcher.dll
+Successfully processed 1 files; Failed processing 0 files
+processed file: C:\Users\kkwil\AppData\Local\Temp\nocklock-probe-aed59e49de2d4341b90a7cba9f9590b3\_inside.ps1
+Successfully processed 1 files; Failed processing 0 files
+processed file: C:\Users\kkwil\AppData\Local\Temp\nocklock-probe-aed59e49de2d4341b90a7cba9f9590b3\out
+Successfully processed 1 files; Failed processing 0 files
+LAUNCHER-ENV: PASS - TEMP=C:\Users\kkwil\AppData\Local\Packages\nocklock-probe-aed59e49de2d4341b90a7cba9f9590b3\AC\Packages\nocklock-probe-aed59e49de2d4341b90a7cba9f9590b3\AC\Temp LOCALAPPDATA=C:\Users\kkwil\AppData\Local\Packages\nocklock-probe-aed59e49de2d4341b90a7cba9f9590b3\AC\Packages\nocklock-probe-aed59e49de2d4341b90a7cba9f9590b3\AC
+0
+LIMITED-TOKEN: PASS - task token is Medium IL with High absent
+===== Probe 1: zero-capability loopback =====
+outside 8899 -> live
+outside 9999 -> live
+VERDICT(1-exempt): NON-ELEVATED OK - limited-token -a exited 0 and listed the entry (Probe 2: admin not required) [exit=0]
+inside(1) launch: exit=-1073741502
+inside(1) 9998 listener identity recorded: False
+VERDICT(1): SETUP-FAULT - inside launch: exit=-1073741502, _inside-1.log lines: 0; not scored
+===== Probe 2: does the exemption need elevation? =====
+
+List Loopback Exempted AppContainers 
+
+[1] -----------------------------------------------------------------
+    Name: nocklock-probe-aed59e49de2d4341b90a7cba9f9590b3
+    SID:  S-1-15-2-4050154218-862018945-726142581-281265089-1345647311-1751157957-3938723835
+
+OK.
+VERDICT(2): from VERDICT(1-exempt) - NON-ELEVATED OK - limited-token -a exited 0 and listed the entry (Probe 2: admin not required) [exit=0]; this run's entry listed by -s: True
+===== Probe 3: AppContainer launch unelevated =====
+VERDICT(3): INDETERMINATE - launched, but p3\probe3-8842a9cde48249fd96e968d62283b71b\whoami-inside.txt shows no Low IL (S-1-16-4096) plus ALL APPLICATION PACKAGES (S-1-15-2-1)
+===== Global teardown =====
+
+List Loopback Exempted AppContainers 
+
+[1] -----------------------------------------------------------------
+    Name: nocklock-probe-aed59e49de2d4341b90a7cba9f9590b3
+    SID:  S-1-15-2-4050154218-862018945-726142581-281265089-1345647311-1751157957-3938723835
+
+OK.
+
+Data Collector Set                      Type                          Status
+-------------------------------------------------------------------------------
+Circular Kernel Context Logger          Trace                         Running 
+Eventlog-Security                       Trace                         Running 
+CimFSUnionFS-Filter                     Trace                         Running 
+DiagLog                                 Trace                         Running 
+Diagtrack-Listener                      Trace                         Running 
+EventLog-Application                    Trace                         Running 
+EventLog-System                         Trace                         Running 
+FilterMgr-Logger                        Trace                         Running 
+iclsClient                              Trace                         Running 
+iclsProxy                               Trace                         Running 
+IntelRST                                Trace                         Running 
+LwtNetLog                               Trace                         Running 
+Microsoft-Windows-Rdp-Graphics-RdpIdd-Trace Trace                         Running 
+NetCore                                 Trace                         Running 
+NtfsLog                                 Trace                         Running 
+PlatformLicenseManagerService           Trace                         Running 
+RadioMgr                                Trace                         Running 
+Admin_PS_Provider                       Trace                         Running 
+ReFSLog                                 Trace                         Running 
+UBPM                                    Trace                         Running 
+WdiContextLog                           Trace                         Running 
+WiFiDriverIHVSession                    Trace                         Running 
+WiFiSession                             Trace                         Running 
+ScreenOnPowerStudyTraceSession          Trace                         Running 
+SleepStudyTraceSession                  Trace                         Running 
+CldFltLog                               Trace                         Running 
+MpWppCoreTracing-20260926-003201-00000003-100000000 Trace                         Running 
+NVIDIA-NVTOPPS-NOCAT                    Trace                         Running 
+NVIDIA-NVTOPPS-NOCAT-SDK                Trace                         Running 
+NVIDIA-NVTOPPS-FILTER                   Trace                         Running 
+1DSListener                             Trace                         Running 
+Windows-Compat-Inventory-InstallMon     Trace                         Running 
+ETWSENSORTraceSession{F86D80AD-974D-41CC-B1D3-2C4203B8AC09}{2C5AFEDD-2A68-41A7-980A-0B2DD385B687} Trace                         Running 
+WPR_initiated_DiagTrackMiniLogger_WPR System Collector Trace                         Running 
+DtpMsbSession                           Trace                         Running 
+DtpSleepStudySession                    Trace                         Running 
+DtpEnergyEstimationSession              Trace                         Running 
+8696EAC4-1288-4288-A4EE-49EE431B0AD9    Trace                         Running 
+AppDomainStatistics_Activity-{5BD54C15-D8A4-4089-AB87-E5BE3348E0E4} Trace                         Running 
+IntelligenceEvents_Activity-{FE327C96-3A32-4D73-A695-FE13C1301CFE} Trace                         Running 
+ExternalProvider_Session-{3AE2EFD0-4B5C-4EE7-B4DB-5781A6D0FCB3} Trace                         Running 
+UpdateSessionOrchestration              Trace                         Running 
+MoUxCoreWorker                          Trace                         Running 
+WinDiag-Realtime-Session                Trace                         Running 
+SHS-09262026-005239-7-1ff               Trace                         Running 
+WINNETESP                               Trace                         Running 
+Steam Event Tracing                     Trace                         Running 
+WPR_initiated_DiagTrackMiniLogger_OneTrace_User_Logger_20260925_1_EC_0 Trace                         Running 
+
+The command completed successfully.
+
+Domain Profile Settings: 
+----------------------------------------------------------------------
+State                                 ON
+
+Private Profile Settings: 
+----------------------------------------------------------------------
+State                                 ON
+
+Public Profile Settings: 
+----------------------------------------------------------------------
+State                                 ON
+Ok.
+
+True
+TEARDOWN: DeleteProfile nocklock-probe-aed59e49de2d4341b90a7cba9f9590b3 -> 0x00000000
+TEARDOWN: DeleteProfile nocklock-p3-aed59e49de2d4341b90a7cba9f9590b3 -> 0x00000000
+TEARDOWN: DeleteProfile agent-escape-aed59e49de2d4341b90a7cba9f9590b3 -> 0x00000000
+RESTORED: loopback exemptions back to BEFORE (0)
+RESTORED: this run's SID absent from LoopbackExempt -s
+RESTORED: ports 8899/9999/9998 back to BEFORE (0 listening)
+RESTORED: scheduled task nocklock-probe-limited-aed59e49de2d4341b90a7cba9f9590b3 absent
+RESTORED: AppContainer profile folder nocklock-probe-aed59e49de2d4341b90a7cba9f9590b3 absent
+RESTORED: AppContainer profile folder nocklock-p3-aed59e49de2d4341b90a7cba9f9590b3 absent
+RESTORED: AppContainer profile folder agent-escape-aed59e49de2d4341b90a7cba9f9590b3 absent
+RESTORED: AppContainer Mappings keys for this run's monikers absent
+RESTORED: probe root C:\Users\kkwil\AppData\Local\Temp\nocklock-probe-aed59e49de2d4341b90a7cba9f9590b3 absent
+
+Data Collector Set                      Type                          Status
+-------------------------------------------------------------------------------
+Circular Kernel Context Logger          Trace                         Running 
+Eventlog-Security                       Trace                         Running 
+CimFSUnionFS-Filter                     Trace                         Running 
+DiagLog                                 Trace                         Running 
+Diagtrack-Listener                      Trace                         Running 
+EventLog-Application                    Trace                         Running 
+EventLog-System                         Trace                         Running 
+FilterMgr-Logger                        Trace                         Running 
+iclsClient                              Trace                         Running 
+iclsProxy                               Trace                         Running 
+IntelRST                                Trace                         Running 
+LwtNetLog                               Trace                         Running 
+Microsoft-Windows-Rdp-Graphics-RdpIdd-Trace Trace                         Running 
+NetCore                                 Trace                         Running 
+NtfsLog                                 Trace                         Running 
+PlatformLicenseManagerService           Trace                         Running 
+RadioMgr                                Trace                         Running 
+Admin_PS_Provider                       Trace                         Running 
+ReFSLog                                 Trace                         Running 
+UBPM                                    Trace                         Running 
+WdiContextLog                           Trace                         Running 
+WiFiDriverIHVSession                    Trace                         Running 
+WiFiSession                             Trace                         Running 
+ScreenOnPowerStudyTraceSession          Trace                         Running 
+SleepStudyTraceSession                  Trace                         Running 
+CldFltLog                               Trace                         Running 
+MpWppCoreTracing-20260926-003201-00000003-100000000 Trace                         Running 
+NVIDIA-NVTOPPS-NOCAT                    Trace                         Running 
+NVIDIA-NVTOPPS-NOCAT-SDK                Trace                         Running 
+NVIDIA-NVTOPPS-FILTER                   Trace                         Running 
+1DSListener                             Trace                         Running 
+Windows-Compat-Inventory-InstallMon     Trace                         Running 
+ETWSENSORTraceSession{F86D80AD-974D-41CC-B1D3-2C4203B8AC09}{2C5AFEDD-2A68-41A7-980A-0B2DD385B687} Trace                         Running 
+WPR_initiated_DiagTrackMiniLogger_WPR System Collector Trace                         Running 
+DtpMsbSession                           Trace                         Running 
+DtpSleepStudySession                    Trace                         Running 
+DtpEnergyEstimationSession              Trace                         Running 
+8696EAC4-1288-4288-A4EE-49EE431B0AD9    Trace                         Running 
+AppDomainStatistics_Activity-{5BD54C15-D8A4-4089-AB87-E5BE3348E0E4} Trace                         Running 
+IntelligenceEvents_Activity-{FE327C96-3A32-4D73-A695-FE13C1301CFE} Trace                         Running 
+ExternalProvider_Session-{3AE2EFD0-4B5C-4EE7-B4DB-5781A6D0FCB3} Trace                         Running 
+UpdateSessionOrchestration              Trace                         Running 
+MoUxCoreWorker                          Trace                         Running 
+WinDiag-Realtime-Session                Trace                         Running 
+SHS-09262026-005239-7-1ff               Trace                         Running 
+WINNETESP                               Trace                         Running 
+Steam Event Tracing                     Trace                         Running 
+WPR_initiated_DiagTrackMiniLogger_OneTrace_User_Logger_20260925_1_EC_0 Trace                         Running 
+
+The command completed successfully.
+STATE(AFTER) exemptions: (none)
+STATE(AFTER) ports: (none)
+STATE(AFTER) tasks: (none)
+STATE(AFTER) profiles: (none)
+STATE(AFTER) probeRoots: (none)
+AFTER==BEFORE: exemptions
+AFTER==BEFORE: ports
+AFTER==BEFORE: tasks
+AFTER==BEFORE: profiles
+AFTER==BEFORE: probeRoots
+RUN: COMPLETE - AFTER == BEFORE for every listed category

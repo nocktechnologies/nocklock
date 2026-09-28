@@ -230,8 +230,9 @@ try {
     }
   }
 
-  # --- The three files the scaffold writes into $probeRoot (doc: "Launcher (desktop
-  # path)", "Limited-token runner", "Getting the scaffold into the container"). ---
+  # --- The two files the scaffold writes into $probeRoot (doc: "Launcher (desktop
+  # path)", "Limited-token runner"). No _inside.ps1: powershell.exe does not start in a
+  # zero-capability container, so Probes 1 and 3 run their inside commands through cmd.exe. ---
   Set-Content -Path (Join-Path $probeRoot '_launcher.cs') -Encoding UTF8 -Value @'
 using System;
 using System.Runtime.InteropServices;
@@ -329,8 +330,12 @@ namespace NockProbe {
     // DeleteAppContainerProfile; returns the HRESULT (teardown prints it, never throws).
     public static int DeleteProfile(string name) { return DeleteAppContainerProfile(name); }
 
-    // The child's explicit environment block (CREATE_UNICODE_ENVIRONMENT): TEMP, TMP,
-    // LOCALAPPDATA, APPDATA and USERPROFILE all point at the profile's own AC folder
+    // The child's explicit environment block (CREATE_UNICODE_ENVIRONMENT). Windows applies its
+    // own AppContainer redirection ON TOP of this block: it appends Packages\<moniker>\AC to the
+    // LOCALAPPDATA it is handed and derives TEMP from the result (the first desktop run handed
+    // it the AC folder and got ...\AC\Packages\<moniker>\AC). So LOCALAPPDATA carries the base
+    // that redirection expects (the AC folder three levels up), TEMP and TMP name AC\Temp (the
+    // caller creates it), and APPDATA and USERPROFILE name the AC folder itself
     // (%LOCALAPPDATA%\Packages\<moniker>\AC, which CreateAppContainerProfile creates and
     // grants to the package SID), so no probe reads or writes the operator's real
     // profile dirs through them. Only the variables tools need to start are copied through.
@@ -351,14 +356,15 @@ namespace NockProbe {
         throw new InvalidOperationException(string.Format("environment block: GetAppContainerFolderPath HRESULT 0x{0:X8}", hr));
       }
       string acDir;
-      try { acDir = Marshal.PtrToStringUni(p); } finally { Marshal.FreeCoTaskMem(p); }
-      string[] redirected = { "TEMP", "TMP", "LOCALAPPDATA", "APPDATA", "USERPROFILE" };
+      try { acDir = Marshal.PtrToStringUni(p).TrimEnd('\\'); } finally { Marshal.FreeCoTaskMem(p); }
       string[] copied = { "SystemRoot", "windir", "SystemDrive", "ComSpec", "PATH", "PATHEXT", "PSModulePath",
                           "PROCESSOR_ARCHITECTURE", "NUMBER_OF_PROCESSORS", "OS", "USERNAME", "COMPUTERNAME",
                           "ProgramFiles", "ProgramFiles(x86)", "ProgramW6432", "CommonProgramFiles",
                           "CommonProgramFiles(x86)", "ProgramData", "ALLUSERSPROFILE" };
       var vars = new System.Collections.Generic.SortedDictionary<string, string>(StringComparer.OrdinalIgnoreCase);
-      foreach (string n in redirected) vars[n] = acDir;
+      vars["LOCALAPPDATA"] = System.IO.Path.GetDirectoryName(System.IO.Path.GetDirectoryName(System.IO.Path.GetDirectoryName(acDir)));
+      vars["TEMP"] = vars["TMP"] = acDir + "\\Temp";
+      vars["APPDATA"] = vars["USERPROFILE"] = acDir;
       foreach (string n in copied) { string v = Environment.GetEnvironmentVariable(n); if (v != null) vars[n] = v; }
       StringBuilder b = new StringBuilder();
       foreach (var kv in vars) b.Append(kv.Key).Append('=').Append(kv.Value).Append('\0');
@@ -523,12 +529,15 @@ try {
       $step = 'grant'
       $d3 = New-Item -ItemType Directory -Path (Join-Path $probeRoot "p3\$inv") -ErrorAction Stop   # this invocation's own dir
       icacls $d3.FullName /grant "*${sid3}:(OI)(CI)(M)" | Out-Null   # the limited token owns p3\<id>\, so it holds WRITE_DAC
+      # The launcher's TEMP/TMP (see BuildEnvironment); it creates no directories itself.
+      New-Item -ItemType Directory -Force -Path (Join-Path $env:LOCALAPPDATA "Packages\nocklock-p3-$runId\AC\Temp") -ErrorAction Stop | Out-Null
       $step = 'run'
-      # `set` records the container's own environment, so the verdict shows TEMP/LOCALAPPDATA were redirected.
-      $rc = [NockProbe.AC]::Run($sid3, @(),
-        ('cmd.exe /c whoami /all > "' + (Join-Path $d3.FullName 'whoami-inside.txt') +
-         '" & set > "' + (Join-Path $d3.FullName 'env-inside.txt') + '"'), 60000)
-      "launch=OK exit=$rc" | Out-File $log -Append -Encoding utf8
+      # Two launches through cmd.exe (not powershell.exe, which does not start in a zero-capability
+      # container), each with its own exit code and its stderr kept: `whoami /groups` for the token,
+      # `set` for the container's own environment, so the verdict shows TEMP/LOCALAPPDATA were redirected.
+      $rcW = [NockProbe.AC]::Run($sid3, @(), ('cmd.exe /c whoami /groups > "' + (Join-Path $d3.FullName 'whoami-inside.txt') + '" 2>&1'), 60000)
+      $rcE = [NockProbe.AC]::Run($sid3, @(), ('cmd.exe /c set > "' + (Join-Path $d3.FullName 'env-inside.txt') + '" 2>&1'), 60000)
+      ('launch=OK whoami exit={0} (0x{0:X8}); set exit={1} (0x{1:X8})' -f $rcW, $rcE) | Out-File $log -Append -Encoding utf8
     }
     default   { throw "unknown phase '$phase'" }   # never a silent no-op the runner would accept
   }
@@ -545,69 +554,6 @@ try {
   # Completion sentinel, written LAST: the outer session never scores a half-written log.
   Set-Content -Path (Join-Path $lim "$inv.done") -Value 'done'
 }
-'@
-  Set-Content -Path (Join-Path $probeRoot '_inside.ps1') -Encoding UTF8 -Value @'
-param([string]$Phase)
-$probeRoot = $PSScriptRoot
-$runId     = (Split-Path -Leaf $probeRoot) -replace '^nocklock-probe-',''
-$moniker   = "nocklock-probe-$runId"
-$out       = Get-Item (Join-Path $probeRoot 'out')
-# Denial helper used by every "MUST fail" step. It discriminates the HResult:
-# only E_ACCESSDENIED (0x80070005) is a pass; not-found (0x80070002/3) is a
-# FAILED probe — that is the exact bug this round fixes.
-# HResult of the innermost exception, formatted '0x80070005'. A denial from a .NET
-# method call (the launcher, a pipe Connect) arrives wrapped in PowerShell's
-# MethodInvocationException, so the outer exception's HResult is the wrong one.
-function Get-BaseHResult($ErrorRecord) { '0x{0:X8}' -f $ErrorRecord.Exception.GetBaseException().HResult }
-
-function Assert-AccessDenied {
-  param([scriptblock]$Action, [string]$Label)
-  # Access-denied from Set-Content/Get-Content is NON-terminating, so it must be
-  # forced to terminate or the catch never runs and the helper prints FAIL(no-error)
-  # on a real denial. Each call site passes -ErrorAction Stop, which is the
-  # guaranteed path regardless of how $ErrorActionPreference scopes into a
-  # scriptblock invoked with `&`; this sets the preference too as a backstop.
-  $ErrorActionPreference = 'Stop'
-  try { & $Action | Out-Null; "FAIL(no-error): $Label" }
-  catch [System.UnauthorizedAccessException] { "PASS(denied): $Label" }
-  catch {
-    $h = Get-BaseHResult $_
-    if ($h -eq '0x80070005') { "PASS(denied): $Label" }
-    else { "FAIL(wrong-error): $Label -> $($_.Exception.GetBaseException().GetType().FullName) HResult=$h" }
-  }
-}
-# Process-identity helpers. Bare PID cleanup can kill an unrelated process after
-# PID reuse; these record and verify PID + StartTime + Path before acting.
-function Write-ProcessIdentity {
-  param([System.Diagnostics.Process]$Proc, [string]$FilePath)
-  $info = '{0}|{1}|{2}' -f $Proc.Id, $Proc.StartTime.ToString('o'), $Proc.Path
-  Set-Content -Path $FilePath -Value $info
-}
-# The launcher returns only the exit code, so every line the phase emits (curl's stderr
-# included) is appended to $out\_inside-<phase>.log for the outer session to read. An
-# unknown phase or a body that throws leaves an ERROR line, never an empty log.
-& {
-  try {
-    switch ($Phase) {
-      '1'     {
-        curl.exe -sS -m 5 http://127.0.0.1:8899/ 2>&1; "8899 exit=$LASTEXITCODE"  # MUST succeed, or Phase 1 is dead
-        curl.exe -sS -m 5 https://example.com/   2>&1; "example exit=$LASTEXITCODE"  # MUST fail (Block Outbound Default Rule)
-        curl.exe -sS -m 5 http://127.0.0.1:9999/ 2>&1; "9999 exit=$LASTEXITCODE"  # unrelated loopback port: EXPECTED reachable
-        # agent binds its own listener (Start-Process, not Start-Job — the container's
-        # job objects are not reachable from the outer session). The Process object from
-        # -PassThru is not accessible to the outer session (different process), so write
-        # PID + StartTime + Path to the drop dir. The outer teardown verifies all three
-        # before stopping — bare PID reuse across the ~minutes a probe run takes can
-        # kill an unrelated process.
-        $listener = Start-Process -PassThru python -ArgumentList "-m","http.server","9998","--bind","127.0.0.1","--directory",$probeRoot
-        Write-ProcessIdentity -Proc $listener -FilePath (Join-Path $out.FullName 'own-listener.txt')
-      }
-      default { throw "unknown phase '$Phase'" }
-    }
-  } catch {
-    'ERROR: phase={0} type={1} HResult={2} {3}' -f $Phase, $_.Exception.GetBaseException().GetType().Name, (Get-BaseHResult $_), $_.Exception.GetBaseException().Message
-  }
-} *>&1 | ForEach-Object { "$_" } | Out-File -FilePath (Join-Path $out.FullName "_inside-$Phase.log") -Append -Encoding utf8
 '@
 
   # ORDER: compile + load the launcher and prove the limited token (below) BEFORE any
@@ -636,34 +582,41 @@ function Write-ProcessIdentity {
   }
   $sid                                               # record this SID string; the icacls probes need it
   icacls $launcherDll /grant "*${sid}:(R)"          # Probe 10(a) loads it inside the container
-  icacls (Join-Path $probeRoot '_inside.ps1') /grant "*${sid}:(R)"   # every inside launch runs it
   # One SID-writable drop dir, created and ACL'd from the OUTER shell (which holds
   # WRITE_DAC; the Low-IL container does not). Inside-container steps hand their verdict
-  # logs and any value back out through it — every inside probe's `_inside-<phase>.log`
-  # and Probe 10's WMI child PID (see the bootstrap note above):
+  # logs and any value back out through it — Probe 1's `_inside-1-<name>.txt` captures,
+  # every `_inside.ps1` phase's `_inside-<phase>.log` and Probe 10's WMI child PID (see
+  # the bootstrap note above):
   $out = New-Item -ItemType Directory -Force -Path (Join-Path $probeRoot 'out')
   icacls $out.FullName /grant "*${sid}:(OI)(CI)(M)"
   # zero-capability container — the default, and the study's pivot. It doubles as the
   # environment self-check every launcher probe relies on: the child's TEMP and
   # LOCALAPPDATA must lie under this profile's AC folder, or the run stops here.
   # Returns "TEMP=<v> LOCALAPPDATA=<v>" from a `cmd /c set` capture, and $true in
-  # $script:redirected only if both are AC or under it (AC\Temp counts). Probe 3 reuses it.
+  # $script:redirected only if both are AC or under it (AC\Temp counts) AND exist: a prefix
+  # test alone passed the first desktop run's doubled ...\AC\Packages\<moniker>\AC path.
+  # Probe 3 reuses it.
   function Test-Redirected([object[]]$Lines, [string]$AcDir) {
     $script:redirected = $true
     $shown = foreach ($n in 'TEMP', 'LOCALAPPDATA') {
       # -join makes a plain string, so an absent line is '' and fails the test below.
       $v = (((@($Lines) -match "^$n=") -replace "^$n=",'') -join ';').TrimEnd('\')
-      if (-not ($v -eq $AcDir -or $v.StartsWith("$AcDir\", [StringComparison]::OrdinalIgnoreCase))) { $script:redirected = $false }
-      "$n=$v"
+      $ok = ($v -eq $AcDir -or $v.StartsWith("$AcDir\", [StringComparison]::OrdinalIgnoreCase)) -and
+            (Test-Path -LiteralPath $v -PathType Container)
+      if (-not $ok) { $script:redirected = $false }
+      "$n=$v$(if (-not $ok) { ' (not under AC, or missing)' })"
     }
     $shown -join ' '
   }
+  $acDir    = (Join-Path $env:LOCALAPPDATA "Packages\$moniker\AC").TrimEnd('\')
+  # The launcher's TEMP/TMP (see BuildEnvironment); it creates no directories itself.
+  New-Item -ItemType Directory -Force -Path (Join-Path $acDir 'Temp') | Out-Null
   $envSmoke = Join-Path $out.FullName 'env-smoke.txt'
   $rcSmoke  = [NockProbe.AC]::Run($sid, @(), ('cmd.exe /c set > "' + $envSmoke + '"'), 30000)
-  $acDir    = (Join-Path $env:LOCALAPPDATA "Packages\$moniker\AC").TrimEnd('\')
   $envShown = Test-Redirected (Get-Content $envSmoke -ErrorAction SilentlyContinue) $acDir
   if (-not (Test-Path $envSmoke)) {
-    "SETUP-FAULT: zero-capability launch wrote no environment capture (exit $rcSmoke); run stopped before any probe"
+    # A negative exit is an NTSTATUS (0xC0000142 = STATUS_DLL_INIT_FAILED): the process never ran.
+    "SETUP-FAULT: zero-capability launch wrote no environment capture (exit $rcSmoke = 0x$('{0:X8}' -f $rcSmoke)); run stopped before any probe"
     throw 'launcher environment self-check failed'
   } elseif (-not $redirected) {
     "SETUP-FAULT: container environment not under $acDir ($envShown); run stopped before any probe"
@@ -864,40 +817,75 @@ function Write-ProcessIdentity {
         }
       "VERDICT(1-exempt): $verdict1x"
 
-      # then, inside a ZERO-capability container: `_inside.ps1 -Phase 1` (its body is the next
-      # block), launched by the launcher from the elevated shell. Never run those curls in this
-      # shell: an outer curl answers nothing about the container. The launcher returns only the
-      # exit code, so the curl text and exit codes come back through $out\_inside-1.log and are
-      # printed verbatim: the verdict is read from the recorded output, not inferred.
-      $launch1 = $null
-      try {
-        $launch1 = 'exit=' + [NockProbe.AC]::Run($sid, @(), ('powershell -NoProfile -ExecutionPolicy Bypass -File "' +
-          (Join-Path $probeRoot '_inside.ps1') + '" -Phase 1'), 300000)
-      } catch {
-        $launch1 = 'threw {0} HResult={1} {2}' -f $_.Exception.GetBaseException().GetType().Name, (Get-BaseHResult $_), $_.Exception.GetBaseException().Message
+      # then, inside a ZERO-capability container: each measured command in its own launch from
+      # the elevated shell, run by cmd.exe. Not powershell.exe: it does not start in a
+      # zero-capability container (the first desktop run's launch exited 0xC0000142,
+      # STATUS_DLL_INIT_FAILED, while cmd.exe started). Never run those curls in this shell: an
+      # outer curl answers nothing about the container. cmd writes each command's output (curl's
+      # error text included) into the granted $out dir and the launcher returns that command's own
+      # exit code; both are printed verbatim as inside(1) lines, so the verdict is read from the
+      # recorded output, not inferred. An exit code outside curl's 0-255 is not curl's answer (a
+      # negative one is an NTSTATUS from a process that did not start; 9009 is cmd's "not
+      # recognized"), so it is a SETUP-FAULT, recorded in hex.
+      $log1 = @(); $fault1 = @()
+      foreach ($c in @(@('8899',    'curl.exe -sS -m 5 http://127.0.0.1:8899/'),      # MUST succeed, or Phase 1 is dead
+                       @('example', 'curl.exe -sS -m 5 https://example.com/'),        # MUST fail (Block Outbound Default Rule)
+                       @('9999',    'curl.exe -sS -m 5 http://127.0.0.1:9999/'))) {   # unrelated loopback port: EXPECTED reachable
+        $capture = Join-Path $out.FullName "_inside-1-$($c[0]).txt"
+        try {
+          $rc = [NockProbe.AC]::Run($sid, @(), ('cmd.exe /c ' + $c[1] + ' > "' + $capture + '" 2>&1'), 60000)
+          $log1 += @(Get-Content $capture -ErrorAction SilentlyContinue) + "$($c[0]) exit=$rc"
+          if ($rc -lt 0 -or $rc -gt 255 -or -not (Test-Path $capture)) {
+            $fault1 += '{0} launch exit={1} (0x{1:X8}), capture written={2}' -f $c[0], $rc, (Test-Path $capture)
+          }
+        } catch {
+          $fault1 += '{0} launch threw {1} HResult={2} {3}' -f $c[0], $_.Exception.GetBaseException().GetType().Name, (Get-BaseHResult $_), $_.Exception.GetBaseException().Message
+        }
       }
-      "inside(1) launch: $launch1"
-      $log1 = Get-Content (Join-Path $out.FullName '_inside-1.log') -ErrorAction SilentlyContinue
       $log1 | ForEach-Object { "inside(1): $_" }
+      # The agent binds its own listener: `start /b` leaves python running after cmd exits (the
+      # launcher's job has no KILL_ON_JOB_CLOSE). cmd cannot report the PID, so THIS shell finds
+      # the 9998 listener (the port was free at BEFORE), proves from its token that it runs in
+      # this run's container, and records PID + StartTime + Path for teardown's
+      # Stop-VerifiedProcess: bare PID reuse across the ~minutes a probe run takes can kill an
+      # unrelated process. python's own output (its error text included) is _inside-1-9998.txt.
+      $capture = Join-Path $out.FullName '_inside-1-9998.txt'
+      try {
+        [void][NockProbe.AC]::Run($sid, @(), ('cmd.exe /c start "" /b python -m http.server 9998 --bind 127.0.0.1 --directory "' +
+          $probeRoot + '" > "' + $capture + '" 2>&1'), 60000)
+      } catch {
+        'inside(1) 9998 launch threw {0} HResult={1} {2}' -f $_.Exception.GetBaseException().GetType().Name, (Get-BaseHResult $_), $_.Exception.GetBaseException().Message
+      }
+      $own = $null
+      for ($i = 0; $i -lt 10 -and -not $own; $i++) {
+        $own = Get-NetTCPConnection -State Listen -LocalPort 9998 -ErrorAction SilentlyContinue | Select-Object -First 1
+        if (-not $own) { Start-Sleep 1 }
+      }
+      $ownToken = if ($own) { try { [NockProbe.AC]::TokenSummary($own.OwningProcess) } catch { "token unreadable: $($_.Exception.GetBaseException().Message)" } }
+      if ($ownToken -like "AppContainer=True PackageSid=$sid *") {
+        Write-ProcessIdentity -Proc (Get-Process -Id $own.OwningProcess) -FilePath (Join-Path $out.FullName 'own-listener.txt')
+      }
+      Get-Content $capture -ErrorAction SilentlyContinue | ForEach-Object { "inside(1) 9998: $_" }
+      "inside(1) 9998 listener: $(if ($own) { "pid=$($own.OwningProcess) $ownToken" } else { 'none listening within 10 s' })"
       $exempt1 = Test-ExemptListed        # read BEFORE Probe 1's teardown, like everything scored below
-      # The 9998 sub-claim (bind + listen inside) has evidence only if the container recorded its
-      # listener. A per-user python (e.g. under %LOCALAPPDATA%\Programs) is unreadable to a
-      # zero-capability container, so this line reads False there, with the ERROR line above.
+      # The 9998 sub-claim (bind + listen inside) has evidence only if this shell found the listener
+      # in this run's container. A per-user python (e.g. under %LOCALAPPDATA%\Programs) is unreadable
+      # to a zero-capability container, so this line reads False there, with cmd's error text above.
       "inside(1) 9998 listener identity recorded: $(Test-Path (Join-Path $out.FullName 'own-listener.txt'))"
 
       # Probe 1's own teardown (see Teardown below), before the next probe runs.
       $job8899, $job9999 | Stop-Job -PassThru | Remove-Job
       Stop-VerifiedProcess -IdentityFile (Join-Path $out.FullName 'own-listener.txt')
 
-      # Nothing is scored unless the launch returned an exit code (not denied, untracked or timed
-      # out) with a log, BOTH outside listeners answered, and this run's exemption is listed: an
-      # inside curl that failed against a dead listener or a missing exemption is a setup fault.
-      $unscored1 = @()
-      if ($launch1 -notlike 'exit=*' -or -not $log1) { $unscored1 += "inside launch: $launch1, _inside-1.log lines: $(@($log1).Count)" }
+      # Nothing is scored unless every curl launch returned curl's own exit code with a capture
+      # (not denied, untracked, timed out or an NTSTATUS), BOTH outside listeners answered, and this
+      # run's exemption is listed: an inside curl that failed against a dead listener or a missing
+      # exemption is a setup fault.
+      $unscored1 = @($fault1)
       foreach ($port in @(8899, 9999)) { if (-not $outsideLive[$port]) { $unscored1 += "outside $port listener never answered" } }
       if (-not $exempt1) { $unscored1 += "this run's loopback exemption is not listed" }
       $inside8899 = @(@($log1) -cmatch '^8899 exit=')
-      if ($log1 -and $inside8899.Count -ne 1) { $unscored1 += "_inside-1.log holds $($inside8899.Count) '8899 exit=' lines, not 1" }
+      if ($inside8899.Count -ne 1) { $unscored1 += "the inside 8899 curl recorded $($inside8899.Count) '8899 exit=' lines, not 1" }
       if ($unscored1.Count) {
         "VERDICT(1): SETUP-FAULT - $($unscored1 -join '; '); not scored"
       } elseif ($inside8899[0] -cne '8899 exit=0') {
@@ -931,6 +919,7 @@ function Write-ProcessIdentity {
       $ac3  = (Join-Path $env:LOCALAPPDATA "Packages\nocklock-p3-$runId\AC").TrimEnd('\')
       $env3 = "container " + (Test-Redirected $e3 $ac3)
       $p3err = (@($p3) -match '^ERROR:') -join '; '
+      $w | ForEach-Object { "inside(3) whoami: $_" }   # verbatim, so any verdict below can be checked against it
       if (-not $p3) {
         "VERDICT(3): SETUP-FAULT - $limitedFault; not scored"
       } elseif ($p3 | Select-String -Pattern '^ERROR: step=run type=JobAssignException') {
@@ -949,6 +938,10 @@ function Write-ProcessIdentity {
         # Any other failure (grant, a Run timeout, ...) is not a denial. A launcher that did not
         # load never reaches here: no contained=OK, so $p3 is $null and the first arm prints SETUP-FAULT.
         "VERDICT(3): INDETERMINATE - $p3err"
+      } elseif (-not ($p3 -cmatch '^launch=OK whoami exit=0 .*; set exit=0 ')) {
+        # A capture whose launch exited nonzero measured nothing; the hex names it (an NTSTATUS
+        # such as 0xC0000142 means that process never started).
+        "VERDICT(3): SETUP-FAULT - inside capture failed: $((@($p3) -cmatch '^launch=OK') -join '; '); not scored"
       } elseif (-not (($w | Select-String -SimpleMatch 'S-1-16-4096') -and ($w | Select-String -Pattern 'S-1-15-2-1\b'))) {
         "VERDICT(3): INDETERMINATE - launched, but p3\$inv3\whoami-inside.txt shows no Low IL (S-1-16-4096) plus ALL APPLICATION PACKAGES (S-1-15-2-1)"
       } elseif (-not $redirected) {
