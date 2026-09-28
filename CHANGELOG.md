@@ -29,6 +29,8 @@ All notable changes to NockLock will be documented in this file.
 
 ### Changed
 
+- The Linux filesystem fence rejects configurations whose `allow_rw` entries
+  push the shared allow cap or the combined wire budget over its limit.
 - macOS Seatbelt root-write confinement no longer grants the fenced child
   write access to NockLock's audit state directory. The unfenced parent alone
   writes the event database, SQLite sidecars, and chain anchor; a macOS

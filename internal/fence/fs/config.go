@@ -19,18 +19,14 @@ const fieldSep = "\x1f"
 // maxAllowPaths mirrors MAX_PATHS in the interposer's libfence_fs.c
 // (internal/fence/fs/interposer/libfence_fs.c; kept in sync by
 // TestMaxAllowPathsMatchesInterposerMaxPaths). Past this count in EITHER the
-// allow or the deny category, the interposer fails closed (denies every
-// path) rather than silently dropping entries.
+// shared allow/allow_rw or deny category, the interposer fails closed (denies
+// every path) rather than silently dropping entries.
 const maxAllowPaths = 256
 
-// interposerMaxPathFields mirrors "char *fields[MAX_PATHS + 4]" in
-// libfence_fs.c: the total slots for the 3 metadata fields (root, mode,
-// socket) PLUS every "+allow"/"-deny" field combined, allow and deny sharing
-// one budget. Past this many total fields, the interposer's tokenizer stops
-// splitting the string and silently drops the remainder — including any
-// deny paths that land in the dropped tail, which never reach deny_count's
-// own "too many, fail closed" check because that check never sees them.
-// CheckInterposerBudget must never let a config reach that combined budget.
+// interposerMaxPathFields preserves the Go-side wire budget of MAX_PATHS + 4
+// fields, including 3 metadata fields. The C tokenizer now allocates more
+// slots and fails closed on overflow, but configurations exceeding this
+// conservative budget are still rejected before starting a wrapped process.
 const interposerMaxPathFields = maxAllowPaths + 4
 const interposerMetadataFields = 3
 
@@ -262,8 +258,8 @@ func ProcessConfig(cfg config.FilesystemConfig) (*FenceConfig, error) {
 	}, nil
 }
 
-// CheckInterposerBudget validates that fc's allow and deny paths fit within the
-// C interposer's field budget (libfence_fs.c MAX_PATHS / fields[] array).
+// CheckInterposerBudget validates that fc's allow, allow_rw, and deny paths fit
+// within the Go-side wire budget and the C interposer's per-category limits.
 // selfProcReserve is the number of additional allow entries that will be injected
 // after config load (the /proc/<pid> self-proc grants from allowSelfProcFS in
 // landlock_exec.go). Pass len(SelfProcFiles()) when the __landlock-exec shim
@@ -278,11 +274,12 @@ func CheckInterposerBudget(fc *FenceConfig, selfProcReserve int) error {
 	if fc == nil {
 		return nil
 	}
-	if room := maxAllowPaths - selfProcReserve; len(fc.AllowPaths) > room {
+	if room := maxAllowPaths - selfProcReserve; len(fc.AllowPaths)+len(fc.AllowRWPaths) > room {
 		return fmt.Errorf(
-			"too many filesystem allow paths (%d): the fence interposer supports at most %d, "+
+			"too many filesystem allow (%d) and allow_rw (%d) paths: the fence interposer supports at most %d combined, "+
 				"and %d are reserved for the wrapped process's own /proc/<pid> grants (see "+
-				"SelfProcFiles); remove entries from [filesystem].allow", len(fc.AllowPaths), maxAllowPaths, selfProcReserve)
+				"SelfProcFiles); remove entries from [filesystem].allow or [filesystem].allow_rw",
+			len(fc.AllowPaths), len(fc.AllowRWPaths), maxAllowPaths, selfProcReserve)
 	}
 	if len(fc.DenyPaths) > maxAllowPaths {
 		return fmt.Errorf(
@@ -290,13 +287,13 @@ func CheckInterposerBudget(fc *FenceConfig, selfProcReserve int) error {
 				"remove entries from [filesystem].deny", len(fc.DenyPaths), maxAllowPaths)
 	}
 	room := interposerMaxPathFields - interposerMetadataFields - selfProcReserve
-	if combined := len(fc.AllowPaths) + len(fc.DenyPaths); combined > room {
+	if combined := len(fc.AllowPaths) + len(fc.AllowRWPaths) + len(fc.DenyPaths); combined > room {
 		return fmt.Errorf(
-			"too many combined filesystem allow (%d) and deny (%d) paths: the fence interposer's "+
+			"too many combined filesystem allow (%d), allow_rw (%d), and deny (%d) paths: the fence's "+
 				"wire format supports at most %d combined, and %d are reserved for the wrapped "+
 				"process's own /proc/<pid> grants (see SelfProcFiles); remove entries from "+
-				"[filesystem].allow or [filesystem].deny",
-			len(fc.AllowPaths), len(fc.DenyPaths), room+selfProcReserve, selfProcReserve)
+				"[filesystem].allow, [filesystem].allow_rw, or [filesystem].deny",
+			len(fc.AllowPaths), len(fc.AllowRWPaths), len(fc.DenyPaths), room+selfProcReserve, selfProcReserve)
 	}
 	return nil
 }
