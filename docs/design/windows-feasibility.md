@@ -1115,17 +1115,28 @@ namespace NockProbe {
     // grants to the package SID), so no probe reads or writes the operator's real
     // profile dirs through them. Only the variables tools need to start are copied through.
     // Layout "K=V\0...K=V\0", sorted case-insensitively; StringToHGlobalUni adds the final \0.
-    // A failure throws InvalidOperationException with NO inner exception, so a denial
-    // resolving the folder is never read as a launch denial (0x80070005).
+    // Returns IntPtr.Zero (inherit) only when the CALLER is itself an AppContainer
+    // (Probe 10(a)'s re-container): its own block is already its container's redirected one,
+    // and a lookup failure must not hide an escape. Otherwise a failure throws
+    // InvalidOperationException with NO inner exception, so it is never read as a launch
+    // denial (0x80070005).
     static IntPtr BuildEnvironment(string packageSid) {
       IntPtr p;
       int hr = GetAppContainerFolderPath(packageSid, out p);
-      if (hr != 0) throw new InvalidOperationException(string.Format("environment block: GetAppContainerFolderPath HRESULT 0x{0:X8}", hr));
+      if (hr != 0) {
+        bool callerIsAc = false;
+        try { callerIsAc = TokenSummary(System.Diagnostics.Process.GetCurrentProcess().Id).StartsWith("AppContainer=True"); }
+        catch { }                                   // unreadable own token: treat as not-AC and throw below
+        if (callerIsAc) return IntPtr.Zero;
+        throw new InvalidOperationException(string.Format("environment block: GetAppContainerFolderPath HRESULT 0x{0:X8}", hr));
+      }
       string acDir;
       try { acDir = Marshal.PtrToStringUni(p); } finally { Marshal.FreeCoTaskMem(p); }
       string[] redirected = { "TEMP", "TMP", "LOCALAPPDATA", "APPDATA", "USERPROFILE" };
       string[] copied = { "SystemRoot", "windir", "SystemDrive", "ComSpec", "PATH", "PATHEXT", "PSModulePath",
-                          "PROCESSOR_ARCHITECTURE", "NUMBER_OF_PROCESSORS", "OS" };
+                          "PROCESSOR_ARCHITECTURE", "NUMBER_OF_PROCESSORS", "OS", "USERNAME", "COMPUTERNAME",
+                          "ProgramFiles", "ProgramFiles(x86)", "ProgramW6432", "CommonProgramFiles",
+                          "CommonProgramFiles(x86)", "ProgramData", "ALLUSERSPROFILE" };
       var vars = new System.Collections.Generic.SortedDictionary<string, string>(StringComparer.OrdinalIgnoreCase);
       foreach (string n in redirected) vars[n] = acDir;
       foreach (string n in copied) { string v = Environment.GetEnvironmentVariable(n); if (v != null) vars[n] = v; }
@@ -1136,7 +1147,8 @@ namespace NockProbe {
 
     // Starts cmdLine as an AppContainer process for packageSid holding exactly capabilitySids
     // (empty = zero capabilities), cwd = System32 (readable by ALL APPLICATION PACKAGES),
-    // environment = BuildEnvironment's explicit block, never the caller's inherited one.
+    // environment = BuildEnvironment's explicit block (inherited only when the caller is
+    // itself an AppContainer, see BuildEnvironment).
     // Waits up to timeoutMs and returns the exit code. The child starts suspended inside an
     // anonymous job, so a timeout kills its WHOLE tree (TerminateJobObject), not just the
     // direct child, then throws. The job has no KILL_ON_JOB_CLOSE: on a normal return,
@@ -1238,21 +1250,26 @@ namespace NockProbe {
 }
 ```
 
-**The child's environment is explicit, not inherited.** Passing `NULL` would hand the
-container the elevated operator's `TEMP`, `TMP`, `LOCALAPPDATA`, `APPDATA` and
-`USERPROFILE`; attaching `SECURITY_CAPABILITIES` does not rewrite them, so every probe
-that assumes profile-local paths would test the host directories. `BuildEnvironment`
-sets all five to the profile's AC folder (`GetAppContainerFolderPath`, i.e.
-`%LOCALAPPDATA%\Packages\<moniker>\AC`) — the folder root rather than `AC\Temp`,
-because `CreateAppContainerProfile` creates and ACLs the root but the launcher creates
-no directories (it also runs *inside* the container for Probe 10(a)). The only other
-variables are `SystemRoot`, `windir`, `SystemDrive`, `ComSpec`, `PATH`, `PATHEXT`,
-`PSModulePath` (in-box modules such as `Resolve-DnsName`), `PROCESSOR_ARCHITECTURE`,
-`NUMBER_OF_PROCESSORS` and `OS`, copied from the launcher's own environment so
-`cmd`, PowerShell, git, node and python can start. The scaffold's first
-zero-capability launch checks that the child's `TEMP` and `LOCALAPPDATA` equal the
-AC folder and stops the run as SETUP-FAULT if not; Probe 3 repeats the check on its
-limited-token launch, and Probes 3 and 5 print both values as evidence.
+**The child's environment is explicit, not inherited.** Passing `NULL` hands the
+child a copy of the elevated operator's block; whether Windows then rewrites `TEMP`
+and `LOCALAPPDATA` for an AppContainer (section (a) cites `AC` / `AC\Temp`) is exactly
+UNVERIFIED #12, and `USERPROFILE`/`APPDATA` are not documented as rewritten at all. So
+the probes do not rely on it: `BuildEnvironment` sets `TEMP`, `TMP`, `LOCALAPPDATA`,
+`APPDATA` and `USERPROFILE` to the profile's AC folder (`GetAppContainerFolderPath`,
+i.e. `%LOCALAPPDATA%\Packages\<moniker>\AC`) — the folder root rather than
+`AC\Temp`, because `CreateAppContainerProfile` creates and ACLs the root but the
+launcher creates no directories. The other variables are copied from the launcher's
+own environment so `cmd`, PowerShell, git, node, python and MSVC discovery can start:
+`SystemRoot`, `windir`, `SystemDrive`, `ComSpec`, `PATH`, `PATHEXT`, `PSModulePath`
+(in-box modules such as `Resolve-DnsName`), `PROCESSOR_ARCHITECTURE`,
+`NUMBER_OF_PROCESSORS`, `OS`, `USERNAME`, `COMPUTERNAME`, and the machine-wide
+`ProgramFiles`/`ProgramFiles(x86)`/`ProgramW6432`/`CommonProgramFiles`/`CommonProgramFiles(x86)`/`ProgramData`/`ALLUSERSPROFILE`
+— none of which names a per-user directory. Inside a container (Probe 10(a)) the
+launcher inherits its caller's block, which is already that container's redirected one.
+The scaffold's first zero-capability launch checks that the child's `TEMP` and
+`LOCALAPPDATA` lie under the AC folder and stops the run as SETUP-FAULT if not; Probe 3
+repeats the check on its limited-token launch, and Probes 3 and 5 print both values as
+evidence.
 
 PS 5.1's `Add-Type` compiles through CodeDom/`csc.exe`, which writes transient
 `.cs`/`.cmdline` files to `Path.GetTempPath()` (TMP, then TEMP) — so the one
@@ -1301,20 +1318,31 @@ $out = New-Item -ItemType Directory -Force -Path (Join-Path $probeRoot 'out')
 icacls $out.FullName /grant "*${sid}:(OI)(CI)(M)"
 # zero-capability container — the default, and the study's pivot. It doubles as the
 # environment self-check every launcher probe relies on: the child's TEMP and
-# LOCALAPPDATA must be this profile's AC folder, or no launcher probe is scored.
-# Value of Name in a `cmd /c set` capture, trailing '\' trimmed; '' if absent (-join
-# makes it a plain string, so an absent line can never slip past -ne). Probe 3 reuses it.
-function Get-SetValue([object[]]$Lines, [string]$Name) {
-  (((@($Lines) -match "^$Name=") -replace "^$Name=",'') -join ';').TrimEnd('\')
+# LOCALAPPDATA must lie under this profile's AC folder, or the run stops here.
+# Returns "TEMP=<v> LOCALAPPDATA=<v>" from a `cmd /c set` capture, and $true in
+# $script:redirected only if both are AC or under it (AC\Temp counts). Probe 3 reuses it.
+function Test-Redirected([object[]]$Lines, [string]$AcDir) {
+  $script:redirected = $true
+  $shown = foreach ($n in 'TEMP', 'LOCALAPPDATA') {
+    # -join makes a plain string, so an absent line is '' and fails the test below.
+    $v = (((@($Lines) -match "^$n=") -replace "^$n=",'') -join ';').TrimEnd('\')
+    if (-not ($v -eq $AcDir -or $v.StartsWith("$AcDir\", [StringComparison]::OrdinalIgnoreCase))) { $script:redirected = $false }
+    "$n=$v"
+  }
+  $shown -join ' '
 }
 $envSmoke = Join-Path $out.FullName 'env-smoke.txt'
-[NockProbe.AC]::Run($sid, @(), ('cmd.exe /c set > "' + $envSmoke + '"'), 30000)
-$acDir = (Join-Path $env:LOCALAPPDATA "Packages\$moniker\AC").TrimEnd('\')
-$smoke = Get-Content $envSmoke -ErrorAction SilentlyContinue
-if ((Get-SetValue $smoke 'TEMP') -ne $acDir -or (Get-SetValue $smoke 'LOCALAPPDATA') -ne $acDir) {
-  "SETUP-FAULT: container environment not redirected to $acDir (TEMP=$(Get-SetValue $smoke 'TEMP') LOCALAPPDATA=$(Get-SetValue $smoke 'LOCALAPPDATA')); probes 1, 3, 4, 5, 6, 10, 11 not scored"
+$rcSmoke  = [NockProbe.AC]::Run($sid, @(), ('cmd.exe /c set > "' + $envSmoke + '"'), 30000)
+$acDir    = (Join-Path $env:LOCALAPPDATA "Packages\$moniker\AC").TrimEnd('\')
+$envShown = Test-Redirected (Get-Content $envSmoke -ErrorAction SilentlyContinue) $acDir
+if (-not (Test-Path $envSmoke)) {
+  "SETUP-FAULT: zero-capability launch wrote no environment capture (exit $rcSmoke); run stopped before any probe"
+  throw 'launcher environment self-check failed'
+} elseif (-not $redirected) {
+  "SETUP-FAULT: container environment not under $acDir ($envShown); run stopped before any probe"
   throw 'launcher environment self-check failed'
 }
+"LAUNCHER-ENV: PASS - $envShown"
 # one capability (internetClient, S-1-15-3-1), for the contrast case:
 [NockProbe.AC]::Run($sid, @('S-1-15-3-1'), 'cmd.exe /c exit 0', 30000)
 ```
@@ -1406,6 +1434,7 @@ function Invoke-LimitedPhase {
   param([string]$Phase, [int]$TimeoutSec = 120)
   # A failed positive control fails every later phase at once, instead of each
   # waiting out its own timeout for a task that will not run either.
+  $script:limitedInv = $null         # never left pointing at an earlier invocation
   if ($script:limitedDead) { $script:limitedFault = "positive control failed ($script:limitedDead)"; return $null }
   $script:limitedFault = $null
   $inv = '{0}-{1}' -f $Phase, [guid]::NewGuid().ToString('N')
@@ -1650,11 +1679,9 @@ $inv3 = $limitedInv                  # this call's id, captured once
 $d3  = if ($p3) { Join-Path $probeRoot "p3\$inv3" }
 $w   = if ($d3) { Get-Content (Join-Path $d3 'whoami-inside.txt') -ErrorAction SilentlyContinue }
 $e3  = if ($d3) { Get-Content (Join-Path $d3 'env-inside.txt') -ErrorAction SilentlyContinue }
-# The launcher's redirect target, compared with the scaffold's Get-SetValue.
-$ac3 = (Join-Path $env:LOCALAPPDATA "Packages\nocklock-p3-$runId\AC").TrimEnd('\')
-$t3  = Get-SetValue $e3 'TEMP'
-$l3  = Get-SetValue $e3 'LOCALAPPDATA'
-$env3 = "container TEMP=$t3 LOCALAPPDATA=$l3"
+# The launcher's redirect target, checked with the scaffold's Test-Redirected.
+$ac3  = (Join-Path $env:LOCALAPPDATA "Packages\nocklock-p3-$runId\AC").TrimEnd('\')
+$env3 = "container " + (Test-Redirected $e3 $ac3)
 $p3err = (@($p3) -match '^ERROR:') -join '; '
 if (-not $p3) {
   "VERDICT(3): SETUP-FAULT - $limitedFault; not scored"
@@ -1667,7 +1694,7 @@ if (-not $p3) {
   "VERDICT(3): INDETERMINATE - $p3err"
 } elseif (-not (($w | Select-String -SimpleMatch 'S-1-16-4096') -and ($w | Select-String -Pattern 'S-1-15-2-1\b'))) {
   "VERDICT(3): INDETERMINATE - launched, but p3\$inv3\whoami-inside.txt shows no Low IL (S-1-16-4096) plus ALL APPLICATION PACKAGES (S-1-15-2-1)"
-} elseif ($t3 -ne $ac3 -or $l3 -ne $ac3) {
+} elseif (-not $redirected) {
   # A Low-IL child that still sees host TEMP/LOCALAPPDATA means the launcher's environment block is wrong.
   "VERDICT(3): INDETERMINATE - Low-IL AppContainer child launched, but it was not redirected to $ac3 ($env3)"
 } else {
@@ -1828,7 +1855,7 @@ capabilities.
 # This is the survival signal. Required tools must already be present on the
 # desktop (checked by the shared scaffold); if any are absent, record
 # SETUP-FAULT for this probe and skip it.
-# The launcher's explicit environment block: both MUST print ...\Packages\<moniker>\AC
+# The launcher's explicit environment block: both MUST lie under ...\Packages\<moniker>\AC
 # (the scaffold's profile folder), never the operator's own TEMP/LOCALAPPDATA.
 "container TEMP=$env:TEMP LOCALAPPDATA=$env:LOCALAPPDATA"
 $repo = Join-Path $probeRoot 'project\repo'
@@ -1857,7 +1884,9 @@ probe root). The launcher passes an explicit environment block with `TEMP`, `TMP
 `LOCALAPPDATA`, `APPDATA` and `USERPROFILE` set to the profile's AC folder (see
 [the launcher](#launcher-desktop-path-add-type-pinvoke)), so the first line above
 shows what the tools saw (the scaffold's environment self-check has already
-stopped the run if the block was not redirected). Whether Windows would redirect
+stopped the run if the block was not redirected). Because `USERPROFILE` and `APPDATA`
+are redirected too, git here finds neither the host's global config nor its credential
+store — a probe-launcher choice, not necessarily what the product will pass. Whether Windows would redirect
 those variables *itself* when handed an explicit block (UNVERIFIED #12) is a product
 question the probe launcher deliberately sidesteps.
 
@@ -2092,9 +2121,9 @@ if (-not $verdictA) {
 }
 if (-not $verdictA) {
   try {
-    # Run waits for curl (its -m 5 bounds it) and returns curl's exit code. If Run cannot
-    # resolve the escape profile's AC folder for the child's environment block, it throws
-    # InvalidOperationException (never 0x80070005), which lands in INDETERMINATE below.
+    # Run waits for curl (its -m 5 bounds it) and returns curl's exit code. Inside the
+    # container, a failed AC-folder lookup makes Run inherit this container's block
+    # rather than throw, so a lookup failure never masks an escape.
     $curlRc = [NockProbe.AC]::Run($s2, @('S-1-15-3-1'), 'curl.exe -sS -m 5 https://example.com/', 30000)
   } catch {
     $e = $_.Exception.GetBaseException(); $h = Get-BaseHResult $_
