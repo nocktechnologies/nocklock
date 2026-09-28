@@ -17,6 +17,9 @@ All notable changes to NockLock will be documented in this file.
 
 ### Added
 
+- A strict Linux claude-code preset regression proof checks that `ls .` and
+  `os.listdir('.')` can read a fresh project's root while the relocated audit
+  database and an explicit deny path remain inaccessible to the wrapped child.
 - Every `wrap` signs a `config.digest` row containing the canonical resolved
   policy and prior digest. Changed policy fields warn before the child starts;
   `verify --audit` reports the history and requires each retained post-adoption
