@@ -1582,8 +1582,9 @@ if ($setupFaults -match '^Probe 1 ') { "VERDICT(1): SETUP-FAULT - $($setupFaults
 # check below has something to reach — without it, curl to 9999 fails with
 # "connection refused" no matter what the loopback policy does, which is the exact
 # wrong-reason verdict this round removes.
-$job8899 = Start-Job { python -m http.server 8899 --bind 127.0.0.1 --directory $using:probeRoot }
-$job9999 = Start-Job { python -m http.server 9999 --bind 127.0.0.1 --directory $using:probeRoot }
+# $script: (not local): teardown reads these from its own block, same as Invoke-LimitedPhase's state.
+$script:job8899 = Start-Job { python -m http.server 8899 --bind 127.0.0.1 --directory $using:probeRoot }
+$script:job9999 = Start-Job { python -m http.server 9999 --bind 127.0.0.1 --directory $using:probeRoot }
 
 # terminal A - POSITIVE CONTROLS from OUTSIDE the container: poll each listener
 # up to 10 s (1 s intervals) to confirm it is live before reading inside verdicts.
@@ -2075,10 +2076,10 @@ logman stop $etwSession -ets 2>&1 | Out-File $log -Append -Encoding utf8
 Scored in the elevated shell, one verdict line:
 
 ```powershell
-$etwSession = "nocklock-fileprobe-$runId"
+# $script: (not local): teardown reads both from its own block, same as Invoke-LimitedPhase's state.
+$script:etwSession = "nocklock-fileprobe-$runId"
 $p7 = Invoke-LimitedPhase 'probe7'
 # Unknown outcome (no proven run) counts as "may exist", so teardown still stops it by exact name.
-# $script: (not local): teardown reads this from its own block, same as Invoke-LimitedPhase's state.
 $script:etwCreated = (-not $p7) -or [bool](@($p7) -match '^create-exit=0$')
 if (-not $p7) {
   "VERDICT(7): SETUP-FAULT - $limitedFault; not scored"
