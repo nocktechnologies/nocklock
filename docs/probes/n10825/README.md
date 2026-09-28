@@ -79,7 +79,7 @@ The transcript carries the verdicts: `LAUNCHER-ENV:`, `LIMITED-TOKEN:`,
   which did not start in a zero-capability container on the first desktop run (exit
   `0xC0000142`, `STATUS_DLL_INIT_FAILED`). A `SETUP-FAULT` that names a
   launch prints its exit code in hex; a negative one is an NTSTATUS, meaning that
-  process never started.
+  process did not start (`0xC0000142`) or crashed (e.g. `0xC0000005`).
 
 - The scaffold's tool check prints lines for every probe in the doc; a
   `SETUP-FAULT: Probe 5a requires ...` line concerns a probe this run does not execute.

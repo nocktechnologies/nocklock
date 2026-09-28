@@ -39,7 +39,7 @@ All notable changes to NockLock will be documented in this file.
   every command inside a container through `cmd.exe`: on the first desktop run
   `powershell.exe` exited `0xC0000142` (`STATUS_DLL_INIT_FAILED`) in a
   zero-capability container. Probe 1 launches each loopback curl on its own and
-  finds the container's 9998 listener from the outer shell; Probe 3 captures
+  checks the 9998 bind + listen with a python that exits; Probe 3 captures
   `whoami /groups` and `set` with their errors and exit codes. SETUP-FAULT lines
   print exit codes in hex. The launcher's environment block now accounts for
   Windows' own AppContainer redirection, which had doubled the

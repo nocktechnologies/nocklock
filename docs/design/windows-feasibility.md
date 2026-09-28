@@ -1183,8 +1183,9 @@ namespace NockProbe {
     // that redirection expects (the AC folder three levels up), TEMP and TMP name AC\Temp
     // (created here), and APPDATA and USERPROFILE name the AC folder itself
     // (%LOCALAPPDATA%\Packages\<moniker>\AC, which CreateAppContainerProfile creates and
-    // grants to the package SID), so no probe reads or writes the operator's real
-    // profile dirs through them. Only the variables tools need to start are copied through.
+    // grants to the package SID). Once Windows' redirection has run (the scaffold's environment
+    // self-check proves it), no probe reads or writes the operator's real profile dirs through
+    // them. Only the variables tools need to start are copied through.
     // Layout "K=V\0...K=V\0", sorted case-insensitively; StringToHGlobalUni adds the final \0.
     // Returns IntPtr.Zero (inherit) only when the CALLER is itself an AppContainer
     // (Probe 10(a)'s re-container): its own block is already its container's redirected one,
@@ -1209,7 +1210,10 @@ namespace NockProbe {
                           "CommonProgramFiles(x86)", "ProgramData", "ALLUSERSPROFILE" };
       var vars = new System.Collections.Generic.SortedDictionary<string, string>(StringComparer.OrdinalIgnoreCase);
       vars["LOCALAPPDATA"] = System.IO.Path.GetDirectoryName(System.IO.Path.GetDirectoryName(System.IO.Path.GetDirectoryName(acDir)));
-      vars["TEMP"] = vars["TMP"] = System.IO.Directory.CreateDirectory(acDir + "\\Temp").FullName;
+      try { vars["TEMP"] = vars["TMP"] = System.IO.Directory.CreateDirectory(acDir + "\\Temp").FullName; }
+      catch (Exception e) {                        // never an access-denied HResult: a setup fault, not a launch denial
+        throw new InvalidOperationException("environment block: cannot create AC\\Temp: " + e.Message);
+      }
       vars["APPDATA"] = vars["USERPROFILE"] = acDir;
       foreach (string n in copied) { string v = Environment.GetEnvironmentVariable(n); if (v != null) vars[n] = v; }
       StringBuilder b = new StringBuilder();
@@ -1224,8 +1228,8 @@ namespace NockProbe {
     // Waits up to timeoutMs and returns the exit code. The child starts suspended inside an
     // anonymous job, so a timeout kills its WHOLE tree (TerminateJobObject), not just the
     // direct child, then throws. This job has no KILL_ON_JOB_CLOSE, deliberately: on a normal
-    // return from the elevated shell, descendants a probe keeps on purpose (Probe 1's 9998
-    // listener) survive and are reaped by teardown's verified-identity stop. The case where the CALLER dies mid-Run
+    // return from the elevated shell, descendants a probe keeps on purpose survive and are
+    // reaped by teardown's verified-identity stop. The case where the CALLER dies mid-Run
     // (the limited task stopped on a timeout) is covered one level up: _limited.ps1 first
     // puts itself in a kill-on-close job (ContainSelf), and this job nests inside it.
     public static int Run(string packageSid, string[] capabilitySids, string cmdLine, int timeoutMs) {
@@ -1409,9 +1413,9 @@ $sid                                               # record this SID string; the
 icacls $launcherDll /grant "*${sid}:(R)"          # Probe 10(a) loads it inside the container
 # One SID-writable drop dir, created and ACL'd from the OUTER shell (which holds
 # WRITE_DAC; the Low-IL container does not). Inside-container steps hand their verdict
-# logs and any value back out through it — Probe 1's `_inside-1-<name>.txt` captures,
-# every `_inside.ps1` phase's `_inside-<phase>.log` and Probe 10's WMI child PID (see
-# the bootstrap note above):
+# logs and any value back out through it — Probe 1's `_inside-1-<name>.txt` captures and,
+# in a run that assembles them, each `_inside.ps1` phase's `_inside-<phase>.log` and
+# Probe 10's WMI child PID (see the bootstrap note above):
 $out = New-Item -ItemType Directory -Force -Path (Join-Path $probeRoot 'out')
 icacls $out.FullName /grant "*${sid}:(OI)(CI)(M)"
 # zero-capability container — the default, and the study's pivot. It doubles as the
@@ -1458,7 +1462,7 @@ the verdicts those probes score (loopback reach, package-SID ACEs, AppContainer
 flag of a WMI child) turn on the package SID and capabilities, not on the user
 groups, and Probe 3 is the unelevated-parent evidence. If a result looks
 parent-dependent, re-run that phase through the limited task (a descendant it keeps on
-purpose, like Probe 1's 9998 listener, then dies when the phase exits: see `ContainSelf`).
+purpose then dies when the phase exits: see `ContainSelf`).
 
 #### Limited-token runner (desktop)
 
@@ -1740,7 +1744,7 @@ $verdict1x = if (-not $preClean) {
 # error text included) into the granted $out dir and the launcher returns that command's own
 # exit code; both are printed verbatim as inside(1) lines, so the verdict is read from the
 # recorded output, not inferred. An exit code outside curl's 0-255 is not curl's answer (a
-# negative one is an NTSTATUS from a process that did not start; 9009 is cmd's "not
+# negative one is an NTSTATUS: the process did not start, or crashed; 9009 is cmd's "not
 # recognized"), so it is a SETUP-FAULT, recorded in hex.
 $log1 = @(); $fault1 = @()
 foreach ($c in @(@('8899',    'curl.exe -sS -m 5 http://127.0.0.1:8899/'),      # MUST succeed, or Phase 1 is dead
@@ -1758,39 +1762,24 @@ foreach ($c in @(@('8899',    'curl.exe -sS -m 5 http://127.0.0.1:8899/'),      
   }
 }
 $log1 | ForEach-Object { "inside(1): $_" }
-# The agent binds its own listener: `start /b` leaves python running after cmd exits (the
-# launcher's job has no KILL_ON_JOB_CLOSE). cmd cannot report the PID, so THIS shell finds
-# the 9998 listener (the port was free at BEFORE), proves from its token that it runs in
-# this run's container, and records PID + StartTime + Path for teardown's
-# Stop-VerifiedProcess: bare PID reuse across the ~minutes a probe run takes can kill an
-# unrelated process. python's own output (its error text included) is _inside-1-9998.txt.
+# The agent binds its own listener: python binds 127.0.0.1:9998, listens, prints one line
+# and exits, so the claim (bind + listen inside, outbound-only scope below) is its exit code
+# and nothing is left running to reap. A per-user python (e.g. under %LOCALAPPDATA%\Programs)
+# is unreadable to a zero-capability container: cmd's error text then shows in the capture.
 $capture = Join-Path $out.FullName '_inside-1-9998.txt'
-try {
-  [void][NockProbe.AC]::Run($sid, @(), ('cmd.exe /c start "" /b python -m http.server 9998 --bind 127.0.0.1 --directory "' +
-    $probeRoot + '" > "' + $capture + '" 2>&1'), 60000)
+$bind9998 = try {
+  $rc = [NockProbe.AC]::Run($sid, @(), ('cmd.exe /c python -c "import socket; s = socket.socket(); ' +
+    's.bind((''127.0.0.1'', 9998)); s.listen(1); print(''bind+listen OK'', s.getsockname())" > "' + $capture + '" 2>&1'), 60000)
+  'exit={0} (0x{0:X8})' -f $rc
 } catch {
-  'inside(1) 9998 launch threw {0} HResult={1} {2}' -f $_.Exception.GetBaseException().GetType().Name, (Get-BaseHResult $_), $_.Exception.GetBaseException().Message
-}
-$own = $null
-for ($i = 0; $i -lt 10 -and -not $own; $i++) {
-  $own = Get-NetTCPConnection -State Listen -LocalPort 9998 -ErrorAction SilentlyContinue | Select-Object -First 1
-  if (-not $own) { Start-Sleep 1 }
-}
-$ownToken = if ($own) { try { [NockProbe.AC]::TokenSummary($own.OwningProcess) } catch { "token unreadable: $($_.Exception.GetBaseException().Message)" } }
-if ($ownToken -like "AppContainer=True PackageSid=$sid *") {
-  Write-ProcessIdentity -Proc (Get-Process -Id $own.OwningProcess) -FilePath (Join-Path $out.FullName 'own-listener.txt')
+  'threw {0} HResult={1} {2}' -f $_.Exception.GetBaseException().GetType().Name, (Get-BaseHResult $_), $_.Exception.GetBaseException().Message
 }
 Get-Content $capture -ErrorAction SilentlyContinue | ForEach-Object { "inside(1) 9998: $_" }
-"inside(1) 9998 listener: $(if ($own) { "pid=$($own.OwningProcess) $ownToken" } else { 'none listening within 10 s' })"
+"inside(1) 9998 bind+listen: $bind9998"
 $exempt1 = Test-ExemptListed        # read BEFORE Probe 1's teardown, like everything scored below
-# The 9998 sub-claim (bind + listen inside) has evidence only if this shell found the listener
-# in this run's container. A per-user python (e.g. under %LOCALAPPDATA%\Programs) is unreadable
-# to a zero-capability container, so this line reads False there, with cmd's error text above.
-"inside(1) 9998 listener identity recorded: $(Test-Path (Join-Path $out.FullName 'own-listener.txt'))"
 
 # Probe 1's own teardown (see Teardown below), before the next probe runs.
 $job8899, $job9999 | Stop-Job -PassThru | Remove-Job
-Stop-VerifiedProcess -IdentityFile (Join-Path $out.FullName 'own-listener.txt')
 
 # Nothing is scored unless every curl launch returned curl's own exit code with a capture
 # (not denied, untracked, timed out or an NTSTATUS), BOTH outside listeners answered, and this
@@ -1842,17 +1831,9 @@ proxy design, which only needs the container to reach out to the proxy.
 If the first `curl` fails, the recommendation's Phase 1 is dead and Phase 2
 becomes mandatory — report immediately, do not run the rest.
 
-**Teardown.** Stop all three `python` listeners: the two outer jobs by handle
-(`$job8899, $job9999 | Stop-Job -PassThru | Remove-Job`) and the inside 9998
-listener via the scaffold's `Stop-VerifiedProcess` (reads `own-listener.txt`,
-confirms PID + StartTime + Path still match the live process, skips if missing
-or mismatched):
-
-```powershell
-Stop-VerifiedProcess -IdentityFile (Join-Path $out.FullName 'own-listener.txt')
-```
-
-Never `Get-Job | Stop-Job` — that kills every job in the operator's session. The
+**Teardown.** Stop the two outer `python` listeners by handle
+(`$job8899, $job9999 | Stop-Job -PassThru | Remove-Job`); the inside 9998 check
+exits on its own after `listen()`. Never `Get-Job | Stop-Job` — that kills every job in the operator's session. The
 loopback exemption is machine-wide session state shared by every probe, so it is
 **left in place until the global teardown** removes it with
 `CheckNetIsolation.exe LoopbackExempt -d "-n=$moniker"`. The one exception is the
@@ -1864,8 +1845,8 @@ stop (see the quiescence gate above).
 
 | State touched | Detail |
 |---|---|
-| Creates | 2 outer jobs (`$job8899`, `$job9999`); 1 inside listener process (identity in `own-listener.txt`); loopback exemption (machine-wide; removed and proven absent before each measured attempt, then added by the limited task or the elevated retry, kept until global teardown); `limited\exempt-<GUID>.*` files under `$probeRoot` (one run of the scaffold's scheduled task, when the pre-clean succeeds) |
-| Removes | the 2 outer jobs (by handle); inside listener (by verified PID+StartTime+Path) |
+| Creates | 2 outer jobs (`$job8899`, `$job9999`); 4 transient container processes (3 curls, 1 python bind + listen that exits); loopback exemption (machine-wide; removed and proven absent before each measured attempt, then added by the limited task or the elevated retry, kept until global teardown); `limited\exempt-<GUID>.*` files under `$probeRoot` (one run of the scaffold's scheduled task, when the pre-clean succeeds) |
+| Removes | the 2 outer jobs (by handle) |
 | Must never touch | other user jobs; loopback exemptions not created by this run; scheduled tasks other than `nocklock-probe-limited-$runId` |
 
 ### Probe 2: does the exemption need elevation?
@@ -1970,7 +1951,7 @@ if (-not $p3) {
   "VERDICT(3): INDETERMINATE - $p3err"
 } elseif (-not ($p3 -cmatch '^launch=OK whoami exit=0 .*; set exit=0 ')) {
   # A capture whose launch exited nonzero measured nothing; the hex names it (an NTSTATUS
-  # such as 0xC0000142 means that process never started).
+  # such as 0xC0000142 means that process did not start; 0xC0000005 that it crashed).
   "VERDICT(3): SETUP-FAULT - inside capture failed: $((@($p3) -cmatch '^launch=OK') -join '; '); not scored"
 } elseif (-not (($w | Select-String -SimpleMatch 'S-1-16-4096') -and ($w | Select-String -Pattern 'S-1-15-2-1\b'))) {
   "VERDICT(3): INDETERMINATE - launched, but p3\$inv3\whoami-inside.txt shows no Low IL (S-1-16-4096) plus ALL APPLICATION PACKAGES (S-1-15-2-1)"
@@ -2670,14 +2651,13 @@ if ($pipeNoAce)   { $pipeNoAce.Dispose() }
 $job8899, $job9999 | Where-Object { $_ } | Remove-Job -Force -ErrorAction SilentlyContinue   # Probe 1's listeners, by handle (an abort skips its own teardown)
 if ($etwCreated) { logman stop $etwSession -ets 2>$null }  # only if THIS run created it
 # Reap spawned processes BEFORE deleting $probeRoot (identity files live there).
-# Walks the two well-known identity-file paths directly — own-listener.txt (Probe 1) and
-# wmi-child.txt (Probe 10b) are the only ones this scaffold ever writes, both under
-# $probeRoot\out. Built from $probeRoot, not $out: $out isn't assigned until after the
+# Walks the one well-known identity-file path directly — wmi-child.txt (Probe 10b) is the
+# only one this scaffold ever writes, under $probeRoot\out. Built from $probeRoot, not $out: $out isn't assigned until after the
 # launcher compile/CreateProfile step (which can fail and re-throw before that
 # assignment), and this loop must still run — and reach the cleanup below it — on that
 # early-abort path. Never a *.txt scan of $probeRoot either: that would risk reaping (or
 # misreading) a probe's own log or output file that happens to share the directory.
-foreach ($idFile in @((Join-Path $probeRoot 'out\own-listener.txt'), (Join-Path $probeRoot 'out\wmi-child.txt'))) {
+foreach ($idFile in @((Join-Path $probeRoot 'out\wmi-child.txt'))) {
   Stop-VerifiedProcess -IdentityFile $idFile
 }
 # Probe 9 (VM only): restore firewall to the recorded per-profile state
