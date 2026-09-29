@@ -25,6 +25,16 @@ nocklock wrap -- claude
 
 Four commands and your agent is fenced.
 
+On Linux, the default read-only system grants cover binaries and libraries, plus
+`/etc/ld.so.cache` (loader cache), `passwd` and `group` (identity lookup),
+`nsswitch.conf`, `hosts`, and `resolv.conf` (name resolution), `localtime`
+(timezone), and `/etc/ssl/certs/` (public CA trust). They do not grant all of
+`/etc/`: files such as `/etc/environment` and TLS private keys stay outside
+the default allowlist. Loader configuration (`ld.so.conf*`), CA maintenance
+configuration, and alternatives directories are not needed by these runtime
+checks; symlinks into the allowed binary/library trees already resolve. Missing
+optional paths are skipped. Add distro-specific runtime files explicitly if needed.
+
 On macOS, `nocklock init` writes the same default `filesystem.root = "."`, and `nocklock wrap` enforces it as a kernel Seatbelt write boundary. Writes outside the root, `.nock`, and essential per-user runtime paths are denied. The built-in credential and sensitive paths (`~/.ssh`, `~/.aws`, `~/.config`, `~/.gnupg`, `~/Library/Keychains`, plus your `filesystem.deny` paths) are denied for reads and writes. Reads outside the root are not confined, and `filesystem.allow` and `filesystem.allow_rw` are not enforced on macOS. `filesystem.mode = "read-only"` is enforced: it drops the write allow for the root. See "Filesystem platform boundary" below.
 
 To start from a preset for a specific runtime:
@@ -240,7 +250,14 @@ allow = [
     "/bin/",
     "/lib/",
     "/lib64/",
-    "/etc/",
+    "/etc/ld.so.cache",
+    "/etc/passwd",
+    "/etc/group",
+    "/etc/nsswitch.conf",
+    "/etc/hosts",
+    "/etc/resolv.conf",
+    "/etc/localtime",
+    "/etc/ssl/certs/",
 ]
 # Linux only: these paths are explicitly read-write; allow stays read-only.
 allow_rw = []

@@ -8,9 +8,11 @@ if [[ "$(uname -s)" != Linux ]]; then
 fi
 
 repo=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
+scratch=
+read_only=
+trap 'rm -rf -- "$scratch" "$read_only"' EXIT
 scratch=$(mktemp -d "${HOME}/nocklock-init-default.XXXXXX")
 read_only=$(mktemp -d /tmp/nocklock-init-read-only.XXXXXX)
-trap 'rm -rf "$scratch" "$read_only"' EXIT
 
 mkdir -p "$scratch/home" "$scratch/project" "$scratch/outside"
 cp "$repo/nocklock" "$read_only/nocklock"
@@ -26,7 +28,21 @@ output=$(run_fenced wrap -- /bin/sh -c 'echo ok' 2>&1) || {
     echo "$output" >&2
     exit 1
 }
-[[ "$output" == *$'\nok'* ]] || { echo "wrapped shell did not print ok: $output" >&2; exit 1; }
+grep -Fxq ok <<<"$output" || { echo "wrapped shell did not print ok: $output" >&2; exit 1; }
+
+# Exercise the runtime data grants without relying on external network access.
+run_fenced wrap -- /bin/sh -ec '
+    getent passwd "$(id -u)" >/dev/null
+    getent group "$(id -g)" >/dev/null
+    getent hosts localhost >/dev/null
+    date +%Z >/dev/null
+    for path in /etc/ld.so.cache /etc/passwd /etc/group /etc/nsswitch.conf /etc/hosts /etc/resolv.conf /etc/localtime; do
+        if [ -e "$path" ]; then cat "$path" >/dev/null; fi
+    done
+    if [ -f /etc/ssl/certs/ca-certificates.crt ]; then
+        openssl crl2pkcs7 -nocrl -certfile /etc/ssl/certs/ca-certificates.crt >/dev/null
+    fi
+' >/dev/null
 
 run_fenced wrap -- /bin/sh -c 'echo ok > in-project' >/dev/null
 [[ "$(cat "$scratch/project/in-project")" == ok ]] || {

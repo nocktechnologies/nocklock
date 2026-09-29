@@ -661,7 +661,10 @@ func TestDefaultConfigFilesystemRootAndMode(t *testing.T) {
 
 func TestDefaultConfigSystemPathsAreReadOnly(t *testing.T) {
 	cfg := DefaultConfig()
-	for _, want := range []string{"/usr/", "/bin/", "/lib/", "/lib64/", "/etc/"} {
+	if len(cfg.Filesystem.AllowRW) != 0 {
+		t.Fatalf("default must not grant writes outside root: %v", cfg.Filesystem.AllowRW)
+	}
+	for _, want := range []string{"/usr/", "/bin/", "/lib/", "/lib64/", "/etc/ld.so.cache"} {
 		if !slices.Contains(cfg.Filesystem.Allow, want) {
 			t.Errorf("default filesystem.allow missing system read path %q", want)
 		}

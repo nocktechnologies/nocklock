@@ -18,7 +18,15 @@ func DefaultConfig() Config {
 				"/bin/",
 				"/lib/",
 				"/lib64/",
-				"/etc/",
+				// Loader cache, identity, name resolution, timezone, and public CAs.
+				"/etc/ld.so.cache",
+				"/etc/passwd",
+				"/etc/group",
+				"/etc/nsswitch.conf",
+				"/etc/hosts",
+				"/etc/resolv.conf",
+				"/etc/localtime",
+				"/etc/ssl/certs/",
 			},
 			AllowRW: []string{},
 			Deny: []string{
@@ -100,7 +108,15 @@ allow = [
     "/bin/",
     "/lib/",
     "/lib64/",
-    "/etc/",
+    # Runtime data only; never grant all of /etc (host secrets live there).
+    "/etc/ld.so.cache",
+    "/etc/passwd",
+    "/etc/group",
+    "/etc/nsswitch.conf",
+    "/etc/hosts",
+    "/etc/resolv.conf",
+    "/etc/localtime",
+    "/etc/ssl/certs/",
 ]
 # Linux only: paths explicitly granted read-write access. allow stays read-only.
 allow_rw = []
