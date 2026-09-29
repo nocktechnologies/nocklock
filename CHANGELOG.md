@@ -45,6 +45,10 @@ All notable changes to NockLock will be documented in this file.
 ### Changed
 
 - Failed anchor verification now names the anchored head and row count, and prints the recomputed local head at that count when available.
+- Fresh Linux `nocklock init` configs allow system binaries, libraries, and selected
+  configuration files to be read and executed without granting writes. Missing
+  optional read paths no longer prevent a wrapped shell from starting. The
+  default does not grant `/etc/environment` or `/etc/ssl/private/`.
 - The Windows desktop probe script (`docs/probes/n10825/run-probe.ps1`) runs
   every command inside a container through `cmd.exe`: on the first desktop run
   `powershell.exe` exited `0xC0000142` (`STATUS_DLL_INIT_FAILED`) in a

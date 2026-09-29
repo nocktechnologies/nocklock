@@ -89,6 +89,40 @@ func TestRulesFromConfigMapsReadOnlyAndReadWriteRights(t *testing.T) {
 	}
 }
 
+func TestRulesFromConfigOmitsMissingReadOnlyPath(t *testing.T) {
+	parent := t.TempDir()
+	root := filepath.Join(parent, "project")
+	existing := filepath.Join(parent, "existing")
+	missing := filepath.Join(parent, "missing")
+	if err := os.Mkdir(root, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Mkdir(existing, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	spec, err := RulesFromConfig(&fsfence.FenceConfig{
+		Root: root, Mode: "read-write", AllowPaths: []string{existing, missing},
+	}, nil, 5)
+	if err != nil {
+		t.Fatalf("build rules with absent read path: %v", err)
+	}
+	foundExisting := false
+	for _, rule := range spec.Paths {
+		if rule.Path == missing {
+			t.Fatal("missing path received a Landlock grant")
+		}
+		if rule.Path == existing {
+			foundExisting = true
+			if rule.Rights&RightExecute == 0 || rule.Rights&RightWriteFile != 0 {
+				t.Fatalf("existing path must be executable but read-only: %+v", rule)
+			}
+		}
+	}
+	if !foundExisting {
+		t.Fatal("existing read-only path received no Landlock grant")
+	}
+}
+
 // TestRulesFromConfigGrantsBaselineDeviceWrites asserts on the RIGHTS BITMASK,
 // not path presence: /dev/null and /dev/tty must carry write, and /dev/zero must
 // be read-only. A path-presence check would pass under the pre-fix behavior
