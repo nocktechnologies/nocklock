@@ -40,13 +40,22 @@ func TestWriteAnchorVerifyResult_TruncationExitsNonZero(t *testing.T) {
 	err := writeAnchorVerifyResult(&buf, &logging.AnchorVerifyResult{
 		Classification: "truncation",
 		Reason:         "truncation detected: anchor attests 5 rows, local has 3",
+		AnchorRowCount: 5,
+		AnchorHeadHash: "anchored-head-hash",
 	})
 	var ece *exitCodeError
 	if !asExitCodeError(err, &ece) || ece.code != 1 {
 		t.Fatalf("truncation must exit 1, got %v", err)
 	}
-	if !strings.Contains(buf.String(), "ANCHOR: TRUNCATION") {
-		t.Errorf("missing TRUNCATION verdict:\n%s", buf.String())
+	out := buf.String()
+	if !strings.Contains(out, "ANCHOR: TRUNCATION") {
+		t.Errorf("missing TRUNCATION verdict:\n%s", out)
+	}
+	if !strings.Contains(out, "Anchor head: anchored-head-hash (anchor attests 5 rows)") {
+		t.Errorf("truncation must name the anchored head and row count:\n%s", out)
+	}
+	if strings.Contains(out, "Local head at 5 rows:") {
+		t.Errorf("truncation cannot compute the local head at the anchored row count:\n%s", out)
 	}
 }
 
@@ -65,15 +74,25 @@ func TestWriteAnchorVerifyResult_TruncationAfterPruneCarriesNote(t *testing.T) {
 func TestWriteAnchorVerifyResult_TamperedExitsNonZero(t *testing.T) {
 	var buf bytes.Buffer
 	err := writeAnchorVerifyResult(&buf, &logging.AnchorVerifyResult{
-		Classification: "tampered",
-		Reason:         "tamper detected: local chain does not reproduce the anchored head hash at 4 rows",
+		Classification:    "tampered",
+		Reason:            "tamper detected: local chain does not reproduce the anchored head hash at 4 rows",
+		AnchorRowCount:    4,
+		AnchorHeadHash:    "anchored-head-hash",
+		LocalHeadAtAnchor: "local-head-at-4",
 	})
 	var ece *exitCodeError
 	if !asExitCodeError(err, &ece) || ece.code != 1 {
 		t.Fatalf("tampered must exit 1, got %v", err)
 	}
-	if !strings.Contains(buf.String(), "ANCHOR: TAMPERED") {
-		t.Errorf("missing TAMPERED verdict:\n%s", buf.String())
+	out := buf.String()
+	if !strings.Contains(out, "ANCHOR: TAMPERED") {
+		t.Errorf("missing TAMPERED verdict:\n%s", out)
+	}
+	if !strings.Contains(out, "Anchor head: anchored-head-hash (anchor attests 4 rows)") {
+		t.Errorf("tampered verdict must name the anchored head and row count:\n%s", out)
+	}
+	if !strings.Contains(out, "Local head at 4 rows: local-head-at-4") {
+		t.Errorf("tampered verdict must include the computable local head at that row count:\n%s", out)
 	}
 }
 
@@ -83,6 +102,8 @@ func TestWriteAnchorVerifyResult_ForgedAndIdentityAreForgedVerdict(t *testing.T)
 		err := writeAnchorVerifyResult(&buf, &logging.AnchorVerifyResult{
 			Classification: class,
 			Reason:         "anchor signature does not verify against the supplied key",
+			AnchorRowCount: 5,
+			AnchorHeadHash: "anchored-head-hash",
 		})
 		var ece *exitCodeError
 		if !asExitCodeError(err, &ece) || ece.code != 1 {
@@ -90,6 +111,9 @@ func TestWriteAnchorVerifyResult_ForgedAndIdentityAreForgedVerdict(t *testing.T)
 		}
 		if !strings.Contains(buf.String(), "ANCHOR: FORGED") {
 			t.Errorf("%s should render ANCHOR: FORGED:\n%s", class, buf.String())
+		}
+		if !strings.Contains(buf.String(), "Anchor head: anchored-head-hash (anchor attests 5 rows)") {
+			t.Errorf("%s verdict must name the anchored head and row count:\n%s", class, buf.String())
 		}
 	}
 }
@@ -99,6 +123,8 @@ func TestWriteAnchorVerifyResult_NoKeyFailsClosed(t *testing.T) {
 	err := writeAnchorVerifyResult(&buf, &logging.AnchorVerifyResult{
 		Classification: "no_key",
 		Reason:         "no public key available to authenticate the anchor",
+		AnchorRowCount: 5,
+		AnchorHeadHash: "anchored-head-hash",
 	})
 	var ece *exitCodeError
 	if !asExitCodeError(err, &ece) || ece.code != 1 {
@@ -106,6 +132,9 @@ func TestWriteAnchorVerifyResult_NoKeyFailsClosed(t *testing.T) {
 	}
 	if !strings.Contains(buf.String(), "ANCHOR: FAILED") {
 		t.Errorf("missing FAILED verdict:\n%s", buf.String())
+	}
+	if !strings.Contains(buf.String(), "Anchor head: anchored-head-hash (anchor attests 5 rows)") {
+		t.Errorf("no_key verdict must name the known anchored head and row count:\n%s", buf.String())
 	}
 }
 

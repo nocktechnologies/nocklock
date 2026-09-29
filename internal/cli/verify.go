@@ -158,6 +158,13 @@ func runVerifyAgainstAnchor(w io.Writer, anchorFile, pubFlag string) error {
 // writeAnchorVerifyResult renders an anchor verification verdict, mirroring the
 // AUDIT: verdict shape. Any non-OK outcome exits non-zero (No-Silent-Success).
 func writeAnchorVerifyResult(w io.Writer, result *logging.AnchorVerifyResult) error {
+	if result.Classification != "ok" && result.AnchorHeadHash != "" {
+		fmt.Fprintf(w, "Anchor head: %s (anchor attests %d rows)\n", result.AnchorHeadHash, result.AnchorRowCount)
+		if result.LocalHeadAtAnchor != "" {
+			fmt.Fprintf(w, "Local head at %d rows: %s\n", result.AnchorRowCount, result.LocalHeadAtAnchor)
+		}
+	}
+
 	switch result.Classification {
 	case "ok":
 		fmt.Fprintf(w, "ANCHOR: OK — %s (anchor attests %d rows, local has %d)\n", result.Reason, result.AnchorRowCount, result.LocalRowCount)
