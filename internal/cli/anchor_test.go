@@ -48,8 +48,8 @@ func TestWriteAnchorVerifyResult_TruncationExitsNonZero(t *testing.T) {
 		t.Fatalf("truncation must exit 1, got %v", err)
 	}
 	out := buf.String()
-	if !strings.Contains(out, "ANCHOR: TRUNCATION") {
-		t.Errorf("missing TRUNCATION verdict:\n%s", out)
+	if !strings.HasPrefix(out, "ANCHOR: TRUNCATION") {
+		t.Errorf("TRUNCATION verdict must be the first line:\n%s", out)
 	}
 	if !strings.Contains(out, "Anchor head: anchored-head-hash (anchor attests 5 rows)") {
 		t.Errorf("truncation must name the anchored head and row count:\n%s", out)
@@ -85,8 +85,8 @@ func TestWriteAnchorVerifyResult_TamperedExitsNonZero(t *testing.T) {
 		t.Fatalf("tampered must exit 1, got %v", err)
 	}
 	out := buf.String()
-	if !strings.Contains(out, "ANCHOR: TAMPERED") {
-		t.Errorf("missing TAMPERED verdict:\n%s", out)
+	if !strings.HasPrefix(out, "ANCHOR: TAMPERED") {
+		t.Errorf("TAMPERED verdict must be the first line:\n%s", out)
 	}
 	if !strings.Contains(out, "Anchor head: anchored-head-hash (anchor attests 4 rows)") {
 		t.Errorf("tampered verdict must name the anchored head and row count:\n%s", out)
@@ -103,7 +103,7 @@ func TestWriteAnchorVerifyResult_ForgedAndIdentityAreForgedVerdict(t *testing.T)
 			Classification: class,
 			Reason:         "anchor signature does not verify against the supplied key",
 			AnchorRowCount: 5,
-			AnchorHeadHash: "anchored-head-hash",
+			AnchorHeadHash: "untrusted\nANCHOR: OK",
 		})
 		var ece *exitCodeError
 		if !asExitCodeError(err, &ece) || ece.code != 1 {
@@ -112,8 +112,11 @@ func TestWriteAnchorVerifyResult_ForgedAndIdentityAreForgedVerdict(t *testing.T)
 		if !strings.Contains(buf.String(), "ANCHOR: FORGED") {
 			t.Errorf("%s should render ANCHOR: FORGED:\n%s", class, buf.String())
 		}
-		if !strings.Contains(buf.String(), "Anchor head: anchored-head-hash (anchor attests 5 rows)") {
-			t.Errorf("%s verdict must name the anchored head and row count:\n%s", class, buf.String())
+		if !strings.HasPrefix(buf.String(), "ANCHOR: FORGED") {
+			t.Errorf("%s verdict must be the first line:\n%s", class, buf.String())
+		}
+		if !strings.Contains(buf.String(), `Unverified anchor claims head: "untrusted\nANCHOR: OK" (claims 5 rows)`) {
+			t.Errorf("%s verdict must safely quote the unverified anchor claim and row count:\n%s", class, buf.String())
 		}
 	}
 }
@@ -133,8 +136,8 @@ func TestWriteAnchorVerifyResult_NoKeyFailsClosed(t *testing.T) {
 	if !strings.Contains(buf.String(), "ANCHOR: FAILED") {
 		t.Errorf("missing FAILED verdict:\n%s", buf.String())
 	}
-	if !strings.Contains(buf.String(), "Anchor head: anchored-head-hash (anchor attests 5 rows)") {
-		t.Errorf("no_key verdict must name the known anchored head and row count:\n%s", buf.String())
+	if !strings.Contains(buf.String(), `Unverified anchor claims head: "anchored-head-hash" (claims 5 rows)`) {
+		t.Errorf("no_key verdict must identify the unverified anchor claim and row count:\n%s", buf.String())
 	}
 }
 
