@@ -27,6 +27,8 @@ func DefaultConfig() Config {
 				"/etc/resolv.conf",
 				"/etc/localtime",
 				"/etc/ssl/certs/",
+				"/etc/pki/tls/certs/",
+				"/etc/pki/ca-trust/extracted/",
 			},
 			AllowRW: []string{},
 			Deny: []string{
@@ -117,6 +119,8 @@ allow = [
     "/etc/resolv.conf",
     "/etc/localtime",
     "/etc/ssl/certs/",
+    "/etc/pki/tls/certs/",
+    "/etc/pki/ca-trust/extracted/",
 ]
 # Linux only: paths explicitly granted read-write access. allow stays read-only.
 allow_rw = []

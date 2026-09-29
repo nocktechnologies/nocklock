@@ -39,7 +39,7 @@ run_fenced wrap -- /bin/sh -ec '
     for path in /etc/ld.so.cache /etc/passwd /etc/group /etc/nsswitch.conf /etc/hosts /etc/resolv.conf /etc/localtime; do
         if [ -e "$path" ]; then cat "$path" >/dev/null; fi
     done
-    if [ -f /etc/ssl/certs/ca-certificates.crt ]; then
+    if [ -f /etc/ssl/certs/ca-certificates.crt ] && command -v openssl >/dev/null 2>&1; then
         openssl crl2pkcs7 -nocrl -certfile /etc/ssl/certs/ca-certificates.crt >/dev/null
     fi
 ' >/dev/null

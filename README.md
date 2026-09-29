@@ -28,7 +28,9 @@ Four commands and your agent is fenced.
 On Linux, the default read-only system grants cover binaries and libraries, plus
 `/etc/ld.so.cache` (loader cache), `passwd` and `group` (identity lookup),
 `nsswitch.conf`, `hosts`, and `resolv.conf` (name resolution), `localtime`
-(timezone), and `/etc/ssl/certs/` (public CA trust). They do not grant all of
+(timezone), and public CA trust in the Debian/Alpine (`/etc/ssl/certs/`)
+and RHEL/Fedora (`/etc/pki/tls/certs/`, `/etc/pki/ca-trust/extracted/`)
+layouts. They do not grant all of
 `/etc/`: files such as `/etc/environment` and TLS private keys stay outside
 the default allowlist. Loader configuration (`ld.so.conf*`), CA maintenance
 configuration, and alternatives directories are not needed by these runtime
@@ -258,6 +260,8 @@ allow = [
     "/etc/resolv.conf",
     "/etc/localtime",
     "/etc/ssl/certs/",
+    "/etc/pki/tls/certs/",
+    "/etc/pki/ca-trust/extracted/",
 ]
 # Linux only: these paths are explicitly read-write; allow stays read-only.
 allow_rw = []

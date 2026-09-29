@@ -41,10 +41,12 @@ func TestDefaultConfigEtcSecretDenied(t *testing.T) {
 		if err := Apply(spec); err != nil {
 			t.Fatal(err)
 		}
-		if _, err := os.ReadFile(filepath.Join(root, "etc/ld.so.cache")); err != nil {
-			t.Fatalf("loader cache read denied: %v", err)
+		for _, name := range []string{"etc/ld.so.cache", "etc/pki/tls/certs/ca-bundle.crt", "etc/pki/ca-trust/extracted/pem/tls-ca-bundle.pem"} {
+			if _, err := os.ReadFile(filepath.Join(root, name)); err != nil {
+				t.Fatalf("runtime data %s read denied: %v", name, err)
+			}
 		}
-		for _, name := range []string{"etc/environment", "etc/ssl/private/server.key", "etc/ld.so.cache.backup"} {
+		for _, name := range []string{"etc/environment", "etc/ssl/private/server.key", "etc/pki/tls/private/server.key", "etc/ld.so.cache.backup"} {
 			_, err := os.ReadFile(filepath.Join(root, name))
 			if !errors.Is(err, syscall.EACCES) {
 				t.Fatalf("secret %s read error = %v, want EACCES", name, err)
@@ -61,7 +63,7 @@ func TestDefaultConfigEtcSecretDenied(t *testing.T) {
 	if err := os.Mkdir(filepath.Join(root, "project"), 0700); err != nil {
 		t.Fatal(err)
 	}
-	for _, name := range []string{"etc/ld.so.cache", "etc/environment", "etc/ssl/private/server.key", "etc/ld.so.cache.backup"} {
+	for _, name := range []string{"etc/ld.so.cache", "etc/pki/tls/certs/ca-bundle.crt", "etc/pki/ca-trust/extracted/pem/tls-ca-bundle.pem", "etc/environment", "etc/ssl/private/server.key", "etc/pki/tls/private/server.key", "etc/ld.so.cache.backup"} {
 		path := filepath.Join(root, name)
 		if err := os.MkdirAll(filepath.Dir(path), 0700); err != nil {
 			t.Fatal(err)
