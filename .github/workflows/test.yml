@@ -58,6 +58,11 @@ jobs:
       - name: test
         run: go test ./... -count=1
 
+      - name: fresh Linux init and wrapped shell
+        run: |
+          make build-all
+          bash scripts/test-init-default-linux.sh
+
   claude-code-preset:
     name: claude-code preset · Landlock enforcement (non-root)
     runs-on: ubuntu-latest

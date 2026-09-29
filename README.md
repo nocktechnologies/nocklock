@@ -236,6 +236,11 @@ linux_enforcement = "required"
 allow = [
     "~/.claude/",
     "/tmp/",
+    "/usr/",
+    "/bin/",
+    "/lib/",
+    "/lib64/",
+    "/etc/",
 ]
 # Linux only: these paths are explicitly read-write; allow stays read-only.
 allow_rw = []
@@ -306,6 +311,10 @@ On Linux, `filesystem.allow` grants read-only access. Use
 `filesystem.allow_rw` only for paths a tool must modify, such as a runtime's
 state directory. Both lists are ignored on macOS, whose Seatbelt backend uses
 the configured root as its write boundary instead.
+
+The default Linux policy includes the system binary, library, and configuration
+paths needed to launch a shell. Missing read-only paths, such as `~/.claude/`
+in a new home, grant nothing for that session and do not prevent a wrap.
 
 Runtime presets exist for `claude-code`, `codex`, `aider`, `gemini-cli`, `opencode`, and `goose`. Each preset keeps the network default-deny, blocks private ranges, keeps Linux filesystem and syscall enforcement required, and passes only the runtime's documented first-party provider key or keys. `gemini-cli` targets the API-key path; OAuth and Vertex AI setups need explicit operator review before widening the filesystem or egress. `opencode` targets OpenCode Zen/Go through `opencode.ai`; direct third-party providers should use a reviewed custom config. `goose` is a multi-provider preset covering Anthropic, OpenAI, Gemini, Groq, and OpenRouter; only the provider key the user has set is live, and the rest are unset and harmless. MCP extensions that reach additional hosts need an operator overlay.
 

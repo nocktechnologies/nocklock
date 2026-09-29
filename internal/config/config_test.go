@@ -4,6 +4,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"slices"
 	"strings"
 	"testing"
 
@@ -655,6 +656,18 @@ func TestDefaultConfigFilesystemRootAndMode(t *testing.T) {
 	}
 	if cfg.Filesystem.LinuxEnforcement != "required" {
 		t.Errorf("expected default linux_enforcement 'required', got %q", cfg.Filesystem.LinuxEnforcement)
+	}
+}
+
+func TestDefaultConfigSystemPathsAreReadOnly(t *testing.T) {
+	cfg := DefaultConfig()
+	for _, want := range []string{"/usr/", "/bin/", "/lib/", "/lib64/", "/etc/"} {
+		if !slices.Contains(cfg.Filesystem.Allow, want) {
+			t.Errorf("default filesystem.allow missing system read path %q", want)
+		}
+		if slices.Contains(cfg.Filesystem.AllowRW, want) {
+			t.Errorf("system path %q must not be writable", want)
+		}
 	}
 }
 

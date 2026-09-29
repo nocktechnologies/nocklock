@@ -14,6 +14,11 @@ func DefaultConfig() Config {
 			Allow: []string{
 				"~/.claude/",
 				"/tmp/",
+				"/usr/",
+				"/bin/",
+				"/lib/",
+				"/lib64/",
+				"/etc/",
 			},
 			AllowRW: []string{},
 			Deny: []string{
@@ -91,6 +96,11 @@ macos_allow_unfenced = false
 allow = [
     "~/.claude/",
     "/tmp/",
+    "/usr/",
+    "/bin/",
+    "/lib/",
+    "/lib64/",
+    "/etc/",
 ]
 # Linux only: paths explicitly granted read-write access. allow stays read-only.
 allow_rw = []

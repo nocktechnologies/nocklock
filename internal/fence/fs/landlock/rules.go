@@ -2,6 +2,7 @@ package landlock
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -139,6 +140,13 @@ func RulesFromConfig(cfg *fsfence.FenceConfig, extra []AllowPath, abi int) (Spec
 	}
 	spec.Paths = append(spec.Paths, rootRuleset...)
 	for _, p := range cfg.AllowPaths {
+		// An absent optional read path grants nothing. A fresh HOME need not
+		// already contain ~/.claude for the default policy to start.
+		if _, err := os.Stat(p); errors.Is(err, os.ErrNotExist) {
+			continue
+		} else if err != nil {
+			return Spec{}, fmt.Errorf("inspect allow path %q: %w", p, err)
+		}
 		spec.Paths = append(spec.Paths, pathRule(p, AccessReadOnly, abi))
 	}
 	for _, p := range cfg.AllowRWPaths {
