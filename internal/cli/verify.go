@@ -168,26 +168,33 @@ func writeAnchorVerifyResult(w io.Writer, result *logging.AnchorVerifyResult) er
 		if result.PrunedAfterAnchor {
 			fmt.Fprintln(w, "NOTE: the local chain_head records a prune after this anchor was emitted; a legitimate compaction can look like truncation. Re-emit the anchor after a prune.")
 		}
-		return &exitCodeError{code: 1}
 	case "tampered":
 		fmt.Fprintf(w, "ANCHOR: TAMPERED — %s\n", result.Reason)
 		if result.PrunedAfterAnchor {
 			fmt.Fprintln(w, "NOTE: the local chain_head records a prune after this anchor was emitted; a legitimate compaction re-chains surviving rows. Re-emit the anchor after a prune.")
 		}
-		return &exitCodeError{code: 1}
 	case "identity_mismatch", "forged":
 		fmt.Fprintf(w, "ANCHOR: FORGED — %s\n", result.Reason)
-		return &exitCodeError{code: 1}
 	case "no_key":
 		fmt.Fprintf(w, "ANCHOR: FAILED — %s\n", result.Reason)
-		return &exitCodeError{code: 1}
 	case "anchor_unavailable":
 		fmt.Fprintf(w, "ANCHOR: UNAVAILABLE (anchor_unavailable) — %s\n", result.Reason)
-		return &exitCodeError{code: 1}
 	default:
 		fmt.Fprintf(w, "ANCHOR: FAILED — unexpected verification state %q: %s\n", result.Classification, result.Reason)
-		return &exitCodeError{code: 1}
 	}
+
+	if result.AnchorHeadHash != "" {
+		if result.Classification == "truncation" || result.Classification == "tampered" {
+			fmt.Fprintf(w, "Anchor head: %s (anchor attests %d rows)\n", result.AnchorHeadHash, result.AnchorRowCount)
+		} else {
+			fmt.Fprintf(w, "Unverified anchor claims head: %q (claims %d rows)\n", result.AnchorHeadHash, result.AnchorRowCount)
+		}
+		if result.LocalHeadAtAnchor != "" {
+			fmt.Fprintf(w, "Local head at %d rows: %s\n", result.AnchorRowCount, result.LocalHeadAtAnchor)
+		}
+	}
+
+	return &exitCodeError{code: 1}
 }
 
 // resolveAuditDBPath finds the NockLock config and returns the absolute event

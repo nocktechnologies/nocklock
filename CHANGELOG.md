@@ -44,6 +44,7 @@ All notable changes to NockLock will be documented in this file.
 
 ### Changed
 
+- Failed anchor verification now names the anchored head and row count, and prints the recomputed local head at that count when available.
 - Fresh Linux `nocklock init` configs allow system binaries, libraries, and selected
   configuration files to be read and executed without granting writes. Missing
   optional read paths no longer prevent a wrapped shell from starting. The
