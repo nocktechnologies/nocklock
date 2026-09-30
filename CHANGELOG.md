@@ -44,6 +44,7 @@ All notable changes to NockLock will be documented in this file.
 
 ### Changed
 
+- Anvil removed; NockLock is public and uses GitHub-hosted runners only; PR review is Gander.
 - Anvil now runs its PR trust gate from the protected base workflow with
   `pull_request_target`. It checks out the event's exact base commit and
   rejects a PR head that changed before constructing the review diff. The job
