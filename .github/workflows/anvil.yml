@@ -1,17 +1,19 @@
 name: Anvil (Codex Security Review)
 
 on:
-  pull_request:
+  pull_request_target:
     types: [opened, synchronize, reopened, ready_for_review]
 
 permissions:
   contents: read
-  pull-requests: write
   issues: write
 
 jobs:
   anvil-review:
-    # A public-repo exception is limited to the exact fleet bot on a same-repo head.
+    # This workflow must come from the base branch: fork PRs can edit their
+    # own workflow file, so a pull_request job-level gate can be removed.
+    # The public-repo exception remains limited to the exact fleet bot on a
+    # same-repo head.
     if: >-
       github.event.pull_request.draft == false &&
       github.event.pull_request.user.login != 'dependabot[bot]' &&
@@ -23,7 +25,9 @@ jobs:
           contains(fromJSON('["OWNER","MEMBER","COLLABORATOR"]'), github.event.pull_request.author_association)
         )
       )
-    runs-on: [self-hosted, macOS, ARM64, codex-signed]
+    runs-on:
+      group: nocklock-anvil
+      labels: [self-hosted, macOS, ARM64, codex-signed]
     timeout-minutes: 25
 
     steps:
@@ -44,6 +48,7 @@ jobs:
 
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4
         with:
+          ref: ${{ github.event.pull_request.base.sha }}
           fetch-depth: 0
 
       - name: Record shared Codex auth guard
@@ -116,7 +121,7 @@ jobs:
         env:
           ANVIL_CODEX_MODEL: ${{ vars.ANVIL_CODEX_MODEL }}
           ANVIL_DEFAULT_CODEX_MODEL: "gpt-5.5"
-          PR_BASE_REF: ${{ github.event.pull_request.base.ref }}
+          PR_BASE_SHA: ${{ github.event.pull_request.base.sha }}
           PR_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
           PR_NUMBER: ${{ github.event.pull_request.number }}
         run: |
@@ -208,12 +213,16 @@ jobs:
           fi
           echo "codex smoke test OK: ${SMOKE_OUTPUT}"
 
-          if ! git fetch --no-tags origin "${PR_BASE_REF}"; then
-            echo "::error::Could not fetch base ref '${PR_BASE_REF}'; refusing to review."
+          if ! git fetch --no-tags origin "refs/pull/${PR_NUMBER}/head"; then
+            echo "::error::Could not fetch PR head; refusing to review."
+            exit 1
+          fi
+          if [[ "$(git rev-parse FETCH_HEAD)" != "${PR_HEAD_SHA}" ]]; then
+            echo "::error::PR head changed since this workflow event; refusing to review a different commit."
             exit 1
           fi
           mkdir -p .anvil
-          if ! git diff "origin/${PR_BASE_REF}...${PR_HEAD_SHA}" > .anvil/pr-diff.patch; then
+          if ! git diff "${PR_BASE_SHA}...${PR_HEAD_SHA}" > .anvil/pr-diff.patch; then
             echo "::error::Could not create the PR diff; refusing to review."
             exit 1
           fi
@@ -223,13 +232,13 @@ jobs:
             exit 1
           fi
 
-          # This is a private repository, so checkout needs credentials to fetch
-          # the base ref. Remove them before Codex reads PR-controlled content.
+          # A private repository needs checkout credentials for the fetches.
+          # Remove them before Codex reads PR-controlled content.
           git config --local --unset-all http.https://github.com/.extraheader || true
 
           PROMPT="Security-focused adversarial review of PR #${PR_NUMBER}.
 
-          Diff scope: changes between origin/${PR_BASE_REF} and HEAD (${PR_HEAD_SHA}).
+          Diff scope: changes between base ${PR_BASE_SHA} and PR head ${PR_HEAD_SHA}.
           Pre-computed diff file: .anvil/pr-diff.patch (${DIFF_LINES} lines).
           Read that file first, then read surrounding source as needed.
 

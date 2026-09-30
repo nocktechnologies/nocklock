@@ -29,6 +29,11 @@ All notable changes to NockLock will be documented in this file.
 
 ### Changed
 
+- Anvil now runs its PR trust gate from the protected base workflow with
+  `pull_request_target`. It checks out the event's exact base commit and
+  rejects a PR head that changed before constructing the review diff. The job
+  requires a dedicated `nocklock-anvil` runner group, which must be restricted
+  to the Anvil workflow on `main` before a credentialed runner is registered.
 - Anvil security reviews now admit `nock-fleet[bot]` by exact login on
   same-repo heads while preserving the private-repository association gate for
   other authors. Reviews pass only on `ANVIL_NO_FINDINGS`; finding lines and
