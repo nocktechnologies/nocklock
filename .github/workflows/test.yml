@@ -5,8 +5,8 @@ on:
     branches: [main]
   pull_request:
     # ready_for_review is included so the macos-enforce job's
-    # `draft == false` gate fires on the draft→ready transition (mirrors
-    # anvil.yml). This applies to the whole trigger, so the ubuntu test and
+    # `draft == false` gate fires on the draft→ready transition. This applies
+    # to the whole trigger, so the ubuntu test and
     # fuzz-smoke jobs also re-run when a draft PR is marked ready — a cheap,
     # desirable full-CI pass at the moment a PR opens for review.
     types: [opened, synchronize, reopened, ready_for_review]
@@ -29,12 +29,6 @@ jobs:
         with:
           go-version-file: go.mod
           cache: true
-
-      - name: Anvil fail-closed output contract
-        run: bash scripts/test-anvil-output.sh
-
-      - name: Anvil base-workflow trust gate
-        run: python3 scripts/test-anvil-trust-gate.py
 
       - name: build
         run: go build ./...
@@ -146,8 +140,8 @@ jobs:
     # `test` job — no `needs:`, so it can neither delay nor skip it.
     #
     # Runs on a GitHub-hosted macos-latest runner (ephemeral + isolated), so PR
-    # test code — even from forks — executes safely without a self-hosted
-    # trust gate. sandbox-exec ships on the hosted image. Runs beside the
+    # test code — even from forks — executes on an ephemeral runner.
+    # sandbox-exec ships on the hosted image. Runs beside the
     # ubuntu `test` job (no `needs:`), so it can neither delay nor skip it.
     if: github.event_name == 'pull_request' && github.event.pull_request.draft == false
     runs-on: macos-latest
