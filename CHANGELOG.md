@@ -17,6 +17,15 @@ All notable changes to NockLock will be documented in this file.
 
 ### Added
 
+- `wrap` reports and signs the effective network egress level (`KERNEL`,
+  `CONFINED`, `ADVISORY`, `OFF`, or `UNREACHABLE`). Advisory proxy mode warns
+  that clients ignoring `HTTP_PROXY` can reach any host. Set
+  `network.require_enforced = true` or pass `--require-enforced-egress` to
+  refuse sessions without enforced egress.
+- A strict Linux claude-code preset regression proof checks that `ls .` and
+  `os.listdir('.')` can read a fresh project's root while the relocated audit
+  database and a path outside the allowlist (default-deny) remain inaccessible
+  to the wrapped child.
 - Every `wrap` signs a `config.digest` row containing the canonical resolved
   policy and prior digest. Changed policy fields warn before the child starts;
   `verify --audit` reports the history and requires each retained post-adoption
@@ -26,6 +35,12 @@ All notable changes to NockLock will be documented in this file.
   its temporary probe files outside granted paths, including `/tmp`.
 - Source builds now embed `git describe --tags --always --dirty` in
   `nocklock version`.
+- `docs/probes/n10825/run-probe.ps1` runs the Windows feasibility Probes 1, 2
+  and 3 on a real desktop, assembled verbatim from
+  `docs/design/windows-feasibility.md`. It proves the launcher and the
+  limited token before any probe changes machine state, always runs the global
+  teardown, and writes BEFORE/AFTER state plus environment stamps to
+  `output.txt`. Operator steps are in the directory's README.
 
 ### Changed
 
@@ -41,6 +56,27 @@ All notable changes to NockLock will be documented in this file.
   Redacted output is retained outside runner temp with 0700 directories and
   0600 files, keeping the newest 50 per repository. Codex runs in a bounded
   process group so timeout cleanup can remove its temporary copies.
+- Failed anchor verification now names the anchored head and row count, and prints the recomputed local head at that count when available.
+- Fresh Linux `nocklock init` configs allow system binaries, libraries, and selected
+  configuration files to be read and executed without granting writes. Missing
+  optional read paths no longer prevent a wrapped shell from starting. The
+  default does not grant `/etc/environment` or `/etc/ssl/private/`.
+- The Windows desktop probe script (`docs/probes/n10825/run-probe.ps1`) runs
+  every command inside a container through `cmd.exe`: on the first desktop run
+  `powershell.exe` exited `0xC0000142` (`STATUS_DLL_INIT_FAILED`) in a
+  zero-capability container. Probe 1 launches each loopback curl on its own and
+  checks the 9998 bind + listen with a python that exits; Probe 3 captures
+  `whoami /groups` and `set` with their errors and exit codes. SETUP-FAULT lines
+  print exit codes in hex. A launch counts as the tool's answer only when its
+  capture holds a line the tool itself writes (curl's `--write-out`
+  `CURL_DONE exit=<n>`, python's `PYTHON_RAN`, a SID from whoami): cmd failing to
+  start the tool (access denied on the exe, or the exe missing) is a SETUP-FAULT,
+  never `PHASE 1 DEAD` or another probe verdict. The launcher's environment block now accounts for
+  Windows' own AppContainer redirection, which had doubled the
+  `Packages\<moniker>\AC` path, and the environment self-check fails when
+  `TEMP` or `LOCALAPPDATA` does not exist. The first run's output is committed
+  as `docs/probes/n10825/output-20260928T0558Z.txt`.
+
 - The Linux filesystem fence rejects configurations whose `allow_rw` entries
   push the shared allow cap or the combined wire budget over its limit.
 - macOS Seatbelt root-write confinement no longer grants the fenced child
@@ -48,6 +84,16 @@ All notable changes to NockLock will be documented in this file.
   writes the event database, SQLite sidecars, and chain anchor; a macOS
   enforcement test now proves child truncate and rename attempts are denied
   while a wrapped session still produces a verifiable audit chain.
+- Behavior change: `nocklock wrap` now fails closed when `logging.db` resolves
+  directly to the project root, because its SQLite sidecars and chain anchor
+  cannot be protected there. Move the database, sidecars, and chain anchor
+  together under `<root>/.nock/` with `[logging] db = ".nock/events.db"`, or
+  use the state directory with `[logging] db = "events.db"`.
+  Dry runs apply the same refusal without writing audit events. Audit path
+  resolution errors fail closed; fresh audit directories remain supported.
+  Dry runs now use the shared audit-path resolver: they also reject unusable
+  state roots and conflicting chains, and may create missing trusted state
+  directories, but do not create a database, signing key, or anchor.
 - New projects keep their audit trail outside the project, so the fenced agent
   can finally use its own project root (N10749). Two requirements had been in
   direct conflict: the agent must be able to create and remove files directly in
@@ -196,6 +242,14 @@ All notable changes to NockLock will be documented in this file.
 
 ### Fixed
 
+- CI fuzz smoke no longer fails spuriously under runner load (N10854). The
+  three fuzz steps budgeted wall time (`-fuzztime=25s`), and Go's fuzz
+  coordinator can surface its own timeout as `--- FAIL ... context deadline
+  exceeded` with no crasher. The steps now budget an exec count
+  (`-fuzztime=Nx`, per target, set below the fewest execs each target reached
+  in 25s on CI), so a slow runner takes longer instead of failing; the job gets
+  a 15-minute ceiling. Seed-corpus and newly found crashers still fail the job.
+  `test.yml` also accepts `workflow_dispatch` for manual reruns.
 - Interposer field-budget cap is now enforced post-ABI-detection (#10815).
   The cap on allow/deny paths (matching libfence_fs.c's MAX_PATHS and field
   tokenizer budget) previously ran unconditionally in ProcessConfig with
@@ -307,6 +361,28 @@ All notable changes to NockLock will be documented in this file.
   tracked separately (N10753); no standard client speaks a unix-socket HTTP
   proxy, so it needs an interposer socket()/connect() translation that is a
   distinct design decision.
+
+### Documentation
+
+- Accepted-limitation record for grandchild procfs reads (#10764, follow-up to
+  #10757, ADR-005). A Node subprocess spawned by the wrapped Node agent (an MCP
+  server or tool that execs under a new pid) still throws `EACCES` on
+  `process.memoryUsage()`, because the `/proc/self/{stat,status,statm}` grants
+  are Landlock inode-bound to the directly wrapped child's own files. Every path
+  to reach grandchildren was assessed and rejected: a broad `/proc/` or
+  directory-level grant re-opens the #115 `/proc/<pid>/environ` leak; a
+  userspace interposer grant can never widen what the kernel Landlock policy
+  denies (rulesets only intersect); and a per-process PID namespace + fresh
+  `/proc` mount requires forking (abandoning the in-place `execve` that makes the
+  #10757 grant correct), a `CLONE_NEWUSER` that hands the tree the
+  namespaced-root surface `allow_namespaces=false` exists to deny, and the
+  privileged-helper lifecycle of ADR-004. `os.cpus()` is unaffected tree-wide.
+  `TestLandlockProcSelfAllowPathsStaysNarrow` pins the grant to one read-only
+  `/proc/self/<file>` entry per curated file, and
+  `TestSelfProcFilesExcludesSecretBearingEntries` keeps `environ`, `cmdline`,
+  `mem`, `maps` and `fd` off that list, and `TestSelfProcFilesPinsExactSet`
+  pins the list to exactly `stat`, `statm` and `status`, so this cannot be
+  "fixed" by widening it.
 
 ## [0.5.0] - 2026-09-26
 

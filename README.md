@@ -12,7 +12,7 @@ The secret fence filters environment variables. Your agent sees `PATH` and `HOME
 
 The filesystem fence is built differently on each platform. Linux uses a kernel root allowlist (Landlock) with LD_PRELOAD event logging. macOS uses kernel Seatbelt (`sandbox-exec`) to confine writes to `filesystem.root` plus required runtime paths, and it denies credential and sensitive paths such as `~/.ssh`, `~/.aws`, `~/.config`, `~/.gnupg`, and `~/Library/Keychains` for both reads and writes.
 
-The network fence is a local proxy with a domain allowlist. Your agent can reach GitHub and `api.anthropic.com`. It cannot reach anywhere else. On Linux, `nocklock wrap --net-fence=netns` opts into a kernel-enforced version: a network namespace with an nftables default-drop floor and a transparent HTTP(S) and DNS allowlist, so nothing outside `network.allow` leaves the namespace on any transport.
+The default network policy is a userspace proxy with a domain allowlist. A client that ignores `HTTP_PROXY` can bypass it. On Linux, `nocklock wrap --net-fence=netns` opts into a kernel-enforced version: a network namespace with an nftables default-drop floor and a transparent HTTP(S) and DNS allowlist, so nothing outside `network.allow` leaves the namespace on any transport.
 
 ## Quick start
 
@@ -24,6 +24,18 @@ nocklock wrap -- claude
 ```
 
 Four commands and your agent is fenced.
+
+On Linux, the default read-only system grants cover binaries and libraries, plus
+`/etc/ld.so.cache` (loader cache), `passwd` and `group` (identity lookup),
+`nsswitch.conf`, `hosts`, and `resolv.conf` (name resolution), `localtime`
+(timezone), and public CA trust in the Debian/Alpine (`/etc/ssl/certs/`)
+and RHEL/Fedora (`/etc/pki/tls/certs/`, `/etc/pki/ca-trust/extracted/`)
+layouts. They do not grant all of
+`/etc/`: files such as `/etc/environment` and TLS private keys stay outside
+the default allowlist. Loader configuration (`ld.so.conf*`), CA maintenance
+configuration, and alternatives directories are not needed by these runtime
+checks; symlinks into the allowed binary/library trees already resolve. Missing
+optional paths are skipped. Add distro-specific runtime files explicitly if needed.
 
 On macOS, `nocklock init` writes the same default `filesystem.root = "."`, and `nocklock wrap` enforces it as a kernel Seatbelt write boundary. Writes outside the root, `.nock`, and essential per-user runtime paths are denied. The built-in credential and sensitive paths (`~/.ssh`, `~/.aws`, `~/.config`, `~/.gnupg`, `~/Library/Keychains`, plus your `filesystem.deny` paths) are denied for reads and writes. Reads outside the root are not confined, and `filesystem.allow` and `filesystem.allow_rw` are not enforced on macOS. `filesystem.mode = "read-only"` is enforced: it drops the write allow for the root. See "Filesystem platform boundary" below.
 
@@ -45,9 +57,23 @@ It filters environment variables against the pass and block lists, which accept 
 
 It fences the filesystem. On Linux, Landlock applies a kernel allowlist and LD_PRELOAD records blocked-access events. On macOS, Seatbelt denies writes by default, then permits only `filesystem.root`, NockLock state, and essential per-user runtime paths; its sensitive-path denies also block reads. Every child process inherits the profile. Before launch, NockLock validates the generated profile, so a requested macOS fence either engages or refuses to start. It never silently degrades.
 
-It routes network traffic through a local proxy that enforces a domain allowlist. On Linux, in the default proxy mode with the syscall fence enabled, IP socket creation is denied in the child; proxy-aware HTTP(S) clients connect to an advertised loopback proxy address that the interposer maps onto a Unix socket. Direct IP sockets, including `--noproxy` bypass attempts, fail closed. For HTTPS, only the hostname is inspected. There is no certificate injection and no payload decryption. If the proxy is not confirmed healthy, the agent does not start.
+It routes network traffic through a local proxy that enforces a domain allowlist. On Linux, in proxy mode with syscall enforcement and the filesystem interposer enabled, IP socket creation is denied in the child; proxy-aware HTTP(S) clients connect to an advertised loopback proxy address that the interposer maps onto a Unix socket. Direct IP sockets, including `--noproxy` bypass attempts, fail closed. For HTTPS, only the hostname is inspected. There is no certificate injection and no payload decryption. If the proxy is not confirmed healthy, the agent does not start.
 
 On Linux you can instead pass `--net-fence=netns`. The child then runs in its own network namespace behind a kernel default-drop floor, keeps its configured IP socket families, and reaches only `network.allow` hosts through a transparent HTTP(S) proxy and a fixed-answer DNS stub that answers DNS over UDP and TCP port 53 inside the namespace. All other traffic leaving the namespace is dropped in the kernel, including direct DNS to other resolvers, non-DNS UDP, QUIC (UDP/443), SCTP and raw IP. This mode needs the privileged egress helper described under "Linux network-egress helper" and fails closed without it.
+
+### What “network fence active” means
+
+`wrap` prints and signs the effective egress level for each session. The proxy checks hostnames only for clients that use it; it does not decrypt HTTPS.
+
+| Level | Boundary |
+|---|---|
+| `KERNEL` | Linux netns with a kernel default-drop floor and the configured HTTP(S)/DNS allowlist. |
+| `CONFINED` | Linux proxy with syscall enforcement and the filesystem interposer bridge; the child can connect only to the proxy's Unix socket. |
+| `ADVISORY` | Userspace proxy only. A client that ignores `HTTP_PROXY` can reach any host. The wrap warning names this limitation. |
+| `OFF` | `network.allow_all = true`; any host is reachable. |
+| `UNREACHABLE` | Syscall enforcement restricts proxy traffic to Unix sockets, but the filesystem interposer bridge is disabled, so the allowlist cannot be reached. Wrap refuses to start. |
+
+Set `network.require_enforced = true` in `.nock/config.toml` or pass `--require-enforced-egress` to refuse `ADVISORY`, `OFF`, and `UNREACHABLE` levels. Linux can use `--net-fence=netns`; macOS cannot provide enforced egress today.
 
 Linux blocked accesses are logged to the event log (see "Event log" for where it lives). The macOS Seatbelt path records its fence state but does not yet emit one audit event per denied file; Seatbelt returns its native permission error. Blocked domains get a 403.
 
@@ -222,6 +248,20 @@ linux_enforcement = "required"
 allow = [
     "~/.claude/",
     "/tmp/",
+    "/usr/",
+    "/bin/",
+    "/lib/",
+    "/lib64/",
+    "/etc/ld.so.cache",
+    "/etc/passwd",
+    "/etc/group",
+    "/etc/nsswitch.conf",
+    "/etc/hosts",
+    "/etc/resolv.conf",
+    "/etc/localtime",
+    "/etc/ssl/certs/",
+    "/etc/pki/tls/certs/",
+    "/etc/pki/ca-trust/extracted/",
 ]
 # Linux only: these paths are explicitly read-write; allow stays read-only.
 allow_rw = []
@@ -243,6 +283,7 @@ allow = [
     "crates.io",
 ]
 allow_all = false
+require_enforced = false
 
 [syscall]
 enforcement = "required"
@@ -292,6 +333,10 @@ On Linux, `filesystem.allow` grants read-only access. Use
 state directory. Both lists are ignored on macOS, whose Seatbelt backend uses
 the configured root as its write boundary instead.
 
+The default Linux policy includes the system binary, library, and configuration
+paths needed to launch a shell. Missing read-only paths, such as `~/.claude/`
+in a new home, grant nothing for that session and do not prevent a wrap.
+
 Runtime presets exist for `claude-code`, `codex`, `aider`, `gemini-cli`, `opencode`, and `goose`. Each preset keeps the network default-deny, blocks private ranges, keeps Linux filesystem and syscall enforcement required, and passes only the runtime's documented first-party provider key or keys. `gemini-cli` targets the API-key path; OAuth and Vertex AI setups need explicit operator review before widening the filesystem or egress. `opencode` targets OpenCode Zen/Go through `opencode.ai`; direct third-party providers should use a reviewed custom config. `goose` is a multi-provider preset covering Anthropic, OpenAI, Gemini, Groq, and OpenRouter; only the provider key the user has set is live, and the rest are unset and harmless. MCP extensions that reach additional hosts need an operator overlay.
 
 Two candidate runtimes are deliberately left without a preset:
@@ -307,6 +352,7 @@ Two candidate runtimes are deliberately left without a preset:
 | `nocklock init --runtime <name>` | Create `.nock/config.toml` from an embedded runtime preset |
 | `nocklock wrap -- <cmd>` | Run a command inside the fence |
 | `nocklock wrap --net-fence=netns -- <cmd>` | Linux only: run inside the kernel-enforced netns egress fence (needs the privileged helper) |
+| `nocklock wrap --require-enforced-egress -- <cmd>` | Refuse to start unless egress is `KERNEL` or `CONFINED` |
 | `nocklock wrap --profile list` | List embedded runtime presets |
 | `nocklock wrap --dry-run` | Validate config without starting fences or a command |
 | `nocklock scan [path ...]` | Scan selected local files; `--env` adds environment values and `--json` prints structured results |
@@ -440,6 +486,12 @@ the filename does not hide an existing default-name chain: if both the old
 default location and the newly configured destination are candidates, NockLock
 refuses to guess which chain is authoritative and names both paths. Likewise,
 an existing legacy `.nock/events.db` remains visible after a rename.
+`nocklock wrap` refuses to start if the resolved `logging.db` directory is the
+project root: Landlock cannot protect the database's sidecars and chain anchor
+while granting that root. Move the database, sidecars, and chain anchor
+together under `.nock/` with
+`[logging] db = ".nock/events.db"`, or use the NockLock state directory with
+`[logging] db = "events.db"`.
 `nocklock doctor` warns if an absolute path lands back inside
 `filesystem.root`, where the agent can reach it.
 

@@ -151,6 +151,7 @@ func canonicalPolicy(cfg *config.Config, configPath, dbPath, networkFenceMode st
 			"allow":                canonicalStrings(cfg.Network.Allow),
 			"allow_all":            cfg.Network.AllowAll,
 			"allow_private_ranges": cfg.Network.AllowPrivateRanges,
+			"require_enforced":     cfg.Network.RequireEnforced,
 		},
 		"secrets": map[string]any{
 			"pass":           canonicalStrings(cfg.Secrets.Pass),

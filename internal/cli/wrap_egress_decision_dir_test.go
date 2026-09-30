@@ -55,7 +55,7 @@ func TestEgressDecisionDirIsLandlockEnforceable(t *testing.T) {
 			Root:       root,
 			Mode:       "read-write",
 			AllowPaths: []string{grantedTemp},
-			DenyPaths:  egressChildDenyPaths(dbPath, root, decisionDir),
+			DenyPaths:  egressChildDenyPaths(dbPath, decisionDir),
 		}, nil, abi)
 	}
 

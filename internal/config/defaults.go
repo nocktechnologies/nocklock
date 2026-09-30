@@ -14,6 +14,21 @@ func DefaultConfig() Config {
 			Allow: []string{
 				"~/.claude/",
 				"/tmp/",
+				"/usr/",
+				"/bin/",
+				"/lib/",
+				"/lib64/",
+				// Loader cache, identity, name resolution, timezone, and public CAs.
+				"/etc/ld.so.cache",
+				"/etc/passwd",
+				"/etc/group",
+				"/etc/nsswitch.conf",
+				"/etc/hosts",
+				"/etc/resolv.conf",
+				"/etc/localtime",
+				"/etc/ssl/certs/",
+				"/etc/pki/tls/certs/",
+				"/etc/pki/ca-trust/extracted/",
 			},
 			AllowRW: []string{},
 			Deny: []string{
@@ -91,6 +106,21 @@ macos_allow_unfenced = false
 allow = [
     "~/.claude/",
     "/tmp/",
+    "/usr/",
+    "/bin/",
+    "/lib/",
+    "/lib64/",
+    # Runtime data only; never grant all of /etc (host secrets live there).
+    "/etc/ld.so.cache",
+    "/etc/passwd",
+    "/etc/group",
+    "/etc/nsswitch.conf",
+    "/etc/hosts",
+    "/etc/resolv.conf",
+    "/etc/localtime",
+    "/etc/ssl/certs/",
+    "/etc/pki/tls/certs/",
+    "/etc/pki/ca-trust/extracted/",
 ]
 # Linux only: paths explicitly granted read-write access. allow stays read-only.
 allow_rw = []
@@ -112,6 +142,8 @@ allow = [
     "crates.io",
 ]
 allow_all = false
+# Refuse wrap unless egress is kernel-enforced or Linux syscall-confined.
+require_enforced = false
 
 [secrets]
 # Optional local preflight. A finding or incomplete scan prevents launch.

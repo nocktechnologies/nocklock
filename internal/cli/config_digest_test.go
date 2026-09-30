@@ -137,8 +137,37 @@ func TestConfigDigestCanonicalizesPolicyAndExcludesCloudAPIKey(t *testing.T) {
 	if first.Digest != second.Digest || !bytes.Equal(first.Policy, second.Policy) {
 		t.Fatalf("equivalent policy ordering changed digest: %s != %s", first.Digest, second.Digest)
 	}
+	cfg.Network.RequireEnforced = true
+	third, err := newConfigDigestRecord(&cfg, configPath, filepath.Join(project, "events.db"), "proxy")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if second.Digest == third.Digest {
+		t.Fatal("network.require_enforced change did not change the config digest")
+	}
 	if bytes.Contains(first.Policy, []byte(cfg.Cloud.APIKey)) {
 		t.Fatalf("canonical policy leaked cloud.api_key: %s", first.Policy)
+	}
+}
+
+func TestConfigDigestCoversRequireEnforcedCLIFlag(t *testing.T) {
+	project := t.TempDir()
+	configPath := filepath.Join(project, config.Dir, config.File)
+	cfg := config.DefaultConfig()
+	base, err := newConfigDigestRecord(&cfg, configPath, filepath.Join(project, "events.db"), "proxy")
+	if err != nil {
+		t.Fatal(err)
+	}
+	effective := effectiveWrapConfig(&cfg, WrapFlags{RequireEnforcedEgress: true})
+	flagged, err := newConfigDigestRecord(&effective, configPath, filepath.Join(project, "events.db"), "proxy")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if base.Digest == flagged.Digest {
+		t.Fatal("--require-enforced-egress did not change the signed config digest")
+	}
+	if !jsonPathPresent(flagged.Policy, "network.require_enforced") {
+		t.Fatalf("effective policy omitted network.require_enforced: %s", flagged.Policy)
 	}
 }
 
@@ -157,6 +186,7 @@ var configDigestPolicyFields = map[string]string{
 	"Network.Allow":                 "network.allow",
 	"Network.AllowAll":              "network.allow_all",
 	"Network.AllowPrivateRanges":    "network.allow_private_ranges",
+	"Network.RequireEnforced":       "network.require_enforced",
 	"Secrets.Pass":                  "secrets.pass",
 	"Secrets.Block":                 "secrets.block",
 	"Secrets.ScanEnv":               "secrets.scan_env",
