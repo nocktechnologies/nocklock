@@ -45,18 +45,6 @@ All notable changes to NockLock will be documented in this file.
 ### Changed
 
 - Anvil removed; NockLock is public and uses GitHub-hosted runners only; PR review is Gander.
-- Anvil now runs its PR trust gate from the protected base workflow with
-  `pull_request_target`. It checks out the event's exact base commit and
-  rejects a PR head that changed before constructing the review diff. The job
-  requires a dedicated `nocklock-anvil` runner group, which must be restricted
-  to the Anvil workflow on `main` before a credentialed runner is registered.
-- Anvil security reviews now admit `nock-fleet[bot]` by exact login on
-  same-repo heads while preserving the private-repository association gate for
-  other authors. Reviews pass only on `ANVIL_NO_FINDINGS`; finding lines and
-  unparseable output fail closed.
-  Redacted output is retained outside runner temp with 0700 directories and
-  0600 files, keeping the newest 50 per repository. Codex runs in a bounded
-  process group so timeout cleanup can remove its temporary copies.
 - Failed anchor verification now names the anchored head and row count, and prints the recomputed local head at that count when available.
 - Fresh Linux `nocklock init` configs allow system binaries, libraries, and selected
   configuration files to be read and executed without granting writes. Missing
