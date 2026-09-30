@@ -2,11 +2,25 @@
 """Guard Anvil's base-branch workflow and pinned checkout against regression."""
 
 import re
+import subprocess
+import tempfile
 import unittest
 from pathlib import Path
 
 
 WORKFLOW = Path(__file__).resolve().parents[1] / ".github/workflows/anvil.yml"
+EXPECTED_GATE = " ".join("""
+    github.event.pull_request.draft == false &&
+    github.event.pull_request.user.login != 'dependabot[bot]' &&
+    github.event.pull_request.head.repo.full_name == github.repository &&
+    (
+      github.event.pull_request.user.login == 'nock-fleet[bot]' ||
+      (
+        github.event.repository.private == true &&
+        contains(fromJSON('["OWNER","MEMBER","COLLABORATOR"]'), github.event.pull_request.author_association)
+      )
+    )
+""".split())
 
 
 def violations(source):
@@ -22,10 +36,8 @@ def violations(source):
     job_body = job.group(1) if job else ""
     condition = re.search(r"(?ms)^    if: >-\n(.*?)(?=^    [\w-]+:|\Z)", job_body)
     gate = condition.group(1) if condition else ""
-    if "github.event.pull_request.head.repo.full_name == github.repository" not in gate:
-        errors.append("Anvil must require a same-repository PR head")
-    if "github.event.pull_request.user.login == 'nock-fleet[bot]'" not in gate:
-        errors.append("Anvil must keep the exact fleet login check")
+    if " ".join(gate.split()) != EXPECTED_GATE:
+        errors.append("Anvil must keep the exact same-repository and author trust gate")
 
     runs_on = re.search(r"(?ms)^    runs-on:\s*\n(.*?)(?=^    [\w-]+:|\Z)", job_body)
     runner = runs_on.group(1) if runs_on else ""
@@ -65,6 +77,46 @@ class AnvilTrustGateTests(unittest.TestCase):
 
     def test_workflow_has_protected_trigger_and_pinned_diff(self):
         self.assertEqual([], violations(self.source))
+
+    def test_prompt_distinguishes_base_checkout_from_head_source(self):
+        prompt = self.source.split('PROMPT="', 1)[1].split('MODEL_LABEL=', 1)[0]
+        prompt = " ".join(prompt.split())
+        for instruction in (
+            "The working tree is the BASE commit ${PR_BASE_SHA}, not the PR head.",
+            "Read PR-head source with git show ${PR_HEAD_SHA}:<path>",
+            "Line numbers in findings must refer to the PR head.",
+            "Do not check out, copy, or worktree the PR head into the runner tree.",
+        ):
+            with self.subTest(instruction=instruction):
+                self.assertIn(instruction, prompt)
+
+    def test_reclaim_glob_matches_output_directory(self):
+        loop = re.search(r'^\s*(for stale_dir in .+; do)$', self.source, re.MULTILINE)
+        self.assertIsNotNone(loop)
+        self.assertIn('mktemp -d "${RUNNER_TEMP}/anvil-codex.output.XXXXXX"', self.source)
+        script = "\n".join([
+            'set -eu',
+            'RUNNER_TEMP="$1"',
+            'output_dir=$(mktemp -d "${RUNNER_TEMP}/anvil-codex.output.XXXXXX")',
+            loop.group(1),
+            '  if [[ "$stale_dir" == "$output_dir" ]]; then exit 0; fi',
+            'done',
+            'exit 1',
+        ])
+        with tempfile.TemporaryDirectory() as runner_temp:
+            result = subprocess.run(
+                ["bash", "-c", script, "reclaim-glob-test", runner_temp],
+                check=False,
+            )
+            self.assertEqual(0, result.returncode, "reclaim glob must match the output directory")
+
+    def test_negative_control_rejects_gate_or_bypass(self):
+        source = self.source.replace(
+            "github.event.pull_request.draft == false &&",
+            "true || github.event.pull_request.draft == false &&",
+            1,
+        )
+        self.assertTrue(any("trust gate" in error for error in violations(source)))
 
     def test_negative_controls_reject_pr_trigger_and_head_checkout(self):
         source = self.source.replace("  pull_request_target:", "  pull_request:", 1)

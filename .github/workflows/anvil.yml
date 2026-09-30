@@ -240,7 +240,10 @@ jobs:
 
           Diff scope: changes between base ${PR_BASE_SHA} and PR head ${PR_HEAD_SHA}.
           Pre-computed diff file: .anvil/pr-diff.patch (${DIFF_LINES} lines).
-          Read that file first, then read surrounding source as needed.
+          Read that file first. The working tree is the BASE commit ${PR_BASE_SHA}, not the PR head.
+          Read PR-head source with git show ${PR_HEAD_SHA}:<path> for surrounding context.
+          Line numbers in findings must refer to the PR head.
+          Do not check out, copy, or worktree the PR head into the runner tree.
 
           Check for injection, auth/authz bypasses, insecure data handling,
           hard-coded secrets, CSRF, and logic errors in security-critical paths.
