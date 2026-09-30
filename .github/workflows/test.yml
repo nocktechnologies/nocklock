@@ -30,6 +30,12 @@ jobs:
           go-version-file: go.mod
           cache: true
 
+      - name: Anvil fail-closed output contract
+        run: bash scripts/test-anvil-output.sh
+
+      - name: Anvil base-workflow trust gate
+        run: python3 scripts/test-anvil-trust-gate.py
+
       - name: build
         run: go build ./...
 
