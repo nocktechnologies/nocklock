@@ -1,0 +1,24 @@
+name: probe-n11039
+on:
+  push:
+    branches: [scratch/n11039-macos-run]
+jobs:
+  mac:
+    runs-on: macos-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+      - name: fs package
+        env:
+          NOCKLOCK_SANDBOX_REQUIRE: "1"
+        run: go test ./internal/fence/fs/ -count=1 -v 2>&1 | tail -80
+      - name: cli denial tests
+        env:
+          NOCKLOCK_SANDBOX_REQUIRE: "1"
+        run: go test ./internal/cli/ -run 'MacOS' -count=1 -v 2>&1 | tail -80
