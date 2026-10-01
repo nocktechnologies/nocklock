@@ -4,6 +4,11 @@ All notable changes to NockLock will be documented in this file.
 
 ## [Unreleased]
 
+## [0.6.1] - 2026-10-01
+
+Security patch release for macOS. In v0.6.0 the default config marked the
+syscall fence `required` but enforced nothing at the syscall level on macOS.
+
 ### Breaking
 
 - macOS: `nocklock wrap` now refuses to start when `syscall.enforcement` is
@@ -18,12 +23,15 @@ All notable changes to NockLock will be documented in this file.
 - macOS: `syscall.enforcement = "required"` (the `nocklock init` default) no
   longer starts silently without a syscall fence. On macOS the fence is the
   hardened Seatbelt rules, previously applied only with
-  `filesystem.hardened = true`; `nocklock wrap` now applies them whenever
-  enforcement is `"required"` or `"preferred"`, announces
-  `macOS syscall hardening ENGAGED`, and records a `syscall` audit event.
-  `"required"` with an empty `filesystem.root` has no Seatbelt profile to carry
-  the rules, so wrap refuses to start (`REFUSED-TO-START`); set
-  `filesystem.root` or `syscall.enforcement = "off"`.
+  `filesystem.hardened = true`: deny `mach-priv-host-port`, `iokit-open` and
+  `system-socket`, and limit writes under `/dev` to the common pseudo-devices.
+  `nocklock wrap` now applies them whenever enforcement is `"required"` or
+  `"preferred"`, announces `macOS syscall hardening ENGAGED`, and records a
+  `syscall` audit event. v0.6.0 macOS users get these stricter defaults after
+  upgrading; set `syscall.enforcement = "off"` to opt out. `"required"` with an
+  empty `filesystem.root` has no Seatbelt profile to carry the rules, so wrap
+  refuses to start (`REFUSED-TO-START`); set `filesystem.root` or
+  `syscall.enforcement = "off"`.
 
 ### Fixed
 
