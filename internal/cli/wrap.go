@@ -920,9 +920,10 @@ var wrapCmd = &cobra.Command{
 				OnDenial: func(d fsfence.Denial) {
 					logEvent(logging.EventFileBlocked, "filesystem", d.Detail(), true)
 				},
-				OnSuppressed: func(n int) {
+				OnSuppressed: func(overCap, repeats int) {
 					logEvent(logging.EventFileBlocked, "filesystem",
-						fmt.Sprintf("macOS denial log: %d further denial events suppressed after the %d-per-session cap", n, fsfence.DefaultMaxDenialEvents), true)
+						fmt.Sprintf("macOS denial log: %d denial events suppressed (%d over the %d-per-session cap, %d repeats of an already-logged operation and path)",
+							overCap+repeats, overCap, fsfence.DefaultMaxDenialEvents, repeats), true)
 				},
 				OnWarning: func(msg string) {
 					logEvent(logging.EventFilePassed, "filesystem", "macOS denial log (best-effort): "+msg, false)

@@ -92,7 +92,7 @@ func skipWithoutShell(t *testing.T) {
 type tailerRecorder struct {
 	mu         sync.Mutex
 	denials    []Denial
-	suppressed []int
+	suppressed [][2]int
 	warnings   []string
 }
 
@@ -101,7 +101,7 @@ func (r *tailerRecorder) config(argv []string, tag string, max int) DenialTailer
 		Argv: argv, Tag: tag, Max: max,
 		Drain: 200 * time.Millisecond, ReadyWait: 2 * time.Second,
 		OnDenial:     func(d Denial) { r.mu.Lock(); r.denials = append(r.denials, d); r.mu.Unlock() },
-		OnSuppressed: func(n int) { r.mu.Lock(); r.suppressed = append(r.suppressed, n); r.mu.Unlock() },
+		OnSuppressed: func(o, d int) { r.mu.Lock(); r.suppressed = append(r.suppressed, [2]int{o, d}); r.mu.Unlock() },
 		OnWarning:    func(m string) { r.mu.Lock(); r.warnings = append(r.warnings, m); r.mu.Unlock() },
 	}
 }
@@ -141,8 +141,8 @@ func TestDenialTailer_CapsAndReportsSuppressedOnce(t *testing.T) {
 	if len(r.denials) != 2 {
 		t.Errorf("want 2 reported denials, got %d", len(r.denials))
 	}
-	if len(r.suppressed) != 1 || r.suppressed[0] != 3 {
-		t.Errorf("want one suppressed notice of 3, got %v", r.suppressed)
+	if len(r.suppressed) != 1 || r.suppressed[0] != [2]int{3, 0} {
+		t.Errorf("want one suppressed notice of 3 over the cap, got %v", r.suppressed)
 	}
 }
 
@@ -167,5 +167,22 @@ func TestDenialTailer_EarlyExitWarnsOnceWithStderr(t *testing.T) {
 	tl.Stop()
 	if len(r.warnings) != 1 || !strings.Contains(r.warnings[0], "permission denied") {
 		t.Fatalf("want one early-exit warning quoting stderr, got %q", r.warnings)
+	}
+}
+
+func TestDenialTailer_RepeatedDenialsReportOnceAndDoNotUseCap(t *testing.T) {
+	skipWithoutShell(t)
+	rec := `{"eventMessage":"Sandbox: x(1) deny(1) file-write-data /dev/dtracehelper\nnocklock:S"}`
+	real := `{"eventMessage":"Sandbox: x(1) deny(1) file-read-data /home/u/.ssh/id\nnocklock:S"}`
+	stream := filepath.Join(t.TempDir(), "dup.ndjson")
+	body := strings.Repeat(rec+"\n", 4) + real + "\n"
+	if err := os.WriteFile(stream, []byte(body), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	var r tailerRecorder
+	tl := StartDenialTailer(r.config([]string{"/bin/sh", "-c", `cat "$1"; exec sleep 30`, "sh", stream}, DenialTag("S"), 2))
+	tl.Stop()
+	if len(r.denials) != 2 || len(r.suppressed) != 1 || r.suppressed[0] != [2]int{0, 3} {
+		t.Fatalf("denials=%+v suppressed=%v", r.denials, r.suppressed)
 	}
 }

@@ -107,7 +107,7 @@ type DenialTailerConfig struct {
 	ReadyWait time.Duration // bound on waiting for the stream to attach
 
 	OnDenial     func(Denial)
-	OnSuppressed func(n int) // called at most once, with the count over Max
+	OnSuppressed func(overCap, repeats int) // called at most once, if either is non-zero
 	OnWarning    func(msg string)
 }
 
@@ -160,6 +160,7 @@ func StartDenialTailer(cfg DenialTailerConfig) *DenialTailer {
 	case <-ready:
 	case <-t.done:
 	case <-time.After(cfg.ReadyWait):
+		t.warn("denial log stream had not attached when the command started; early denials may be missing")
 	}
 	return t
 }
@@ -174,38 +175,64 @@ func (t *DenialTailer) warn(msg string) {
 
 func (t *DenialTailer) read(out io.Reader, ready chan<- struct{}) {
 	defer close(t.done)
-	sc := bufio.NewScanner(out)
-	sc.Buffer(make([]byte, 0, 64*1024), 1<<20)
+	r := bufio.NewReaderSize(out, 64*1024)
 	signalled := false
-	reported, suppressed := 0, 0
-	for sc.Scan() {
-		if !signalled {
-			signalled = true
-			close(ready)
+	seen := make(map[Denial]struct{})
+	reported, overCap, repeats := 0, 0, 0
+	var readErr error
+	for {
+		line, err := r.ReadSlice('\n')
+		for err == bufio.ErrBufferFull { // oversized record: drop it, keep streaming
+			line = nil
+			_, err = r.ReadSlice('\n')
 		}
-		d, ok := ParseDenial(sc.Bytes(), t.cfg.Tag)
-		if !ok {
-			continue
+		if len(line) > 0 {
+			if !signalled {
+				signalled = true
+				close(ready)
+			}
+			t.handleLine(line, seen, &reported, &overCap, &repeats)
 		}
-		if reported >= t.cfg.Max {
-			suppressed++
-			continue
-		}
-		reported++
-		if t.cfg.OnDenial != nil {
-			t.cfg.OnDenial(d)
+		if err != nil {
+			if err != io.EOF {
+				readErr = err
+			}
+			break
 		}
 	}
-	if suppressed > 0 && t.cfg.OnSuppressed != nil {
-		t.cfg.OnSuppressed(suppressed)
+	if (overCap > 0 || repeats > 0) && t.cfg.OnSuppressed != nil {
+		t.cfg.OnSuppressed(overCap, repeats)
 	}
 	if !t.stopping.Load() {
 		t.wait() // stderr is complete only once the process has been reaped
 		detail := strings.TrimSpace(t.stderr.String())
-		if err := sc.Err(); err != nil {
-			detail = err.Error()
+		if readErr != nil {
+			detail = readErr.Error()
 		}
 		t.warn("denial log stopped early; later denials may be missing: " + detail)
+	}
+}
+
+// handleLine reports one stream line. Identical operation+path pairs are
+// recorded once per session: every process trips the same startup denials, and
+// repeats would exhaust the cap before a real secret access arrives.
+func (t *DenialTailer) handleLine(line []byte, seen map[Denial]struct{}, reported, overCap, repeats *int) {
+	d, ok := ParseDenial(line, t.cfg.Tag)
+	if !ok {
+		return
+	}
+	if _, dup := seen[d]; dup {
+		*repeats++
+		return
+	}
+	if *reported >= t.cfg.Max {
+		*overCap++
+		return
+	}
+	seen[d] = struct{}{}
+	*reported++
+	if t.cfg.OnDenial != nil {
+		t.cfg.OnDenial(d)
 	}
 }
 
@@ -221,11 +248,8 @@ func (t *DenialTailer) Stop() {
 		if t.cmd.Process != nil {
 			_ = t.cmd.Process.Kill()
 		}
-		select {
-		case <-t.done:
-		case <-time.After(2 * time.Second):
-		}
 		t.wait()
+		<-t.done
 	})
 }
 
