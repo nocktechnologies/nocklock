@@ -928,7 +928,6 @@ var wrapCmd = &cobra.Command{
 					logEvent(logging.EventFilePassed, "filesystem", "macOS denial log (best-effort): "+msg, false)
 				},
 			})
-			defer denialTailer.Stop()
 		}
 
 		childErr := child.Run()
