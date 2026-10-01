@@ -306,6 +306,16 @@ var wrapCmd = &cobra.Command{
 
 		// Apply filesystem fence. Linux: LD_PRELOAD interposition. macOS: Seatbelt
 		// (sandbox-exec) — fsSandboxPrefix wraps the child argv at launch.
+		macOSHardened := false
+		if runtime.GOOS == "darwin" {
+			var hardenErr error
+			if macOSHardened, hardenErr = macOSSyscallHardening(cfg); hardenErr != nil {
+				if logErr := recordMacOSFilesystemFenceState("REFUSED-TO-START", "syscall fence required but no Seatbelt profile to carry it", true); logErr != nil {
+					return fmt.Errorf("cannot record macOS syscall fence refusal; refusing to start: %w", logErr)
+				}
+				return fmt.Errorf("syscall fence cannot be enforced (fail-closed): %w; set filesystem.root or set syscall.enforcement = \"off\" if intentionally disabled", hardenErr)
+			}
+		}
 		var fsFenceEvents <-chan fsfence.FenceEvent
 		var fsFence *fsfence.Fence
 		var fsFenceCancel context.CancelFunc
@@ -438,7 +448,7 @@ var wrapCmd = &cobra.Command{
 					// is already included in sensitive through egressChildDenyPaths,
 					// so never grant its directory to the fenced child.
 					profile, pathCount, err := fsfence.GenerateTaggedWriteConfinementProfile(
-						sensitive, fsCfg.Root, fsCfg.Mode, cfg.Filesystem.Hardened, fsfence.DenialTag(sessionID),
+						sensitive, fsCfg.Root, fsCfg.Mode, macOSHardened, fsfence.DenialTag(sessionID),
 					)
 					if err != nil {
 						return refuse("profile generation failed", err)
@@ -463,6 +473,10 @@ var wrapCmd = &cobra.Command{
 
 					if err := recordMacOSFilesystemFenceState("ENGAGED", fmt.Sprintf("Seatbelt root-write confinement applied; root=%s mode=%s sensitive_paths=%d", fsCfg.Root, fsCfg.Mode, pathCount), false); err != nil {
 						return fmt.Errorf("cannot record macOS filesystem fence engagement; refusing to start: %w", err)
+					}
+					if macOSHardened {
+						fmt.Fprintf(os.Stderr, "NockLock: macOS syscall hardening ENGAGED — hardened SBPL rules (syscall.enforcement=%s)\n", syscallEnforcementMode(cfg.Syscall.Enforcement))
+						logEvent(logging.EventFilePassed, "syscall", "macOS hardened SBPL rules applied", false)
 					}
 					fmt.Fprintf(os.Stderr, "NockLock: macOS filesystem fence ENGAGED — Seatbelt root-write confinement active for %s (%s); %d sensitive path(s) denied\n", fsCfg.Root, fsCfg.Mode, pathCount)
 

@@ -218,7 +218,7 @@ func (cfg *Config) EffectivePolicy() string {
 	if syscallEnforcement == "off" {
 		b.WriteString("  Syscall: off\n")
 	} else {
-		fmt.Fprintf(&b, "  Syscall: enforcement=%s allow_namespaces=%t socket_families=%d (Linux only)\n",
+		fmt.Fprintf(&b, "  Syscall: enforcement=%s allow_namespaces=%t socket_families=%d (Linux seccomp; macOS hardened SBPL)\n",
 			syscallEnforcement, cfg.Syscall.AllowNamespaces, len(cfg.Syscall.SocketFamilies))
 	}
 

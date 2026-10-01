@@ -237,17 +237,28 @@ func syscallDoctorCheck(cfg *config.Config, caps doctorCapabilities) doctorCheck
 		}
 		return doctorOKCheck("Fences", "syscall", "enforceable", "Syscall fence enforceable with Linux seccomp-BPF.")
 	case "darwin":
-		if !cfg.Filesystem.Hardened {
+		hardened, err := macOSSyscallHardening(cfg)
+		if err != nil {
 			return doctorCriticalCheck("Fences", "syscall", "configured-but-backend-missing",
-				"Syscall fence configured, but macOS hardened SBPL is not enabled.",
-				"set filesystem.hardened = true or set syscall.enforcement = \"off\" if intentionally disabled")
+				fmt.Sprintf("Syscall fence configured, but %v.", err),
+				"set filesystem.root or set syscall.enforcement = \"off\" if intentionally disabled")
 		}
 		if err := caps.sandboxExec(); err != nil {
 			return doctorCriticalCheck("Fences", "syscall", "configured-but-backend-missing",
 				fmt.Sprintf("Syscall fence configured, but macOS Seatbelt backend is unavailable: %v", err),
 				"install or restore sandbox-exec support before wrapping agents")
 		}
-		return doctorOKCheck("Fences", "syscall", "enforceable", "Syscall hardening enforceable with hardened macOS SBPL.")
+		if !hardened {
+			return doctorCheck{
+				Group:    "Fences",
+				Name:     "syscall",
+				Severity: doctorWarning,
+				Status:   "not-applied",
+				Message:  "Syscall fence is preferred but filesystem.root is empty, so no macOS Seatbelt profile carries the hardened rules.",
+				Fix:      "set filesystem.root to apply the hardened SBPL rules",
+			}
+		}
+		return doctorOKCheck("Fences", "syscall", "enforceable", "Syscall hardening enforceable with the hardened macOS SBPL rules.")
 	default:
 		return doctorCriticalCheck("Fences", "syscall", "backend-unavailable-on-this-platform",
 			fmt.Sprintf("Syscall fence configured, but %s has no supported backend.", caps.goos),

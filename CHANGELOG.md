@@ -4,6 +4,33 @@ All notable changes to NockLock will be documented in this file.
 
 ## [Unreleased]
 
+### Breaking
+
+- macOS: `nocklock wrap` now refuses to start when `syscall.enforcement` is
+  `"required"` (including when unset) and `filesystem.root = ""`, because the
+  Seatbelt profile that carries the syscall rules does not exist. Set
+  `filesystem.root`, or set `syscall.enforcement = "off"` if the fence is
+  intentionally disabled. With `"preferred"` and an empty root, wrap continues
+  without the rules and `nocklock doctor` warns.
+
+### Security
+
+- macOS: `syscall.enforcement = "required"` (the `nocklock init` default) no
+  longer starts silently without a syscall fence. On macOS the fence is the
+  hardened Seatbelt rules, previously applied only with
+  `filesystem.hardened = true`; `nocklock wrap` now applies them whenever
+  enforcement is `"required"` or `"preferred"`, announces
+  `macOS syscall hardening ENGAGED`, and records a `syscall` audit event.
+  `"required"` with an empty `filesystem.root` has no Seatbelt profile to carry
+  the rules, so wrap refuses to start (`REFUSED-TO-START`); set
+  `filesystem.root` or `syscall.enforcement = "off"`.
+
+### Fixed
+
+- macOS: `nocklock doctor` no longer fails a fresh `nocklock init` config with
+  `syscall [configured-but-backend-missing]`. Doctor and wrap now share one
+  rule, so the default config passes `doctor` and is enforced by `wrap`.
+
 ## [0.6.0] - 2026-10-01
 
 ### Breaking

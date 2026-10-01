@@ -2,6 +2,7 @@ package cli
 
 import (
 	"encoding/json"
+	"errors"
 
 	"github.com/nocktechnologies/nocklock/internal/config"
 	"github.com/nocktechnologies/nocklock/internal/fence/syscallfence"
@@ -25,6 +26,22 @@ func syscallEnforcementMode(raw string) syscallfence.Mode {
 		// treat anything else conservatively as off (no behaviour change).
 		return syscallfence.ModeOff
 	}
+}
+
+// macOSSyscallHardening is the single macOS rule shared by wrap and doctor. The
+// hardened SBPL rules are macOS's syscall-surface fence, so any enforcement other
+// than "off" applies them even when filesystem.hardened is unset. They ride in
+// the Seatbelt profile, which exists only when filesystem.root is set: without
+// it nothing is applied (hardened=false), and "required" refuses (error).
+func macOSSyscallHardening(cfg *config.Config) (hardened bool, err error) {
+	mode := syscallEnforcementMode(cfg.Syscall.Enforcement)
+	if cfg.Filesystem.Root == "" {
+		if mode == syscallfence.ModeRequired {
+			return false, errors.New("syscall.enforcement = \"required\" needs the macOS Seatbelt filesystem fence, but filesystem.root is empty")
+		}
+		return false, nil
+	}
+	return cfg.Filesystem.Hardened || mode != syscallfence.ModeOff, nil
 }
 
 // networkFenceMode is the network fence active for this wrap invocation.
