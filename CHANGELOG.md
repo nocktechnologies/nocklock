@@ -21,8 +21,9 @@ All notable changes to NockLock will be documented in this file.
   rows (category `filesystem`, detail `<operation> <path>`) in the signed audit
   chain. The profile tags its file-deny rules with
   `(with message "nocklock:<session-id>")`, and a best-effort `log stream`
-  tailer attributes unified-log denials to the session by that tag. At most 500
-  denial rows are written per session, followed by one row counting the rest. A
+  tailer attributes unified-log denials to the session by that tag. Each
+  operation and path is recorded once per session, at most 500 rows are
+  written, and one row counts the repeats and overflow. A
   tailer that cannot start or stops early writes one warning row and never
   affects the wrapped command. `status` and the docs describe macOS denial
   events as best-effort (the unified log can drop lines under load; Endpoint

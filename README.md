@@ -94,7 +94,7 @@ Apple deprecates `sandbox-exec`, but it is still present and working on
 macOS 26.5. NockLock tests it in macOS CI and will track its availability. Its
 per-file deny events are best-effort on macOS via the unified log: the profile
 tags each file-deny rule with the session id, and a background `log stream`
-tailer records the matching denials as `file_blocked` rows (at most 500 per
+tailer records the matching denials as `file_blocked` rows (each operation and path once, at most 500 per
 session, then one row counting the rest). The unified log can drop lines under
 load, so a missing row is not proof that no denial happened, and a tailer that
 cannot start becomes one warning row without affecting the wrapped command.
