@@ -21,9 +21,11 @@ All notable changes to NockLock will be documented in this file.
   cannot be protected there. Move the database, sidecars, and chain anchor
   together under `<root>/.nock/` with `[logging] db = ".nock/events.db"`, or
   use the state directory with `[logging] db = "events.db"`.
-  Dry runs apply the same refusal and also reject unusable state roots and
-  conflicting chains. They may create missing trusted state directories, but
-  never a database, signing key, or anchor.
+  Dry runs apply the same refusal without writing audit events. Audit path
+  resolution errors fail closed; fresh audit directories remain supported.
+  Dry runs also reject unusable state roots and conflicting chains. They may
+  create missing trusted state directories, but never a database, signing key,
+  or anchor.
 
 ### Added
 
@@ -360,16 +362,18 @@ All notable changes to NockLock will be documented in this file.
   matching tls/empty-host receipt after the child exits; the direct
   off-namespace resolver query gets no answer (default-drop). The
   `resolv.conf`/`hosts` writes are **asserted** to fail closed: the test fails
-  the run with a distinct exit code unless the write returns EACCES/EPERM/EROFS, and only then connects by the
-  allowed NAME and requires it still lands on the allowed upstream. The test log carries a per-trick outcome line (e.g.
-  "T1a: redirected to allowed upstream, 200 read", "T2/T3: write_denied
-  (<errno>)") as evidence, not just `--- PASS`. On macOS,
+  the run with a distinct exit code unless the write returns EACCES/EPERM/EROFS,
+  and only then connects by the allowed NAME and requires it still lands on the
+  allowed upstream. The test log carries a per-trick outcome line (e.g. "T1a:
+  redirected to allowed upstream, 200 read", "T2/T3: write_denied (<errno>)") as
+  evidence, not just `--- PASS`. On macOS,
   `TestWrapMacOSDNSEscapeRecordsProxyEnforcement` records the proxy-only model:
   it asserts a proxied disallowed host is denied and signed, the allowed host
-  works and is signed, and `verify --audit` is clean, while logging that direct-IP
-  egress and hosts-pinning are not kernel-blocked (macOS has no netns floor). Both
-  run in new `network-egress.yml` jobs (the Linux job as root, the macOS job on a
-  hosted runner), each emitting a per-trick verdict table to the step summary.
+  works and is signed, and `verify --audit` is clean, while logging that
+  direct-IP egress and hosts-pinning are not kernel-blocked (macOS has no netns
+  floor). Both run in new `network-egress.yml` jobs (the Linux job as root, the
+  macOS job on a hosted runner), each emitting a per-trick verdict table to the
+  step summary.
 - CI runs the claude-code preset enforcement tests strict in a non-root Linux
   job, with `NOCKLOCK_AUDIT_REQUIRE=1` so missing prerequisites fail rather
   than skip. A raw-syscall read of a sibling's `/proc/<pid>/environ` must print
