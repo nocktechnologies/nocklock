@@ -806,6 +806,24 @@ func dryRunTestTOML() string {
 	return strings.Replace(config.DefaultTOML(), "[filesystem]\nroot = \".\"", "[filesystem]\nroot = \"\"", 1)
 }
 
+func TestWrapRejectsRemovedMacOSAllowUnfencedKeyBeforeLaunch(t *testing.T) {
+	project := t.TempDir()
+	writeTestConfig(t, project, strings.Replace(config.DefaultTOML(), "[filesystem]\n", "[filesystem]\nmacos_allow_unfenced = true\n", 1))
+	withWorkingDir(t, project)
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+
+	marker := filepath.Join(project, "child-ran")
+	cmd := &cobra.Command{}
+	cmd.SetContext(context.Background())
+	err := wrapCmd.RunE(cmd, []string{"--", "/usr/bin/touch", marker})
+	if err == nil || !strings.Contains(err.Error(), "macos_allow_unfenced was removed in v0.6.0") {
+		t.Fatalf("wrap error = %v, want removed-key config error", err)
+	}
+	if _, statErr := os.Stat(marker); !os.IsNotExist(statErr) {
+		t.Fatalf("wrap launched the child despite the removed key: stat = %v", statErr)
+	}
+}
+
 func writeTestConfig(t *testing.T, dir, contents string) {
 	t.Helper()
 	nockDir := filepath.Join(dir, config.Dir)

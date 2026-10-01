@@ -48,6 +48,15 @@ func Validate(cfg *Config) []ValidationError {
 		})
 	}
 
+	// The v0.5 macOS escape hatch was removed in v0.6.0; false/absent still loads.
+	if cfg.Filesystem.MacOSAllowUnfenced {
+		errs = append(errs, ValidationError{
+			Field:    "filesystem.macos_allow_unfenced",
+			Message:  "macos_allow_unfenced was removed in v0.6.0; NockLock now always refuses to start unfenced on macOS; restore sandbox-exec or remove the key",
+			Severity: "error",
+		})
+	}
+
 	// logging.level must be a recognised level.
 	switch cfg.Logging.Level {
 	case "info", "debug", "warn", "error", "":
@@ -198,9 +207,6 @@ func (cfg *Config) EffectivePolicy() string {
 	}
 	if cfg.Filesystem.Hardened {
 		b.WriteString(" hardened=true")
-	}
-	if cfg.Filesystem.MacOSAllowUnfenced {
-		b.WriteString(" macos_allow_unfenced=true (temporary; removed in v0.6)")
 	}
 	b.WriteString("\n")
 

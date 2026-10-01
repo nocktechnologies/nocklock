@@ -248,7 +248,6 @@ allow = ["/tmp/", "/"]
 allow_rw = ["/tmp/", "/"]
 deny = ["~/work/private/"]
 mode = "read-only"
-macos_allow_unfenced = true
 
 [secrets]
 pass = ["HOME", "OPENAI_API_KEY"]
@@ -290,9 +289,6 @@ socket_families = ["unix", "netlink"]
 	}
 	if cfg.Filesystem.Mode != "read-only" {
 		t.Fatalf("filesystem.mode = %q, want read-only", cfg.Filesystem.Mode)
-	}
-	if cfg.Filesystem.MacOSAllowUnfenced {
-		t.Fatal("overlay enabled macos_allow_unfenced despite the profile's fail-closed base")
 	}
 	// Base codex pass now includes OPENAI_API_KEY (the runtime's own key), so an
 	// overlay requesting [HOME, OPENAI_API_KEY] tightens to exactly those two.
@@ -442,7 +438,7 @@ func TestDefaultConfig(t *testing.T) {
 		t.Errorf("expected default linux_enforcement 'required', got %q", cfg.Filesystem.LinuxEnforcement)
 	}
 	if cfg.Filesystem.MacOSAllowUnfenced {
-		t.Error("expected macos_allow_unfenced to default false (fail-closed)")
+		t.Error("expected removed macos_allow_unfenced to default false")
 	}
 
 	// Verify sensitive dirs are denied by default
@@ -753,4 +749,77 @@ func TestSyscallSocketFamilyValidation(t *testing.T) {
 	if !found {
 		t.Errorf("expected a syscall.socket_families validation error, got %v", errs)
 	}
+}
+
+const v05FilesystemTOML = `
+[filesystem]
+root = "."
+mode = "read-write"
+linux_enforcement = "required"
+# TEMPORARY macOS v0.5 compatibility escape hatch.
+macos_allow_unfenced = false
+`
+
+// A config written by `nocklock init` in v0.5 carries macos_allow_unfenced =
+// false. The loader rejects unknown keys, so deleting the field would break
+// every such config; this is the negative control for that trap.
+func TestLoadV05ConfigWithMacOSAllowUnfencedFalse(t *testing.T) {
+	path := writeTempConfig(t, v05FilesystemTOML)
+	cfg, err := Load(path)
+	if err != nil {
+		t.Fatalf("v0.5 config with macos_allow_unfenced = false must still load: %v", err)
+	}
+	if cfg.Filesystem.MacOSAllowUnfenced {
+		t.Fatal("macos_allow_unfenced = false loaded as true")
+	}
+}
+
+func TestLoadRejectsMacOSAllowUnfencedTrue(t *testing.T) {
+	toml := strings.Replace(v05FilesystemTOML, "macos_allow_unfenced = false", "macos_allow_unfenced = true", 1)
+	path := writeTempConfig(t, toml)
+
+	_, err := Load(path)
+	if err == nil {
+		t.Fatal("macos_allow_unfenced = true must fail to load")
+	}
+	for _, want := range []string{"macos_allow_unfenced was removed in v0.6.0", "always refuses to start unfenced on macOS", "restore sandbox-exec or remove the key"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Fatalf("error %q missing %q", err, want)
+		}
+	}
+
+	base := DefaultConfig()
+	if _, err := LoadOverlay(base, path); err == nil {
+		t.Fatal("overlay setting macos_allow_unfenced = true must fail to load")
+	}
+}
+
+func TestDefaultTOMLOmitsMacOSAllowUnfenced(t *testing.T) {
+	if strings.Contains(DefaultTOML(), "macos_allow_unfenced") {
+		t.Fatal("DefaultTOML must not write the removed macos_allow_unfenced key")
+	}
+	path := writeTempConfig(t, DefaultTOML())
+	if _, err := Load(path); err != nil {
+		t.Fatalf("DefaultTOML must load: %v", err)
+	}
+}
+
+func writeTempConfig(t *testing.T, contents string) string {
+	t.Helper()
+	path := filepath.Join(t.TempDir(), "nocklock.toml")
+	if err := os.WriteFile(path, []byte(contents), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	return path
+}
+
+func TestValidateMacOSAllowUnfencedTrueIsError(t *testing.T) {
+	cfg := DefaultConfig()
+	cfg.Filesystem.MacOSAllowUnfenced = true
+	for _, e := range Validate(&cfg) {
+		if e.Field == "filesystem.macos_allow_unfenced" && e.Severity == "error" {
+			return
+		}
+	}
+	t.Fatal("Validate must report filesystem.macos_allow_unfenced = true as an error")
 }

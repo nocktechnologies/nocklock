@@ -184,16 +184,6 @@ func filesystemDoctorCheck(cfg *config.Config, caps doctorCapabilities) doctorCh
 	switch caps.goos {
 	case "darwin":
 		if err := caps.sandboxExec(); err != nil {
-			if cfg.Filesystem.MacOSAllowUnfenced {
-				return doctorCheck{
-					Group:    "Fences",
-					Name:     "filesystem",
-					Severity: doctorWarning,
-					Status:   "configured-with-unfenced-opt-out",
-					Message:  fmt.Sprintf("macOS Seatbelt filesystem fence is unavailable: %v. wrap will record DEGRADED and run unfenced because filesystem.macos_allow_unfenced = true.", err),
-					Fix:      "restore sandbox-exec and remove filesystem.macos_allow_unfenced before v0.6",
-				}
-			}
 			return doctorCriticalCheck("Fences", "filesystem", "configured-but-backend-missing",
 				fmt.Sprintf("Filesystem fence configured, but macOS Seatbelt is unavailable: %v", err),
 				"install or restore sandbox-exec; wrap will otherwise refuse to start")

@@ -91,10 +91,10 @@ pkg/
    Seatbelt profile that denies writes outside the root and required runtime
    paths, preserves the sensitive-path read and write denies, validates it with
    `sandbox-exec`, and wraps the child with it. Exactly one fence state is
-   recorded before launch: ENGAGED, REFUSED-TO-START (the default when the
+   recorded before launch: ENGAGED, REFUSED-TO-START (always, when the
    profile cannot be applied) or DEGRADED (only via the explicit
-   `filesystem.root = ""` or the temporary `filesystem.macos_allow_unfenced`
-   escape hatch).
+   `filesystem.root = ""`). The v0.5 `filesystem.macos_allow_unfenced` escape
+   hatch was removed in v0.6.0.
 7. On Linux with `[syscall] enforcement` on, the seccomp fence is installed in
    the child. In the default proxy mode it narrows the child to Unix-domain
    sockets. Under `--net-fence=netns` the child keeps its configured IP socket

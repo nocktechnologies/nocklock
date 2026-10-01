@@ -293,10 +293,9 @@ type FilesystemConfig struct {
 	Allow            []string `toml:"allow"`
 	AllowRW          []string `toml:"allow_rw"`
 	Deny             []string `toml:"deny"`
-	// MacOSAllowUnfenced is a temporary macOS-only escape hatch. When true,
-	// wrap records a DEGRADED fence state and starts the child only if Seatbelt
-	// cannot be applied. It is scheduled for removal in v0.6; false is the
-	// secure, fail-closed default.
+	// MacOSAllowUnfenced is the removed v0.5 macOS escape hatch. The key is
+	// still decoded so configs written by v0.5 (`= false`) keep loading and the
+	// signed policy digest stays stable; Validate rejects `= true`.
 	MacOSAllowUnfenced bool `toml:"macos_allow_unfenced"`
 	// Hardened opts in to the stricter macOS Seatbelt rules (deny
 	// mach-priv-host-port, iokit-open, system-socket; tightened /dev). It is a

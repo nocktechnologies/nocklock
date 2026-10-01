@@ -273,45 +273,6 @@ func TestWrapMacOSFilesystemFenceRefusesBeforeLaunchingChild(t *testing.T) {
 	}
 }
 
-// TestWrapMacOSFilesystemFenceOptOutRecordsDegraded proves the temporary,
-// explicit compatibility opt-out is loud and audited before it starts an
-// unfenced child when Seatbelt cannot be applied.
-func TestWrapMacOSFilesystemFenceOptOutRecordsDegraded(t *testing.T) {
-	project := t.TempDir()
-	policy := strings.Replace(config.DefaultTOML(), "macos_allow_unfenced = false", "macos_allow_unfenced = true", 1)
-	writeTestConfig(t, project, policy)
-	withWorkingDir(t, project)
-	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
-
-	oldEnsure := ensureSandboxExecAvailable
-	ensureSandboxExecAvailable = func() error { return errors.New("sandbox-exec unavailable") }
-	t.Cleanup(func() { ensureSandboxExecAvailable = oldEnsure })
-
-	marker := filepath.Join(project, "child-ran")
-	cmd := &cobra.Command{}
-	cmd.SetContext(context.Background())
-	if err := wrapCmd.RunE(cmd, []string{"--", "/usr/bin/touch", marker}); err != nil {
-		t.Fatalf("explicit macOS compatibility opt-out should start the child: %v", err)
-	}
-	if _, err := os.Stat(marker); err != nil {
-		t.Fatalf("opt-out child did not run: %v", err)
-	}
-
-	// The event log lives in the audit state directory outside the project
-	// (config.AuditStateDir), so resolve it the way the CLI does.
-	dbPath := resolvedAuditDB(t, project)
-	db, err := sql.Open("sqlite", dbPath)
-	if err != nil {
-		t.Fatalf("open audit log: %v", err)
-	}
-	defer db.Close()
-
-	states := macOSFilesystemFenceStates(t, db)
-	if len(states) != 1 || !strings.Contains(states[0], "DEGRADED") || !strings.Contains(states[0], "macos_allow_unfenced=true") {
-		t.Fatalf("expected exactly one explicit degraded state, got %q", states)
-	}
-}
-
 func macOSFilesystemFenceStates(t *testing.T, db *sql.DB) []string {
 	t.Helper()
 

@@ -119,12 +119,13 @@ func canonicalPolicy(cfg *config.Config, configPath, dbPath, networkFenceMode st
 		projectRoot = abs
 	}
 	filesystem := map[string]any{
-		"root":                 canonicalConfigPath(projectRoot, cfg.Filesystem.Root),
-		"mode":                 cfg.Filesystem.Mode,
-		"linux_enforcement":    cfg.Filesystem.LinuxEnforcement,
-		"allow":                canonicalConfigPaths(projectRoot, cfg.Filesystem.Allow),
-		"allow_rw":             canonicalConfigPaths(projectRoot, cfg.Filesystem.AllowRW),
-		"deny":                 canonicalConfigPaths(projectRoot, cfg.Filesystem.Deny),
+		"root":              canonicalConfigPath(projectRoot, cfg.Filesystem.Root),
+		"mode":              cfg.Filesystem.Mode,
+		"linux_enforcement": cfg.Filesystem.LinuxEnforcement,
+		"allow":             canonicalConfigPaths(projectRoot, cfg.Filesystem.Allow),
+		"allow_rw":          canonicalConfigPaths(projectRoot, cfg.Filesystem.AllowRW),
+		"deny":              canonicalConfigPaths(projectRoot, cfg.Filesystem.Deny),
+		// Removed in v0.6.0 and always false; kept so signed policy digests stay stable.
 		"macos_allow_unfenced": cfg.Filesystem.MacOSAllowUnfenced,
 		"hardened":             cfg.Filesystem.Hardened,
 	}
