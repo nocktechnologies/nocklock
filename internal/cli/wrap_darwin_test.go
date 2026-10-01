@@ -493,3 +493,87 @@ func TestWrapMacOSDenialLogSilentStreamDoesNotDelayRun(t *testing.T) {
 		t.Fatalf("silent stream produced %d warning rows, want 1", warnings)
 	}
 }
+
+func macOSSyscallHardeningEvents(t *testing.T, project string) int {
+	t.Helper()
+	db, err := sql.Open("sqlite", resolvedAuditDB(t, project))
+	if err != nil {
+		t.Fatalf("open audit log: %v", err)
+	}
+	defer db.Close()
+	var n int
+	if err := db.QueryRow(`SELECT COUNT(*) FROM events WHERE category = 'syscall' AND detail LIKE 'macOS hardened SBPL%'`).Scan(&n); err != nil {
+		t.Fatalf("query syscall events: %v", err)
+	}
+	return n
+}
+
+func runDarwinWrap(t *testing.T, project, toml string, args ...string) error {
+	t.Helper()
+	writeTestConfig(t, project, toml)
+	withWorkingDir(t, project)
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+	cmd := &cobra.Command{}
+	cmd.SetContext(context.Background())
+	return wrapCmd.RunE(cmd, append([]string{"--"}, args...))
+}
+
+// TestWrapMacOSSyscallEnforcementMatchesDoctor pins wrap's macOS syscall
+// behaviour to the same rule doctor reports (macOSSyscallHardening): the
+// default config (enforcement = "required", hardened unset) applies the
+// hardened SBPL rules and says so, "required" without a Seatbelt profile to
+// carry them refuses, and "off" applies nothing.
+func TestWrapMacOSSyscallEnforcementMatchesDoctor(t *testing.T) {
+	requireSandboxExecForWrap(t)
+
+	t.Run("default config applies hardened rules", func(t *testing.T) {
+		project := t.TempDir()
+		if err := runDarwinWrap(t, project, doctorTestTOML(true), "/usr/bin/true"); err != nil {
+			t.Fatalf("default config must wrap under hardened SBPL: %v", err)
+		}
+		if n := macOSSyscallHardeningEvents(t, project); n != 1 {
+			t.Fatalf("hardened-SBPL audit events = %d, want 1", n)
+		}
+	})
+	t.Run("required without filesystem.root refuses", func(t *testing.T) {
+		project := t.TempDir()
+		toml := strings.Replace(dryRunTestTOML(), "allow_all = false", "allow_all = true", 1)
+		err := runDarwinWrap(t, project, toml, "/usr/bin/true")
+		if err == nil || !strings.Contains(err.Error(), "syscall fence cannot be enforced (fail-closed)") {
+			t.Fatalf("wrap err = %v, want the syscall fail-closed refusal", err)
+		}
+	})
+	t.Run("off applies no hardening", func(t *testing.T) {
+		project := t.TempDir()
+		toml := strings.Replace(doctorTestTOML(true), "\nenforcement = \"required\"", "\nenforcement = \"off\"", 1)
+		if !strings.Contains(toml, "\nenforcement = \"off\"") {
+			t.Fatal("test premise: [syscall] enforcement was not switched off")
+		}
+		if err := runDarwinWrap(t, project, toml, "/usr/bin/true"); err != nil {
+			t.Fatalf("syscall off must wrap: %v", err)
+		}
+		if n := macOSSyscallHardeningEvents(t, project); n != 0 {
+			t.Fatalf("hardened-SBPL audit events = %d with enforcement off, want 0", n)
+		}
+	})
+}
+
+// TestWrapMacOSClaudeCodePresetRunsUnderHardenedRules proves the hardened SBPL
+// rules that "required" now applies do not break ordinary tools under the
+// claude-code preset: shell, /dev/null and pty-style writes, directory reads.
+func TestWrapMacOSClaudeCodePresetRunsUnderHardenedRules(t *testing.T) {
+	requireSandboxExecForWrap(t)
+	body, err := config.ProfileTOML("claude-code")
+	if err != nil {
+		t.Fatalf("claude-code preset: %v", err)
+	}
+	project := t.TempDir()
+	err = runDarwinWrap(t, project, body,
+		"/bin/sh", "-c", `echo ok >/dev/null && /bin/ls /usr/bin >/dev/null && /usr/bin/true`)
+	if err != nil {
+		t.Fatalf("claude-code preset must run ordinary tools under hardened SBPL: %v", err)
+	}
+	if n := macOSSyscallHardeningEvents(t, project); n != 1 {
+		t.Fatalf("hardened-SBPL audit events = %d, want 1 (preset enforces syscall)", n)
+	}
+}

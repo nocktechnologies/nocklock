@@ -171,3 +171,36 @@ func TestMarshalSyscallPolicy_RoundTrips(t *testing.T) {
 		t.Errorf("round-trip lost slice data: %+v", out)
 	}
 }
+
+func TestMacOSSyscallHardening(t *testing.T) {
+	cases := []struct {
+		name         string
+		enforcement  string
+		root         string
+		fsHardened   bool
+		wantHardened bool
+		wantErr      bool
+	}{
+		{"default required applies hardened rules", "required", ".", false, true, false},
+		{"empty enforcement defaults to required", "", ".", false, true, false},
+		{"preferred applies hardened rules", "preferred", ".", false, true, false},
+		{"required without filesystem.root fails closed", "required", "", false, false, true},
+		{"preferred without filesystem.root applies nothing", "preferred", "", false, false, false},
+		{"off leaves hardened to the explicit setting", "off", ".", false, false, false},
+		{"off honours filesystem.hardened", "off", ".", true, true, false},
+		{"hardened without root applies nothing", "off", "", true, false, false},
+		{"off without root is not an error", "off", "", false, false, false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			cfg := &config.Config{}
+			cfg.Syscall.Enforcement = tc.enforcement
+			cfg.Filesystem.Root = tc.root
+			cfg.Filesystem.Hardened = tc.fsHardened
+			got, err := macOSSyscallHardening(cfg)
+			if (err != nil) != tc.wantErr || got != tc.wantHardened {
+				t.Fatalf("macOSSyscallHardening = (%t, %v), want (%t, err=%t)", got, err, tc.wantHardened, tc.wantErr)
+			}
+		})
+	}
+}

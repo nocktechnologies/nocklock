@@ -454,3 +454,58 @@ func stubDoctorCapabilities(c doctorCapabilities) func() {
 	currentDoctorCapabilities = c
 	return func() { currentDoctorCapabilities = orig }
 }
+
+// TestSyscallDoctorCheckDarwin pins doctor's macOS syscall verdict to the rule
+// wrap enforces (macOSSyscallHardening). The default config that `nocklock init`
+// writes must pass its own doctor.
+func TestSyscallDoctorCheckDarwin(t *testing.T) {
+	darwin := doctorCapabilities{goos: "darwin", sandboxExec: func() error { return nil }}
+	defaultCfg := func(t *testing.T) *config.Config {
+		cfg := config.DefaultConfig()
+		return &cfg
+	}
+
+	t.Run("default config passes", func(t *testing.T) {
+		cfg := defaultCfg(t)
+		if cfg.Filesystem.Hardened {
+			t.Fatal("test premise: default config leaves filesystem.hardened unset")
+		}
+		check := syscallDoctorCheck(cfg, darwin)
+		if check.Severity != doctorOK || check.Status != "enforceable" {
+			t.Fatalf("darwin default-config syscall check = %+v, want enforceable", check)
+		}
+	})
+	t.Run("required without root is critical", func(t *testing.T) {
+		cfg := defaultCfg(t)
+		cfg.Filesystem.Root = ""
+		check := syscallDoctorCheck(cfg, darwin)
+		if check.Severity != doctorCritical || !strings.Contains(check.Message, "filesystem.root") {
+			t.Fatalf("check = %+v, want critical naming filesystem.root", check)
+		}
+	})
+	t.Run("preferred without root warns that nothing is applied", func(t *testing.T) {
+		cfg := defaultCfg(t)
+		cfg.Syscall.Enforcement = "preferred"
+		cfg.Filesystem.Root = ""
+		check := syscallDoctorCheck(cfg, darwin)
+		if check.Severity != doctorWarning || check.Status != "not-applied" {
+			t.Fatalf("check = %+v, want not-applied warning", check)
+		}
+	})
+	t.Run("missing sandbox-exec is critical", func(t *testing.T) {
+		caps := darwin
+		caps.sandboxExec = func() error { return errors.New("sandbox-exec not found") }
+		check := syscallDoctorCheck(defaultCfg(t), caps)
+		if check.Severity != doctorCritical {
+			t.Fatalf("check = %+v, want critical", check)
+		}
+	})
+	t.Run("off is not configured", func(t *testing.T) {
+		cfg := defaultCfg(t)
+		cfg.Syscall.Enforcement = "off"
+		cfg.Filesystem.Root = ""
+		if check := syscallDoctorCheck(cfg, darwin); check.Status != "not-configured" {
+			t.Fatalf("check = %+v, want not-configured", check)
+		}
+	})
+}

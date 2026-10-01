@@ -182,6 +182,20 @@ jobs:
           NOCKLOCK_SANDBOX_REQUIRE: "1"
         run: go test ./internal/fence/fs/ -count=1 -v
 
+      # A fresh `nocklock init` config must pass its own `doctor` and wrap
+      # under the syscall rule both apply on macOS (N11047).
+      - name: init, doctor, wrap on the default config
+        env:
+          XDG_STATE_HOME: ${{ runner.temp }}/nocklock-state
+          XDG_CONFIG_HOME: ${{ runner.temp }}/nocklock-config
+        run: |
+          go build -o "$RUNNER_TEMP/nocklock" ./cmd/nocklock
+          proj="$(mktemp -d)"
+          cd "$proj"
+          "$RUNNER_TEMP/nocklock" init
+          "$RUNNER_TEMP/nocklock" doctor
+          "$RUNNER_TEMP/nocklock" wrap -- /bin/echo WRAP_OK
+
       # The full non-root unit suite, natively on darwin. The seven Linux
       # path/Seatbelt assumptions that used to be skipped by name were fixed in
       # N10714 (validatePath resolves the deepest existing ancestor;

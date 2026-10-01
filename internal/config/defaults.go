@@ -167,7 +167,8 @@ block = [
 ]
 
 [syscall]
-# Linux seccomp-BPF syscall fence (no-op on macOS).
+# Linux: seccomp-BPF syscall fence. macOS: the hardened Seatbelt rules (applied
+# whenever enforcement is not "off"; requires filesystem.root).
 # enforcement: "required" (fail closed), "preferred" (install if supported),
 # or "off" (disabled).
 enforcement = "required"
