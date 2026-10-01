@@ -504,7 +504,8 @@ func TestWrapMacOSDenialLogFailureIsOneWarning(t *testing.T) {
 
 // TestWrapMacOSDenialLogSilentStreamDoesNotDelayRun proves the tailer's bounded
 // attach and drain windows: a stream that never produces output costs the run
-// at most those two windows, and the run still succeeds with no warning row.
+// at most those two windows, and the run still succeeds with one warning row
+// recording that the stream never attached.
 func TestWrapMacOSDenialLogSilentStreamDoesNotDelayRun(t *testing.T) {
 	project, _, run := denialLogProject(t)
 
@@ -527,7 +528,7 @@ func TestWrapMacOSDenialLogSilentStreamDoesNotDelayRun(t *testing.T) {
 	if err := db.QueryRow(`SELECT COUNT(*) FROM events WHERE detail LIKE 'macOS denial log (best-effort):%'`).Scan(&warnings); err != nil {
 		t.Fatal(err)
 	}
-	if warnings != 0 {
-		t.Fatalf("silent stream produced %d warning rows", warnings)
+	if warnings != 1 {
+		t.Fatalf("silent stream produced %d warning rows, want 1", warnings)
 	}
 }
