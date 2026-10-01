@@ -40,6 +40,11 @@ func (d Denial) Detail() string { return d.Operation + " " + d.Path }
 // stream's non-JSON header, malformed or truncated JSON, denials of other
 // processes or sessions (no tag, or a different one), and non-file operations.
 func ParseDenial(line []byte, tag string) (Denial, bool) {
+	// Most lines on a busy host are other processes' denials; skip them before
+	// paying for a JSON decode. Session tags are UUIDs, which JSON leaves unescaped.
+	if !bytes.Contains(line, []byte(tag)) {
+		return Denial{}, false
+	}
 	var rec struct {
 		EventMessage string `json:"eventMessage"`
 	}

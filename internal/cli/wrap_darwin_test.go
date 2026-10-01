@@ -26,12 +26,7 @@ import (
 // not merely the component helper, records precisely one filesystem-fence
 // state after a Seatbelt profile is accepted and before its child runs.
 func TestWrapMacOSFilesystemFenceRecordsOneEngagedState(t *testing.T) {
-	if err := fsfence.EnsureSandboxExecAvailable(); err != nil {
-		if os.Getenv("NOCKLOCK_SANDBOX_REQUIRE") == "1" {
-			t.Fatalf("sandbox-exec unavailable: %v; NOCKLOCK_SANDBOX_REQUIRE=1 forbids skipping", err)
-		}
-		t.Skipf("sandbox-exec unavailable: %v", err)
-	}
+	requireSandboxExecForWrap(t)
 
 	project := t.TempDir()
 	policy := strings.Replace(config.DefaultTOML(), "allow_all = false", "allow_all = true", 1)
@@ -68,12 +63,7 @@ func TestWrapMacOSFilesystemFenceRecordsOneEngagedState(t *testing.T) {
 // a valid SBPL string. The targets live under the home directory because the
 // profile intentionally permits the system temp directory used by t.TempDir.
 func TestWrapMacOSFilesystemFenceConfinesWritesToRoot(t *testing.T) {
-	if err := fsfence.EnsureSandboxExecAvailable(); err != nil {
-		if os.Getenv("NOCKLOCK_SANDBOX_REQUIRE") == "1" {
-			t.Fatalf("sandbox-exec unavailable: %v; NOCKLOCK_SANDBOX_REQUIRE=1 forbids skipping", err)
-		}
-		t.Skipf("sandbox-exec unavailable: %v", err)
-	}
+	requireSandboxExecForWrap(t)
 
 	home, err := os.UserHomeDir()
 	if err != nil || home == "" {
@@ -120,12 +110,7 @@ func TestWrapMacOSFilesystemFenceConfinesWritesToRoot(t *testing.T) {
 // anchor. The unfenced parent must still write a complete, signed audit trail
 // for both the denied attempts and a subsequent ordinary wrapped command.
 func TestWrapMacOSFilesystemFenceDeniesAuditStateTampering(t *testing.T) {
-	if err := fsfence.EnsureSandboxExecAvailable(); err != nil {
-		if os.Getenv("NOCKLOCK_SANDBOX_REQUIRE") == "1" {
-			t.Fatalf("sandbox-exec unavailable: %v; NOCKLOCK_SANDBOX_REQUIRE=1 forbids skipping", err)
-		}
-		t.Skipf("sandbox-exec unavailable: %v", err)
-	}
+	requireSandboxExecForWrap(t)
 
 	project := t.TempDir()
 	policy := strings.Replace(config.DefaultTOML(), "allow_all = false", "allow_all = true", 1)
@@ -439,11 +424,16 @@ func TestWrapMacOSDenialLogRecordsFileBlockedRow(t *testing.T) {
 		if err := rows.Scan(&category, &detail, &blocked, &session); err != nil {
 			t.Fatal(err)
 		}
-		details = append(details, detail)
+		if strings.HasSuffix(detail, secret) {
+			details = append(details, detail)
+		}
 		if category != "filesystem" || blocked != 1 || session != sessionID {
 			t.Errorf("denial row = category %q blocked %d session %q; want filesystem/1/%q", category, blocked, session, sessionID)
 		}
 	}
+	// Other file_blocked rows may exist: every process also trips the fence's
+	// base write deny on /dev/dtracehelper at startup. The denied secret must
+	// appear exactly once.
 	if len(details) != 1 || details[0] != "file-read-data "+secret {
 		t.Fatalf("want exactly one file_blocked row %q, got %q", "file-read-data "+secret, details)
 	}
