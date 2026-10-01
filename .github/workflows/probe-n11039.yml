@@ -10,7 +10,7 @@ jobs:
       - name: probe
         shell: bash
         run: |
-          sw_vers; id
+          set +e; sw_vers; id
           D="$(mktemp -d)"; D="$(cd "$D" && pwd -P)"
           echo secret > "$D/s.txt"
           try() { # name, profile body
@@ -34,5 +34,5 @@ jobs:
             echo "--- stderr"; cat "$D/$v.err"
             echo "--- ndjson ($(wc -l < "$D/$v.nd") lines)"; cat "$D/$v.nd"
           done
-          echo "=== stream with sudo, msgA"
-          sudo -n true && echo sudo-ok
+          echo "=== sudo check"
+          sudo -n true && echo sudo-ok; exit 0
