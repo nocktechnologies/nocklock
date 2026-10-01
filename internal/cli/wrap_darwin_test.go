@@ -545,7 +545,10 @@ func TestWrapMacOSSyscallEnforcementMatchesDoctor(t *testing.T) {
 	})
 	t.Run("off applies no hardening", func(t *testing.T) {
 		project := t.TempDir()
-		toml := strings.Replace(doctorTestTOML(true), "enforcement = \"required\"", "enforcement = \"off\"", 1)
+		toml := strings.Replace(doctorTestTOML(true), "\nenforcement = \"required\"", "\nenforcement = \"off\"", 1)
+		if !strings.Contains(toml, "\nenforcement = \"off\"") {
+			t.Fatal("test premise: [syscall] enforcement was not switched off")
+		}
 		if err := runDarwinWrap(t, project, toml, "/usr/bin/true"); err != nil {
 			t.Fatalf("syscall off must wrap: %v", err)
 		}
