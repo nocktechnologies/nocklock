@@ -1,0 +1,38 @@
+name: probe-n11039
+on:
+  push:
+    branches: [scratch/n11039-macos-log-probe]
+jobs:
+  probe:
+    runs-on: macos-latest
+    timeout-minutes: 10
+    steps:
+      - name: probe
+        shell: bash
+        run: |
+          sw_vers; id
+          D="$(mktemp -d)"; D="$(cd "$D" && pwd -P)"
+          echo secret > "$D/s.txt"
+          try() { # name, profile body
+            echo "=== variant $1"
+            printf '(version 1)\n(allow default)\n%s\n' "$2" > "$D/$1.sb"
+            cat "$D/$1.sb"
+            /usr/bin/sandbox-exec -f "$D/$1.sb" -- /usr/bin/true; echo "validate rc=$?"
+          }
+          try plain   "(deny file-read* file-write* (subpath \"$D\"))"
+          try msgA    "(deny file-read* file-write* (subpath \"$D\") (with message \"nocklock:SESS1\"))"
+          try msgB    "(deny file-read* file-write* (with message \"nocklock:SESS1\") (subpath \"$D\"))"
+          try msgC    "(with message \"nocklock:SESS1\") (deny file-read* file-write* (subpath \"$D\"))"
+          for v in plain msgA msgB msgC; do
+            echo "=== stream $v"
+            log stream --style ndjson --predicate 'sender == "Sandbox"' > "$D/$v.nd" 2> "$D/$v.err" &
+            LP=$!
+            sleep 4
+            /usr/bin/sandbox-exec -f "$D/$v.sb" -- /bin/cat "$D/s.txt"; echo "cat rc=$?"
+            sleep 4
+            kill $LP 2>/dev/null; wait $LP 2>/dev/null
+            echo "--- stderr"; cat "$D/$v.err"
+            echo "--- ndjson ($(wc -l < "$D/$v.nd") lines)"; cat "$D/$v.nd"
+          done
+          echo "=== stream with sudo, msgA"
+          sudo -n true && echo sudo-ok
