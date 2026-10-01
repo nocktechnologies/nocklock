@@ -8,6 +8,14 @@ All notable changes to NockLock will be documented in this file.
 
 ### Breaking
 
+- Removed the macOS `filesystem.macos_allow_unfenced` escape hatch, as v0.5.0
+  promised. `nocklock wrap` now always refuses to start (`REFUSED-TO-START`)
+  when the macOS Seatbelt fence cannot be set up. A config setting
+  `macos_allow_unfenced = true` now fails to load with "macos_allow_unfenced was
+  removed in v0.6.0; NockLock now always refuses to start unfenced on macOS;
+  restore sandbox-exec or remove the key". Configs with
+  `macos_allow_unfenced = false` keep working, and new configs from
+  `nocklock init` no longer write the key.
 - Fresh projects now keep audit state outside the project in
   `$XDG_STATE_HOME/nocklock` (or `~/.local/state/nocklock`). As a result,
   NockLock refuses to start when a `filesystem.deny` path is inside

@@ -243,21 +243,20 @@ func TestFilesystemDoctorCheckDarwinReportsSeatbeltEnforceable(t *testing.T) {
 	}
 }
 
-func TestFilesystemDoctorCheckDarwinMissingSeatbeltRespectsTemporaryOptOut(t *testing.T) {
+func TestFilesystemDoctorCheckDarwinMissingSeatbeltIsCritical(t *testing.T) {
 	cfg := &config.Config{}
 	cfg.Filesystem.Root = t.TempDir()
-	cfg.Filesystem.MacOSAllowUnfenced = true
 
 	check := filesystemDoctorCheck(cfg, doctorCapabilities{
 		goos:        "darwin",
 		sandboxExec: func() error { return errors.New("sandbox-exec not found") },
 	})
 
-	if check.Severity != doctorWarning || check.Status != "configured-with-unfenced-opt-out" {
-		t.Fatalf("darwin opt-out check = %+v, want explicit degraded warning", check)
+	if check.Severity != doctorCritical || check.Status != "configured-but-backend-missing" {
+		t.Fatalf("darwin missing-Seatbelt check = %+v, want critical backend-missing", check)
 	}
-	if !strings.Contains(check.Message, "DEGRADED") || !strings.Contains(check.Fix, "v0.6") {
-		t.Fatalf("opt-out must state its logged degraded state and removal timeline, got %+v", check)
+	if strings.Contains(check.Message+check.Fix, "macos_allow_unfenced") {
+		t.Fatalf("doctor must not mention the removed macos_allow_unfenced hatch, got %+v", check)
 	}
 }
 

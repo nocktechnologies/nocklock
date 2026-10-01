@@ -102,10 +102,10 @@ cannot start becomes one warning row without affecting the wrapped command.
 Every macOS wrap also records exactly one filesystem-fence state in the event
 log: `ENGAGED`, `REFUSED-TO-START`, or `DEGRADED`.
 
-`filesystem.macos_allow_unfenced = true` is a temporary v0.5 compatibility
-escape hatch for a missing or rejected Seatbelt profile. It starts the child
-unfenced only after a loud warning and a `DEGRADED` audit record. It is removed
-in v0.6. The default is fail-closed and should stay that way.
+The v0.5 `filesystem.macos_allow_unfenced = true` escape hatch was removed in
+v0.6.0. When Seatbelt cannot be applied, wrap always records
+`REFUSED-TO-START` and does not launch the child. A config that sets the key to
+`true` fails to load; `= false` is still accepted.
 
 ## Tamper-evident audit log (v1)
 

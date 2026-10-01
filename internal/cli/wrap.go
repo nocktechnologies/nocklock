@@ -205,7 +205,7 @@ var wrapCmd = &cobra.Command{
 		}
 		// macOS filesystem-fence state is an enforcement prerequisite, unlike
 		// ordinary best-effort access telemetry: the child must not run unless
-		// ENGAGED or the explicit DEGRADED escape hatch is durably recorded.
+		// ENGAGED or the explicit filesystem.root = "" DEGRADED state is durably recorded.
 		recordMacOSFilesystemFenceState := func(state, detail string, blocked bool) error {
 			return logger.Log(logging.Event{
 				Timestamp: time.Now(),
@@ -418,14 +418,7 @@ var wrapCmd = &cobra.Command{
 					// common macOS processes. The generated profile nevertheless
 					// confines WRITES to filesystem.root and essential runtime paths,
 					// while retaining the Phase 1 sensitive read/write denies.
-					degradeOrRefuse := func(stage string, setupErr error) error {
-						if cfg.Filesystem.MacOSAllowUnfenced {
-							if logErr := recordMacOSFilesystemFenceState("DEGRADED", stage+"; explicit filesystem.macos_allow_unfenced=true", false); logErr != nil {
-								return fmt.Errorf("cannot record macOS filesystem fence degradation; refusing to start: %w", logErr)
-							}
-							fmt.Fprintf(os.Stderr, "NockLock: WARNING: macOS filesystem fence DEGRADED — %s; starting unfenced because filesystem.macos_allow_unfenced = true (temporary; removed in v0.6)\n", stage)
-							return nil
-						}
+					refuse := func(stage string, setupErr error) error {
 						if logErr := recordMacOSFilesystemFenceState("REFUSED-TO-START", stage, true); logErr != nil {
 							return fmt.Errorf("cannot record macOS filesystem fence refusal; refusing to start: %w", logErr)
 						}
@@ -433,18 +426,12 @@ var wrapCmd = &cobra.Command{
 					}
 
 					if err := ensureSandboxExecAvailable(); err != nil {
-						if setupErr := degradeOrRefuse("sandbox-exec unavailable", err); setupErr != nil {
-							return setupErr
-						}
-						break
+						return refuse("sandbox-exec unavailable", err)
 					}
 
 					defaultSensitive := fsfence.DefaultSensitivePaths()
 					if len(defaultSensitive) == 0 {
-						if setupErr := degradeOrRefuse("default sensitive paths unavailable", errors.New("cannot resolve the current user's home directory")); setupErr != nil {
-							return setupErr
-						}
-						break
+						return refuse("default sensitive paths unavailable", errors.New("cannot resolve the current user's home directory"))
 					}
 					sensitive := append(defaultSensitive, fsCfg.DenyPaths...)
 					// The audit state is written only by this unfenced parent. It
@@ -454,34 +441,22 @@ var wrapCmd = &cobra.Command{
 						sensitive, fsCfg.Root, fsCfg.Mode, cfg.Filesystem.Hardened, fsfence.DenialTag(sessionID),
 					)
 					if err != nil {
-						if setupErr := degradeOrRefuse("profile generation failed", err); setupErr != nil {
-							return setupErr
-						}
-						break
+						return refuse("profile generation failed", err)
 					}
 
 					profilePath, err := fsfence.WriteProfile(profile)
 					if err != nil {
-						if setupErr := degradeOrRefuse("profile write failed", err); setupErr != nil {
-							return setupErr
-						}
-						break
+						return refuse("profile write failed", err)
 					}
 					defer os.Remove(profilePath)
 
 					if err := fsfence.ValidateProfile(profilePath); err != nil {
-						if setupErr := degradeOrRefuse("profile rejected", err); setupErr != nil {
-							return setupErr
-						}
-						break
+						return refuse("profile rejected", err)
 					}
 
 					sandboxArgv, err := fsfence.WrapArgv(profilePath, args)
 					if err != nil {
-						if setupErr := degradeOrRefuse("sandbox-exec argv construction failed", err); setupErr != nil {
-							return setupErr
-						}
-						break
+						return refuse("sandbox-exec argv construction failed", err)
 					}
 					fsSandboxPrefix = sandboxArgv[:len(sandboxArgv)-len(args)]
 					macOSDenialLog = true
