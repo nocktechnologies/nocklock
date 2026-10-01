@@ -4,6 +4,8 @@ All notable changes to NockLock will be documented in this file.
 
 ## [Unreleased]
 
+## [0.6.0] - 2026-10-01
+
 ### Breaking
 
 - Fresh projects now keep audit state outside the project in
@@ -14,6 +16,14 @@ All notable changes to NockLock will be documented in this file.
   state directory; narrow `filesystem.root` to the project. If more than one
   audit chain exists for a project, NockLock refuses to guess which chain to
   use.
+- `nocklock wrap` now fails closed when `logging.db` resolves
+  directly to the project root, because its SQLite sidecars and chain anchor
+  cannot be protected there. Move the database, sidecars, and chain anchor
+  together under `<root>/.nock/` with `[logging] db = ".nock/events.db"`, or
+  use the state directory with `[logging] db = "events.db"`.
+  Dry runs apply the same refusal and also reject unusable state roots and
+  conflicting chains. They may create missing trusted state directories, but
+  never a database, signing key, or anchor.
 
 ### Added
 
@@ -38,10 +48,6 @@ All notable changes to NockLock will be documented in this file.
   that clients ignoring `HTTP_PROXY` can reach any host. Set
   `network.require_enforced = true` or pass `--require-enforced-egress` to
   refuse sessions without enforced egress.
-- A strict Linux claude-code preset regression proof checks that `ls .` and
-  `os.listdir('.')` can read a fresh project's root while the relocated audit
-  database and a path outside the allowlist (default-deny) remain inaccessible
-  to the wrapped child.
 - Every `wrap` signs a `config.digest` row containing the canonical resolved
   policy and prior digest. Changed policy fields warn before the child starts;
   `verify --audit` reports the history and requires each retained post-adoption
@@ -51,54 +57,19 @@ All notable changes to NockLock will be documented in this file.
   its temporary probe files outside granted paths, including `/tmp`.
 - Source builds now embed `git describe --tags --always --dirty` in
   `nocklock version`.
-- `docs/probes/n10825/run-probe.ps1` runs the Windows feasibility Probes 1, 2
-  and 3 on a real desktop, assembled verbatim from
-  `docs/design/windows-feasibility.md`. It proves the launcher and the
-  limited token before any probe changes machine state, always runs the global
-  teardown, and writes BEFORE/AFTER state plus environment stamps to
-  `output.txt`. Operator steps are in the directory's README.
 
 ### Changed
 
-- Anvil removed; NockLock is public and uses GitHub-hosted runners only; PR review is Gander.
-- Failed anchor verification now names the anchored head and row count, and prints the recomputed local head at that count when available.
+- Anvil removed; NockLock is public and uses GitHub-hosted runners only; PR
+  review is Gander.
+- Failed anchor verification now names the anchored head and row count, and
+  prints the recomputed local head at that count when available.
 - Fresh Linux `nocklock init` configs allow system binaries, libraries, and selected
   configuration files to be read and executed without granting writes. Missing
   optional read paths no longer prevent a wrapped shell from starting. The
   default does not grant `/etc/environment` or `/etc/ssl/private/`.
-- The Windows desktop probe script (`docs/probes/n10825/run-probe.ps1`) runs
-  every command inside a container through `cmd.exe`: on the first desktop run
-  `powershell.exe` exited `0xC0000142` (`STATUS_DLL_INIT_FAILED`) in a
-  zero-capability container. Probe 1 launches each loopback curl on its own and
-  checks the 9998 bind + listen with a python that exits; Probe 3 captures
-  `whoami /groups` and `set` with their errors and exit codes. SETUP-FAULT lines
-  print exit codes in hex. A launch counts as the tool's answer only when its
-  capture holds a line the tool itself writes (curl's `--write-out`
-  `CURL_DONE exit=<n>`, python's `PYTHON_RAN`, a SID from whoami): cmd failing to
-  start the tool (access denied on the exe, or the exe missing) is a SETUP-FAULT,
-  never `PHASE 1 DEAD` or another probe verdict. The launcher's environment block now accounts for
-  Windows' own AppContainer redirection, which had doubled the
-  `Packages\<moniker>\AC` path, and the environment self-check fails when
-  `TEMP` or `LOCALAPPDATA` does not exist. The first run's output is committed
-  as `docs/probes/n10825/output-20260928T0558Z.txt`.
-
 - The Linux filesystem fence rejects configurations whose `allow_rw` entries
   push the shared allow cap or the combined wire budget over its limit.
-- macOS Seatbelt root-write confinement no longer grants the fenced child
-  write access to NockLock's audit state directory. The unfenced parent alone
-  writes the event database, SQLite sidecars, and chain anchor; a macOS
-  enforcement test now proves child truncate and rename attempts are denied
-  while a wrapped session still produces a verifiable audit chain.
-- Behavior change: `nocklock wrap` now fails closed when `logging.db` resolves
-  directly to the project root, because its SQLite sidecars and chain anchor
-  cannot be protected there. Move the database, sidecars, and chain anchor
-  together under `<root>/.nock/` with `[logging] db = ".nock/events.db"`, or
-  use the state directory with `[logging] db = "events.db"`.
-  Dry runs apply the same refusal without writing audit events. Audit path
-  resolution errors fail closed; fresh audit directories remain supported.
-  Dry runs now use the shared audit-path resolver: they also reject unusable
-  state roots and conflicting chains, and may create missing trusted state
-  directories, but do not create a database, signing key, or anchor.
 - New projects keep their audit trail outside the project, so the fenced agent
   can finally use its own project root (N10749). Two requirements had been in
   direct conflict: the agent must be able to create and remove files directly in
@@ -208,35 +179,6 @@ All notable changes to NockLock will be documented in this file.
   when no home directory is available is unaffected — it is a shared system
   directory by design, and only the per-uid component NockLock creates under
   it is held to this rule.
-- CI acceptance tests that run the three July-2026 DNS-based egress-escape tricks
-  (from the Hugging Face sandbox-escape writeup) against NockLock's egress fence
-  on both platforms (N10813). On Linux, `TestNetnsDNSEscape` drives the real netns
-  tproxy floor and, from inside the namespace, attempts each trick: (T1) an
-  in-process resolver override — a getaddrinfo-style connect to a disallowed IP
-  carrying the allowlisted SNI, a raw-IP connect to that same disallowed IP with
-  no SNI, and the child's own UDP+TCP/53 query to an off-namespace resolver;
-  (T2) a `resolv.conf` rewrite to 8.8.8.8; and (T3) an `/etc/hosts` pin of the
-  allowed name to a disallowed IP. The centerpiece (T1a) dials the attacker IP
-  while presenting the allowlisted SNI and must still read back the **real
-  allowed upstream's 200** — a race-free, synchronous receipt that the tproxy
-  floor redirected by port and re-resolved the SNI itself, so the trick changed
-  only what the child thought an address is, never where the proxy connected.
-  The raw-IP no-SNI attempt's connection is terminated at the proxy (checked by
-  the child), and the parent separately asserts the run's deny log carries a
-  matching tls/empty-host receipt after the child exits; the direct
-  off-namespace resolver query gets no answer (default-drop). The
-  `resolv.conf`/`hosts` writes are **asserted** to fail closed — the test fails
-  the run with a distinct exit code unless the write returns EACCES/EPERM/EROFS
-  — and only then connects by the allowed NAME and requires it still lands on
-  the allowed upstream. The test log carries a per-trick outcome line (e.g.
-  "T1a: redirected to allowed upstream, 200 read", "T2/T3: write_denied
-  (<errno>)") as evidence, not just `--- PASS`. On macOS,
-  `TestWrapMacOSDNSEscapeRecordsProxyEnforcement` records the proxy-only model:
-  it asserts a proxied disallowed host is denied and signed, the allowed host
-  works and is signed, and `verify --audit` is clean, while logging that direct-IP
-  egress and hosts-pinning are not kernel-blocked (macOS has no netns floor). Both
-  run in new `network-egress.yml` jobs — the Linux job as root, the macOS job on a
-  hosted runner — each emitting a per-trick verdict table to the step summary.
 - Linux userspace proxy mode now bridges syscall-fenced children to the
   allowlist proxy without granting IP sockets (N10753). When the syscall fence
   narrows proxy-mode children to Unix sockets, `wrap` serves the HTTP(S) proxy on
@@ -247,14 +189,6 @@ All notable changes to NockLock will be documented in this file.
 
 ### Fixed
 
-- CI fuzz smoke no longer fails spuriously under runner load (N10854). The
-  three fuzz steps budgeted wall time (`-fuzztime=25s`), and Go's fuzz
-  coordinator can surface its own timeout as `--- FAIL ... context deadline
-  exceeded` with no crasher. The steps now budget an exec count
-  (`-fuzztime=Nx`, per target, set below the fewest execs each target reached
-  in 25s on CI), so a slow runner takes longer instead of failing; the job gets
-  a 15-minute ceiling. Seed-corpus and newly found crashers still fail the job.
-  `test.yml` also accepts `workflow_dispatch` for manual reruns.
 - Interposer field-budget cap is now enforced post-ABI-detection (#10815).
   The cap on allow/deny paths (matching libfence_fs.c's MAX_PATHS and field
   tokenizer budget) previously ran unconditionally in ProcessConfig with
@@ -367,6 +301,14 @@ All notable changes to NockLock will be documented in this file.
   proxy, so it needs an interposer socket()/connect() translation that is a
   distinct design decision.
 
+### Security
+
+- macOS Seatbelt root-write confinement no longer grants the fenced child
+  write access to NockLock's audit state directory. The unfenced parent alone
+  writes the event database, SQLite sidecars, and chain anchor; a macOS
+  enforcement test now proves child truncate and rename attempts are denied
+  while a wrapped session still produces a verifiable audit chain.
+
 ### Documentation
 
 - Accepted-limitation record for grandchild procfs reads (#10764, follow-up to
@@ -388,6 +330,61 @@ All notable changes to NockLock will be documented in this file.
   `mem`, `maps` and `fd` off that list, and `TestSelfProcFilesPinsExactSet`
   pins the list to exactly `stat`, `statm` and `status`, so this cannot be
   "fixed" by widening it.
+- Windows feasibility study (`docs/design/windows-feasibility.md`) for running
+  the fence in an AppContainer with an empty capability set and a single loopback
+  exemption, without admin rights, with a desktop probe script
+  (`docs/probes/n10825/run-probe.ps1`) and the output of its first run.
+  NockLock still runs on Linux and macOS only.
+
+### Testing
+
+- A strict Linux claude-code preset regression proof checks that `ls .` and
+  `os.listdir('.')` can read a fresh project's root while the relocated audit
+  database and a path outside the allowlist (default-deny) remain inaccessible
+  to the wrapped child.
+- CI acceptance tests that run the three July-2026 DNS-based egress-escape tricks
+  (from the Hugging Face sandbox-escape writeup) against NockLock's egress fence
+  on both platforms (N10813). On Linux, `TestNetnsDNSEscape` drives the real netns
+  tproxy floor and, from inside the namespace, attempts each trick: (T1) an
+  in-process resolver override: a getaddrinfo-style connect to a disallowed IP
+  carrying the allowlisted SNI, a raw-IP connect to that same disallowed IP with
+  no SNI, and the child's own UDP+TCP/53 query to an off-namespace resolver;
+  (T2) a `resolv.conf` rewrite to 8.8.8.8; and (T3) an `/etc/hosts` pin of the
+  allowed name to a disallowed IP. The centerpiece (T1a) dials the attacker IP
+  while presenting the allowlisted SNI and must still read back the **real
+  allowed upstream's 200**, a race-free, synchronous receipt that the tproxy
+  floor redirected by port and re-resolved the SNI itself, so the trick changed
+  only what the child thought an address is, never where the proxy connected.
+  The raw-IP no-SNI attempt's connection is terminated at the proxy (checked by
+  the child), and the parent separately asserts the run's deny log carries a
+  matching tls/empty-host receipt after the child exits; the direct
+  off-namespace resolver query gets no answer (default-drop). The
+  `resolv.conf`/`hosts` writes are **asserted** to fail closed: the test fails
+  the run with a distinct exit code unless the write returns EACCES/EPERM/EROFS, and only then connects by the
+  allowed NAME and requires it still lands on the allowed upstream. The test log carries a per-trick outcome line (e.g.
+  "T1a: redirected to allowed upstream, 200 read", "T2/T3: write_denied
+  (<errno>)") as evidence, not just `--- PASS`. On macOS,
+  `TestWrapMacOSDNSEscapeRecordsProxyEnforcement` records the proxy-only model:
+  it asserts a proxied disallowed host is denied and signed, the allowed host
+  works and is signed, and `verify --audit` is clean, while logging that direct-IP
+  egress and hosts-pinning are not kernel-blocked (macOS has no netns floor). Both
+  run in new `network-egress.yml` jobs (the Linux job as root, the macOS job on a
+  hosted runner), each emitting a per-trick verdict table to the step summary.
+- CI runs the claude-code preset enforcement tests strict in a non-root Linux
+  job, with `NOCKLOCK_AUDIT_REQUIRE=1` so missing prerequisites fail rather
+  than skip. A raw-syscall read of a sibling's `/proc/<pid>/environ` must print
+  `DENIED`, and the `cmdline` leak check catches a broadened `/proc` grant
+  (N10755).
+- CI fuzz smoke no longer fails spuriously under runner load (N10854). The
+  three fuzz steps budgeted wall time (`-fuzztime=25s`), and Go's fuzz
+  coordinator can surface its own timeout as `--- FAIL ... context deadline
+  exceeded` with no crasher. The steps now budget an exec count
+  (`-fuzztime=Nx`, per target, set below the fewest execs each target reached
+  in 25s on CI), so a slow runner takes longer instead of failing; the job gets
+  a 15-minute ceiling. Seed-corpus and newly found crashers still fail the job.
+  `test.yml` also accepts `workflow_dispatch` for manual reruns.
+
+---
 
 ## [0.5.0] - 2026-09-26
 
