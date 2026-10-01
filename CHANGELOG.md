@@ -23,7 +23,12 @@ All notable changes to NockLock will be documented in this file.
   `(with message "nocklock:<session-id>")`, and a best-effort `log stream`
   tailer attributes unified-log denials to the session by that tag. Each
   operation and path is recorded once per session, at most 500 rows are
-  written, and one row counts the repeats and overflow. A
+  written, and one row counts the repeats and overflow. Only records carrying
+  kernel provenance (process id 0, `/kernel`, the Sandbox kext as sender image)
+  are logged, so a fenced child cannot forge denial rows by logging under the
+  `Sandbox` sender name. When the wrapped command ends, the tailer reads what
+  the log process already wrote before reaping it, and one warning row says so
+  if a stalled reader forces truncation. A
   tailer that cannot start or stops early writes one warning row and never
   affects the wrapped command. `status` and the docs describe macOS denial
   events as best-effort (the unified log can drop lines under load; Endpoint

@@ -2,6 +2,7 @@ package fs
 
 import (
 	"bufio"
+	"fmt"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -17,8 +18,12 @@ const fixturePath = "testdata/seatbelt_log_stream.ndjson"
 // --predicate 'sender == "Sandbox"'` on a macos-latest runner (macOS 26.6.2):
 // the stream header, an unrelated system denial, an untagged denial of `cat`
 // (profile without a message), and a tagged denial of `cat` (session SESS1).
-// The last three lines are hand-made variants: a truncated record, a tagged
-// write denial on a path with spaces, and a tagged non-file operation.
+// The next three lines are hand-made variants: a truncated record, a tagged
+// write denial on a path with spaces, and a tagged non-file operation. The last
+// is a forgery: a userland os_log record under sender "Sandbox" with the right
+// tag. Real kernel records carry processID 0, processImagePath "/kernel" and a
+// senderImagePath under /System/Library/Extensions/Sandbox.kext/; those are the
+// fields ParseDenial requires, and the forgery carries its own pid and paths.
 func fixtureLines(t *testing.T) []string {
 	t.Helper()
 	f, err := os.Open(fixturePath)
@@ -40,8 +45,8 @@ func fixtureLines(t *testing.T) []string {
 
 func TestParseDenial_Fixtures(t *testing.T) {
 	lines := fixtureLines(t)
-	if len(lines) != 7 {
-		t.Fatalf("fixture changed: want 7 lines, got %d", len(lines))
+	if len(lines) != 8 {
+		t.Fatalf("fixture changed: want 8 lines, got %d", len(lines))
 	}
 
 	var got []Denial
@@ -70,9 +75,10 @@ func TestParseDenial_NegativeControls(t *testing.T) {
 			t.Errorf("line %d logged for the wrong session: %+v", i, d)
 		}
 	}
-	// Individually: header, other process, untagged denial, truncated JSON and
-	// a tagged non-file operation are all skipped for the right session.
-	for _, i := range []int{0, 1, 2, 4, 6} {
+	// Individually: header, other process, untagged denial, truncated JSON, a
+	// tagged non-file operation and a tagged userland forgery are all skipped
+	// for the right session.
+	for _, i := range []int{0, 1, 2, 4, 6, 7} {
 		if d, ok := ParseDenial([]byte(lines[i]), DenialTag("SESS1")); ok {
 			t.Errorf("line %d must be skipped, parsed %+v", i, d)
 		}
@@ -82,11 +88,41 @@ func TestParseDenial_NegativeControls(t *testing.T) {
 	}
 }
 
+func TestParseDenial_RequiresEachKernelProvenanceField(t *testing.T) {
+	real := fixtureLines(t)[3]
+	if _, ok := ParseDenial([]byte(real), DenialTag("SESS1")); !ok {
+		t.Fatal("the recorded kernel denial must parse before it is mutated")
+	}
+	for name, mut := range map[string][2]string{
+		"processID":        {`"processID":0`, `"processID":4242`},
+		"processImagePath": {`"processImagePath":"\/kernel"`, `"processImagePath":"\/tmp\/Sandbox"`},
+		"senderImagePath":  {`"senderImagePath":"\/System\/Library\/Extensions\/Sandbox.kext`, `"senderImagePath":"\/tmp\/Sandbox.kext`},
+	} {
+		forged := strings.Replace(real, mut[0], mut[1], 1)
+		if forged == real {
+			t.Fatalf("%s: mutation did not apply; fixture changed", name)
+		}
+		if d, ok := ParseDenial([]byte(forged), DenialTag("SESS1")); ok {
+			t.Errorf("a record with a forged %s must not be logged, parsed %+v", name, d)
+		}
+	}
+}
+
 func skipWithoutShell(t *testing.T) {
 	t.Helper()
 	if runtime.GOOS == "windows" {
 		t.Skip("needs /bin/sh")
 	}
+}
+
+// streamArgv replays a file as a never-ending stream: cat it, then idle.
+func streamArgv(t *testing.T, body string) []string {
+	t.Helper()
+	stream := filepath.Join(t.TempDir(), "stream.ndjson")
+	if err := os.WriteFile(stream, []byte(body), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	return []string{"/bin/sh", "-c", `cat "$1"; exec sleep 30`, "sh", stream}
 }
 
 type tailerRecorder struct {
@@ -125,18 +161,13 @@ func TestDenialTailer_ReportsOnlyThisSession(t *testing.T) {
 
 func TestDenialTailer_CapsAndReportsSuppressedOnce(t *testing.T) {
 	skipWithoutShell(t)
-	rec := `{"eventMessage":"Sandbox: x(1) deny(1) file-read-data /p/%d\nnocklock:S"}`
+	rec := kernelRecord("/p/%d")
 	var b strings.Builder
 	for i := 0; i < 5; i++ {
 		b.WriteString(strings.Replace(rec, "%d", string(rune('a'+i)), 1) + "\n")
 	}
-	stream := filepath.Join(t.TempDir(), "burst.ndjson")
-	if err := os.WriteFile(stream, []byte(b.String()), 0o600); err != nil {
-		t.Fatal(err)
-	}
-
 	var r tailerRecorder
-	tl := StartDenialTailer(r.config([]string{"/bin/sh", "-c", `cat "$1"; exec sleep 30`, "sh", stream}, DenialTag("S"), 2))
+	tl := StartDenialTailer(r.config(streamArgv(t, b.String()), DenialTag("S"), 2))
 	tl.Stop()
 	if len(r.denials) != 2 {
 		t.Errorf("want 2 reported denials, got %d", len(r.denials))
@@ -172,17 +203,67 @@ func TestDenialTailer_EarlyExitWarnsOnceWithStderr(t *testing.T) {
 
 func TestDenialTailer_RepeatedDenialsReportOnceAndDoNotUseCap(t *testing.T) {
 	skipWithoutShell(t)
-	rec := `{"eventMessage":"Sandbox: x(1) deny(1) file-write-data /dev/dtracehelper\nnocklock:S"}`
-	real := `{"eventMessage":"Sandbox: x(1) deny(1) file-read-data /home/u/.ssh/id\nnocklock:S"}`
-	stream := filepath.Join(t.TempDir(), "dup.ndjson")
-	body := strings.Repeat(rec+"\n", 4) + real + "\n"
-	if err := os.WriteFile(stream, []byte(body), 0o600); err != nil {
-		t.Fatal(err)
-	}
+	rec := kernelRecord("/dev/dtracehelper")
+	real := kernelRecord("/home/u/.ssh/id")
 	var r tailerRecorder
-	tl := StartDenialTailer(r.config([]string{"/bin/sh", "-c", `cat "$1"; exec sleep 30`, "sh", stream}, DenialTag("S"), 2))
+	tl := StartDenialTailer(r.config(streamArgv(t, strings.Repeat(rec+"\n", 4)+real+"\n"), DenialTag("S"), 2))
 	tl.Stop()
 	if len(r.denials) != 2 || len(r.suppressed) != 1 || r.suppressed[0] != [2]int{0, 3} {
 		t.Fatalf("denials=%+v suppressed=%v", r.denials, r.suppressed)
+	}
+}
+
+func kernelRecord(path string) string {
+	return `{"processID":0,"processImagePath":"/kernel","senderImagePath":"/System/Library/Extensions/Sandbox.kext/Contents/MacOS/Sandbox","eventMessage":"Sandbox: x(1) deny(1) file-read-data ` + path + `\nnocklock:S"}`
+}
+
+func TestDenialTailer_StopKeepsEveryBufferedRecordFromASlowConsumer(t *testing.T) {
+	skipWithoutShell(t)
+	const n = 1000
+	var b strings.Builder
+	for i := 0; i < n; i++ {
+		b.WriteString(kernelRecord(fmt.Sprintf("/p/%04d", i)) + "\n")
+	}
+	if b.Len() <= 64*1024 {
+		t.Fatalf("burst of %d bytes does not exceed the pipe buffer", b.Len())
+	}
+	var r tailerRecorder
+	cfg := r.config(streamArgv(t, b.String()), DenialTag("S"), 2*n)
+	onDenial := cfg.OnDenial
+	cfg.OnDenial = func(d Denial) { time.Sleep(time.Millisecond); onDenial(d) }
+	tl := StartDenialTailer(cfg)
+	tl.Stop()
+	if len(r.denials) != n || len(r.warnings) != 0 {
+		t.Fatalf("want all %d denials and no warning, got %d denials, warnings=%q", n, len(r.denials), r.warnings)
+	}
+}
+
+func TestDenialTailer_StopWarnsOnceWhenTheReaderStalls(t *testing.T) {
+	skipWithoutShell(t)
+	var r tailerRecorder
+	release := make(chan struct{})
+	cfg := r.config(streamArgv(t, kernelRecord("/p/a")+"\n"+kernelRecord("/p/b")+"\n"), DenialTag("S"), 0)
+	cfg.OnDenial = func(Denial) { <-release }
+	tl := StartDenialTailer(cfg)
+
+	stopped := make(chan struct{})
+	go func() { tl.Stop(); close(stopped) }()
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		r.mu.Lock()
+		n := len(r.warnings)
+		r.mu.Unlock()
+		if n > 0 {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("a stalled reader produced no truncation warning")
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	close(release)
+	<-stopped
+	if len(r.warnings) != 1 || !strings.Contains(r.warnings[0], "dropped") {
+		t.Fatalf("want exactly one truncation warning, got %q", r.warnings)
 	}
 }

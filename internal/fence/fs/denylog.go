@@ -20,8 +20,11 @@ import (
 // its deny rules with `(with message "nocklock:<session-id>")` and the kernel
 // appends that tag to the log line, so a denial is attributed to a session by
 // its tag alone, covering every descendant of the wrapped process with no PID
-// bookkeeping. The unified log can drop lines under load, so the audit rows this
-// produces are evidence of denials, never proof that none occurred.
+// bookkeeping. The tag and the sender name are not proof of origin: a fenced
+// child can os_log its own "Sandbox" records and learn the tag, so a record is
+// accepted only when it carries kernel provenance (see ParseDenial). The unified
+// log can drop lines under load, so the audit rows this produces are evidence of
+// denials, never proof that none occurred.
 
 // DenialTag is the message tag a session's deny rules carry.
 func DenialTag(sessionID string) string { return "nocklock:" + sessionID }
@@ -35,10 +38,22 @@ type Denial struct {
 // Detail renders the audit-row detail, e.g. "file-read-data /Users/x/.ssh/id_ed25519".
 func (d Denial) Detail() string { return d.Operation + " " + d.Path }
 
+const (
+	kernelImagePath = "/kernel"
+	sandboxKextDir  = "/System/Library/Extensions/Sandbox.kext/"
+)
+
 // ParseDenial extracts a file denial from one `log stream --style ndjson` line.
 // It reports false for anything that is not a file denial carrying tag: the
 // stream's non-JSON header, malformed or truncated JSON, denials of other
-// processes or sessions (no tag, or a different one), and non-file operations.
+// processes or sessions (no tag, or a different one), non-file operations, and
+// records a userland process logged under the "Sandbox" sender name.
+//
+// Provenance fields, as captured from a real Seatbelt denial on macos-latest
+// (testdata/seatbelt_log_stream.ndjson): the kernel emits the record, so logd
+// stamps it processID 0, processImagePath "/kernel" and a senderImagePath inside
+// the SIP-protected Sandbox.kext. A userland os_log call gets its own pid and
+// image paths, which it cannot choose.
 func ParseDenial(line []byte, tag string) (Denial, bool) {
 	// Most lines on a busy host are other processes' denials; skip them before
 	// paying for a JSON decode. Session tags are UUIDs, which JSON leaves unescaped.
@@ -46,9 +61,16 @@ func ParseDenial(line []byte, tag string) (Denial, bool) {
 		return Denial{}, false
 	}
 	var rec struct {
-		EventMessage string `json:"eventMessage"`
+		EventMessage     string `json:"eventMessage"`
+		ProcessID        int    `json:"processID"`
+		ProcessImagePath string `json:"processImagePath"`
+		SenderImagePath  string `json:"senderImagePath"`
 	}
 	if err := json.Unmarshal(line, &rec); err != nil {
+		return Denial{}, false
+	}
+	if rec.ProcessID != 0 || rec.ProcessImagePath != kernelImagePath ||
+		!strings.HasPrefix(rec.SenderImagePath, sandboxKextDir) {
 		return Denial{}, false
 	}
 	// eventMessage is "Sandbox: <proc>(<pid>) deny(<n>) <op> <path>" with the
@@ -121,6 +143,7 @@ type DenialTailer struct {
 	stopOnce sync.Once
 	warnOnce sync.Once
 	waitOnce sync.Once
+	lines    atomic.Int64 // stream lines the reader has fully handled
 	stderr   cappedBuffer
 }
 
@@ -192,6 +215,7 @@ func (t *DenialTailer) read(out io.Reader, ready chan<- struct{}) {
 				close(ready)
 			}
 			t.handleLine(line, seen, &reported, &overCap, &repeats)
+			t.lines.Add(1)
 		}
 		if err != nil {
 			if err != io.EOF {
@@ -236,8 +260,11 @@ func (t *DenialTailer) handleLine(line []byte, seen map[Denial]struct{}, reporte
 	}
 }
 
-// Stop lets the stream drain briefly, then ends it and waits for the reader.
-// It is safe to call more than once.
+// Stop lets the stream drain briefly, ends it, and lets the reader consume what
+// the process already wrote before reaping it: Wait closes the stdout pipe, so
+// waiting first would discard lines still buffered in it. The reader gets as
+// long as it keeps making progress; a reader stalled for a full drain window is
+// cut off with one truncation warning. It is safe to call more than once.
 func (t *DenialTailer) Stop() {
 	t.stopOnce.Do(func() {
 		select {
@@ -248,9 +275,28 @@ func (t *DenialTailer) Stop() {
 		if t.cmd.Process != nil {
 			_ = t.cmd.Process.Kill()
 		}
+		if !t.awaitReader() && t.cfg.OnWarning != nil {
+			t.cfg.OnWarning("denial log reader stalled while stopping; denials still buffered in the stream may have been dropped")
+		}
 		t.wait()
 		<-t.done
 	})
+}
+
+// awaitReader reports whether the reader reached the end of the stream before
+// going a full drain window without handling a line.
+func (t *DenialTailer) awaitReader() bool {
+	for {
+		before := t.lines.Load()
+		select {
+		case <-t.done:
+			return true
+		case <-time.After(t.cfg.Drain):
+		}
+		if t.lines.Load() == before {
+			return false
+		}
+	}
 }
 
 func (t *DenialTailer) wait() {
