@@ -310,6 +310,7 @@ var wrapCmd = &cobra.Command{
 		var fsFence *fsfence.Fence
 		var fsFenceCancel context.CancelFunc
 		var fsSandboxPrefix []string
+		macOSDenialLog := false
 		var landlockPrefix []string
 		var fsCfg *fsfence.FenceConfig
 		if cfg.Filesystem.Root != "" {
@@ -449,8 +450,8 @@ var wrapCmd = &cobra.Command{
 					// The audit state is written only by this unfenced parent. It
 					// is already included in sensitive through egressChildDenyPaths,
 					// so never grant its directory to the fenced child.
-					profile, pathCount, err := fsfence.GenerateWriteConfinementProfile(
-						sensitive, fsCfg.Root, fsCfg.Mode, cfg.Filesystem.Hardened,
+					profile, pathCount, err := fsfence.GenerateTaggedWriteConfinementProfile(
+						sensitive, fsCfg.Root, fsCfg.Mode, cfg.Filesystem.Hardened, fsfence.DenialTag(sessionID),
 					)
 					if err != nil {
 						if setupErr := degradeOrRefuse("profile generation failed", err); setupErr != nil {
@@ -483,6 +484,7 @@ var wrapCmd = &cobra.Command{
 						break
 					}
 					fsSandboxPrefix = sandboxArgv[:len(sandboxArgv)-len(args)]
+					macOSDenialLog = true
 
 					if err := recordMacOSFilesystemFenceState("ENGAGED", fmt.Sprintf("Seatbelt root-write confinement applied; root=%s mode=%s sensitive_paths=%d", fsCfg.Root, fsCfg.Mode, pathCount), false); err != nil {
 						return fmt.Errorf("cannot record macOS filesystem fence engagement; refusing to start: %w", err)
@@ -907,7 +909,33 @@ var wrapCmd = &cobra.Command{
 			}()
 		}
 
+		// Best-effort: file denials of the Seatbelt fence reach the audit chain
+		// through the unified log. The tailer never blocks or fails the child;
+		// its problems become one warning row.
+		var denialTailer *fsfence.DenialTailer
+		if macOSDenialLog {
+			denialTailer = fsfence.StartDenialTailer(fsfence.DenialTailerConfig{
+				Argv: denialLogArgv(),
+				Tag:  fsfence.DenialTag(sessionID),
+				OnDenial: func(d fsfence.Denial) {
+					logEvent(logging.EventFileBlocked, "filesystem", d.Detail(), true)
+				},
+				OnSuppressed: func(n int) {
+					logEvent(logging.EventFileBlocked, "filesystem",
+						fmt.Sprintf("macOS denial log: %d further denial events suppressed after the %d-per-session cap", n, fsfence.DefaultMaxDenialEvents), true)
+				},
+				OnWarning: func(msg string) {
+					logEvent(logging.EventFilePassed, "filesystem", "macOS denial log (best-effort): "+msg, false)
+				},
+			})
+			defer denialTailer.Stop()
+		}
+
 		childErr := child.Run()
+
+		if denialTailer != nil {
+			denialTailer.Stop()
+		}
 
 		// The child (and thus the proxy that writes the decision-log) has exited.
 		// Signal the reader to do its final drain and wait for it before the
@@ -1087,6 +1115,10 @@ func mergeFSFenceEnv(childEnv, fenceEnv []string) []string {
 	}
 	return append(childEnv, fenceEnv...)
 }
+
+// denialLogArgv returns the command that streams Seatbelt denials; tests
+// replace it to simulate an unavailable or scripted unified log.
+var denialLogArgv = fsfence.LogStreamArgv
 
 // sessionIDEnv is the env var through which wrap tells the child which audit
 // session it belongs to. The id is not a secret; it lets a co-located tool

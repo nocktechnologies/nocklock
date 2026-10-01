@@ -17,7 +17,8 @@ and an external chain-head anchor that can be pushed off-box (v1.2). macOS
 has a kernel-enforced Seatbelt write-confinement profile plus sensitive-path
 read and write denies (reads outside `filesystem.root` are not confined) and
 records its filesystem-fence state in SQLite. Per-file deny events on macOS
-are still a follow-up.
+are best-effort, read from the unified log; Endpoint Security is the follow-up
+for complete events.
 
 The target is to keep all three fence categories active while adding an
 Endpoint Security macOS backend for read confinement and native per-file
@@ -125,8 +126,8 @@ pkg/
 
 ### Future
 
-A macOS Endpoint Security backend can add read confinement and native per-file
-deny events. Events could also be batched and synced to the NockCC cloud
+A macOS Endpoint Security backend can add read confinement and complete native
+per-file deny events (the Seatbelt fence's unified-log events are best-effort). Events could also be batched and synced to the NockCC cloud
 dashboard, as an option.
 
 ## Network egress fence (Linux, opt-in)

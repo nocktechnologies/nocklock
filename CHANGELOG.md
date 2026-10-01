@@ -17,6 +17,16 @@ All notable changes to NockLock will be documented in this file.
 
 ### Added
 
+- macOS: file accesses the Seatbelt fence denies are recorded as `file_blocked`
+  rows (category `filesystem`, detail `<operation> <path>`) in the signed audit
+  chain. The profile tags its file-deny rules with
+  `(with message "nocklock:<session-id>")`, and a best-effort `log stream`
+  tailer attributes unified-log denials to the session by that tag. At most 500
+  denial rows are written per session, followed by one row counting the rest. A
+  tailer that cannot start or stops early writes one warning row and never
+  affects the wrapped command. `status` and the docs describe macOS denial
+  events as best-effort (the unified log can drop lines under load; Endpoint
+  Security remains the complete-events path). (N11039)
 - `wrap` reports and signs the effective network egress level (`KERNEL`,
   `CONFINED`, `ADVISORY`, `OFF`, or `UNREACHABLE`). Advisory proxy mode warns
   that clients ignoring `HTTP_PROXY` can reach any host. Set
