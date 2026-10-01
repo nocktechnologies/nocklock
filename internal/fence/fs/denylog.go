@@ -1,0 +1,326 @@
+package fs
+
+import (
+	"bufio"
+	"bytes"
+	"encoding/json"
+	"fmt"
+	"io"
+	"os/exec"
+	"strings"
+	"sync"
+	"sync/atomic"
+	"time"
+)
+
+// Best-effort capture of Seatbelt file denials from the macOS unified log.
+//
+// Seatbelt has no callback like the Linux interposer socket; the kernel writes
+// each denial to the unified log (sender "Sandbox"). The generated profile tags
+// its deny rules with `(with message "nocklock:<session-id>")` and the kernel
+// appends that tag to the log line, so a denial is attributed to a session by
+// its tag alone, covering every descendant of the wrapped process with no PID
+// bookkeeping. The tag and the sender name are not proof of origin: a fenced
+// child can os_log its own "Sandbox" records and learn the tag, so a record is
+// accepted only when it carries kernel provenance (see ParseDenial). The unified
+// log can drop lines under load, so the audit rows this produces are evidence of
+// denials, never proof that none occurred.
+
+// DenialTag is the message tag a session's deny rules carry.
+func DenialTag(sessionID string) string { return "nocklock:" + sessionID }
+
+// Denial is one file access the Seatbelt fence refused.
+type Denial struct {
+	Operation string // e.g. "file-read-data"
+	Path      string
+}
+
+// Detail renders the audit-row detail, e.g. "file-read-data /Users/x/.ssh/id_ed25519".
+func (d Denial) Detail() string { return d.Operation + " " + d.Path }
+
+const (
+	kernelImagePath = "/kernel"
+	sandboxKextDir  = "/System/Library/Extensions/Sandbox.kext/"
+)
+
+// ParseDenial extracts a file denial from one `log stream --style ndjson` line.
+// It reports false for anything that is not a file denial carrying tag: the
+// stream's non-JSON header, malformed or truncated JSON, denials of other
+// processes or sessions (no tag, or a different one), non-file operations, and
+// records a userland process logged under the "Sandbox" sender name.
+//
+// Provenance fields, as captured from a real Seatbelt denial on macos-latest
+// (testdata/seatbelt_log_stream.ndjson): the kernel emits the record, so logd
+// stamps it processID 0, processImagePath "/kernel" and a senderImagePath inside
+// the SIP-protected Sandbox.kext. A userland os_log call gets its own pid and
+// image paths, which it cannot choose.
+func ParseDenial(line []byte, tag string) (Denial, bool) {
+	// Most lines on a busy host are other processes' denials; skip them before
+	// paying for a JSON decode. Session tags are UUIDs, which JSON leaves unescaped.
+	if !bytes.Contains(line, []byte(tag)) {
+		return Denial{}, false
+	}
+	var rec struct {
+		EventMessage     string `json:"eventMessage"`
+		ProcessID        int    `json:"processID"`
+		ProcessImagePath string `json:"processImagePath"`
+		SenderImagePath  string `json:"senderImagePath"`
+	}
+	if err := json.Unmarshal(line, &rec); err != nil {
+		return Denial{}, false
+	}
+	if rec.ProcessID != 0 || rec.ProcessImagePath != kernelImagePath ||
+		!strings.HasPrefix(rec.SenderImagePath, sandboxKextDir) {
+		return Denial{}, false
+	}
+	// eventMessage is "Sandbox: <proc>(<pid>) deny(<n>) <op> <path>" with the
+	// profile's message tag on a following line.
+	first, rest, tagged := strings.Cut(rec.EventMessage, "\n")
+	if !tagged || !hasLine(rest, tag) {
+		return Denial{}, false
+	}
+	_, afterDeny, ok := strings.Cut(first, ") deny(")
+	if !ok {
+		return Denial{}, false
+	}
+	_, opAndPath, ok := strings.Cut(afterDeny, ") ")
+	if !ok {
+		return Denial{}, false
+	}
+	op, path, ok := strings.Cut(opAndPath, " ")
+	if !ok || !strings.HasPrefix(op, "file-") || path == "" {
+		return Denial{}, false
+	}
+	return Denial{Operation: op, Path: path}, true
+}
+
+func hasLine(s, want string) bool {
+	for _, l := range strings.Split(s, "\n") {
+		if l == want {
+			return true
+		}
+	}
+	return false
+}
+
+// LogStreamArgv is the command that streams Seatbelt denials as ndjson.
+func LogStreamArgv() []string {
+	return []string{"/usr/bin/log", "stream", "--style", "ndjson", "--predicate", `sender == "Sandbox"`}
+}
+
+const (
+	// DefaultMaxDenialEvents caps denial rows per session so a denial storm
+	// cannot flood the audit chain.
+	DefaultMaxDenialEvents = 500
+	// DefaultDenialDrain is how long the tailer keeps reading after the child
+	// exits, so late log lines still land.
+	DefaultDenialDrain = time.Second
+	// DefaultDenialReadyWait bounds how long Start waits for the stream to
+	// attach before the child launches.
+	DefaultDenialReadyWait = 750 * time.Millisecond
+)
+
+// DenialTailerConfig configures StartDenialTailer. Zero values select defaults.
+type DenialTailerConfig struct {
+	Argv      []string      // defaults to LogStreamArgv()
+	Tag       string        // only denials carrying this tag are reported
+	Max       int           // denial events reported before suppression
+	Drain     time.Duration // post-exit read window
+	ReadyWait time.Duration // bound on waiting for the stream to attach
+
+	OnDenial     func(Denial)
+	OnSuppressed func(overCap, repeats int) // called at most once, if either is non-zero
+	OnWarning    func(msg string)
+}
+
+// DenialTailer reads Seatbelt denials in the background. It never blocks or
+// fails the wrapped process: every problem becomes one OnWarning call.
+type DenialTailer struct {
+	cfg      DenialTailerConfig
+	cmd      *exec.Cmd
+	done     chan struct{} // closed when the reader goroutine exits
+	stopping atomic.Bool
+	stopOnce sync.Once
+	warnOnce sync.Once
+	waitOnce sync.Once
+	lines    atomic.Int64 // stream lines the reader has fully handled
+	stderr   cappedBuffer
+}
+
+// StartDenialTailer starts the stream and waits briefly for it to attach. A
+// tailer that cannot start is returned already finished, after one warning.
+func StartDenialTailer(cfg DenialTailerConfig) *DenialTailer {
+	if len(cfg.Argv) == 0 {
+		cfg.Argv = LogStreamArgv()
+	}
+	if cfg.Max <= 0 {
+		cfg.Max = DefaultMaxDenialEvents
+	}
+	if cfg.Drain <= 0 {
+		cfg.Drain = DefaultDenialDrain
+	}
+	if cfg.ReadyWait <= 0 {
+		cfg.ReadyWait = DefaultDenialReadyWait
+	}
+	t := &DenialTailer{cfg: cfg, done: make(chan struct{})}
+
+	t.cmd = exec.Command(cfg.Argv[0], cfg.Argv[1:]...)
+	t.cmd.Stderr = &t.stderr
+	t.cmd.WaitDelay = time.Second
+	out, err := t.cmd.StdoutPipe()
+	if err == nil {
+		err = t.cmd.Start()
+	}
+	if err != nil {
+		t.warn(fmt.Sprintf("denial log unavailable: cannot start %s: %v", cfg.Argv[0], err))
+		close(t.done)
+		return t
+	}
+
+	ready := make(chan struct{})
+	go t.read(out, ready)
+	select {
+	case <-ready:
+	case <-t.done:
+	case <-time.After(cfg.ReadyWait):
+		t.warn("denial log stream had not attached when the command started; early denials may be missing")
+	}
+	return t
+}
+
+func (t *DenialTailer) warn(msg string) {
+	t.warnOnce.Do(func() {
+		if t.cfg.OnWarning != nil {
+			t.cfg.OnWarning(msg)
+		}
+	})
+}
+
+func (t *DenialTailer) read(out io.Reader, ready chan<- struct{}) {
+	defer close(t.done)
+	r := bufio.NewReaderSize(out, 64*1024)
+	signalled := false
+	seen := make(map[Denial]struct{})
+	reported, overCap, repeats := 0, 0, 0
+	var readErr error
+	for {
+		line, err := r.ReadSlice('\n')
+		for err == bufio.ErrBufferFull { // oversized record: drop it, keep streaming
+			line = nil
+			_, err = r.ReadSlice('\n')
+		}
+		if len(line) > 0 {
+			if !signalled {
+				signalled = true
+				close(ready)
+			}
+			t.handleLine(line, seen, &reported, &overCap, &repeats)
+			t.lines.Add(1)
+		}
+		if err != nil {
+			if err != io.EOF {
+				readErr = err
+			}
+			break
+		}
+	}
+	if (overCap > 0 || repeats > 0) && t.cfg.OnSuppressed != nil {
+		t.cfg.OnSuppressed(overCap, repeats)
+	}
+	if !t.stopping.Load() {
+		t.wait() // stderr is complete only once the process has been reaped
+		detail := strings.TrimSpace(t.stderr.String())
+		if readErr != nil {
+			detail = readErr.Error()
+		}
+		t.warn("denial log stopped early; later denials may be missing: " + detail)
+	}
+}
+
+// handleLine reports one stream line. Identical operation+path pairs are
+// recorded once per session: every process trips the same startup denials, and
+// repeats would exhaust the cap before a real secret access arrives.
+func (t *DenialTailer) handleLine(line []byte, seen map[Denial]struct{}, reported, overCap, repeats *int) {
+	d, ok := ParseDenial(line, t.cfg.Tag)
+	if !ok {
+		return
+	}
+	if _, dup := seen[d]; dup {
+		*repeats++
+		return
+	}
+	if *reported >= t.cfg.Max {
+		*overCap++
+		return
+	}
+	seen[d] = struct{}{}
+	*reported++
+	if t.cfg.OnDenial != nil {
+		t.cfg.OnDenial(d)
+	}
+}
+
+// Stop lets the stream drain briefly, ends it, and lets the reader consume what
+// the process already wrote before reaping it: Wait closes the stdout pipe, so
+// waiting first would discard lines still buffered in it. The reader gets as
+// long as it keeps making progress; a reader stalled for a full drain window is
+// cut off with one truncation warning. It is safe to call more than once.
+func (t *DenialTailer) Stop() {
+	t.stopOnce.Do(func() {
+		select {
+		case <-t.done:
+		case <-time.After(t.cfg.Drain):
+		}
+		t.stopping.Store(true)
+		if t.cmd.Process != nil {
+			_ = t.cmd.Process.Kill()
+		}
+		if !t.awaitReader() && t.cfg.OnWarning != nil {
+			t.cfg.OnWarning("denial log reader stalled while stopping; denials still buffered in the stream may have been dropped")
+		}
+		t.wait()
+		<-t.done
+	})
+}
+
+// awaitReader reports whether the reader reached the end of the stream before
+// going a full drain window without handling a line.
+func (t *DenialTailer) awaitReader() bool {
+	for {
+		before := t.lines.Load()
+		select {
+		case <-t.done:
+			return true
+		case <-time.After(t.cfg.Drain):
+		}
+		if t.lines.Load() == before {
+			return false
+		}
+	}
+}
+
+func (t *DenialTailer) wait() {
+	t.waitOnce.Do(func() { _ = t.cmd.Wait() })
+}
+
+// cappedBuffer keeps the first 2 KiB written to it; a failing stream's stderr
+// is only ever quoted in one warning.
+type cappedBuffer struct {
+	mu  sync.Mutex
+	buf bytes.Buffer
+}
+
+func (c *cappedBuffer) Write(p []byte) (int, error) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if room := 2048 - c.buf.Len(); room > 0 {
+		c.buf.Write(p[:min(room, len(p))])
+	}
+	return len(p), nil
+}
+
+func (c *cappedBuffer) String() string {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.buf.String()
+}

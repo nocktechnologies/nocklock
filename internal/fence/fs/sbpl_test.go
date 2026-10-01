@@ -425,3 +425,40 @@ func TestSbplString_Escaping(t *testing.T) {
 		}
 	}
 }
+
+// TestGenerateTaggedWriteConfinementProfile_TagsEveryFileDeny proves the session
+// tag rides on every file-deny rule (the sensitive read/write deny, the base
+// write deny, and the hardened /dev deny) and that an empty tag leaves the
+// profile byte-identical to the untagged generator.
+func TestGenerateTaggedWriteConfinementProfile_TagsEveryFileDeny(t *testing.T) {
+	root := t.TempDir()
+	secret := t.TempDir()
+	const tag = `nocklock:sess"1`
+
+	profile, _, err := GenerateTaggedWriteConfinementProfile([]string{secret}, root, "read-write", true, tag)
+	if err != nil {
+		t.Fatalf("GenerateTaggedWriteConfinementProfile: %v", err)
+	}
+	modifier := `(with message "nocklock:sess\"1")`
+	if got := strings.Count(profile, modifier); got != 3 {
+		t.Errorf("expected the tag on 3 file-deny rules, got %d:\n%s", got, profile)
+	}
+	if !strings.Contains(profile, "(deny file-write* "+modifier+")") {
+		t.Errorf("base write deny is untagged:\n%s", profile)
+	}
+	if strings.Contains(profile, "(deny mach-priv-host-port "+modifier) {
+		t.Errorf("non-file denials must stay untagged:\n%s", profile)
+	}
+
+	plain, plainCount, err := GenerateWriteConfinementProfile([]string{secret}, root, "read-write", true)
+	if err != nil {
+		t.Fatalf("GenerateWriteConfinementProfile: %v", err)
+	}
+	untagged, untaggedCount, err := GenerateTaggedWriteConfinementProfile([]string{secret}, root, "read-write", true, "")
+	if err != nil {
+		t.Fatalf("GenerateTaggedWriteConfinementProfile(empty tag): %v", err)
+	}
+	if plain != untagged || plainCount != untaggedCount {
+		t.Errorf("empty tag changed the profile:\n%s\nvs\n%s", plain, untagged)
+	}
+}

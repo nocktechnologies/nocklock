@@ -12,6 +12,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/nocktechnologies/nocklock/internal/config"
 	fsfence "github.com/nocktechnologies/nocklock/internal/fence/fs"
@@ -25,12 +26,7 @@ import (
 // not merely the component helper, records precisely one filesystem-fence
 // state after a Seatbelt profile is accepted and before its child runs.
 func TestWrapMacOSFilesystemFenceRecordsOneEngagedState(t *testing.T) {
-	if err := fsfence.EnsureSandboxExecAvailable(); err != nil {
-		if os.Getenv("NOCKLOCK_SANDBOX_REQUIRE") == "1" {
-			t.Fatalf("sandbox-exec unavailable: %v; NOCKLOCK_SANDBOX_REQUIRE=1 forbids skipping", err)
-		}
-		t.Skipf("sandbox-exec unavailable: %v", err)
-	}
+	requireSandboxExecForWrap(t)
 
 	project := t.TempDir()
 	policy := strings.Replace(config.DefaultTOML(), "allow_all = false", "allow_all = true", 1)
@@ -67,12 +63,7 @@ func TestWrapMacOSFilesystemFenceRecordsOneEngagedState(t *testing.T) {
 // a valid SBPL string. The targets live under the home directory because the
 // profile intentionally permits the system temp directory used by t.TempDir.
 func TestWrapMacOSFilesystemFenceConfinesWritesToRoot(t *testing.T) {
-	if err := fsfence.EnsureSandboxExecAvailable(); err != nil {
-		if os.Getenv("NOCKLOCK_SANDBOX_REQUIRE") == "1" {
-			t.Fatalf("sandbox-exec unavailable: %v; NOCKLOCK_SANDBOX_REQUIRE=1 forbids skipping", err)
-		}
-		t.Skipf("sandbox-exec unavailable: %v", err)
-	}
+	requireSandboxExecForWrap(t)
 
 	home, err := os.UserHomeDir()
 	if err != nil || home == "" {
@@ -119,12 +110,7 @@ func TestWrapMacOSFilesystemFenceConfinesWritesToRoot(t *testing.T) {
 // anchor. The unfenced parent must still write a complete, signed audit trail
 // for both the denied attempts and a subsequent ordinary wrapped command.
 func TestWrapMacOSFilesystemFenceDeniesAuditStateTampering(t *testing.T) {
-	if err := fsfence.EnsureSandboxExecAvailable(); err != nil {
-		if os.Getenv("NOCKLOCK_SANDBOX_REQUIRE") == "1" {
-			t.Fatalf("sandbox-exec unavailable: %v; NOCKLOCK_SANDBOX_REQUIRE=1 forbids skipping", err)
-		}
-		t.Skipf("sandbox-exec unavailable: %v", err)
-	}
+	requireSandboxExecForWrap(t)
 
 	project := t.TempDir()
 	policy := strings.Replace(config.DefaultTOML(), "allow_all = false", "allow_all = true", 1)
@@ -347,4 +333,202 @@ func macOSFilesystemFenceStates(t *testing.T, db *sql.DB) []string {
 		t.Fatalf("iterate fence state: %v", err)
 	}
 	return states
+}
+
+func requireSandboxExecForWrap(t *testing.T) {
+	t.Helper()
+	if err := fsfence.EnsureSandboxExecAvailable(); err != nil {
+		if os.Getenv("NOCKLOCK_SANDBOX_REQUIRE") == "1" {
+			t.Fatalf("sandbox-exec unavailable: %v; NOCKLOCK_SANDBOX_REQUIRE=1 forbids skipping", err)
+		}
+		t.Skipf("sandbox-exec unavailable: %v", err)
+	}
+}
+
+// denialLogProject prepares an allow_all project whose HOME is a temp directory
+// holding a default-denied ~/.ssh secret, and returns the project, the secret
+// path, and a runner for wrapped commands.
+func denialLogProject(t *testing.T) (project, secret string, run func(args ...string) error) {
+	t.Helper()
+	requireSandboxExecForWrap(t)
+	home := t.TempDir()
+	if resolved, err := filepath.EvalSymlinks(home); err == nil {
+		home = resolved
+	}
+	t.Setenv("HOME", home)
+	if err := os.Mkdir(filepath.Join(home, ".ssh"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	secret = filepath.Join(home, ".ssh", "id_nocklock_test")
+	if err := os.WriteFile(secret, []byte("not-a-real-key"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	project = t.TempDir()
+	policy := strings.Replace(config.DefaultTOML(), "allow_all = false", "allow_all = true", 1)
+	writeTestConfig(t, project, policy)
+	withWorkingDir(t, project)
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+
+	run = func(args ...string) error {
+		cmd := &cobra.Command{}
+		cmd.SetContext(context.Background())
+		return wrapCmd.RunE(cmd, append([]string{"--"}, args...))
+	}
+	return project, secret, run
+}
+
+func wantExitCode(t *testing.T, err error, want int) {
+	t.Helper()
+	var ec *exitCodeError
+	if want == 0 {
+		if err != nil {
+			t.Fatalf("wrapped command failed: %v", err)
+		}
+		return
+	}
+	if !errors.As(err, &ec) || ec.code != want {
+		t.Fatalf("wrap error = %v, want exit code %d", err, want)
+	}
+}
+
+// TestWrapMacOSDenialLogRecordsFileBlockedRow is the end-to-end proof for the
+// unified-log tailer: a wrapped command reads a denied path and exactly one
+// signed EventFileBlocked row naming it lands in the session's audit chain,
+// while the command's own exit code passes through untouched.
+func TestWrapMacOSDenialLogRecordsFileBlockedRow(t *testing.T) {
+	project, secret, run := denialLogProject(t)
+
+	err := run("/bin/sh", "-c", `cat "$1" >/dev/null 2>&1; exit 7`, "sh", secret)
+	wantExitCode(t, err, 7)
+
+	db, err := sql.Open("sqlite", resolvedAuditDB(t, project))
+	if err != nil {
+		t.Fatalf("open audit log: %v", err)
+	}
+	defer db.Close()
+
+	var sessionID string
+	if err := db.QueryRow(`SELECT session_id FROM events WHERE event_type = 'session_end'`).Scan(&sessionID); err != nil {
+		t.Fatalf("session_end row: %v", err)
+	}
+	rows, err := db.Query(`SELECT category, detail, blocked, session_id FROM events WHERE event_type = 'file_blocked'`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer rows.Close()
+	var details []string
+	for rows.Next() {
+		var category, detail, session string
+		var blocked int
+		if err := rows.Scan(&category, &detail, &blocked, &session); err != nil {
+			t.Fatal(err)
+		}
+		if strings.HasSuffix(detail, secret) {
+			details = append(details, detail)
+		}
+		if category != "filesystem" || blocked != 1 || session != sessionID {
+			t.Errorf("denial row = category %q blocked %d session %q; want filesystem/1/%q", category, blocked, session, sessionID)
+		}
+	}
+	// Other file_blocked rows may exist: every process also trips the fence's
+	// base write deny on /dev/dtracehelper at startup. The denied secret must
+	// appear exactly once.
+	if len(details) != 1 || details[0] != "file-read-data "+secret {
+		t.Fatalf("want exactly one file_blocked row %q, got %q", "file-read-data "+secret, details)
+	}
+
+	var verifyOut bytes.Buffer
+	if err := runAuditVerify(context.Background(), &verifyOut, ""); err != nil {
+		t.Fatalf("audit chain with denial row does not verify: %v\n%s", err, verifyOut.String())
+	}
+}
+
+// TestWrapMacOSDenialLogIgnoresOtherSessions is the negative control: a denial
+// carrying another session's tag, replayed through the same tailer, is not
+// written to this session's chain.
+func TestWrapMacOSDenialLogIgnoresOtherSessions(t *testing.T) {
+	project, _, run := denialLogProject(t)
+
+	foreign := `{"eventMessage":"Sandbox: cat(1) deny(1) file-read-data /Users/other/.ssh/id_ed25519\nnocklock:some-other-session"}`
+	old := denialLogArgv
+	denialLogArgv = func() []string {
+		return []string{"/bin/sh", "-c", `printf '%s\n' "$1"; exec /bin/sleep 30`, "sh", foreign}
+	}
+	t.Cleanup(func() { denialLogArgv = old })
+
+	wantExitCode(t, run("/usr/bin/true"), 0)
+
+	db, err := sql.Open("sqlite", resolvedAuditDB(t, project))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	var n int
+	if err := db.QueryRow(`SELECT COUNT(*) FROM events WHERE event_type = 'file_blocked'`).Scan(&n); err != nil {
+		t.Fatal(err)
+	}
+	if n != 0 {
+		t.Fatalf("a denial tagged for another session was logged: %d file_blocked rows", n)
+	}
+}
+
+// TestWrapMacOSDenialLogFailureIsOneWarning proves a unified-log stream that
+// cannot start never fails or reroutes the run: the command's exit code is
+// preserved and exactly one warning row is written.
+func TestWrapMacOSDenialLogFailureIsOneWarning(t *testing.T) {
+	project, secret, run := denialLogProject(t)
+
+	old := denialLogArgv
+	denialLogArgv = func() []string { return []string{filepath.Join(t.TempDir(), "no-such-log")} }
+	t.Cleanup(func() { denialLogArgv = old })
+
+	wantExitCode(t, run("/bin/sh", "-c", `cat "$1" >/dev/null 2>&1; exit 7`, "sh", secret), 7)
+
+	db, err := sql.Open("sqlite", resolvedAuditDB(t, project))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	var warnings, denials int
+	if err := db.QueryRow(`SELECT COUNT(*) FROM events WHERE event_type = 'file_passed' AND detail LIKE 'macOS denial log (best-effort):%'`).Scan(&warnings); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.QueryRow(`SELECT COUNT(*) FROM events WHERE event_type = 'file_blocked'`).Scan(&denials); err != nil {
+		t.Fatal(err)
+	}
+	if warnings != 1 || denials != 0 {
+		t.Fatalf("want 1 warning and 0 denial rows, got %d and %d", warnings, denials)
+	}
+}
+
+// TestWrapMacOSDenialLogSilentStreamDoesNotDelayRun proves the tailer's bounded
+// attach and drain windows: a stream that never produces output costs the run
+// at most those two windows, and the run still succeeds with one warning row
+// recording that the stream never attached.
+func TestWrapMacOSDenialLogSilentStreamDoesNotDelayRun(t *testing.T) {
+	project, _, run := denialLogProject(t)
+
+	old := denialLogArgv
+	denialLogArgv = func() []string { return []string{"/bin/sleep", "60"} }
+	t.Cleanup(func() { denialLogArgv = old })
+
+	start := time.Now()
+	wantExitCode(t, run("/usr/bin/true"), 0)
+	if elapsed := time.Since(start); elapsed > 10*time.Second {
+		t.Fatalf("a silent denial stream held the run for %v", elapsed)
+	}
+
+	db, err := sql.Open("sqlite", resolvedAuditDB(t, project))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	var warnings int
+	if err := db.QueryRow(`SELECT COUNT(*) FROM events WHERE detail LIKE 'macOS denial log (best-effort):%'`).Scan(&warnings); err != nil {
+		t.Fatal(err)
+	}
+	if warnings != 1 {
+		t.Fatalf("silent stream produced %d warning rows, want 1", warnings)
+	}
 }

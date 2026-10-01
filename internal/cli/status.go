@@ -4,6 +4,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"runtime"
 
 	"github.com/nocktechnologies/nocklock/internal/config"
 	"github.com/nocktechnologies/nocklock/internal/logging"
@@ -44,6 +45,9 @@ var statusCmd = &cobra.Command{
 			allowRWCount := len(cfg.Filesystem.AllowRW)
 			denyCount := len(cfg.Filesystem.Deny)
 			fmt.Printf("Filesystem fence: active (allow %d read-only, %d read-write, deny %d)\n", allowCount, allowRWCount, denyCount)
+			if runtime.GOOS == "darwin" {
+				fmt.Println("Filesystem deny events: best-effort on macOS via the unified log")
+			}
 		} else {
 			fmt.Println("Filesystem fence: not configured")
 		}

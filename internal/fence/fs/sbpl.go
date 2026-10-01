@@ -68,7 +68,7 @@ func GenerateHardenedProfile(sensitivePaths []string) (string, error) {
 // lets callers audit the exact applied policy without over-reporting duplicate
 // configuration entries.
 func GenerateProfileAndCount(sensitivePaths []string, hardened bool) (string, int, error) {
-	return generateProfile(sensitivePaths, hardened, nil)
+	return generateProfile(sensitivePaths, hardened, nil, "")
 }
 
 // GenerateWriteConfinementProfile builds the macOS Seatbelt profile used when
@@ -79,6 +79,15 @@ func GenerateProfileAndCount(sensitivePaths []string, hardened bool) (string, in
 // for both reads and writes after those grants, so a sensitive path under root
 // never becomes accessible.
 func GenerateWriteConfinementProfile(sensitivePaths []string, root, mode string, hardened bool) (string, int, error) {
+	return GenerateTaggedWriteConfinementProfile(sensitivePaths, root, mode, hardened, "")
+}
+
+// GenerateTaggedWriteConfinementProfile is GenerateWriteConfinementProfile with
+// every file-deny rule carrying `(with message "<tag>")`. The kernel appends the
+// tag to the unified-log line for each denial, which is how the denial tailer
+// attributes a log line to this session (see DenialTag). An empty tag emits the
+// untagged profile.
+func GenerateTaggedWriteConfinementProfile(sensitivePaths []string, root, mode string, hardened bool, tag string) (string, int, error) {
 	if strings.TrimSpace(root) == "" {
 		return "", 0, fmt.Errorf("refusing to generate write-confinement profile with an empty root")
 	}
@@ -90,10 +99,16 @@ func GenerateWriteConfinementProfile(sensitivePaths []string, root, mode string,
 	if err != nil {
 		return "", 0, err
 	}
-	return generateProfile(sensitivePaths, hardened, writePaths)
+	return generateProfile(sensitivePaths, hardened, writePaths, tag)
 }
 
-func generateProfile(sensitivePaths []string, hardened bool, writePaths []string) (string, int, error) {
+func generateProfile(sensitivePaths []string, hardened bool, writePaths []string, tag string) (string, int, error) {
+	// The modifier must follow the filters inside the deny form: a global
+	// `(with message ...)` ahead of the rule is accepted but never reaches the log.
+	msg := ""
+	if tag != "" {
+		msg = " (with message " + sbplString(tag) + ")"
+	}
 	canonical, err := canonicalProfilePaths(sensitivePaths, "sensitive")
 	if err != nil {
 		return "", 0, err
@@ -111,7 +126,7 @@ func generateProfile(sensitivePaths []string, hardened bool, writePaths []string
 	if len(writePaths) > 0 {
 		b.WriteString(";; Root write confinement: deny all writes, then grant only\n")
 		b.WriteString(";; the canonical root/runtime paths below.\n")
-		b.WriteString("(deny file-write*)\n")
+		b.WriteString("(deny file-write*" + msg + ")\n")
 		b.WriteString("(allow file-write*\n")
 		for _, p := range writePaths {
 			b.WriteString("    (subpath ")
@@ -132,6 +147,9 @@ func generateProfile(sensitivePaths []string, hardened bool, writePaths []string
 		b.WriteString(sbplString(c))
 		b.WriteString(")\n")
 	}
+	if msg != "" {
+		b.WriteString("   " + msg + "\n")
+	}
 	b.WriteString(")\n")
 
 	if hardened {
@@ -143,7 +161,7 @@ func generateProfile(sensitivePaths []string, hardened bool, writePaths []string
 		b.WriteString(";; tighten /dev: deny write to the raw/BSD device nodes a fenced\n")
 		b.WriteString(";; agent never needs, while leaving the common pseudo-devices.\n")
 		b.WriteString("(deny file-write*\n")
-		b.WriteString("    (subpath \"/dev\"))\n")
+		b.WriteString("    (subpath \"/dev\")" + msg + ")\n")
 		b.WriteString("(allow file-write-data\n")
 		b.WriteString("    (literal \"/dev/null\")\n")
 		b.WriteString("    (literal \"/dev/zero\")\n")

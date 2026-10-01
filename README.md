@@ -92,9 +92,15 @@ fails closed before the agent starts.
 
 Apple deprecates `sandbox-exec`, but it is still present and working on
 macOS 26.5. NockLock tests it in macOS CI and will track its availability. Its
-per-file deny events are not available yet; instead, every macOS wrap records
-exactly one filesystem-fence state in the event log: `ENGAGED`,
-`REFUSED-TO-START`, or `DEGRADED`.
+per-file deny events are best-effort on macOS via the unified log: the profile
+tags each file-deny rule with the session id, and a background `log stream`
+tailer records the matching denials as `file_blocked` rows (each operation and path once, at most 500 per
+session, then one row counting the rest). Only kernel-originated records count: a record that a process
+inside the fence logs under the `Sandbox` sender name is ignored. The unified log can drop lines under
+load, so a missing row is not proof that no denial happened, and a tailer that
+cannot start becomes one warning row without affecting the wrapped command.
+Every macOS wrap also records exactly one filesystem-fence state in the event
+log: `ENGAGED`, `REFUSED-TO-START`, or `DEGRADED`.
 
 `filesystem.macos_allow_unfenced = true` is a temporary v0.5 compatibility
 escape hatch for a missing or rejected Seatbelt profile. It starts the child

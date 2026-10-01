@@ -127,7 +127,7 @@ Phase 1, macOS enforcement (validated above):
 - Tests: SBPL generation incl. **a canonicalization regression test** (a `/tmp`-aliased path must emit the `/private/tmp` rule), pure + cross-platform in CI; darwin integration test asserting a denied path gives `EPERM` and an allowed path succeeds (gated on `GOOS == darwin`).
 - Docs: README "macOS support coming" becomes supported-with-caveats; state the denylist-vs-allowlist divergence + deprecation + partial event logging honestly.
 
-Phase 2, event logging via `log stream` parsing (best-effort).
+Phase 2, event logging via `log stream` parsing (best-effort). **Shipped (N11039):** deny rules carry `(with message "nocklock:<session-id>")`, a tailer records matching denials as `file_blocked` rows; see README.
 Phase 3, Endpoint Security system extension (separate epic), restores strict allowlist + native event stream.
 
 ---
