@@ -4,6 +4,12 @@ All notable changes to NockLock will be documented in this file.
 
 ## [Unreleased]
 
+### Security
+
+- CI: `claude.yml` now runs only when the triggering author is an `OWNER`,
+  `MEMBER` or `COLLABORATOR`, checked per event type. `claude-code-review.yml`
+  skips pull requests opened from forks instead of failing on missing secrets.
+
 ## [0.6.1] - 2026-10-01
 
 Security patch release for macOS. In v0.6.0 the default config marked the
