@@ -4,6 +4,10 @@ All notable changes to NockLock will be documented in this file.
 
 ## [Unreleased]
 
+### Added
+
+- Opt-in `[audit.forward]` delivery of committed file, network, and secret fence decisions to Command's ops log. Payloads carry the session ID and audit-chain entry hash; delivery failures leave local decisions and `events.db` unchanged.
+
 ### Security
 
 - CI: `claude.yml` now runs only when the triggering author is an `OWNER`,

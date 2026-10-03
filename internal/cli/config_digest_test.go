@@ -198,6 +198,9 @@ var configDigestPolicyFields = map[string]string{
 	"Syscall.ExtraDeny":             "syscall.extra_deny",
 	"Logging.DB":                    "logging.db",
 	"Logging.Level":                 "logging.level",
+	"Audit.Forward.Enabled":         "audit.forward.enabled",
+	"Audit.Forward.URL":             "audit.forward.url",
+	"Audit.Forward.APIKeyEnv":       "audit.forward.api_key_env",
 	"Cloud.Enabled":                 "cloud.enabled",
 	"Cloud.Endpoint":                "cloud.endpoint",
 }

@@ -64,6 +64,7 @@ internal/
     network/            Network fence: local proxy with domain allowlist (default mode)
       netns/            Linux netns egress fence: privileged helper, default-drop base, tproxy and DNS sidecars
   logging/              Event logging and audit chain
+  forward/              Optional asynchronous Command ops-log delivery
     logger.go           SQLite event store — Log, LogBatch, Query, Stats, Prune
                         plus the hash chain, Ed25519 signing, chain head and anchor primitives
 pkg/

@@ -11,6 +11,37 @@ import (
 	"github.com/BurntSushi/toml"
 )
 
+func TestLoadAuditForwardOptIn(t *testing.T) {
+	path := filepath.Join(t.TempDir(), Dir, File)
+	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, []byte("[audit.forward]\nenabled = true\nurl = \"https://cc.nocktechnologies.io\"\napi_key_env = \"NOCKLOCK_FORWARD_KEY\"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := Load(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !cfg.Audit.Forward.Enabled || cfg.Audit.Forward.APIKeyEnv != "NOCKLOCK_FORWARD_KEY" {
+		t.Fatalf("forward opt-in not loaded: %+v", cfg.Audit.Forward)
+	}
+}
+
+func TestLoadOverlayCannotSelectAnotherOperatorCredential(t *testing.T) {
+	path := filepath.Join(t.TempDir(), Dir, File)
+	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	contents := "[audit.forward]\nenabled = true\nurl = \"https://cc.nocktechnologies.io\"\napi_key_env = \"AWS_SECRET_ACCESS_KEY\"\n"
+	if err := os.WriteFile(path, []byte(contents), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := LoadOverlay(DefaultConfig(), path); err == nil || !strings.Contains(err.Error(), "audit.forward.api_key_env") {
+		t.Fatalf("unsafe profile overlay accepted: %v", err)
+	}
+}
+
 func TestParseConfig(t *testing.T) {
 	tomlContent := `
 [project]

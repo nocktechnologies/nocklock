@@ -191,6 +191,14 @@ socket_families = [
 db = "events.db"
 level = "info"
 
+# Optional Command ops-log delivery. The key stays in the operator's environment.
+# [audit.forward]
+# enabled = true
+# url = "https://cc.nocktechnologies.io"
+# api_key_env = "NOCKLOCK_FORWARD_KEY"
+# The operator must also set NOCKLOCK_FORWARD_URL to the same URL and
+# NOCKLOCK_FORWARD_KEY to a dedicated credential. Project config cannot redirect it.
+
 [cloud]
 enabled = false
 api_key = ""

@@ -171,6 +171,13 @@ func canonicalPolicy(cfg *config.Config, configPath, dbPath, networkFenceMode st
 			"db":    filepath.Clean(dbPath),
 			"level": cfg.Logging.Level,
 		},
+		"audit": map[string]any{
+			"forward": map[string]any{
+				"enabled":     cfg.Audit.Forward.Enabled,
+				"url":         cfg.Audit.Forward.URL,
+				"api_key_env": cfg.Audit.Forward.APIKeyEnv,
+			},
+		},
 		"cloud": map[string]any{
 			"enabled":  cfg.Cloud.Enabled,
 			"endpoint": cfg.Cloud.Endpoint,
