@@ -808,7 +808,7 @@ func dryRunTestTOML() string {
 
 func TestWrapForwardRequiresOperatorPinnedURL(t *testing.T) {
 	project := t.TempDir()
-	writeTestConfig(t, project, config.DefaultTOML()+"\n[audit.forward]\nenabled = true\nurl = \"https://approved.example\"\napi_key_env = \"NOCKCC_API_KEY\"\n")
+	writeTestConfig(t, project, config.DefaultTOML()+"\n[audit.forward]\nenabled = true\nurl = \"https://approved.example\"\napi_key_env = \"NOCKLOCK_FORWARD_KEY\"\n")
 	withWorkingDir(t, project)
 	stateHome := t.TempDir()
 	if err := os.Chmod(stateHome, 0o700); err != nil {
@@ -816,7 +816,7 @@ func TestWrapForwardRequiresOperatorPinnedURL(t *testing.T) {
 	}
 	t.Setenv("XDG_STATE_HOME", stateHome)
 	t.Setenv("NOCKLOCK_FORWARD_URL", "https://different.example")
-	t.Setenv("NOCKCC_API_KEY", "operator-test-key")
+	t.Setenv("NOCKLOCK_FORWARD_KEY", "operator-test-key")
 	marker := filepath.Join(project, "launched")
 	cmd := &cobra.Command{}
 	err := wrapCmd.RunE(cmd, []string{"--", "/usr/bin/touch", marker})
@@ -828,7 +828,7 @@ func TestWrapForwardRequiresOperatorPinnedURL(t *testing.T) {
 	}
 	// Dry run checks policy without requiring operator credentials or doing HTTP.
 	t.Setenv("NOCKLOCK_FORWARD_URL", "")
-	t.Setenv("NOCKCC_API_KEY", "")
+	t.Setenv("NOCKLOCK_FORWARD_KEY", "")
 	if err := wrapCmd.RunE(&cobra.Command{}, []string{"--dry-run"}); err != nil {
 		t.Fatalf("dry run required delivery credentials: %v", err)
 	}

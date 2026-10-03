@@ -121,8 +121,8 @@ func Validate(cfg *Config) []ValidationError {
 		if !validURL {
 			errs = append(errs, ValidationError{Field: "audit.forward.url", Message: "enabled forwarding requires a Command base URL (HTTPS, or HTTP on localhost) without a path, query, fragment, or credentials", Severity: "error"})
 		}
-		if f.APIKeyEnv != "NOCKCC_API_KEY" {
-			errs = append(errs, ValidationError{Field: "audit.forward.api_key_env", Message: "enabled forwarding requires api_key_env = \"NOCKCC_API_KEY\"; arbitrary operator environment variables cannot be used as credentials", Severity: "error"})
+		if f.APIKeyEnv != ForwardKeyEnv {
+			errs = append(errs, ValidationError{Field: "audit.forward.api_key_env", Message: fmt.Sprintf("enabled forwarding requires api_key_env = %q; use a dedicated operator credential", ForwardKeyEnv), Severity: "error"})
 		}
 	}
 

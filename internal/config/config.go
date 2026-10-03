@@ -362,6 +362,13 @@ type ForwardConfig struct {
 	APIKeyEnv string `toml:"api_key_env"`
 }
 
+const (
+	// ForwardKeyEnv is the dedicated operator credential used for Command forwarding.
+	ForwardKeyEnv = "NOCKLOCK_FORWARD_KEY"
+	// ForwardURLEnv pins the Command origin outside the project-controlled config.
+	ForwardURLEnv = "NOCKLOCK_FORWARD_URL"
+)
+
 // CloudConfig configures optional NockCC dashboard sync.
 type CloudConfig struct {
 	Enabled  bool   `toml:"enabled"`

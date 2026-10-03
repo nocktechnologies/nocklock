@@ -17,7 +17,7 @@ func TestValidateDefaultConfigPasses(t *testing.T) {
 
 func TestValidateAuditForward(t *testing.T) {
 	cfg := DefaultConfig()
-	cfg.Audit.Forward = ForwardConfig{Enabled: true, URL: "https://cc.nocktechnologies.io", APIKeyEnv: "NOCKCC_API_KEY"}
+	cfg.Audit.Forward = ForwardConfig{Enabled: true, URL: "https://cc.nocktechnologies.io", APIKeyEnv: "NOCKLOCK_FORWARD_KEY"}
 	if errs := Validate(&cfg); hasError(errs, "audit.forward.url") || hasError(errs, "audit.forward.api_key_env") {
 		t.Fatalf("valid forwarding config rejected: %v", errs)
 	}

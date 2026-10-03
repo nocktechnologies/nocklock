@@ -195,9 +195,9 @@ level = "info"
 # [audit.forward]
 # enabled = true
 # url = "https://cc.nocktechnologies.io"
-# api_key_env = "NOCKCC_API_KEY"
+# api_key_env = "NOCKLOCK_FORWARD_KEY"
 # The operator must also set NOCKLOCK_FORWARD_URL to the same URL and
-# NOCKCC_API_KEY to the credential. Project config cannot redirect the key.
+# NOCKLOCK_FORWARD_KEY to a dedicated credential. Project config cannot redirect it.
 
 [cloud]
 enabled = false

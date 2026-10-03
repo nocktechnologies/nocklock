@@ -79,7 +79,7 @@ var wrapCmd = &cobra.Command{
 		sessionID := uuid.New().String()
 		loggerOpts := signingLoggerOpts()
 		if effectiveCfg.Audit.Forward.Enabled && !wrapFlags.DryRun {
-			operatorURL := strings.TrimRight(os.Getenv("NOCKLOCK_FORWARD_URL"), "/")
+			operatorURL := strings.TrimRight(os.Getenv(config.ForwardURLEnv), "/")
 			if operatorURL == "" || operatorURL != strings.TrimRight(effectiveCfg.Audit.Forward.URL, "/") {
 				cmd.SilenceUsage = true
 				return fmt.Errorf("audit.forward.url must match operator environment NOCKLOCK_FORWARD_URL; set it to the approved Command origin before wrapping")
@@ -247,7 +247,15 @@ var wrapCmd = &cobra.Command{
 		// The off-box anchor store's URL and bearer token are wrap's, never the
 		// fenced agent's: strip them before the child env is logged or launched.
 		childEnv = stripAnchorEnv(childEnv)
-		childEnv = removeEnvVars(childEnv, "NOCKCC_API_KEY", "NOCKLOCK_FORWARD_URL")
+		for _, name := range []string{config.ForwardKeyEnv, config.ForwardURLEnv} {
+			for _, entry := range childEnv {
+				if strings.HasPrefix(entry, name+"=") {
+					blockedNames = append(blockedNames, name)
+					break
+				}
+			}
+		}
+		childEnv = removeEnvVars(childEnv, config.ForwardKeyEnv, config.ForwardURLEnv)
 
 		// Log all blocked env vars in a single transaction.
 		if len(blockedNames) > 0 {
