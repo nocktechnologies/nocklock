@@ -84,10 +84,10 @@ var wrapCmd = &cobra.Command{
 				cmd.SilenceUsage = true
 				return fmt.Errorf("audit.forward.url must match operator environment NOCKLOCK_FORWARD_URL; set it to the approved Command origin before wrapping")
 			}
-			key := os.Getenv(effectiveCfg.Audit.Forward.APIKeyEnv)
+			key := os.Getenv(config.ForwardKeyEnv)
 			if key == "" {
 				cmd.SilenceUsage = true
-				return fmt.Errorf("audit.forward.api_key_env %q is unset; set it before running a fenced agent", effectiveCfg.Audit.Forward.APIKeyEnv)
+				return fmt.Errorf("audit.forward.api_key_env %q is unset; set it before running a fenced agent", config.ForwardKeyEnv)
 			}
 			forwarder := forward.New(operatorURL, key)
 			defer forwarder.Close()
