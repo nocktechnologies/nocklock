@@ -120,6 +120,7 @@ func (f *Forwarder) run() {
 	defer close(f.done)
 	for item := range f.queue {
 		if f.ctx.Err() != nil {
+			f.failed++
 			return
 		}
 		if !f.post(item) {

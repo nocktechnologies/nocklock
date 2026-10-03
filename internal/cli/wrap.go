@@ -247,9 +247,7 @@ var wrapCmd = &cobra.Command{
 		// The off-box anchor store's URL and bearer token are wrap's, never the
 		// fenced agent's: strip them before the child env is logged or launched.
 		childEnv = stripAnchorEnv(childEnv)
-		if effectiveCfg.Audit.Forward.Enabled {
-			childEnv = removeEnvVars(childEnv, effectiveCfg.Audit.Forward.APIKeyEnv, "NOCKLOCK_FORWARD_URL")
-		}
+		childEnv = removeEnvVars(childEnv, "NOCKCC_API_KEY", "NOCKLOCK_FORWARD_URL")
 
 		// Log all blocked env vars in a single transaction.
 		if len(blockedNames) > 0 {

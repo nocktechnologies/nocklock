@@ -2,10 +2,13 @@ package cli
 
 import (
 	"context"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"runtime"
 	"strings"
+	"sync/atomic"
 	"testing"
 
 	"github.com/nocktechnologies/nocklock/internal/anchorclient"
@@ -21,7 +24,7 @@ import (
 func plainLaunchTOML(t *testing.T) string {
 	t.Helper()
 	toml := dryRunTestTOML()
-	// The secret fence is an allowlist. Pass the three vars under test THROUGH it
+	// The secret fence is an allowlist. Pass the vars under test THROUGH it
 	// so their presence or absence in the child is decided by wrap's own env
 	// handling (the export and the anchor strip), not by the fence dropping them.
 	const passTail = "    \"TERM\",\n]"
@@ -29,7 +32,7 @@ func plainLaunchTOML(t *testing.T) string {
 		t.Fatal("test setup: could not find the secrets.pass list")
 	}
 	toml = strings.Replace(toml, passTail,
-		"    \"TERM\",\n    \"NOCKLOCK_SESSION_ID\",\n    \"NOCKLOCK_ANCHOR_URL\",\n    \"NOCKLOCK_ANCHOR_TOKEN\",\n]", 1)
+		"    \"TERM\",\n    \"NOCKLOCK_SESSION_ID\",\n    \"NOCKLOCK_ANCHOR_URL\",\n    \"NOCKLOCK_ANCHOR_TOKEN\",\n    \"NOCKLOCK_FORWARD_URL\",\n    \"NOCKCC_API_KEY\",\n]", 1)
 	i := strings.Index(toml, "[syscall]")
 	if i < 0 {
 		t.Fatal("test setup: default config has no [syscall] table")
@@ -59,7 +62,9 @@ func runWrapPrintingEnv(t *testing.T) (childSees map[string]string, dbSessionIDs
 	out := filepath.Join(dir, "child-env.txt")
 	script := `{ echo "sid=${NOCKLOCK_SESSION_ID-<unset>}"; ` +
 		`echo "url=${NOCKLOCK_ANCHOR_URL-<unset>}"; ` +
-		`echo "tok=${NOCKLOCK_ANCHOR_TOKEN-<unset>}"; } > "$1"`
+		`echo "tok=${NOCKLOCK_ANCHOR_TOKEN-<unset>}"; ` +
+		`echo "forward_url=${NOCKLOCK_FORWARD_URL-<unset>}"; ` +
+		`echo "forward_key=${NOCKCC_API_KEY-<unset>}"; } > "$1"`
 
 	cmd := &cobra.Command{}
 	cmd.SetContext(context.Background())
@@ -157,6 +162,21 @@ func TestWrapSessionIDExportKeepsAnchorEnvStripped(t *testing.T) {
 	}
 	if len(dbIDs) != 1 || sees["sid"] != dbIDs[0] {
 		t.Errorf("child session id %q does not match audit DB ids %v", sees["sid"], dbIDs)
+	}
+}
+
+func TestWrapStripsCommandCredentialWhenForwardingDisabled(t *testing.T) {
+	var calls atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) { calls.Add(1) }))
+	defer server.Close()
+	t.Setenv("NOCKLOCK_FORWARD_URL", server.URL)
+	t.Setenv("NOCKCC_API_KEY", "operator-only-test-key")
+	sees, _ := runWrapPrintingEnv(t)
+	if sees["forward_url"] != "<unset>" || sees["forward_key"] != "<unset>" {
+		t.Fatal("Command forwarding variables reached the child")
+	}
+	if calls.Load() != 0 {
+		t.Fatalf("disabled forwarding made %d network calls", calls.Load())
 	}
 }
 
