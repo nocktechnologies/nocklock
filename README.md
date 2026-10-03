@@ -109,6 +109,21 @@ v0.6.0. When Seatbelt cannot be applied, wrap always records
 
 ## Tamper-evident audit log (v1)
 
+### Forward fence decisions to Command
+
+Add this to `.nock/config.toml` to send committed file, network, and secret allow/block events to Command's ops log:
+
+```toml
+[audit.forward]
+enabled = true
+url = "https://cc.nocktechnologies.io"
+api_key_env = "NOCKCC_API_KEY"
+```
+
+Set the named environment variable before `nocklock wrap`. NockLock reads the key from the operator environment, strips it from the fenced child, and never stores it in config or the audit log. Forwarding is off by default. Each ops-log entry includes the action, target, decision, session ID, and committed audit-chain entry hash. Blocked decisions use `high` severity; allowed decisions use `info`. Command currently accepts these as `event_type = "other"` with `source = "nocklock"` in `data_blob`.
+
+Delivery uses a bounded background queue with short retries. Network failures do not change fence decisions or remove events from `events.db`; a warning reports failed delivery. The queue is not durable, so events that cannot be sent during the current session remain available only in the local audit log.
+
 `nocklock verify --audit` walks the SHA-256 hash chain in the event log and reports whether it is intact. Each row carries a SHA-256 hash of its contents, linked to the previous row's hash. A verification run looks like this:
 
 ```

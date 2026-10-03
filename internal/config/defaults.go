@@ -191,6 +191,12 @@ socket_families = [
 db = "events.db"
 level = "info"
 
+# Optional Command ops-log delivery. The key stays in the operator's environment.
+# [audit.forward]
+# enabled = true
+# url = "https://cc.nocktechnologies.io"
+# api_key_env = "NOCKCC_API_KEY"
+
 [cloud]
 enabled = false
 api_key = ""

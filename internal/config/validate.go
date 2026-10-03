@@ -3,6 +3,7 @@ package config
 import (
 	"fmt"
 	"io/fs"
+	"net/url"
 	"path/filepath"
 	"regexp"
 	"strings"
@@ -106,6 +107,22 @@ func Validate(cfg *Config) []ValidationError {
 				Message:  fmt.Sprintf("unknown socket family %q: must be one of unix, inet, inet6, netlink", fam),
 				Severity: "error",
 			})
+		}
+	}
+
+	if cfg.Audit.Forward.Enabled {
+		f := cfg.Audit.Forward
+		u, err := url.Parse(f.URL)
+		validURL := false
+		if err == nil && u != nil && u.Host != "" && u.User == nil && u.RawQuery == "" && !u.ForceQuery && u.Fragment == "" && (u.Path == "" || u.Path == "/") {
+			loopback := u.Hostname() == "localhost" || u.Hostname() == "127.0.0.1" || u.Hostname() == "::1"
+			validURL = u.Scheme == "https" || (u.Scheme == "http" && loopback)
+		}
+		if !validURL {
+			errs = append(errs, ValidationError{Field: "audit.forward.url", Message: "enabled forwarding requires a Command base URL (HTTPS, or HTTP on localhost) without a path, query, fragment, or credentials", Severity: "error"})
+		}
+		if !envScanName.MatchString(f.APIKeyEnv) {
+			errs = append(errs, ValidationError{Field: "audit.forward.api_key_env", Message: "enabled forwarding requires the name of an API-key environment variable", Severity: "error"})
 		}
 	}
 

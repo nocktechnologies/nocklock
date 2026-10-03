@@ -11,6 +11,23 @@ import (
 	"github.com/BurntSushi/toml"
 )
 
+func TestLoadAuditForwardOptIn(t *testing.T) {
+	path := filepath.Join(t.TempDir(), Dir, File)
+	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, []byte("[audit.forward]\nenabled = true\nurl = \"https://cc.nocktechnologies.io\"\napi_key_env = \"NOCKCC_API_KEY\"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := Load(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !cfg.Audit.Forward.Enabled || cfg.Audit.Forward.APIKeyEnv != "NOCKCC_API_KEY" {
+		t.Fatalf("forward opt-in not loaded: %+v", cfg.Audit.Forward)
+	}
+}
+
 func TestParseConfig(t *testing.T) {
 	tomlContent := `
 [project]

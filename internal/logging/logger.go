@@ -125,8 +125,9 @@ type Stats struct {
 
 // Logger handles SQLite event storage.
 type Logger struct {
-	db     *sql.DB
-	signer *signer // nil when Ed25519 signing is off
+	db       *sql.DB
+	signer   *signer // nil when Ed25519 signing is off
+	onCommit func(Event, string)
 }
 
 // eventTransaction is the common database/sql operation set shared by a
@@ -142,7 +143,14 @@ type Option func(*loggerConfig)
 type loggerConfig struct {
 	signingEnabled bool
 	signingKeyPath string
+	onCommit       func(Event, string)
 	afterValidate  func() // test seam, see withAfterValidate
+}
+
+// WithEventCommitted observes an event and its audit-chain entry hash only
+// after the event transaction commits. The callback must return promptly.
+func WithEventCommitted(fn func(Event, string)) Option {
+	return func(c *loggerConfig) { c.onCommit = fn }
 }
 
 // WithSigning enables Ed25519 signing of each row and the chain_head, using the
@@ -463,7 +471,7 @@ func NewLogger(dbPath string, projectRoot string, opts ...Option) (*Logger, erro
 		return nil, fmt.Errorf("failed to migrate signature columns: %w", err)
 	}
 
-	l := &Logger{db: db}
+	l := &Logger{db: db, onCommit: lc.onCommit}
 
 	if lc.signingEnabled {
 		adopted, err := signingAlreadyAdopted(db)
@@ -503,11 +511,15 @@ func (l *Logger) Log(event Event) error {
 		return fmt.Errorf("failed to begin log transaction: %w", err)
 	}
 	defer tx.Rollback()
-	if err := l.logInTransaction(tx, event); err != nil {
+	var hash string
+	if err := l.logInTransaction(tx, &event, &hash); err != nil {
 		return err
 	}
 	if err := tx.Commit(); err != nil {
 		return fmt.Errorf("failed to commit log transaction: %w", err)
+	}
+	if l.onCommit != nil {
+		l.onCommit(event, hash)
 	}
 	return nil
 }
@@ -545,13 +557,17 @@ func (l *Logger) LogAfterLatest(eventType EventType, build func(*Event) (Event, 
 	if err != nil {
 		return nil, err
 	}
-	if err := l.logInTransaction(conn, event); err != nil {
+	var hash string
+	if err := l.logInTransaction(conn, &event, &hash); err != nil {
 		return nil, err
 	}
 	if _, err := conn.ExecContext(ctx, "COMMIT"); err != nil {
 		return nil, fmt.Errorf("failed to commit immediate log transaction: %w", err)
 	}
 	committed = true
+	if l.onCommit != nil {
+		l.onCommit(event, hash)
+	}
 	return previous, nil
 }
 
@@ -581,7 +597,7 @@ func latestEvent(ctx context.Context, tx eventTransaction, eventType EventType) 
 	return &event, nil
 }
 
-func (l *Logger) logInTransaction(tx eventTransaction, event Event) error {
+func (l *Logger) logInTransaction(tx eventTransaction, event *Event, hash *string) error {
 	ts := formatTimestampForChain(event.Timestamp)
 	storedDetail := encodeEventDetail(event.EventType, event.Detail, event.EgressLevel)
 	blocked := 0
@@ -657,6 +673,8 @@ func (l *Logger) logInTransaction(tx eventTransaction, event Event) error {
 	if err != nil {
 		return fmt.Errorf("failed to update chain_head: %w", err)
 	}
+	event.ID = eventID
+	*hash = entryHash
 
 	return nil
 }
@@ -690,9 +708,12 @@ func (l *Logger) LogBatch(events []Event) error {
 	}
 
 	prevHashHex := currentHeadHash
+	hashes := make([]string, 0, len(events))
+	committedEvents := make([]Event, 0, len(events))
 
 	// Insert all events with chaining
-	for _, event := range events {
+	for i := range events {
+		event := events[i]
 		ts := formatTimestampForChain(event.Timestamp)
 		storedDetail := encodeEventDetail(event.EventType, event.Detail, event.EgressLevel)
 		blocked := 0
@@ -735,6 +756,9 @@ func (l *Logger) LogBatch(events []Event) error {
 		}
 
 		prevHashHex = entryHash
+		event.ID = eventID
+		committedEvents = append(committedEvents, event)
+		hashes = append(hashes, entryHash)
 	}
 
 	// Update chain_head with final state
@@ -761,6 +785,11 @@ func (l *Logger) LogBatch(events []Event) error {
 
 	if err := tx.Commit(); err != nil {
 		return fmt.Errorf("failed to commit batch transaction: %w", err)
+	}
+	if l.onCommit != nil {
+		for i, event := range committedEvents {
+			l.onCommit(event, hashes[i])
+		}
 	}
 	return nil
 }

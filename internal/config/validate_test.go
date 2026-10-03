@@ -15,6 +15,25 @@ func TestValidateDefaultConfigPasses(t *testing.T) {
 	}
 }
 
+func TestValidateAuditForward(t *testing.T) {
+	cfg := DefaultConfig()
+	cfg.Audit.Forward = ForwardConfig{Enabled: true, URL: "https://cc.nocktechnologies.io", APIKeyEnv: "NOCKCC_API_KEY"}
+	if errs := Validate(&cfg); hasError(errs, "audit.forward.url") || hasError(errs, "audit.forward.api_key_env") {
+		t.Fatalf("valid forwarding config rejected: %v", errs)
+	}
+	for _, url := range []string{"", "http://example.com", "https://user:pass@example.com", "https://example.com/other", "https://example.com?key=secret"} {
+		cfg.Audit.Forward.URL = url
+		if !hasError(Validate(&cfg), "audit.forward.url") {
+			t.Errorf("unsafe URL %q accepted", url)
+		}
+	}
+	cfg.Audit.Forward.URL = "https://cc.nocktechnologies.io"
+	cfg.Audit.Forward.APIKeyEnv = ""
+	if !hasError(Validate(&cfg), "audit.forward.api_key_env") {
+		t.Error("missing API key env name accepted")
+	}
+}
+
 func TestValidateInvalidFilesystemMode(t *testing.T) {
 	cfg := DefaultConfig()
 	cfg.Filesystem.Mode = "full-access" // invalid

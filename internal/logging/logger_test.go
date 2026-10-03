@@ -4,6 +4,7 @@ import (
 	"database/sql"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"sync"
 	"testing"
@@ -40,6 +41,46 @@ func sampleEvent(et EventType, category, detail string, blocked bool, sessionID 
 		Detail:    detail,
 		Blocked:   blocked,
 		SessionID: sessionID,
+	}
+}
+
+func TestCommittedEventHookCarriesStoredHashes(t *testing.T) {
+	var got []string
+	l, err := NewLogger(tempDBPath(t), "", WithEventCommitted(func(event Event, hash string) {
+		got = append(got, string(event.EventType)+":"+hash)
+	}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer l.Close()
+	events := []Event{
+		sampleEvent(EventFileBlocked, "filesystem", "/denied", true, "session"),
+		sampleEvent(EventSecretBlocked, "secret", "TOKEN", true, "session"),
+	}
+	if err := l.LogBatch(events); err != nil {
+		t.Fatal(err)
+	}
+	if err := l.Log(sampleEvent(EventNetworkBlocked, "network", "example.org", true, "session")); err != nil {
+		t.Fatal(err)
+	}
+	rows, err := l.db.Query("SELECT event_type, entry_hash FROM events ORDER BY id")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer rows.Close()
+	var want []string
+	for rows.Next() {
+		var typ, hash string
+		if err := rows.Scan(&typ, &hash); err != nil {
+			t.Fatal(err)
+		}
+		want = append(want, typ+":"+hash)
+	}
+	if err := rows.Err(); err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("committed hook = %v, stored rows = %v", got, want)
 	}
 }
 

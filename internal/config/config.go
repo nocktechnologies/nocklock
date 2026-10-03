@@ -276,6 +276,7 @@ type Config struct {
 	Secrets     SecretsConfig    `toml:"secrets"`
 	Syscall     SyscallConfig    `toml:"syscall"`
 	Logging     LoggingConfig    `toml:"logging"`
+	Audit       AuditConfig      `toml:"audit"`
 	Cloud       CloudConfig      `toml:"cloud"`
 }
 
@@ -346,6 +347,19 @@ type SecretsConfig struct {
 type LoggingConfig struct {
 	DB    string `toml:"db"`
 	Level string `toml:"level"`
+}
+
+// AuditConfig configures optional off-box delivery of committed fence decisions.
+type AuditConfig struct {
+	Forward ForwardConfig `toml:"forward"`
+}
+
+// ForwardConfig selects Command ops-log forwarding. The key stays in the
+// operator environment and is never stored in project TOML.
+type ForwardConfig struct {
+	Enabled   bool   `toml:"enabled"`
+	URL       string `toml:"url"`
+	APIKeyEnv string `toml:"api_key_env"`
 }
 
 // CloudConfig configures optional NockCC dashboard sync.

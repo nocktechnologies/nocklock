@@ -24,6 +24,7 @@ import (
 	"github.com/nocktechnologies/nocklock/internal/fence/network/netns"
 	"github.com/nocktechnologies/nocklock/internal/fence/secrets"
 	"github.com/nocktechnologies/nocklock/internal/fence/syscallfence"
+	"github.com/nocktechnologies/nocklock/internal/forward"
 	"github.com/nocktechnologies/nocklock/internal/logging"
 	"github.com/spf13/cobra"
 )
@@ -76,6 +77,16 @@ var wrapCmd = &cobra.Command{
 
 		// Generate a session ID for event logging.
 		sessionID := uuid.New().String()
+		loggerOpts := signingLoggerOpts()
+		if effectiveCfg.Audit.Forward.Enabled {
+			key := os.Getenv(effectiveCfg.Audit.Forward.APIKeyEnv)
+			if key == "" {
+				return fmt.Errorf("audit.forward.api_key_env %q is unset; set it before running a fenced agent", effectiveCfg.Audit.Forward.APIKeyEnv)
+			}
+			forwarder := forward.New(effectiveCfg.Audit.Forward.URL, key)
+			defer forwarder.Close()
+			loggerOpts = append(loggerOpts, logging.WithEventCommitted(forwarder.Enqueue))
+		}
 
 		// Open the event logger. The audit trail is not optional — NockLock's
 		// guarantee is that every fence decision is recorded — so a logger that
@@ -108,7 +119,7 @@ var wrapCmd = &cobra.Command{
 			if wrapFlags.DryRun {
 				return refusal
 			}
-			logger, logErr := logging.NewLogger(dbPath, projectRoot, signingLoggerOpts()...)
+			logger, logErr := logging.NewLogger(dbPath, projectRoot, loggerOpts...)
 			if logErr != nil {
 				return fmt.Errorf("%w; could not record the refusal in the audit log: %v", refusal, logErr)
 			}
@@ -152,7 +163,7 @@ var wrapCmd = &cobra.Command{
 		// fall back to an unsigned (still hash-chained) open rather than refusing
 		// to run; the logger itself fails closed on any write to a log that has
 		// already adopted signing.
-		logger, logErr := logging.NewLogger(dbPath, projectRoot, signingLoggerOpts()...)
+		logger, logErr := logging.NewLogger(dbPath, projectRoot, loggerOpts...)
 		if logErr != nil {
 			return fmt.Errorf("could not open the event log at %s: %w\nThe audit trail is required — refusing to run unrecorded. Fix the .nock directory's permissions or free disk space", dbPath, logErr)
 		}
@@ -230,6 +241,9 @@ var wrapCmd = &cobra.Command{
 		// The off-box anchor store's URL and bearer token are wrap's, never the
 		// fenced agent's: strip them before the child env is logged or launched.
 		childEnv = stripAnchorEnv(childEnv)
+		if effectiveCfg.Audit.Forward.Enabled {
+			childEnv = removeEnvVars(childEnv, effectiveCfg.Audit.Forward.APIKeyEnv)
+		}
 
 		// Log all blocked env vars in a single transaction.
 		if len(blockedNames) > 0 {
