@@ -196,6 +196,8 @@ level = "info"
 # enabled = true
 # url = "https://cc.nocktechnologies.io"
 # api_key_env = "NOCKCC_API_KEY"
+# The operator must also set NOCKLOCK_FORWARD_URL to the same URL and
+# NOCKCC_API_KEY to the credential. Project config cannot redirect the key.
 
 [cloud]
 enabled = false

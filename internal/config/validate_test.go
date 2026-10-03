@@ -28,9 +28,9 @@ func TestValidateAuditForward(t *testing.T) {
 		}
 	}
 	cfg.Audit.Forward.URL = "https://cc.nocktechnologies.io"
-	cfg.Audit.Forward.APIKeyEnv = ""
+	cfg.Audit.Forward.APIKeyEnv = "AWS_SECRET_ACCESS_KEY"
 	if !hasError(Validate(&cfg), "audit.forward.api_key_env") {
-		t.Error("missing API key env name accepted")
+		t.Error("arbitrary operator credential name accepted")
 	}
 }
 

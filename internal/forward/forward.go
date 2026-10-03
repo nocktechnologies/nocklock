@@ -34,6 +34,8 @@ type Forwarder struct {
 	cancel      context.CancelFunc
 	mu          sync.Mutex
 	closed      bool
+	dropped     int
+	failed      int // worker-owned until done closes
 }
 
 // New starts a forwarder for an already-validated Command base URL.
@@ -80,7 +82,7 @@ func (f *Forwarder) Enqueue(event logging.Event, hash string) {
 	select {
 	case f.queue <- queuedEvent{event, hash}:
 	default:
-		fmt.Fprintln(f.warnings, "NockLock: warning: Command forward queue full; event remains in events.db")
+		f.dropped++
 	}
 }
 
@@ -90,6 +92,7 @@ func (f *Forwarder) Close() {
 		return
 	}
 	f.mu.Lock()
+	firstClose := !f.closed
 	if !f.closed {
 		f.closed = true
 		close(f.queue)
@@ -98,11 +101,19 @@ func (f *Forwarder) Close() {
 	select {
 	case <-f.done:
 	case <-time.After(2 * time.Second):
-		fmt.Fprintln(f.warnings, "NockLock: warning: Command forward deadline exceeded; queued events remain in events.db")
 		f.cancel()
 		<-f.done
 	}
 	f.cancel()
+	if firstClose {
+		f.mu.Lock()
+		dropped := f.dropped
+		f.mu.Unlock()
+		queued := len(f.queue)
+		if dropped+f.failed+queued > 0 {
+			fmt.Fprintf(f.warnings, "NockLock: warning: Command forwarding incomplete (%d failed, %d dropped, %d queued); events remain in events.db; check Command connectivity and credentials\n", f.failed, dropped, queued)
+		}
+	}
 }
 
 func (f *Forwarder) run() {
@@ -111,11 +122,13 @@ func (f *Forwarder) run() {
 		if f.ctx.Err() != nil {
 			return
 		}
-		f.post(item)
+		if !f.post(item) {
+			f.failed++
+		}
 	}
 }
 
-func (f *Forwarder) post(item queuedEvent) {
+func (f *Forwarder) post(item queuedEvent) bool {
 	decision := "allow"
 	severity := "info"
 	if item.event.Blocked {
@@ -138,14 +151,14 @@ func (f *Forwarder) post(item queuedEvent) {
 	}
 	body, err := json.Marshal(payload)
 	if err != nil {
-		return
+		return false
 	}
 	for attempt := 0; attempt < 3; attempt++ {
 		if attempt > 0 {
 			select {
 			case <-time.After(time.Duration(100<<(attempt-1)) * time.Millisecond):
 			case <-f.ctx.Done():
-				return
+				return false
 			}
 		}
 		req, err := http.NewRequestWithContext(f.ctx, http.MethodPost, f.url, bytes.NewReader(body))
@@ -159,13 +172,12 @@ func (f *Forwarder) post(item queuedEvent) {
 			_, _ = io.Copy(io.Discard, resp.Body)
 			_ = resp.Body.Close()
 			if resp.StatusCode >= 200 && resp.StatusCode < 300 {
-				return
+				return true
 			}
 			if resp.StatusCode < 500 && resp.StatusCode != http.StatusTooManyRequests {
 				break
 			}
 		}
 	}
-	// Never include the request URL, response body, or credential in diagnostics.
-	fmt.Fprintln(f.warnings, "NockLock: warning: Command forward failed; event remains in events.db")
+	return false
 }

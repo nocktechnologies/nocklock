@@ -78,12 +78,18 @@ var wrapCmd = &cobra.Command{
 		// Generate a session ID for event logging.
 		sessionID := uuid.New().String()
 		loggerOpts := signingLoggerOpts()
-		if effectiveCfg.Audit.Forward.Enabled {
+		if effectiveCfg.Audit.Forward.Enabled && !wrapFlags.DryRun {
+			operatorURL := strings.TrimRight(os.Getenv("NOCKLOCK_FORWARD_URL"), "/")
+			if operatorURL == "" || operatorURL != strings.TrimRight(effectiveCfg.Audit.Forward.URL, "/") {
+				cmd.SilenceUsage = true
+				return fmt.Errorf("audit.forward.url must match operator environment NOCKLOCK_FORWARD_URL; set it to the approved Command origin before wrapping")
+			}
 			key := os.Getenv(effectiveCfg.Audit.Forward.APIKeyEnv)
 			if key == "" {
+				cmd.SilenceUsage = true
 				return fmt.Errorf("audit.forward.api_key_env %q is unset; set it before running a fenced agent", effectiveCfg.Audit.Forward.APIKeyEnv)
 			}
-			forwarder := forward.New(effectiveCfg.Audit.Forward.URL, key)
+			forwarder := forward.New(operatorURL, key)
 			defer forwarder.Close()
 			loggerOpts = append(loggerOpts, logging.WithEventCommitted(forwarder.Enqueue))
 		}
@@ -242,7 +248,7 @@ var wrapCmd = &cobra.Command{
 		// fenced agent's: strip them before the child env is logged or launched.
 		childEnv = stripAnchorEnv(childEnv)
 		if effectiveCfg.Audit.Forward.Enabled {
-			childEnv = removeEnvVars(childEnv, effectiveCfg.Audit.Forward.APIKeyEnv)
+			childEnv = removeEnvVars(childEnv, effectiveCfg.Audit.Forward.APIKeyEnv, "NOCKLOCK_FORWARD_URL")
 		}
 
 		// Log all blocked env vars in a single transaction.

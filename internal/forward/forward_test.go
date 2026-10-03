@@ -145,7 +145,7 @@ func TestUnreachableCommandDoesNotChangeDecisionOrLoseAudit(t *testing.T) {
 	if calls != 3 {
 		t.Errorf("retry calls = %d, want 3", calls)
 	}
-	if !strings.Contains(message, "event remains in events.db") || strings.Contains(message, "private-test-key") {
+	if !strings.Contains(message, "events remain in events.db") || strings.Contains(message, "private-test-key") {
 		t.Errorf("unsafe or missing diagnostic: %q", message)
 	}
 }
@@ -161,5 +161,46 @@ func TestRedirectDoesNotCarryAPIKey(t *testing.T) {
 	f.Close()
 	if redirected {
 		t.Fatal("forwarder followed redirect")
+	}
+}
+
+func TestQueueOverflowDoesNotWriteOrBlockDecisionPath(t *testing.T) {
+	started := make(chan struct{}, 1)
+	release := make(chan struct{})
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		select {
+		case started <- struct{}{}:
+		default:
+		}
+		<-release
+		w.WriteHeader(http.StatusServiceUnavailable)
+	}))
+	defer server.Close()
+	f := New(server.URL, "test-key")
+	var warning bytes.Buffer
+	f.warnings = &warning
+	event := logging.Event{EventType: logging.EventFileBlocked, Detail: "/denied", Blocked: true}
+	f.Enqueue(event, "hash")
+	select {
+	case <-started:
+	case <-time.After(time.Second):
+		close(release)
+		t.Fatal("worker did not start")
+	}
+	start := time.Now()
+	for i := 0; i < queueSize+20; i++ {
+		f.Enqueue(event, "hash")
+	}
+	if time.Since(start) > 200*time.Millisecond {
+		t.Error("enqueue blocked with a full queue")
+	}
+	if warning.Len() != 0 {
+		t.Errorf("enqueue wrote synchronously: %q", warning.String())
+	}
+	f.cancel()
+	close(release)
+	f.Close()
+	if strings.Count(warning.String(), "Command forwarding incomplete") != 1 {
+		t.Errorf("warning should be one summary: %q", warning.String())
 	}
 }
