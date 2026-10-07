@@ -6,7 +6,7 @@
 
 flowchart TD
     A["nocklock wrap -- claude ..."] --> B["1. Load .nock/config.toml<br/>(walk up from cwd; none → error: run nocklock init,<br/>unless --profile)<br/>strict TOML: unknown key = error"]
-    B --> C["2. Open audit log (outside the project by default)<br/>$XDG_STATE_HOME or ~/.local/state/nocklock/&lt;project-key&gt;/events.db<br/>an existing .nock/events.db keeps being used<br/>sign config.digest row"]
+    B --> C["2. Open audit log (outside the project by default)<br/>$XDG_STATE_HOME/nocklock/&lt;project-key&gt;/events.db, or ~/.local/state/nocklock/&lt;project-key&gt;/events.db when XDG_STATE_HOME is unset<br/>an existing .nock/events.db keeps being used<br/>sign config.digest row"]
     C --> D["3. Secret fence<br/>block list wins, then pass list<br/>optional preflight scan of paths + env"]
     D --> E{"4. Filesystem fence"}
     E -->|Linux| E1["Landlock ruleset<br/>+ LD_PRELOAD libfence_fs.so (events)"]

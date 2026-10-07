@@ -14,9 +14,9 @@ flowchart TB
     end
 
     subgraph KERN["KERNEL — Linux, --net-fence=netns"]
-        K1["Agent in its own network namespace"] -->|"DNS to the local stub"| K2["DNS stub"] --> K3["allowlisted host"]
+        K1["Agent in its own network namespace"] -->|"DNS to the local stub"| K2["DNS stub"]
         K1 -->|"direct TCP 80/443 to any host"| K5["nftables TPROXY"] --> K6{"tproxy allowlist check<br/>(SNI or Host)"}
-        K6 -->|allowed| K3
+        K6 -->|allowed| K3["allowlisted host"]
         K6 -->|not allowlisted| K7["refused (not allowlisted)"]
         K1 -->|"other TCP ports / UDP / QUIC / raw IP / other resolvers"| K4["nftables default-drop"]
     end
@@ -25,8 +25,6 @@ flowchart TB
     UNR["UNREACHABLE — seccomp on but interposer bridge disabled<br/>wrap refuses (fatal)"]
 
     classDef reached stroke:#F87171,stroke-width:2px
-    classDef refused stroke:#F87171,stroke-width:2px
     classDef blocked stroke:#10B981,stroke-width:2px
     class A4,OFF reached
-    class UNR,K7 refused
-    class C4,K4 blocked
+    class C4,K4,K7,UNR blocked
