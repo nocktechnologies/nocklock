@@ -1,31 +1,39 @@
 %% NockLock — Event Flow
-%% Fence events → SQLite → log command → cloud sync
+%% Fence decisions → signed hash chain → chain-head anchor → verify.
+%% Command forwarding is opt-in and never changes local rows.
 
 flowchart LR
-    subgraph "Fence Engines"
-        FS["Filesystem Fence"]
-        NET["Network Fence"]
-        SEC["Secret Fence"]
+    subgraph "Fences (inside wrap)"
+        FS["Filesystem<br/>deny ~/.ssh/id_rsa"]
+        NET["Network / egress<br/>allow github.com:443<br/>deny evil.example:443"]
+        SEC["Secrets<br/>blocked AWS_SECRET_ACCESS_KEY (name only)"]
+        SYS["Syscall<br/>fence state"]
     end
 
-    subgraph "Event Generation"
-        FS -->|"blocked: open ~/.ssh/id_rsa"| EVT["FenceEvent{<br/>timestamp, session_id,<br/>fence_type, action,<br/>detail, target,<br/>agent_command, project}"]
-        NET -->|"blocked: CONNECT evil.com:443"| EVT
-        SEC -->|"blocked: env AWS_SECRET_ACCESS_KEY"| EVT
-        FS -->|"allowed: open src/main.go"| EVT
-        NET -->|"allowed: CONNECT github.com:443"| EVT
+    subgraph "Local audit log (outside the project)"
+        ROW["Row N<br/>event fields + prev_hash<br/>hash = SHA-256(row, prev)<br/>Ed25519 signature"]
+        HEAD["Chain head<br/>last hash + row count, signed"]
+        ANCH["chain-anchor.json<br/>written at teardown"]
+        ROW -->|"prev_hash links to row N-1"| ROW
+        ROW --> HEAD --> ANCH
     end
 
-    subgraph "Local Storage"
-        EVT --> DB[".nock/events.db<br/>SQLite"]
-        DB --> LOG["nocklock log<br/>--type filesystem<br/>--action blocked<br/>--since 1h<br/>--json"]
-    end
+    FS --> ROW
+    NET --> ROW
+    SEC --> ROW
+    SYS --> ROW
 
-    subgraph "Cloud Sync (optional)"
-        DB -->|"Batch every 60s"| API["POST /api/fence/events/<br/>X-API-Key header<br/>JSON array of events"]
-        API --> NCC["NockCC Dashboard<br/>Nerve Center"]
-        NCC --> ALERT["Telegram / Slack<br/>alerts on high-severity blocks"]
-    end
+    KEY["~/.config/nocklock/signing-ed25519.key"] -. signs .-> ROW
+    KEY -. signs .-> HEAD
 
-    classDef planned fill:#1a1a2e,stroke:#10B981,stroke-dasharray: 5 5
-    class FS,NET,SEC,EVT,DB,LOG,API,NCC,ALERT planned
+    ANCH -->|"NOCKLOCK_ANCHOR_URL set<br/>5s, fail-open"| OFF["Off-box anchor<br/>(e.g. NockCC)"]
+    ROW -->|"[audit.forward] enabled<br/>bounded async queue"| CMD["Command ops log<br/>POST /api/brain/ops-log/<br/>session id + entry hash"]
+
+    ROW --> LOG["nocklock log<br/>filter by type / action / time"]
+    ROW --> VER["nocklock verify --audit<br/>re-hash, check signatures,<br/>compare head with anchor"]
+    ANCH --> VER
+    OFF -. "--anchor" .-> VER
+    ROW --> RCPT["pkg/receipt.VerifySession<br/>(used by NockGuard)"]
+
+    classDef optional stroke-dasharray: 5 5
+    class OFF,CMD optional

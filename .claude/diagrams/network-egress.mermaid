@@ -1,0 +1,27 @@
+%% NockLock — Network egress levels
+%% What happens when the agent ignores the proxy and opens a direct socket.
+%% `nocklock wrap` prints the effective level at start (internal/cli/egress_level.go).
+
+flowchart TB
+    subgraph ADV["ADVISORY — macOS, or Linux without syscall enforcement"]
+        A1["Agent"] -->|HTTP_PROXY| A2["Allowlist proxy"] -->|allowed| A3["allowlisted host"]
+        A1 -->|"direct socket (ignores proxy)"| A4["any other host — REACHED"]
+    end
+
+    subgraph CONF["CONFINED — Linux, seccomp + LD_PRELOAD interposer"]
+        C1["Agent"] -->|"connect() to proxy → AF_UNIX bridge"| C2["Allowlist proxy"] -->|allowed| C3["allowlisted host"]
+        C1 -->|"direct inet socket"| C4["seccomp: EPERM"]
+    end
+
+    subgraph KERN["KERNEL — Linux, --net-fence=netns"]
+        K1["Agent in its own network namespace"] -->|"nftables redirect"| K2["tproxy + DNS stub"] -->|allowed| K3["allowlisted host"]
+        K1 -->|"direct TCP / UDP / QUIC / raw IP / other resolvers"| K4["nftables default-drop"]
+    end
+
+    OFF["OFF — network.allow_all = true<br/>agent can reach any host"]
+    UNR["UNREACHABLE — seccomp on but interposer bridge disabled<br/>wrap refuses (fatal)"]
+
+    classDef reached stroke:#F87171,stroke-width:2px
+    classDef blocked stroke:#10B981,stroke-width:2px
+    class A4,OFF,UNR reached
+    class C4,K4 blocked

@@ -1,49 +1,39 @@
 %% NockLock — Fence Flow
-%% Config loading → fence engine setup → child process wrapping
+%% What `nocklock wrap -- <agent>` does, in order. Every fence is set up before
+%% the child starts; any setup failure refuses to start (fail closed).
 
 flowchart TD
-    A["nocklock wrap -- command args..."] --> B{".nock/config.toml<br/>exists?"}
+    A["nocklock wrap -- claude ..."] --> B["1. Load .nock/config.toml<br/>(walk up from cwd; none → error: run nocklock init,<br/>unless --profile)<br/>strict TOML: unknown key = error"]
+    B --> C["2. Open audit log OUTSIDE the project<br/>$XDG_STATE_HOME/nocklock/&lt;project-key&gt;/events.db<br/>sign config.digest row"]
+    C --> D["3. Secret fence<br/>block list wins, then pass list<br/>optional preflight scan of paths + env"]
+    D --> E{"4. Filesystem fence"}
+    E -->|Linux| E1["Landlock ruleset<br/>+ LD_PRELOAD libfence_fs.so (events)"]
+    E -->|macOS| E2["Seatbelt profile: writes confined to root,<br/>sensitive paths denied<br/>validated with sandbox-exec"]
+    E1 --> F
+    E2 --> F
+    F{"5. Syscall fence<br/>(enforcement = required by default)"}
+    F -->|Linux| F1["seccomp: EPERM denylist<br/>(mount, ptrace, bpf, unshare, ...)<br/>+ allowed socket families"]
+    F -->|macOS| F2["hardened SBPL rules: deny mach-priv-host-port,<br/>iokit-open, system-socket; limit /dev writes"]
+    F1 --> G
+    F2 --> G
+    G{"6. Network fence"}
+    G -->|default| G1["allowlist proxy<br/>HTTP_PROXY / HTTPS_PROXY<br/>(Linux+seccomp: AF_UNIX bridge via LD_PRELOAD)"]
+    G -->|"--net-fence=netns (Linux)"| G2["root helper via sudo -n:<br/>new netns, nftables default-drop,<br/>tproxy + DNS stub, drop caps, exec agent"]
+    G1 --> H
+    G2 --> H
+    H["7. Agent starts exactly once<br/>filtered env, stdio passes through"]
+    H --> I["Every allow / deny → signed audit row<br/>(optional: forward to Command ops log)"]
+    I --> J["8. Agent exits<br/>write chain-anchor.json; push off-box if NOCKLOCK_ANCHOR_URL set<br/>nocklock exits with the agent's exit code"]
 
-    B -->|No| C["Use DefaultConfig()"]
-    B -->|Yes| D["Load(path)<br/>Parse TOML + reject unknown keys"]
-    D --> E{Parse OK?}
-    E -->|Error| F["Exit with actionable error"]
-    E -->|OK| G["Config loaded"]
-    C --> G
+    B -. fails .-> X
+    C -. fails .-> X
+    D -. "finding or fails" .-> X
+    E -. fails .-> X
+    F -. fails .-> X
+    G -. fails .-> X
+    X["Refuse to start<br/>agent never runs, nonzero exit"]
 
-    G --> H["Initialize Fence Engines"]
-
-    H --> H_CHK{All fences<br/>init OK?}
-    H_CHK -->|No| H_FAIL["Abort — fail closed<br/>nocklock exits 1<br/>Child NOT spawned"]
-    H_CHK -->|Yes| I
-
-    I["Secret Fence<br/>Filter env vars:<br/>pass list → allow<br/>block list → deny<br/>block overrides pass"]
-
-    H_CHK -->|Yes| J["Filesystem Fence<br/>LD_PRELOAD / DYLD_INSERT_LIBRARIES<br/>Intercept: open, openat, stat, access<br/>Check allow/deny lists<br/>Blocked → ENOENT"]
-
-    H_CHK -->|Yes| K["Network Fence<br/>Start local proxy<br/>Set HTTP_PROXY / HTTPS_PROXY<br/>Check domain allowlist<br/>Blocked → 403"]
-
-    I --> L["Build filtered env"]
-    J --> M["Prepare preload library"]
-    K --> N["Start proxy, get port"]
-
-    L --> O["Spawn Child Process<br/>exec.Command(args[0], args[1:]...)<br/>Stdin/Stdout/Stderr pass-through"]
-    M --> O
-    N --> O
-
-    O --> P["Child Running"]
-    P --> Q{Child exits}
-    Q -->|exit 0| R["nocklock exits 0"]
-    Q -->|exit N| S["nocklock exits N<br/>(preserve child exit code)"]
-    Q -->|signal| T["nocklock exits 1<br/>(cross-platform fallback)"]
-
-    subgraph "Event Logging (all fences)"
-        U["Every allow/block decision<br/>→ SQLite fence_events table"]
-    end
-
-    I -.-> U
-    J -.-> U
-    K -.-> U
-
-    classDef planned fill:#1a1a2e,stroke:#10B981,stroke-dasharray: 5 5
-    class I,J,K,L,M,N,U,H_CHK,H_FAIL planned
+    classDef refused stroke:#F87171,stroke-width:2px
+    classDef running stroke:#10B981,stroke-width:2px
+    class X refused
+    class H running
