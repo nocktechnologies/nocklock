@@ -863,7 +863,7 @@ func TestPruneRetainsEventAfterFractionalCutoff(t *testing.T) {
 
 	pruneAge := 24 * time.Hour
 	eventTime := time.Now().Add(-pruneAge).Add(500 * time.Millisecond)
-	oldCutoffFormat := eventTime.Truncate(time.Second).Format(time.RFC3339)
+	oldCutoffFormat := eventTime.UTC().Truncate(time.Second).Format(time.RFC3339)
 	storedTimestamp := formatTimestampForChain(eventTime)
 	if !(storedTimestamp < oldCutoffFormat) {
 		t.Fatalf("negative control failed: fractional timestamp %q should sort before second-precision cutoff %q", storedTimestamp, oldCutoffFormat)
