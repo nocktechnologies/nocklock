@@ -14,6 +14,12 @@ All notable changes to NockLock will be documented in this file.
   `MEMBER` or `COLLABORATOR`, checked per event type. `claude-code-review.yml`
   skips pull requests opened from forks instead of failing on missing secrets.
 
+### Changed
+
+- Docs: the `.claude/diagrams` Mermaid diagrams now describe the shipped v0.6.1
+  fences instead of the original "planned" design, and a new
+  `network-egress.mermaid` shows the three egress levels.
+
 ### Fixed
 
 - Tests: the audit-log prune fractional-cutoff test now passes outside UTC. Its

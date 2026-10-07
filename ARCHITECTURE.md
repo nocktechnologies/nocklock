@@ -226,6 +226,7 @@ path; macOS keeps a documented residual window.
 
 ## Diagrams
 
-- `.claude/diagrams/architecture.mermaid`: package dependencies
-- `.claude/diagrams/fence-flow.mermaid`: config, then fences, then the child process
-- `.claude/diagrams/event-flow.mermaid`: events, then SQLite, then cloud sync
+- `.claude/diagrams/architecture.mermaid`: package dependencies (from `go list` imports)
+- `.claude/diagrams/fence-flow.mermaid`: the `wrap` sequence, per-platform fence setup, and the fail-closed exits
+- `.claude/diagrams/network-egress.mermaid`: the ADVISORY, CONFINED and KERNEL egress levels, and what stops a direct socket in each
+- `.claude/diagrams/event-flow.mermaid`: signed hash-chain rows, the chain-head anchor, Command forwarding, and `verify --audit`
