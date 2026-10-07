@@ -14,6 +14,11 @@ All notable changes to NockLock will be documented in this file.
   `MEMBER` or `COLLABORATOR`, checked per event type. `claude-code-review.yml`
   skips pull requests opened from forks instead of failing on missing secrets.
 
+### Fixed
+
+- Tests: the audit-log prune fractional-cutoff test now passes outside UTC. Its
+  negative control formatted the cutoff in local time; `Prune` was unaffected.
+
 ## [0.6.1] - 2026-10-01
 
 Security patch release for macOS. In v0.6.0 the default config marked the
