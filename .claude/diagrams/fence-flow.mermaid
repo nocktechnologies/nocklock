@@ -1,19 +1,23 @@
 %% NockLock — Fence Flow
 %% What `nocklock wrap -- <agent>` does, in order. Every fence is set up before
-%% the child starts; any setup failure refuses to start (fail closed).
+%% the child starts; by default any setup failure refuses to start (fail closed).
+%% The one exception is syscall.enforcement = "preferred" on a kernel without
+%% seccomp (step 5): it warns and starts without the syscall fence.
 
 flowchart TD
     A["nocklock wrap -- claude ..."] --> B["1. Load .nock/config.toml<br/>(walk up from cwd; none → error: run nocklock init,<br/>unless --profile)<br/>strict TOML: unknown key = error"]
-    B --> C["2. Open audit log OUTSIDE the project<br/>$XDG_STATE_HOME/nocklock/&lt;project-key&gt;/events.db<br/>sign config.digest row"]
+    B --> C["2. Open audit log (outside the project by default)<br/>$XDG_STATE_HOME or ~/.local/state/nocklock/&lt;project-key&gt;/events.db<br/>an existing .nock/events.db keeps being used<br/>sign config.digest row"]
     C --> D["3. Secret fence<br/>block list wins, then pass list<br/>optional preflight scan of paths + env"]
     D --> E{"4. Filesystem fence"}
     E -->|Linux| E1["Landlock ruleset<br/>+ LD_PRELOAD libfence_fs.so (events)"]
     E -->|macOS| E2["Seatbelt profile: writes confined to root,<br/>sensitive paths denied<br/>validated with sandbox-exec"]
     E1 --> F
     E2 --> F
-    F{"5. Syscall fence<br/>(enforcement = required by default)"}
+    F{"5. Syscall fence<br/>(syscall.enforcement = required by default:<br/>no seccomp or Apply() fails → refuse to start)"}
     F -->|Linux| F1["seccomp: EPERM denylist<br/>(mount, ptrace, bpf, unshare, ...)<br/>+ allowed socket families"]
     F -->|macOS| F2["hardened SBPL rules: deny mach-priv-host-port,<br/>iokit-open, system-socket; limit /dev writes"]
+    F -. "DEGRADED: preferred + no seccomp" .-> FD["warns, starts without syscall fence<br/>(Apply() failure still refuses)"]
+    FD -.-> G
     F1 --> G
     F2 --> G
     G{"6. Network fence"}
@@ -22,7 +26,7 @@ flowchart TD
     G1 --> H
     G2 --> H
     H["7. Agent starts exactly once<br/>filtered env, stdio passes through"]
-    H --> I["Every allow / deny → signed audit row<br/>(optional: forward to Command ops log)"]
+    H --> I["Audit rows: network allows + denies, observed file denials<br/>(capped at 500 per session, best-effort on macOS)<br/>file allows not logged; blocked syscalls get no row, only a fence-state row<br/>hash-chained + Ed25519-signed when the signing key is present<br/>(optional: forward to Command ops log)"]
     I --> J["8. Agent exits<br/>write chain-anchor.json; push off-box if NOCKLOCK_ANCHOR_URL set<br/>nocklock exits with the agent's exit code"]
 
     B -. fails .-> X

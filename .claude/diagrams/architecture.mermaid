@@ -1,6 +1,7 @@
 %% NockLock — Package Architecture
 %% Package dependencies as of v0.6.1 (from `go list` imports).
-%% cli is the only package that wires fences together; fence packages never import each other.
+%% cli is the only package that wires fences together; fence packages do not import each other, except
+%% landlock → fs and netns → network (sub-packages of their parent fence).
 
 graph TD
     main["cmd/nocklock<br/>Entry point"] --> cli
@@ -39,6 +40,7 @@ graph TD
 
     fs --> config
     landlock --> fs
+    netns --> net
     net --> config
     net --> logging
     logging --> config
