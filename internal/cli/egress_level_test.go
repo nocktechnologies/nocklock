@@ -5,6 +5,8 @@ import (
 	"fmt"
 	"strings"
 	"testing"
+
+	"github.com/nocktechnologies/nocklock/internal/config"
 )
 
 func TestEffectiveEgressLevelTruthTable(t *testing.T) {
@@ -85,5 +87,26 @@ func TestRequireEnforcedEgressAcceptsOnlyEnforcedLevels(t *testing.T) {
 	}
 	if got := egressRequirementMessage(egressLevelOff, "darwin"); !strings.Contains(got, "macOS cannot provide enforced egress today") {
 		t.Fatalf("macOS OFF fix must say enforced egress is unavailable: %q", got)
+	}
+}
+
+// Test 7 (level half): look-back rules load only at CONFINED. Control: CONFINED
+// loads, and no rules load at any level.
+func TestLookbackLevelError(t *testing.T) {
+	rules := []config.LookbackRule{{Name: "r", On: config.LookbackTriggerFileBlocked, Then: config.LookbackActionDenyEgress}}
+	for _, level := range []egressLevel{egressLevelKernel, egressLevelAdvisory, egressLevelOff, egressLevelUnreachable} {
+		err := lookbackLevelError(rules, level, "linux")
+		if err == nil || !strings.Contains(err.Error(), string(level)) {
+			t.Errorf("level %s with rules: err = %v, want a refusal naming the level", level, err)
+		}
+		if err := lookbackLevelError(nil, level, "linux"); err != nil {
+			t.Errorf("level %s without rules refused: %v", level, err)
+		}
+	}
+	if err := lookbackLevelError(rules, egressLevelConfined, "linux"); err != nil {
+		t.Errorf("CONFINED with rules refused: %v", err)
+	}
+	if err := lookbackLevelError(rules, egressLevelAdvisory, "darwin"); err == nil || !strings.Contains(err.Error(), "Linux-only") {
+		t.Errorf("darwin refusal = %v, want it to say look-back rules are Linux-only", err)
 	}
 }

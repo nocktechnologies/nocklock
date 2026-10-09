@@ -75,6 +75,20 @@ On Linux you can instead pass `--net-fence=netns`. The child then runs in its ow
 
 Set `network.require_enforced = true` in `.nock/config.toml` or pass `--require-enforced-egress` to refuse `ADVISORY`, `OFF`, and `UNREACHABLE` levels. Linux can use `--net-fence=netns`; macOS cannot provide enforced egress today.
 
+#### Look-back rules (Linux, CONFINED only)
+
+A look-back rule narrows egress after a denied file open. It never adds an allow:
+
+```toml
+[[network.lookback]]
+name   = "probe-then-silence"
+on     = "file_blocked"   # only trigger supported today
+within = "10m"            # optional; default is the rest of the session
+then   = "deny_egress"
+```
+
+After the interposer reports a denied open, the proxy closes open tunnels and requests and denies new ones, each logged as a signed `network_blocked` row citing the rule and the trigger row. `wrap` refuses to start with a rule unless the egress level is `CONFINED`. Static binaries, raw syscalls and a cleared `LD_PRELOAD` bypass the interposer, so they never trip the rule. See `docs/design/look-back-rules.md`.
+
 Linux blocked accesses are logged to the event log (see "Event log" for where it lives). The macOS Seatbelt path records its fence state but does not yet emit one audit event per denied file; Seatbelt returns its native permission error. Blocked domains get a 403.
 
 ### Filesystem platform boundary

@@ -183,6 +183,15 @@ func canonicalPolicy(cfg *config.Config, configPath, dbPath, networkFenceMode st
 			"endpoint": cfg.Cloud.Endpoint,
 		},
 	}
+	if rules := cfg.Network.Lookback; len(rules) > 0 {
+		// Omitted when empty so configs without rules keep their prior digest.
+		// Rule order is kept: the first tripped rule names the denial.
+		out := make([]map[string]string, len(rules))
+		for i, r := range rules {
+			out[i] = map[string]string{"name": r.Name, "on": r.On, "within": r.Within, "then": r.Then}
+		}
+		policy["network"].(map[string]any)["lookback"] = out
+	}
 	encoded, err := json.Marshal(policy)
 	return json.RawMessage(encoded), err
 }

@@ -329,6 +329,26 @@ type NetworkConfig struct {
 	AllowAll           bool     `toml:"allow_all"`
 	AllowPrivateRanges bool     `toml:"allow_private_ranges"`
 	RequireEnforced    bool     `toml:"require_enforced"`
+	// Lookback rules narrow egress after a trigger event is recorded in the
+	// current session. They never add an allow.
+	Lookback []LookbackRule `toml:"lookback"`
+}
+
+// LookbackTriggerFileBlocked is the only trigger slice 1 accepts: a denied
+// filesystem access reported by the LD_PRELOAD interposer.
+const LookbackTriggerFileBlocked = "file_blocked"
+
+// LookbackActionDenyEgress denies every egress request while a rule is tripped.
+const LookbackActionDenyEgress = "deny_egress"
+
+// LookbackRule is one [[network.lookback]] entry: once an event of type On has
+// been recorded in the session (within the optional Within window), Then
+// applies to every egress request.
+type LookbackRule struct {
+	Name   string `toml:"name"`
+	On     string `toml:"on"`
+	Within string `toml:"within"` // optional Go duration; empty means the rest of the session
+	Then   string `toml:"then"`
 }
 
 // SecretsConfig defines environment filtering and optional secret preflight checks.
@@ -424,6 +444,8 @@ func Load(path string) (*Config, error) {
 func LoadOverlay(base Config, path string) (*Config, error) {
 	baseCopy := cloneConfig(base)
 	overlay := cloneConfig(base)
+	// Decoding into a seeded slice would merge field by field into base's rules.
+	overlay.Network.Lookback = nil
 	fields, err := overlayDefinedFields(path)
 	if err != nil {
 		return nil, err

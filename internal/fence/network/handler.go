@@ -3,6 +3,7 @@
 package network
 
 import (
+	"context"
 	"fmt"
 	"net"
 	"net/http"
@@ -107,6 +108,29 @@ func (p *ProxyServer) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		p.logEvent(logging.EventNetworkBlocked, r.Method, host, true)
 		http.Error(w, "NockLock: domain not in allowlist", http.StatusForbidden)
 		return
+	}
+
+	if p.lookback != nil {
+		// The cancel func and client connection are what a trip closes: cancelling
+		// aborts the transport's body write and closes the upstream connection,
+		// and closing the client connection stops any further body read.
+		ctx, cancel := context.WithCancel(r.Context())
+		defer cancel()
+		client, _ := ctx.Value(clientConnKey{}).(net.Conn)
+		r = r.WithContext(ctx)
+		p.pauseLookback("before-evaluate")
+		release, denial := p.admitLookback(lookbackDesc(r.Method, host), func() {
+			cancel()
+			if client != nil {
+				_ = client.Close()
+			}
+		})
+		if denial != nil {
+			p.logLookbackBlocked(r.Method, host, denial)
+			http.Error(w, "NockLock: egress denied by look-back rule", http.StatusForbidden)
+			return
+		}
+		defer release()
 	}
 
 	p.logEvent(logging.EventNetworkPassed, r.Method, host, false)

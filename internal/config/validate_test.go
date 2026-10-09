@@ -232,3 +232,52 @@ func hasError(errs []ValidationError, field string) bool {
 	}
 	return false
 }
+
+func lookbackRule(name, on, within, then string) LookbackRule {
+	return LookbackRule{Name: name, On: on, Within: within, Then: then}
+}
+
+// Test 7 (config half): a rule that cannot fire is a config error. Control: a
+// valid rule loads.
+func TestValidateLookback(t *testing.T) {
+	cfg := DefaultConfig()
+	cfg.Network.Lookback = []LookbackRule{
+		lookbackRule("a", "file_blocked", "", "deny_egress"),
+		lookbackRule("b", "file_blocked", "10m", "deny_egress"),
+	}
+	for _, e := range Validate(&cfg) {
+		if e.Severity == "error" {
+			t.Fatalf("valid look-back rules rejected: %s: %s", e.Field, e.Message)
+		}
+	}
+
+	cases := []struct {
+		name  string
+		rules []LookbackRule
+		field string
+	}{
+		{"unknown on", []LookbackRule{lookbackRule("a", "file_open", "", "deny_egress")}, "network.lookback[0].on"},
+		{"on that is never blocked", []LookbackRule{lookbackRule("a", "file_passed", "", "deny_egress")}, "network.lookback[0].on"},
+		{"dotted config.digest", []LookbackRule{lookbackRule("a", "config.digest", "", "deny_egress")}, "network.lookback[0].on"},
+		{"underscored config_digest", []LookbackRule{lookbackRule("a", "config_digest", "", "deny_egress")}, "network.lookback[0].on"},
+		{"blocked type slice 1 does not wire: secret_blocked", []LookbackRule{lookbackRule("a", "secret_blocked", "", "deny_egress")}, "network.lookback[0].on"},
+		{"blocked type slice 1 does not wire: network_error", []LookbackRule{lookbackRule("a", "network_error", "", "deny_egress")}, "network.lookback[0].on"},
+		{"empty on", []LookbackRule{lookbackRule("a", "", "", "deny_egress")}, "network.lookback[0].on"},
+		{"unknown then", []LookbackRule{lookbackRule("a", "file_blocked", "", "allow_egress")}, "network.lookback[0].then"},
+		{"empty then", []LookbackRule{lookbackRule("a", "file_blocked", "", "")}, "network.lookback[0].then"},
+		{"unparseable within", []LookbackRule{lookbackRule("a", "file_blocked", "ten minutes", "deny_egress")}, "network.lookback[0].within"},
+		{"zero within", []LookbackRule{lookbackRule("a", "file_blocked", "0s", "deny_egress")}, "network.lookback[0].within"},
+		{"negative within", []LookbackRule{lookbackRule("a", "file_blocked", "-5m", "deny_egress")}, "network.lookback[0].within"},
+		{"empty name", []LookbackRule{lookbackRule(" ", "file_blocked", "", "deny_egress")}, "network.lookback[0].name"},
+		{"duplicate name", []LookbackRule{lookbackRule("a", "file_blocked", "", "deny_egress"), lookbackRule("a", "file_blocked", "", "deny_egress")}, "network.lookback[1].name"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			cfg := DefaultConfig()
+			cfg.Network.Lookback = tc.rules
+			if !hasError(Validate(&cfg), tc.field) {
+				t.Fatalf("Validate accepted %+v, want an error on %s", tc.rules, tc.field)
+			}
+		})
+	}
+}

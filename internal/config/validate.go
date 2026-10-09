@@ -6,7 +6,9 @@ import (
 	"net/url"
 	"path/filepath"
 	"regexp"
+	"slices"
 	"strings"
+	"time"
 )
 
 // ValidationError describes a single validation failure with a severity level.
@@ -176,7 +178,52 @@ func Validate(cfg *Config) []ValidationError {
 		}
 	}
 
+	errs = append(errs, validateLookback(cfg.Network.Lookback)...)
+
 	return errs
+}
+
+// lookbackBlockedTypes are the event types the code writes with blocked=1. A
+// look-back trigger is a blocked row, so an `on` outside this set could never
+// trip and must not load as a silent no-op.
+var lookbackBlockedTypes = []string{"file_blocked", "secret_blocked", "network_blocked", "network_error", "filesystem_fence_state", "session_end"}
+
+func validateLookback(rules []LookbackRule) []ValidationError {
+	var errs []ValidationError
+	bad := func(i int, key, msg string) {
+		errs = append(errs, ValidationError{Field: fmt.Sprintf("network.lookback[%d].%s", i, key), Message: msg, Severity: "error"})
+	}
+	seen := map[string]bool{}
+	for i, r := range rules {
+		if strings.TrimSpace(r.Name) == "" {
+			bad(i, "name", "must not be empty; the name is cited in the signed denial rows")
+		} else if seen[r.Name] {
+			bad(i, "name", fmt.Sprintf("duplicate rule name %q", r.Name))
+		}
+		seen[r.Name] = true
+		switch {
+		case r.On == LookbackTriggerFileBlocked:
+		case slices.Contains(lookbackBlockedTypes, r.On):
+			bad(i, "on", fmt.Sprintf("%q is not supported yet: this release accepts only %q", r.On, LookbackTriggerFileBlocked))
+		default:
+			bad(i, "on", fmt.Sprintf("%q can never trip: a trigger is an event written with blocked=1, one of %s", r.On, strings.Join(lookbackBlockedTypes, ", ")))
+		}
+		if r.Then != LookbackActionDenyEgress {
+			bad(i, "then", fmt.Sprintf("invalid value %q: must be %q", r.Then, LookbackActionDenyEgress))
+		}
+		if r.Within != "" {
+			if d, err := time.ParseDuration(r.Within); err != nil || d <= 0 {
+				bad(i, "within", fmt.Sprintf("invalid value %q: must be a positive duration such as \"10m\", or omitted for the rest of the session", r.Within))
+			}
+		}
+	}
+	return errs
+}
+
+// WithinDuration returns the rule's window; zero means the rest of the session.
+func (r LookbackRule) WithinDuration() time.Duration {
+	d, _ := time.ParseDuration(r.Within)
+	return d
 }
 
 // EffectivePolicy returns a human-readable summary of the active policy.
@@ -200,6 +247,14 @@ func (cfg *Config) EffectivePolicy() string {
 			len(cfg.Network.Allow),
 			strings.Join(cfg.Network.Allow, ", "),
 			privateRanges)
+	}
+
+	for _, r := range cfg.Network.Lookback {
+		window := r.Within
+		if window == "" {
+			window = "session"
+		}
+		fmt.Fprintf(&b, "  Look-back rule %q: %s within %s -> %s\n", r.Name, r.On, window, r.Then)
 	}
 
 	// Filesystem

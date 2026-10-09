@@ -16,6 +16,9 @@ import (
 // the serialized fence config passed to the LD_PRELOAD interposer.
 const fieldSep = "\x1f"
 
+// ackField is the serialized flag that enables FenceConfig.WaitForAck.
+const ackField = "!ack"
+
 // maxAllowPaths mirrors MAX_PATHS in the interposer's libfence_fs.c
 // (internal/fence/fs/interposer/libfence_fs.c; kept in sync by
 // TestMaxAllowPathsMatchesInterposerMaxPaths). Past this count in EITHER the
@@ -87,6 +90,12 @@ type FenceConfig struct {
 	// profile express the same protection through DenyPaths, which they can
 	// enforce directly.
 	ProtectedRootSubdir string
+
+	// WaitForAck makes the interposer wait, bounded, for a one-byte ack from the
+	// event listener before it returns EACCES for a denied open. The listener
+	// sends it only after the report is handled, which lets a look-back rule
+	// commit its trigger and close open connections first.
+	WaitForAck bool
 }
 
 // SerializedConfig is the parsed representation of a serialized fence
@@ -98,6 +107,7 @@ type SerializedConfig struct {
 	AllowPaths   []string
 	AllowRWPaths []string
 	DenyPaths    []string
+	WaitForAck   bool
 }
 
 // ExpandTilde replaces a leading ~ in path with the user's home directory.
@@ -330,6 +340,9 @@ func (fc *FenceConfig) Serialize(socketPath string) string {
 	for _, p := range fc.DenyPaths {
 		parts = append(parts, "-"+p)
 	}
+	if fc.WaitForAck {
+		parts = append(parts, ackField)
+	}
 	return strings.Join(parts, fieldSep)
 }
 
@@ -371,6 +384,8 @@ func ParseSerialized(s string) (*SerializedConfig, error) {
 			sc.AllowRWPaths = append(sc.AllowRWPaths, f[1:])
 		} else if strings.HasPrefix(f, "-") {
 			sc.DenyPaths = append(sc.DenyPaths, f[1:])
+		} else if f == ackField {
+			sc.WaitForAck = true
 		}
 	}
 

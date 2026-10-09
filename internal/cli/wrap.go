@@ -394,6 +394,7 @@ var wrapCmd = &cobra.Command{
 						return err
 					}
 
+					fsCfg.WaitForAck = len(effectiveCfg.Network.Lookback) > 0
 					fsFence, err = fsfence.NewFence(fsCfg, libPath)
 					if err != nil {
 						return fmt.Errorf("failed to initialize filesystem fence: %w", err)
@@ -567,6 +568,14 @@ var wrapCmd = &cobra.Command{
 			cmd.SilenceErrors = true
 			return &exitCodeError{code: 2}
 		}
+		if err := lookbackLevelError(effectiveCfg.Network.Lookback, egressLevel, runtime.GOOS); err != nil {
+			detail := err.Error()
+			logEvent(logging.EventNetworkError, "network", detail, true)
+			fmt.Fprintf(cmd.ErrOrStderr(), "NockLock: fatal: %s\n", detail)
+			cmd.SilenceUsage = true
+			cmd.SilenceErrors = true
+			return &exitCodeError{code: 2}
+		}
 		if (cfg.Network.RequireEnforced || wrapFlags.RequireEnforcedEgress) && !egressLevelMeetsRequirement(egressLevel) {
 			detail := egressRequirementMessage(egressLevel, runtime.GOOS)
 			logEvent(logging.EventNetworkError, "network", detail, true)
@@ -661,6 +670,22 @@ var wrapCmd = &cobra.Command{
 		} else if !cfg.Network.AllowAll {
 			proxyCfg := effectiveCfg.Network
 			proxy := network.NewProxyServer(proxyCfg, logger, sessionID)
+			if len(proxyCfg.Lookback) > 0 {
+				// lookbackLevelError guaranteed CONFINED, so fsFence is non-nil.
+				proxy.EnableLookback(proxyCfg.Lookback)
+				fsFence.SetReportHandler(func(ev fsfence.FenceEvent) {
+					proxy.LookbackTrip(func() error {
+						return logger.LogImmediate(logging.Event{
+							Timestamp: time.Now(),
+							EventType: logging.EventFileBlocked,
+							Category:  "filesystem",
+							Detail:    fileBlockedDetail(ev),
+							Blocked:   true,
+							SessionID: sessionID,
+						})
+					})
+				})
+			}
 			var addr string
 			var proxyErr error
 			var proxyUnixSocket string
@@ -830,8 +855,7 @@ var wrapCmd = &cobra.Command{
 			go func() {
 				defer eventsWg.Done()
 				for ev := range fsFenceEvents {
-					logEvent(logging.EventFileBlocked, "filesystem",
-						fmt.Sprintf("op=%s path=%s reason=%s", ev.Operation, ev.Path, ev.Reason), true)
+					logEvent(logging.EventFileBlocked, "filesystem", fileBlockedDetail(ev), true)
 				}
 			}()
 		}
@@ -1047,6 +1071,10 @@ func loadWrapConfig(flags WrapFlags) (*config.Config, string, error) {
 		return nil, configPath, fmt.Errorf("failed to load config overlay at %s: %w", configPath, err)
 	}
 	return cfg, configPath, nil
+}
+
+func fileBlockedDetail(ev fsfence.FenceEvent) string {
+	return fmt.Sprintf("op=%s path=%s reason=%s", ev.Operation, ev.Path, ev.Reason)
 }
 
 func printProfiles(w io.Writer) {

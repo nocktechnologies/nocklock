@@ -187,6 +187,7 @@ var configDigestPolicyFields = map[string]string{
 	"Network.AllowAll":              "network.allow_all",
 	"Network.AllowPrivateRanges":    "network.allow_private_ranges",
 	"Network.RequireEnforced":       "network.require_enforced",
+	"Network.Lookback":              "network.lookback",
 	"Secrets.Pass":                  "secrets.pass",
 	"Secrets.Block":                 "secrets.block",
 	"Secrets.ScanEnv":               "secrets.scan_env",
@@ -213,6 +214,8 @@ var configDigestNotSecurityRelevantFields = map[string]struct{}{
 
 func TestConfigDigestCoversTopLevelConfigFields(t *testing.T) {
 	cfg := config.DefaultConfig()
+	// network.lookback is omitted from the policy when empty, so seed a rule.
+	cfg.Network.Lookback = []config.LookbackRule{{Name: "r", On: "file_blocked", Within: "10m", Then: "deny_egress"}}
 	record, err := newConfigDigestRecord(&cfg, filepath.Join(t.TempDir(), config.Dir, config.File), filepath.Join(t.TempDir(), "events.db"), "proxy")
 	if err != nil {
 		t.Fatal(err)
@@ -1068,4 +1071,30 @@ func digestRecords(t *testing.T, dbPath, projectRoot string) []configDigestRecor
 		}
 	}
 	return records
+}
+
+// The digest binds the look-back rules: adding one, or changing its window,
+// changes the signed policy. Control: the same rules give the same bytes.
+func TestConfigDigestCoversLookbackRules(t *testing.T) {
+	policy := func(rules ...config.LookbackRule) string {
+		cfg := config.DefaultConfig()
+		cfg.Network.Lookback = rules
+		raw, err := canonicalPolicy(&cfg, "/p/.nock/config.toml", "/p/audit.db", "proxy")
+		if err != nil {
+			t.Fatalf("canonicalPolicy: %v", err)
+		}
+		return string(raw)
+	}
+	rule := config.LookbackRule{Name: "r", On: "file_blocked", Within: "10m", Then: "deny_egress"}
+	wider := rule
+	wider.Within = "20m"
+	if policy(rule) != policy(rule) {
+		t.Fatal("identical rules produced different policy bytes")
+	}
+	if policy() == policy(rule) || policy(rule) == policy(wider) {
+		t.Fatal("look-back rules do not change the signed policy")
+	}
+	if strings.Contains(policy(), "lookback") {
+		t.Fatal("a config without rules must keep its prior digest: no lookback key")
+	}
 }

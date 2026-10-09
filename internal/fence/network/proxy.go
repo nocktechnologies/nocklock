@@ -146,6 +146,10 @@ type ProxyServer struct {
 	// Defaults to cachedSafeDial which uses the session DNS cache. Overridable in tests.
 	dialFunc DialFunc
 	degraded atomic.Bool
+	// lookback is nil unless EnableLookback was given rules.
+	lookback *lookbackGuard
+	// lookbackPause is a test seam called at named points on the request path.
+	lookbackPause func(stage string)
 }
 
 // NewProxyServer creates a ProxyServer from a NetworkConfig.
@@ -221,13 +225,7 @@ func (p *ProxyServer) Start() (string, error) {
 	p.advertisedAddr = ln.Addr().String()
 	p.degraded.Store(false)
 
-	p.server = &http.Server{
-		Handler:           p,
-		ReadHeaderTimeout: 30 * time.Second,
-		ReadTimeout:       5 * time.Minute,
-		WriteTimeout:      5 * time.Minute,
-		MaxHeaderBytes:    1 << 20, // 1 MiB
-	}
+	p.server = p.newHTTPServer()
 
 	go p.server.Serve(ln) //nolint:errcheck // Serve returns ErrServerClosed on Stop()
 
@@ -243,6 +241,19 @@ func (p *ProxyServer) Start() (string, error) {
 		})
 	}
 	return addr, nil
+}
+
+// newHTTPServer builds the server for either listener. ConnContext exposes
+// the accepted connection to handlers so a look-back trip can close it.
+func (p *ProxyServer) newHTTPServer() *http.Server {
+	return &http.Server{
+		Handler:           p,
+		ReadHeaderTimeout: 30 * time.Second,
+		ReadTimeout:       5 * time.Minute,
+		WriteTimeout:      5 * time.Minute,
+		MaxHeaderBytes:    1 << 20, // 1 MiB
+		ConnContext:       withClientConn,
+	}
 }
 
 // StartUnix binds the proxy to a Unix domain socket while advertising a loopback
@@ -285,13 +296,7 @@ func (p *ProxyServer) StartUnix(unixSocketPath, advertisedAddr string) (string, 
 	p.advertisedAddr = advertisedAddr
 	p.degraded.Store(false)
 
-	p.server = &http.Server{
-		Handler:           p,
-		ReadHeaderTimeout: 30 * time.Second,
-		ReadTimeout:       5 * time.Minute,
-		WriteTimeout:      5 * time.Minute,
-		MaxHeaderBytes:    1 << 20,
-	}
+	p.server = p.newHTTPServer()
 
 	go p.server.Serve(ln) //nolint:errcheck // Serve returns ErrServerClosed on Stop()
 
