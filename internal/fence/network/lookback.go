@@ -51,9 +51,11 @@ type lookbackGuard struct {
 	rules []config.LookbackRule
 	query func() (*logging.Event, error)
 
-	mu          sync.Mutex
-	uncommitted bool
-	live        map[*lookbackConn]struct{}
+	mu sync.Mutex
+	// stickyTrigger is the denial label once a trip leaves the history unable
+	// to vouch for the trigger; empty until then.
+	stickyTrigger string
+	live          map[*lookbackConn]struct{}
 
 	capMu sync.Mutex
 	rows  map[string]int
@@ -125,8 +127,8 @@ func (p *ProxyServer) admitLookback(desc string, closeFn func()) (release func()
 }
 
 func (g *lookbackGuard) evaluateLocked() *lookbackDenial {
-	if g.uncommitted {
-		return &lookbackDenial{rule: g.rules[0].Name, trigger: triggerUncommitted}
+	if g.stickyTrigger != "" {
+		return &lookbackDenial{rule: g.rules[0].Name, trigger: g.stickyTrigger}
 	}
 	trigger, err := g.query()
 	if err != nil {
@@ -167,7 +169,7 @@ func (p *ProxyServer) LookbackTrip(commit func() error) {
 	g.mu.Lock()
 	trigger := triggerUncommitted
 	if err := commit(); err != nil {
-		g.uncommitted = true
+		g.stickyTrigger = triggerUncommitted
 		fmt.Fprintf(os.Stderr, "NockLock: look-back trigger could not be committed (%v); denying egress for the rest of the session\n", err)
 	} else if ev, qerr := g.query(); qerr != nil {
 		trigger = triggerUnreadable
@@ -175,7 +177,7 @@ func (p *ProxyServer) LookbackTrip(commit func() error) {
 		// A committed trigger that reads back empty would otherwise allow the
 		// next request, so deny for the rest of the session.
 		trigger = triggerUnreadable
-		g.uncommitted = true
+		g.stickyTrigger = triggerUnreadable
 		fmt.Fprintln(os.Stderr, "NockLock: look-back trigger was committed but reads back empty; denying egress for the rest of the session")
 	} else {
 		trigger = strconv.FormatInt(ev.ID, 10)

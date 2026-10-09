@@ -479,24 +479,38 @@ func TestLookbackUnreadableHistoryDenies(t *testing.T) {
 }
 
 // A trip whose commit succeeds but whose read-back is empty keeps egress denied
-// for the session. The control is the same empty query with no trip: egress is
-// allowed, so the denial comes from the trip.
+// for the session, and every denial row says trigger=unreadable, not
+// uncommitted (the commit succeeded). The control is the same empty query with
+// no trip: egress is allowed, so the denial comes from the trip.
 func TestLookbackEmptyReadBackAfterCommitStaysDenied(t *testing.T) {
 	empty := func() (*logging.Event, error) { return nil, nil }
 
 	e := newLBEnv(t, denyRule("r", ""))
 	target := holdTarget(t)
+	e.p.lookback.mu.Lock()
 	e.p.lookback.query = empty
+	e.p.lookback.mu.Unlock()
 	e.p.LookbackTrip(func() error { return e.commitTrigger("op=open path=/etc/shadow reason=denied") })
 	conn, status := connectStatus(t, e.addr, target)
 	conn.Close()
 	if status != http.StatusForbidden {
 		t.Fatalf("CONNECT after a committed trip with an empty read-back = %d, want 403", status)
 	}
+	rows := e.rows(t, logging.EventNetworkBlocked)
+	if len(rows) == 0 {
+		t.Fatal("no denial rows after a committed trip with an empty read-back")
+	}
+	for _, r := range rows {
+		if !strings.HasSuffix(r.Detail, "rule=lookback:r trigger=unreadable") {
+			t.Fatalf("row %q does not cite trigger=unreadable", r.Detail)
+		}
+	}
 
 	c := newLBEnv(t, denyRule("r", ""))
 	ctarget := holdTarget(t)
+	c.p.lookback.mu.Lock()
 	c.p.lookback.query = empty
+	c.p.lookback.mu.Unlock()
 	conn, status = connectStatus(t, c.addr, ctarget)
 	conn.Close()
 	if status != http.StatusOK {
