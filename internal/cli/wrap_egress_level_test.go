@@ -206,7 +206,8 @@ func TestWrapRequireEnforcedEgressRejectsUnreachableWithoutStartingFence(t *test
 }
 
 // Test 7 (wrap half): a look-back rule on a proxy that is not CONFINED stops
-// wrap before the child runs and writes a signed network_error row.
+// wrap before the child runs and writes a signed network_error row, which
+// audit verify authenticates.
 func TestWrapRefusesLookbackBelowConfined(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("wrap configuration test requires the POSIX test environment")
@@ -229,5 +230,25 @@ func TestWrapRefusesLookbackBelowConfined(t *testing.T) {
 	}
 	if _, err := os.Stat("child-started"); !errors.Is(err, os.ErrNotExist) {
 		t.Fatalf("child ran despite the refusal; stat error = %v", err)
+	}
+
+	logger, err := logging.NewLogger(resolvedAuditDB(t, project), project)
+	if err != nil {
+		t.Fatalf("open audit DB: %v", err)
+	}
+	netErr := logging.EventNetworkError
+	events, err := logger.Query(logging.QueryOptions{EventType: &netErr, Limit: 10, ByID: true})
+	if cerr := logger.Close(); cerr != nil {
+		t.Fatalf("close audit DB: %v", cerr)
+	}
+	if err != nil {
+		t.Fatalf("query network_error rows: %v", err)
+	}
+	if len(events) != 1 || !events[0].Blocked || !strings.Contains(events[0].Detail, "network.lookback rules require effective egress level CONFINED") {
+		t.Fatalf("network_error rows = %+v, want one blocked row citing the lookback level requirement", events)
+	}
+	var audit bytes.Buffer
+	if err := runAuditVerify(context.Background(), &audit, ""); err != nil || !strings.Contains(audit.String(), "AUDIT: AUTHENTIC") {
+		t.Fatalf("verify --audit did not authenticate the refusal row: %v\n%s", err, audit.String())
 	}
 }

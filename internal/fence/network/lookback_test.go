@@ -478,6 +478,32 @@ func TestLookbackUnreadableHistoryDenies(t *testing.T) {
 	}
 }
 
+// A trip whose commit succeeds but whose read-back is empty keeps egress denied
+// for the session. The control is the same empty query with no trip: egress is
+// allowed, so the denial comes from the trip.
+func TestLookbackEmptyReadBackAfterCommitStaysDenied(t *testing.T) {
+	empty := func() (*logging.Event, error) { return nil, nil }
+
+	e := newLBEnv(t, denyRule("r", ""))
+	target := holdTarget(t)
+	e.p.lookback.query = empty
+	e.p.LookbackTrip(func() error { return e.commitTrigger("op=open path=/etc/shadow reason=denied") })
+	conn, status := connectStatus(t, e.addr, target)
+	conn.Close()
+	if status != http.StatusForbidden {
+		t.Fatalf("CONNECT after a committed trip with an empty read-back = %d, want 403", status)
+	}
+
+	c := newLBEnv(t, denyRule("r", ""))
+	ctarget := holdTarget(t)
+	c.p.lookback.query = empty
+	conn, status = connectStatus(t, c.addr, ctarget)
+	conn.Close()
+	if status != http.StatusOK {
+		t.Fatalf("control: empty read-back with no trip: CONNECT = %d, want 200", status)
+	}
+}
+
 // Test 8: denied requests to distinct hosts write at most the cap plus one
 // summary row. The control stays under the cap and writes one row each.
 func TestLookbackDenialRowCap(t *testing.T) {

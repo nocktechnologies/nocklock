@@ -9,6 +9,7 @@ All notable changes to NockLock will be documented in this file.
 - Opt-in `[audit.forward]` delivery of committed file, network, and secret fence decisions to Command's ops log. Payloads carry the session ID and audit-chain entry hash; delivery failures leave local decisions and `events.db` unchanged.
 
 - Look-back rules, slice 1: `[[network.lookback]]` with `on = "file_blocked"` and `then = "deny_egress"` (optional `within`). Once the filesystem interposer reports a denied open, the HTTP proxy denies every later CONNECT and plain-HTTP request and closes tunnels and requests already open, before the interposer's EACCES returns (250 ms ack bound). Denials are signed `network_blocked` rows citing `rule=lookback:<name> trigger=<id>`. Linux CONFINED egress only: `wrap` refuses to start at any other level. Design: `docs/design/look-back-rules.md`.
+- Look-back rule names must match `^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$`, because the name is written into the signed denial row's detail. A committed trigger that reads back empty keeps egress denied for the rest of the session.
 - `Logger.LogImmediate` and `Logger.LatestBlockedEvent`.
 
 ### Security

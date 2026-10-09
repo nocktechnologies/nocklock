@@ -169,8 +169,14 @@ func (p *ProxyServer) LookbackTrip(commit func() error) {
 	if err := commit(); err != nil {
 		g.uncommitted = true
 		fmt.Fprintf(os.Stderr, "NockLock: look-back trigger could not be committed (%v); denying egress for the rest of the session\n", err)
-	} else if ev, qerr := g.query(); qerr != nil || ev == nil {
+	} else if ev, qerr := g.query(); qerr != nil {
 		trigger = triggerUnreadable
+	} else if ev == nil {
+		// A committed trigger that reads back empty would otherwise allow the
+		// next request, so deny for the rest of the session.
+		trigger = triggerUnreadable
+		g.uncommitted = true
+		fmt.Fprintln(os.Stderr, "NockLock: look-back trigger was committed but reads back empty; denying egress for the rest of the session")
 	} else {
 		trigger = strconv.FormatInt(ev.ID, 10)
 	}

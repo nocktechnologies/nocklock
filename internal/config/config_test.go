@@ -916,3 +916,15 @@ func TestOverlayAddsLookbackRulesButNeverDropsOrDuplicatesBase(t *testing.T) {
 		t.Fatalf("overlay modified the base's rule: %+v", base.Network.Lookback)
 	}
 }
+
+// A rule in the overlay that reuses a base rule's name is refused on the merged
+// list; each file alone is valid. Control: a distinct name loads (see the test
+// above).
+func TestOverlayRefusesLookbackNameDuplicatingBase(t *testing.T) {
+	base := DefaultConfig()
+	base.Network.Lookback = []LookbackRule{{Name: "base", On: "file_blocked", Then: "deny_egress"}}
+	_, err := LoadOverlay(base, writeLookbackConfig(t, "[[network.lookback]]\nname = \"base\"\non = \"file_blocked\"\nthen = \"deny_egress\"\n"))
+	if err == nil || !strings.Contains(err.Error(), "duplicate rule name") {
+		t.Fatalf("LoadOverlay with a duplicate rule name = %v, want a duplicate-name refusal", err)
+	}
+}

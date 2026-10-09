@@ -456,6 +456,9 @@ func LoadOverlay(base Config, path string) (*Config, error) {
 	}
 	addMetadataFields(fields, md)
 	cfg := restrictOverlay(baseCopy, overlay, fields)
+	if errs := validateLookback(cfg.Network.Lookback); len(errs) > 0 {
+		return nil, fmt.Errorf("invalid config at %s: %s", path, errs[0].Error())
+	}
 	return &cfg, nil
 }
 

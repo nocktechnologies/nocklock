@@ -455,6 +455,19 @@ func TestLookbackSeamPausedInsideCriticalSection(t *testing.T) {
 			}
 			conn := <-connCh
 			if conn == nil {
+				// The trip cut the request before the client read its 200 line.
+				// The cut must still have happened by the ack.
+				if n := e.liveCount(); n != 0 {
+					t.Fatalf("%s request was cut before the 200 line but the live set has %d entries at the ack", kind, n)
+				}
+				trig, err := e.l.LatestBlockedEvent(lbSession, logging.EventFileBlocked)
+				if err != nil || trig == nil {
+					t.Fatalf("trigger not committed: %v %v", trig, err)
+				}
+				rows := e.rows(t, logging.EventNetworkBlocked)
+				if len(rows) != 1 || !strings.HasSuffix(rows[0].Detail, fmt.Sprintf("rule=lookback:r trigger=%d", trig.ID)) {
+					t.Fatalf("closure rows at the ack = %+v, want one citing trigger %d", rows, trig.ID)
+				}
 				return
 			}
 			defer conn.Close()

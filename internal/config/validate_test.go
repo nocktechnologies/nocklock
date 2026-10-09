@@ -244,6 +244,8 @@ func TestValidateLookback(t *testing.T) {
 	cfg.Network.Lookback = []LookbackRule{
 		lookbackRule("a", "file_blocked", "", "deny_egress"),
 		lookbackRule("b", "file_blocked", "10m", "deny_egress"),
+		lookbackRule("probe-then.silence_2", "file_blocked", "", "deny_egress"),
+		lookbackRule(strings.Repeat("a", 64), "file_blocked", "", "deny_egress"),
 	}
 	for _, e := range Validate(&cfg) {
 		if e.Severity == "error" {
@@ -269,6 +271,12 @@ func TestValidateLookback(t *testing.T) {
 		{"zero within", []LookbackRule{lookbackRule("a", "file_blocked", "0s", "deny_egress")}, "network.lookback[0].within"},
 		{"negative within", []LookbackRule{lookbackRule("a", "file_blocked", "-5m", "deny_egress")}, "network.lookback[0].within"},
 		{"empty name", []LookbackRule{lookbackRule(" ", "file_blocked", "", "deny_egress")}, "network.lookback[0].name"},
+		{"name that forges detail fields", []LookbackRule{lookbackRule("r trigger=1 host=x", "file_blocked", "", "deny_egress")}, "network.lookback[0].name"},
+		{"name with a newline", []LookbackRule{lookbackRule("r\nhost=x", "file_blocked", "", "deny_egress")}, "network.lookback[0].name"},
+		{"name with an equals sign", []LookbackRule{lookbackRule("a=b", "file_blocked", "", "deny_egress")}, "network.lookback[0].name"},
+		{"name with a trailing newline", []LookbackRule{lookbackRule("a\n", "file_blocked", "", "deny_egress")}, "network.lookback[0].name"},
+		{"name starting with a dot", []LookbackRule{lookbackRule(".a", "file_blocked", "", "deny_egress")}, "network.lookback[0].name"},
+		{"name over 64 characters", []LookbackRule{lookbackRule(strings.Repeat("a", 65), "file_blocked", "", "deny_egress")}, "network.lookback[0].name"},
 		{"duplicate name", []LookbackRule{lookbackRule("a", "file_blocked", "", "deny_egress"), lookbackRule("a", "file_blocked", "", "deny_egress")}, "network.lookback[1].name"},
 	}
 	for _, tc := range cases {

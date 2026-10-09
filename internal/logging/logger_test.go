@@ -1883,6 +1883,54 @@ func TestLatestBlockedEvent(t *testing.T) {
 	}
 }
 
+// LatestBlockedEvent and Query parse the stored timestamp the same way: they
+// return the same instant for one row, and both refuse a row whose stored
+// timestamp does not parse.
+func TestLatestBlockedEventAgreesWithQueryOnTimestamps(t *testing.T) {
+	l, dbPath := mustNewLogger(t)
+	defer l.Close()
+	zone := time.FixedZone("test", -7*3600)
+	var sid string
+	for _, ts := range []time.Time{
+		time.Date(2026, 10, 9, 1, 2, 3, 123456789, zone),
+		time.Date(2026, 10, 9, 1, 2, 3, 0, time.UTC),
+		time.Date(2026, 10, 9, 1, 2, 3, 500000000, zone),
+	} {
+		sid = "s-" + ts.Format(time.RFC3339Nano)
+		if err := l.Log(Event{Timestamp: ts, EventType: EventFileBlocked, Category: "c", Detail: "d", Blocked: true, SessionID: sid}); err != nil {
+			t.Fatalf("Log: %v", err)
+		}
+		latest, err := l.LatestBlockedEvent(sid, EventFileBlocked)
+		if err != nil || latest == nil {
+			t.Fatalf("LatestBlockedEvent(%v) = %v, %v", ts, latest, err)
+		}
+		et := EventFileBlocked
+		rows, err := l.Query(QueryOptions{EventType: &et, SessionID: &sid, Limit: 1, ByID: true})
+		if err != nil || len(rows) != 1 {
+			t.Fatalf("Query(%v) = %v, %v", ts, rows, err)
+		}
+		if latest.ID != rows[0].ID || !latest.Timestamp.Equal(rows[0].Timestamp) || !latest.Timestamp.Equal(ts) {
+			t.Fatalf("read paths disagree for %v: LatestBlockedEvent = %v (id %d), Query = %v (id %d)", ts, latest.Timestamp, latest.ID, rows[0].Timestamp, rows[0].ID)
+		}
+	}
+
+	db, err := sql.Open("sqlite", dbPath)
+	if err != nil {
+		t.Fatalf("open: %v", err)
+	}
+	defer db.Close()
+	if _, err := db.Exec("UPDATE events SET timestamp = 'not-a-time' WHERE session_id = ?", sid); err != nil {
+		t.Fatalf("corrupt timestamp: %v", err)
+	}
+	et := EventFileBlocked
+	if _, err := l.LatestBlockedEvent(sid, EventFileBlocked); err == nil {
+		t.Fatal("LatestBlockedEvent accepted an unparseable stored timestamp")
+	}
+	if _, err := l.Query(QueryOptions{EventType: &et, SessionID: &sid, Limit: 1, ByID: true}); err == nil {
+		t.Fatal("Query accepted an unparseable stored timestamp")
+	}
+}
+
 // LogImmediate waits for another connection's write lock, up to busy_timeout,
 // where Log's read-then-write transaction fails at once. Control: Log fails.
 func TestLogImmediateWaitsForWriteLock(t *testing.T) {

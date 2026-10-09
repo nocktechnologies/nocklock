@@ -195,12 +195,13 @@ func validateLookback(rules []LookbackRule) []ValidationError {
 	}
 	seen := map[string]bool{}
 	for i, r := range rules {
-		if strings.TrimSpace(r.Name) == "" {
-			bad(i, "name", "must not be empty; the name is cited in the signed denial rows")
+		if !lookbackRuleName.MatchString(r.Name) {
+			bad(i, "name", fmt.Sprintf("invalid value %q: must match %s, because the name is written into the signed denial rows", r.Name, lookbackRuleName))
 		} else if seen[r.Name] {
 			bad(i, "name", fmt.Sprintf("duplicate rule name %q", r.Name))
+		} else {
+			seen[r.Name] = true
 		}
-		seen[r.Name] = true
 		switch {
 		case r.On == LookbackTriggerFileBlocked:
 		case slices.Contains(lookbackBlockedTypes, r.On):
@@ -313,6 +314,8 @@ func (cfg *Config) EffectivePolicy() string {
 
 	return b.String()
 }
+
+var lookbackRuleName = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$`)
 
 var envScanName = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]*$`)
 

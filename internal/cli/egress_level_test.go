@@ -110,3 +110,27 @@ func TestLookbackLevelError(t *testing.T) {
 		t.Errorf("darwin refusal = %v, want it to say look-back rules are Linux-only", err)
 	}
 }
+
+// A run without the filesystem interposer has no fsFence, so a look-back rule
+// could never trip. CONFINED needs the interposer, so lookbackLevelError
+// refuses every such run. Control: the same inputs with the interposer reach
+// CONFINED and load.
+func TestLookbackRefusedWhenNoInterposer(t *testing.T) {
+	rules := []config.LookbackRule{{Name: "r", On: config.LookbackTriggerFileBlocked, Then: config.LookbackActionDenyEgress}}
+	for _, goos := range []string{"linux", "darwin", "windows"} {
+		for _, mode := range []string{"proxy", "netns"} {
+			for _, allowAll := range []bool{false, true} {
+				for _, syscallEnforced := range []bool{false, true} {
+					level := effectiveEgressLevel(goos, mode, allowAll, syscallEnforced, false)
+					if err := lookbackLevelError(rules, level, goos); err == nil {
+						t.Errorf("no interposer (%s, %s, allowAll=%t, syscall=%t) reached level %s and loaded look-back rules", goos, mode, allowAll, syscallEnforced, level)
+					}
+				}
+			}
+		}
+	}
+	level := effectiveEgressLevel("linux", "proxy", false, true, true)
+	if err := lookbackLevelError(rules, level, "linux"); err != nil {
+		t.Errorf("control: interposer present, level %s refused: %v", level, err)
+	}
+}
