@@ -16,6 +16,7 @@ All notable changes to NockLock will be documented in this file.
 
 ### Changed
 
+- Docs: `docs/design/look-back-rules.md` design note for look-back policy rules over the audit event history (no code).
 - Docs: the `.claude/diagrams` Mermaid diagrams now describe the shipped v0.6.1
   fences instead of the original "planned" design, and a new
   `network-egress.mermaid` shows the three egress levels.
