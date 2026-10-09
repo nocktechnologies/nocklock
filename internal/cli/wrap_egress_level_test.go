@@ -204,3 +204,51 @@ func TestWrapRequireEnforcedEgressRejectsUnreachableWithoutStartingFence(t *test
 		t.Fatalf("child ran despite unreachable egress; stat error = %v", err)
 	}
 }
+
+// Test 7 (wrap half): a look-back rule on a proxy that is not CONFINED stops
+// wrap before the child runs and writes a signed network_error row, which
+// audit verify authenticates.
+func TestWrapRefusesLookbackBelowConfined(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("wrap configuration test requires the POSIX test environment")
+	}
+	project := t.TempDir()
+	rule := "\n[[network.lookback]]\nname = \"probe\"\non = \"file_blocked\"\nthen = \"deny_egress\"\n"
+	writeTestConfig(t, project, plainLaunchTOML(t)+rule)
+	withWorkingDir(t, project)
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+	t.Setenv("NOCKLOCK_ANCHOR_URL", "")
+	t.Setenv("NOCKLOCK_ANCHOR_TOKEN", "")
+
+	stderr, err := runWrapCapturingStderr(t, []string{"--", "sh", "-c", "touch child-started"})
+	var exitErr *exitCodeError
+	if !errors.As(err, &exitErr) || exitErr.code != 2 {
+		t.Fatalf("wrap error = %v, want exit status 2\n%s", err, stderr)
+	}
+	if !strings.Contains(stderr, "network.lookback rules require effective egress level CONFINED, but it is ADVISORY") {
+		t.Fatalf("refusal did not explain the level requirement:\n%s", stderr)
+	}
+	if _, err := os.Stat("child-started"); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("child ran despite the refusal; stat error = %v", err)
+	}
+
+	logger, err := logging.NewLogger(resolvedAuditDB(t, project), project)
+	if err != nil {
+		t.Fatalf("open audit DB: %v", err)
+	}
+	netErr := logging.EventNetworkError
+	events, err := logger.Query(logging.QueryOptions{EventType: &netErr, Limit: 10, ByID: true})
+	if cerr := logger.Close(); cerr != nil {
+		t.Fatalf("close audit DB: %v", cerr)
+	}
+	if err != nil {
+		t.Fatalf("query network_error rows: %v", err)
+	}
+	if len(events) != 1 || !events[0].Blocked || !strings.Contains(events[0].Detail, "network.lookback rules require effective egress level CONFINED") {
+		t.Fatalf("network_error rows = %+v, want one blocked row citing the lookback level requirement", events)
+	}
+	var audit bytes.Buffer
+	if err := runAuditVerify(context.Background(), &audit, ""); err != nil || !strings.Contains(audit.String(), "AUDIT: AUTHENTIC") {
+		t.Fatalf("verify --audit did not authenticate the refusal row: %v\n%s", err, audit.String())
+	}
+}

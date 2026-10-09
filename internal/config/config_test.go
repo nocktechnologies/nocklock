@@ -7,6 +7,7 @@ import (
 	"slices"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/BurntSushi/toml"
 )
@@ -853,4 +854,77 @@ func TestValidateMacOSAllowUnfencedTrueIsError(t *testing.T) {
 		}
 	}
 	t.Fatal("Validate must report filesystem.macos_allow_unfenced = true as an error")
+}
+
+func writeLookbackConfig(t *testing.T, body string) string {
+	t.Helper()
+	path := filepath.Join(t.TempDir(), "config.toml")
+	if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	return path
+}
+
+func TestLoadParsesLookbackRules(t *testing.T) {
+	path := writeLookbackConfig(t, `
+[[network.lookback]]
+name   = "probe-then-silence"
+on     = "file_blocked"
+within = "10m"
+then   = "deny_egress"
+`)
+	cfg, err := Load(path)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	want := []LookbackRule{{Name: "probe-then-silence", On: "file_blocked", Within: "10m", Then: "deny_egress"}}
+	if !reflect.DeepEqual(cfg.Network.Lookback, want) {
+		t.Fatalf("Lookback = %+v, want %+v", cfg.Network.Lookback, want)
+	}
+	if got := cfg.Network.Lookback[0].WithinDuration(); got != 10*time.Minute {
+		t.Fatalf("WithinDuration = %v, want 10m", got)
+	}
+
+	if _, err := Load(writeLookbackConfig(t, "[[network.lookback]]\nname = \"x\"\non = \"config.digest\"\nthen = \"deny_egress\"\n")); err == nil {
+		t.Fatal("Load accepted a rule whose trigger can never fire")
+	}
+}
+
+func TestOverlayAddsLookbackRulesButNeverDropsOrDuplicatesBase(t *testing.T) {
+	base := DefaultConfig()
+	base.Network.Lookback = []LookbackRule{{Name: "base", On: "file_blocked", Within: "10m", Then: "deny_egress"}}
+
+	// An overlay that names no rules keeps the base's, once.
+	none, err := LoadOverlay(base, writeLookbackConfig(t, "[network]\nallow_all = false\n"))
+	if err != nil {
+		t.Fatalf("LoadOverlay: %v", err)
+	}
+	if !reflect.DeepEqual(none.Network.Lookback, base.Network.Lookback) {
+		t.Fatalf("overlay without rules changed them: %+v", none.Network.Lookback)
+	}
+
+	// An overlay rule is added after the base's, and decoding it must not
+	// write through into the base's rule.
+	added, err := LoadOverlay(base, writeLookbackConfig(t, "[[network.lookback]]\nname = \"extra\"\non = \"file_blocked\"\nthen = \"deny_egress\"\n"))
+	if err != nil {
+		t.Fatalf("LoadOverlay: %v", err)
+	}
+	if len(added.Network.Lookback) != 2 || added.Network.Lookback[0].Name != "base" || added.Network.Lookback[0].Within != "10m" || added.Network.Lookback[1].Name != "extra" || added.Network.Lookback[1].Within != "" {
+		t.Fatalf("merged rules = %+v, want base then extra with no inherited fields", added.Network.Lookback)
+	}
+	if base.Network.Lookback[0].Name != "base" || base.Network.Lookback[0].Within != "10m" {
+		t.Fatalf("overlay modified the base's rule: %+v", base.Network.Lookback)
+	}
+}
+
+// A rule in the overlay that reuses a base rule's name is refused on the merged
+// list; each file alone is valid. Control: a distinct name loads (see the test
+// above).
+func TestOverlayRefusesLookbackNameDuplicatingBase(t *testing.T) {
+	base := DefaultConfig()
+	base.Network.Lookback = []LookbackRule{{Name: "base", On: "file_blocked", Then: "deny_egress"}}
+	_, err := LoadOverlay(base, writeLookbackConfig(t, "[[network.lookback]]\nname = \"base\"\non = \"file_blocked\"\nthen = \"deny_egress\"\n"))
+	if err == nil || !strings.Contains(err.Error(), "duplicate rule name") {
+		t.Fatalf("LoadOverlay with a duplicate rule name = %v, want a duplicate-name refusal", err)
+	}
 }

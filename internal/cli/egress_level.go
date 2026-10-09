@@ -1,6 +1,10 @@
 package cli
 
-import "fmt"
+import (
+	"fmt"
+
+	"github.com/nocktechnologies/nocklock/internal/config"
+)
 
 type egressLevel string
 
@@ -35,6 +39,20 @@ func effectiveEgressLevel(goos, netFence string, allowAll, syscallEnforced, fsIn
 
 func egressLevelMeetsRequirement(level egressLevel) bool {
 	return level == egressLevelKernel || level == egressLevelConfined
+}
+
+// lookbackLevelError refuses look-back rules unless egress is CONFINED. At
+// ADVISORY a client that ignores HTTP_PROXY reaches any host, and the netns
+// path runs its proxy without the signing logger, so the rule could not hold.
+func lookbackLevelError(rules []config.LookbackRule, level egressLevel, goos string) error {
+	if len(rules) == 0 || level == egressLevelConfined {
+		return nil
+	}
+	fix := "run on Linux with the default proxy mode, syscall enforcement and the filesystem interposer enabled, and network.allow_all = false"
+	if goos != "linux" {
+		fix = "look-back rules are Linux-only (macOS cannot reach CONFINED egress)"
+	}
+	return fmt.Errorf("network.lookback rules require effective egress level CONFINED, but it is %s; %s", level, fix)
 }
 
 func egressRequirementMessage(level egressLevel, goos string) string {

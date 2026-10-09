@@ -22,6 +22,7 @@
 #include <arpa/inet.h>
 #include <netinet/in.h>
 #include <netinet/tcp.h>
+#include <poll.h>
 #include <pthread.h>
 #include <stdarg.h>
 #include <stddef.h>
@@ -44,6 +45,8 @@
 
 #define MAX_PATHS 256
 #define FIELD_SEP '\x1f'
+#define ACK_FIELD "!ack"
+#define ACK_TIMEOUT_MS 250
 #define BRIDGE_ABSTRACT_TAG "nocklock-proxy-bridge:"
 #ifndef SOCK_TYPE_MASK
 #define SOCK_TYPE_MASK 0xf
@@ -59,6 +62,7 @@ typedef struct {
     int  allow_rw_count;
     char deny[MAX_PATHS][PATH_MAX];
     int  deny_count;
+    int  wait_ack;         /* 1 = wait for the listener's ack after a report */
     char proxy_unix_socket[PATH_MAX];
     char proxy_tcp_host[INET6_ADDRSTRLEN];
     unsigned short proxy_tcp_port;
@@ -404,6 +408,38 @@ static void json_escape(const char *src, char *dst, size_t dstlen)
 }
 
 /*
+ * wait_for_ack waits up to ACK_TIMEOUT_MS for the listener's one-byte ack. On
+ * timeout the caller still denies the open; the ordering guarantee is lost,
+ * which is a stated limit.
+ */
+static void wait_for_ack(int fd)
+{
+    struct pollfd pfd;
+    pfd.fd = fd;
+    pfd.events = POLLIN;
+    pfd.revents = 0;
+    struct timespec start, now;
+    clock_gettime(CLOCK_MONOTONIC, &start);
+    for (;;) {
+        clock_gettime(CLOCK_MONOTONIC, &now);
+        long left = ACK_TIMEOUT_MS -
+            ((long)(now.tv_sec - start.tv_sec) * 1000L +
+             (now.tv_nsec - start.tv_nsec) / 1000000L);
+        if (left <= 0)
+            return;
+        int rc = poll(&pfd, 1, (int)left);
+        if (rc > 0) {
+            char b;
+            ssize_t n = read(fd, &b, 1);
+            (void)n;
+            return;
+        }
+        if (rc == 0 || errno != EINTR)
+            return;
+    }
+}
+
+/*
  * report_blocked sends a blocked-event JSON message to the Unix domain socket.
  * Best-effort: if the socket connection fails, we silently continue.
  */
@@ -412,6 +448,7 @@ static void report_blocked(const char *path, const char *operation,
 {
     if (g_config.socket_path[0] == '\0')
         return;
+    int saved_errno = errno;
 
     /* Build timestamp in ISO 8601 UTC. */
     char timestamp[64];
@@ -434,13 +471,17 @@ static void report_blocked(const char *path, const char *operation,
         "{\"type\":\"fs\",\"action\":\"blocked\",\"path\":\"%s\","
         "\"operation\":\"%s\",\"reason\":\"%s\",\"timestamp\":\"%s\"}\n",
         escaped_path, operation, escaped_reason, timestamp);
-    if (len < 0 || (size_t)len >= sizeof(buf))
+    if (len < 0 || (size_t)len >= sizeof(buf)) {
+        errno = saved_errno;
         return;
+    }
 
     /* Connect to Unix domain socket and send. */
     int fd = socket(AF_UNIX, SOCK_STREAM, 0);
-    if (fd < 0)
+    if (fd < 0) {
+        errno = saved_errno;
         return;
+    }
 
     struct sockaddr_un addr;
     memset(&addr, 0, sizeof(addr));
@@ -457,9 +498,11 @@ static void report_blocked(const char *path, const char *operation,
         /* Write the full buffer; best-effort. Explicitly ignore the result
          * (checking it satisfies warn_unused_result on modern GCC). */
         ssize_t wr = write(fd, buf, (size_t)len);
-        (void)wr;
+        if (wr == (ssize_t)len && g_config.wait_ack)
+            wait_for_ack(fd);
     }
     close(fd);
+    errno = saved_errno;
 }
 
 /* ------------------------------------------------------------------ */
@@ -757,6 +800,8 @@ static void fence_init(void)
             strncpy(g_config.allow_rw[g_config.allow_rw_count], f + 1, PATH_MAX - 1);
             g_config.allow_rw[g_config.allow_rw_count][PATH_MAX - 1] = '\0';
             g_config.allow_rw_count++;
+        } else if (strcmp(f, ACK_FIELD) == 0) {
+            g_config.wait_ack = 1;
         } else if (f[0] == '-') {
             if (g_config.deny_count >= MAX_PATHS) {
                 /*

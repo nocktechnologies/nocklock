@@ -571,6 +571,39 @@ func (l *Logger) LogAfterLatest(eventType EventType, build func(*Event) (Event, 
 	return previous, nil
 }
 
+// LogImmediate records an event like Log, but opens a BEGIN IMMEDIATE
+// transaction, so busy_timeout applies when another process holds the write
+// lock. Log's deferred transaction reads before it writes and fails at once
+// with SQLITE_BUSY in that case.
+func (l *Logger) LogImmediate(event Event) error {
+	_, err := l.LogAfterLatest(event.EventType, func(*Event) (Event, error) { return event, nil })
+	return err
+}
+
+// LatestBlockedEvent returns the newest blocked=1 row of eventType in
+// sessionID, or nil when there is none. Newest means highest row id, not
+// latest timestamp, so a skewed clock cannot reorder history. The returned
+// Event carries only ID and Timestamp.
+func (l *Logger) LatestBlockedEvent(sessionID string, eventType EventType) (*Event, error) {
+	var id int64
+	var timestamp string
+	err := l.db.QueryRow(
+		"SELECT id, timestamp FROM events WHERE session_id = ? AND event_type = ? AND blocked = 1 ORDER BY id DESC LIMIT 1",
+		sessionID, string(eventType),
+	).Scan(&id, &timestamp)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, fmt.Errorf("failed to read latest blocked %s event: %w", eventType, err)
+	}
+	ts, err := time.Parse(time.RFC3339, timestamp)
+	if err != nil {
+		return nil, fmt.Errorf("failed to parse event %d timestamp %q: %w", id, timestamp, err)
+	}
+	return &Event{ID: id, Timestamp: ts}, nil
+}
+
 func latestEvent(ctx context.Context, tx eventTransaction, eventType EventType) (*Event, error) {
 	var event Event
 	var timestamp string

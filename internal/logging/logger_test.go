@@ -1843,3 +1843,142 @@ func bytesEqual(a, b []byte) bool {
 	}
 	return true
 }
+
+func TestLatestBlockedEvent(t *testing.T) {
+	l, _ := mustNewLogger(t)
+	defer l.Close()
+	now := time.Now().UTC().Truncate(time.Second)
+	log := func(et EventType, blocked bool, session string, ts time.Time) {
+		t.Helper()
+		if err := l.Log(Event{Timestamp: ts, EventType: et, Category: "c", Detail: "d", Blocked: blocked, SessionID: session}); err != nil {
+			t.Fatalf("Log: %v", err)
+		}
+	}
+
+	if ev, err := l.LatestBlockedEvent("s1", EventFileBlocked); err != nil || ev != nil {
+		t.Fatalf("empty log: got %v, %v; want nil, nil", ev, err)
+	}
+
+	log(EventFileBlocked, true, "s2", now)    // other session
+	log(EventFilePassed, false, "s1", now)    // other type
+	log(EventFileBlocked, false, "s1", now)   // not blocked
+	log(EventNetworkBlocked, true, "s1", now) // other blocked type
+	if ev, err := l.LatestBlockedEvent("s1", EventFileBlocked); err != nil || ev != nil {
+		t.Fatalf("no matching row: got %v, %v; want nil, nil", ev, err)
+	}
+
+	log(EventFileBlocked, true, "s1", now)
+	first, err := l.LatestBlockedEvent("s1", EventFileBlocked)
+	if err != nil || first == nil {
+		t.Fatalf("matching row not found: %v, %v", first, err)
+	}
+	// A later row with an earlier timestamp is still newest: order is by id.
+	log(EventFileBlocked, true, "s1", now.Add(-time.Hour))
+	second, err := l.LatestBlockedEvent("s1", EventFileBlocked)
+	if err != nil || second == nil || second.ID <= first.ID {
+		t.Fatalf("newest by id = %v (%v), want an id above %d", second, err, first.ID)
+	}
+	if !second.Timestamp.Equal(now.Add(-time.Hour)) {
+		t.Fatalf("timestamp = %v, want %v", second.Timestamp, now.Add(-time.Hour))
+	}
+}
+
+// LatestBlockedEvent and Query parse the stored timestamp the same way: they
+// return the same instant for one row, and both refuse a row whose stored
+// timestamp does not parse.
+func TestLatestBlockedEventAgreesWithQueryOnTimestamps(t *testing.T) {
+	l, dbPath := mustNewLogger(t)
+	defer l.Close()
+	zone := time.FixedZone("test", -7*3600)
+	var sid string
+	for _, ts := range []time.Time{
+		time.Date(2026, 10, 9, 1, 2, 3, 123456789, zone),
+		time.Date(2026, 10, 9, 1, 2, 3, 0, time.UTC),
+		time.Date(2026, 10, 9, 1, 2, 3, 500000000, zone),
+	} {
+		sid = "s-" + ts.Format(time.RFC3339Nano)
+		if err := l.Log(Event{Timestamp: ts, EventType: EventFileBlocked, Category: "c", Detail: "d", Blocked: true, SessionID: sid}); err != nil {
+			t.Fatalf("Log: %v", err)
+		}
+		latest, err := l.LatestBlockedEvent(sid, EventFileBlocked)
+		if err != nil || latest == nil {
+			t.Fatalf("LatestBlockedEvent(%v) = %v, %v", ts, latest, err)
+		}
+		et := EventFileBlocked
+		rows, err := l.Query(QueryOptions{EventType: &et, SessionID: &sid, Limit: 1, ByID: true})
+		if err != nil || len(rows) != 1 {
+			t.Fatalf("Query(%v) = %v, %v", ts, rows, err)
+		}
+		if latest.ID != rows[0].ID || !latest.Timestamp.Equal(rows[0].Timestamp) || !latest.Timestamp.Equal(ts) {
+			t.Fatalf("read paths disagree for %v: LatestBlockedEvent = %v (id %d), Query = %v (id %d)", ts, latest.Timestamp, latest.ID, rows[0].Timestamp, rows[0].ID)
+		}
+	}
+
+	db, err := sql.Open("sqlite", dbPath)
+	if err != nil {
+		t.Fatalf("open: %v", err)
+	}
+	defer db.Close()
+	if _, err := db.Exec("UPDATE events SET timestamp = 'not-a-time' WHERE session_id = ?", sid); err != nil {
+		t.Fatalf("corrupt timestamp: %v", err)
+	}
+	et := EventFileBlocked
+	if _, err := l.LatestBlockedEvent(sid, EventFileBlocked); err == nil {
+		t.Fatal("LatestBlockedEvent accepted an unparseable stored timestamp")
+	}
+	if _, err := l.Query(QueryOptions{EventType: &et, SessionID: &sid, Limit: 1, ByID: true}); err == nil {
+		t.Fatal("Query accepted an unparseable stored timestamp")
+	}
+}
+
+// LogImmediate waits for another connection's write lock, up to busy_timeout,
+// where Log's read-then-write transaction fails at once. Control: Log fails.
+func TestLogImmediateWaitsForWriteLock(t *testing.T) {
+	l, dbPath := mustNewLogger(t)
+	defer l.Close()
+	if err := l.Log(sampleEvent(EventSessionStart, "session", "seed", false, "s")); err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+	hold := func() func() {
+		db, err := sql.Open("sqlite", dbPath)
+		if err != nil {
+			t.Fatalf("open: %v", err)
+		}
+		conn, err := db.Conn(t.Context())
+		if err != nil {
+			t.Fatalf("conn: %v", err)
+		}
+		if _, err := conn.ExecContext(t.Context(), "BEGIN IMMEDIATE"); err != nil {
+			t.Fatalf("lock: %v", err)
+		}
+		return func() {
+			_, _ = conn.ExecContext(t.Context(), "COMMIT")
+			conn.Close()
+			db.Close()
+		}
+	}
+
+	release := hold()
+	if err := l.Log(sampleEvent(EventFileBlocked, "filesystem", "d", true, "s")); err == nil {
+		release()
+		t.Fatal("control: Log succeeded while another connection held the write lock")
+	}
+	release()
+
+	release = hold()
+	go func() {
+		time.Sleep(200 * time.Millisecond)
+		release()
+	}()
+	start := time.Now()
+	if err := l.LogImmediate(sampleEvent(EventFileBlocked, "filesystem", "d", true, "s")); err != nil {
+		t.Fatalf("LogImmediate under a 200 ms lock: %v", err)
+	}
+	if time.Since(start) < 150*time.Millisecond {
+		t.Fatalf("LogImmediate returned after %v, before the lock was released", time.Since(start))
+	}
+	res, err := l.VerifyChain()
+	if err != nil || !res.Intact {
+		t.Fatalf("chain after LogImmediate: %+v, %v", res, err)
+	}
+}

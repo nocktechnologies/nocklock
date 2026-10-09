@@ -3,6 +3,7 @@ package config
 import (
 	"fmt"
 	"os"
+	"slices"
 	"strings"
 
 	"github.com/BurntSushi/toml"
@@ -38,6 +39,11 @@ func restrictOverlay(base, overlay Config, fields map[string]bool) Config {
 	cfg.Network.AllowAll = base.Network.AllowAll && overlay.Network.AllowAll
 	cfg.Network.AllowPrivateRanges = base.Network.AllowPrivateRanges && overlay.Network.AllowPrivateRanges
 	cfg.Network.RequireEnforced = base.Network.RequireEnforced || overlay.Network.RequireEnforced
+	// Look-back rules only narrow egress, so an overlay adds to the base's.
+	cfg.Network.Lookback = slices.Clone(base.Network.Lookback)
+	if fields["network.lookback"] {
+		cfg.Network.Lookback = append(cfg.Network.Lookback, overlay.Network.Lookback...)
+	}
 
 	if fields["secrets.pass"] {
 		// secrets.pass has INVERTED semantics: an empty pass list means "pass
@@ -104,6 +110,7 @@ func cloneConfig(cfg Config) Config {
 	cfg.Secrets.ScanEnvAllow = append([]string(nil), cfg.Secrets.ScanEnvAllow...)
 	cfg.Syscall.SocketFamilies = append([]string(nil), cfg.Syscall.SocketFamilies...)
 	cfg.Syscall.ExtraDeny = append([]string(nil), cfg.Syscall.ExtraDeny...)
+	cfg.Network.Lookback = slices.Clone(cfg.Network.Lookback)
 	return cfg
 }
 

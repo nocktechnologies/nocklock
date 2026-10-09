@@ -43,8 +43,6 @@ func (p *ProxyServer) handleConnect(w http.ResponseWriter, r *http.Request) {
 	}
 	defer upstream.Close()
 
-	p.logEvent(logging.EventNetworkPassed, r.Method, host, false)
-
 	// Hijack the client connection so we can pipe raw bytes.
 	hijacker, ok := w.(http.Hijacker)
 	if !ok {
@@ -56,6 +54,24 @@ func (p *ProxyServer) handleConnect(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	defer clientConn.Close()
+
+	// Evaluation runs after Hijack, under the look-back mutex: the connection
+	// is either refused here or registered before the 200 line is written, so a
+	// trip can always close it.
+	if p.lookback != nil {
+		p.pauseLookback("before-evaluate")
+		release, denial := p.admitLookback(lookbackDesc(r.Method, host), func() {
+			_ = clientConn.Close()
+			_ = upstream.Close()
+		})
+		if denial != nil {
+			p.logLookbackBlocked(r.Method, host, denial)
+			_, _ = fmt.Fprint(clientConn, lookbackDeniedResponse)
+			return
+		}
+		defer release()
+	}
+	p.logEvent(logging.EventNetworkPassed, r.Method, host, false)
 
 	// Signal the client that the tunnel is established.
 	if _, err := fmt.Fprint(clientConn, "HTTP/1.1 200 Connection Established\r\n\r\n"); err != nil {

@@ -10,6 +10,7 @@ import (
 	"path/filepath"
 	"runtime"
 	"sync"
+	"sync/atomic"
 )
 
 // IsSupported returns true when the shipped CLI can enforce its filesystem
@@ -62,6 +63,18 @@ type Fence struct {
 	SocketPath string
 	LibPath    string // Path to compiled libfence_fs.so
 	listener   net.Listener
+	handler    atomic.Pointer[ReportHandler]
+}
+
+// ReportHandler handles one denied-access report synchronously. While it runs,
+// the interposer is still waiting for its ack (when Config.WaitForAck is set).
+// Reports it handles are not delivered on the Listen channel.
+type ReportHandler func(FenceEvent)
+
+// SetReportHandler routes reports to h instead of the Listen channel. It may be
+// called after Listen and before the child starts.
+func (f *Fence) SetReportHandler(h ReportHandler) {
+	f.handler.Store(&h)
 }
 
 // NewFence creates the Linux LD_PRELOAD filesystem-event listener with a Unix
@@ -167,10 +180,17 @@ func (f *Fence) handleConn(ctx context.Context, conn net.Conn, ch chan<- FenceEv
 			// Skip malformed lines.
 			continue
 		}
-		select {
-		case ch <- event:
-		case <-ctx.Done():
-			return
+		if h := f.handler.Load(); h != nil {
+			(*h)(event)
+		} else {
+			select {
+			case ch <- event:
+			case <-ctx.Done():
+				return
+			}
+		}
+		if f.Config.WaitForAck {
+			_, _ = conn.Write([]byte{1})
 		}
 	}
 	// scanner.Err() is intentionally not checked — connection close from child

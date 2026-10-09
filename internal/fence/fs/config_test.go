@@ -564,3 +564,21 @@ func TestSelfProcFilesPinsExactSet(t *testing.T) {
 		}
 	}
 }
+
+// WaitForAck travels to the interposer as one flag field and round-trips. The
+// control leaves it off, which must stay off after parsing.
+func TestSerialize_WaitForAck(t *testing.T) {
+	for _, want := range []bool{true, false} {
+		fc := &FenceConfig{Root: "/p", Mode: "read-write", DenyPaths: []string{"/p/.ssh"}, WaitForAck: want}
+		parsed, err := ParseSerialized(fc.Serialize("/tmp/nock.sock"))
+		if err != nil {
+			t.Fatalf("ParseSerialized: %v", err)
+		}
+		if parsed.WaitForAck != want {
+			t.Errorf("WaitForAck = %t, want %t", parsed.WaitForAck, want)
+		}
+		if len(parsed.DenyPaths) != 1 || parsed.DenyPaths[0] != "/p/.ssh" {
+			t.Errorf("DenyPaths = %v, want [/p/.ssh]; the ack flag must not disturb path fields", parsed.DenyPaths)
+		}
+	}
+}
