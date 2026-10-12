@@ -6,6 +6,7 @@ import (
 	"path/filepath"
 	"runtime"
 	"sort"
+	"strconv"
 	"strings"
 )
 
@@ -68,7 +69,7 @@ func GenerateHardenedProfile(sensitivePaths []string) (string, error) {
 // lets callers audit the exact applied policy without over-reporting duplicate
 // configuration entries.
 func GenerateProfileAndCount(sensitivePaths []string, hardened bool) (string, int, error) {
-	return generateProfile(sensitivePaths, hardened, nil, "")
+	return generateProfile(sensitivePaths, hardened, nil, "", 0)
 }
 
 // GenerateWriteConfinementProfile builds the macOS Seatbelt profile used when
@@ -79,7 +80,7 @@ func GenerateProfileAndCount(sensitivePaths []string, hardened bool) (string, in
 // for both reads and writes after those grants, so a sensitive path under root
 // never becomes accessible.
 func GenerateWriteConfinementProfile(sensitivePaths []string, root, mode string, hardened bool) (string, int, error) {
-	return GenerateTaggedWriteConfinementProfile(sensitivePaths, root, mode, hardened, "")
+	return GenerateTaggedWriteConfinementProfile(sensitivePaths, root, mode, hardened, "", 0)
 }
 
 // GenerateTaggedWriteConfinementProfile is GenerateWriteConfinementProfile with
@@ -87,7 +88,13 @@ func GenerateWriteConfinementProfile(sensitivePaths []string, root, mode string,
 // tag to the unified-log line for each denial, which is how the denial tailer
 // attributes a log line to this session (see DenialTag). An empty tag emits the
 // untagged profile.
-func GenerateTaggedWriteConfinementProfile(sensitivePaths []string, root, mode string, hardened bool, tag string) (string, int, error) {
+//
+// A non-zero proxyPort engages the kernel network floor: all outbound network
+// connects are denied except to localhost:proxyPort (NockLock's own proxy). The
+// floor carries the same tag. No Unix-socket connect is allowed, so in
+// particular mDNSResponder stays unreachable and DNS cannot leave the box except
+// through the proxy; zero leaves the network unrestricted.
+func GenerateTaggedWriteConfinementProfile(sensitivePaths []string, root, mode string, hardened bool, tag string, proxyPort int) (string, int, error) {
 	if strings.TrimSpace(root) == "" {
 		return "", 0, fmt.Errorf("refusing to generate write-confinement profile with an empty root")
 	}
@@ -99,10 +106,13 @@ func GenerateTaggedWriteConfinementProfile(sensitivePaths []string, root, mode s
 	if err != nil {
 		return "", 0, err
 	}
-	return generateProfile(sensitivePaths, hardened, writePaths, tag)
+	return generateProfile(sensitivePaths, hardened, writePaths, tag, proxyPort)
 }
 
-func generateProfile(sensitivePaths []string, hardened bool, writePaths []string, tag string) (string, int, error) {
+func generateProfile(sensitivePaths []string, hardened bool, writePaths []string, tag string, proxyPort int) (string, int, error) {
+	if proxyPort < 0 || proxyPort > 65535 {
+		return "", 0, fmt.Errorf("invalid proxy port %d for the network floor", proxyPort)
+	}
 	// The modifier must follow the filters inside the deny form: a global
 	// `(with message ...)` ahead of the rule is accepted but never reaches the log.
 	msg := ""
@@ -172,6 +182,17 @@ func generateProfile(sensitivePaths []string, hardened bool, writePaths []string
 		b.WriteString("    (regex #\"^/dev/pty[a-z0-9]+$\")\n")
 		b.WriteString("    (regex #\"^/dev/ptmx$\")\n")
 		b.WriteString("    (regex #\"^/dev/fd/\"))\n")
+	}
+
+	if proxyPort > 0 {
+		// Seatbelt's `remote ip` host filter accepts only "localhost" or "*", so
+		// the floor is pinned to the exact proxy port. Later rules win, so the
+		// allow must follow the deny. network-outbound also covers Unix-socket
+		// connects; none is allowed.
+		b.WriteString(";; Network floor: deny every outbound connect except NockLock's\n")
+		b.WriteString(";; own loopback proxy. The proxy runs outside this profile.\n")
+		b.WriteString("(deny network-outbound" + msg + ")\n")
+		b.WriteString("(allow network-outbound (remote ip \"localhost:" + strconv.Itoa(proxyPort) + "\"))\n")
 	}
 
 	return b.String(), len(canonical), nil

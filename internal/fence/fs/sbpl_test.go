@@ -435,7 +435,7 @@ func TestGenerateTaggedWriteConfinementProfile_TagsEveryFileDeny(t *testing.T) {
 	secret := t.TempDir()
 	const tag = `nocklock:sess"1`
 
-	profile, _, err := GenerateTaggedWriteConfinementProfile([]string{secret}, root, "read-write", true, tag)
+	profile, _, err := GenerateTaggedWriteConfinementProfile([]string{secret}, root, "read-write", true, tag, 0)
 	if err != nil {
 		t.Fatalf("GenerateTaggedWriteConfinementProfile: %v", err)
 	}
@@ -454,11 +454,58 @@ func TestGenerateTaggedWriteConfinementProfile_TagsEveryFileDeny(t *testing.T) {
 	if err != nil {
 		t.Fatalf("GenerateWriteConfinementProfile: %v", err)
 	}
-	untagged, untaggedCount, err := GenerateTaggedWriteConfinementProfile([]string{secret}, root, "read-write", true, "")
+	untagged, untaggedCount, err := GenerateTaggedWriteConfinementProfile([]string{secret}, root, "read-write", true, "", 0)
 	if err != nil {
 		t.Fatalf("GenerateTaggedWriteConfinementProfile(empty tag): %v", err)
 	}
 	if plain != untagged || plainCount != untaggedCount {
 		t.Errorf("empty tag changed the profile:\n%s\nvs\n%s", plain, untagged)
+	}
+}
+
+// TestGenerateTaggedWriteConfinementProfile_NetworkFloor pins the kernel
+// network floor: deny network-outbound, then allow only the exact loopback
+// proxy port, with no Unix-socket allow of any kind (mDNSResponder included).
+func TestGenerateTaggedWriteConfinementProfile_NetworkFloor(t *testing.T) {
+	root := t.TempDir()
+	secret := t.TempDir()
+
+	profile, _, err := GenerateTaggedWriteConfinementProfile([]string{secret}, root, "read-write", false, "nocklock:s1", 43127)
+	if err != nil {
+		t.Fatalf("GenerateTaggedWriteConfinementProfile: %v", err)
+	}
+	deny := `(deny network-outbound (with message "nocklock:s1"))`
+	allow := `(allow network-outbound (remote ip "localhost:43127"))`
+	di, ai := strings.Index(profile, deny), strings.Index(profile, allow)
+	if di < 0 || ai < 0 {
+		t.Fatalf("floor rules missing (deny at %d, allow at %d):\n%s", di, ai, profile)
+	}
+	if di > ai {
+		t.Errorf("allow precedes deny; the later rule wins in SBPL so the floor would be void:\n%s", profile)
+	}
+	if got := strings.Count(profile, "network-outbound"); got != 2 {
+		t.Errorf("want exactly the deny and one allow, got %d network-outbound mentions:\n%s", got, profile)
+	}
+	for _, banned := range []string{"unix-socket", "mDNSResponder", `(remote ip "*`, "network*"} {
+		if strings.Contains(profile, banned) {
+			t.Errorf("floor must not contain %q:\n%s", banned, profile)
+		}
+	}
+
+	// Negative control: without a proxy port the profile has no network rule.
+	open, _, err := GenerateTaggedWriteConfinementProfile([]string{secret}, root, "read-write", false, "nocklock:s1", 0)
+	if err != nil {
+		t.Fatalf("GenerateTaggedWriteConfinementProfile(no floor): %v", err)
+	}
+	if strings.Contains(open, "network") {
+		t.Errorf("port 0 must leave the network unrestricted:\n%s", open)
+	}
+}
+
+func TestGenerateTaggedWriteConfinementProfile_NetworkFloorRejectsBadPort(t *testing.T) {
+	for _, port := range []int{-1, 65536} {
+		if _, _, err := GenerateTaggedWriteConfinementProfile([]string{t.TempDir()}, t.TempDir(), "read-write", false, "", port); err == nil {
+			t.Errorf("port %d: want an error (fail closed), got nil", port)
+		}
 	}
 }

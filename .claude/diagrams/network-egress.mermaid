@@ -3,7 +3,7 @@
 %% `nocklock wrap` prints the effective level at start (internal/cli/egress_level.go).
 
 flowchart TB
-    subgraph ADV["ADVISORY — macOS, or Linux without syscall enforcement"]
+    subgraph ADV["ADVISORY — macOS without filesystem.root, or Linux without syscall enforcement"]
         A1["Agent"] -->|HTTP_PROXY| A2["Allowlist proxy"] -->|allowed| A3["allowlisted host"]
         A1 -->|"direct socket (ignores proxy)"| A4["any other host — REACHED"]
     end

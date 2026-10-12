@@ -11,14 +11,17 @@ type egressLevel string
 const (
 	egressLevelKernel      egressLevel = "KERNEL"
 	egressLevelConfined    egressLevel = "CONFINED"
+	egressLevelSeatbelt    egressLevel = "SEATBELT"
 	egressLevelAdvisory    egressLevel = "ADVISORY"
 	egressLevelOff         egressLevel = "OFF"
 	egressLevelUnreachable egressLevel = "UNREACHABLE"
 )
 
 // effectiveEgressLevel reports the network boundary a wrap invocation can
-// provide from its platform and configured enforcement layers.
-func effectiveEgressLevel(goos, netFence string, allowAll, syscallEnforced, fsInterposer bool) egressLevel {
+// provide from its platform and configured enforcement layers. seatbeltFloor
+// reports that the macOS Seatbelt profile denies all outbound connects except
+// to the local proxy.
+func effectiveEgressLevel(goos, netFence string, allowAll, syscallEnforced, fsInterposer, seatbeltFloor bool) egressLevel {
 	if allowAll {
 		return egressLevelOff
 	}
@@ -34,11 +37,14 @@ func effectiveEgressLevel(goos, netFence string, allowAll, syscallEnforced, fsIn
 		}
 		return egressLevelUnreachable
 	}
+	if goos == "darwin" && seatbeltFloor {
+		return egressLevelSeatbelt
+	}
 	return egressLevelAdvisory
 }
 
 func egressLevelMeetsRequirement(level egressLevel) bool {
-	return level == egressLevelKernel || level == egressLevelConfined
+	return level == egressLevelKernel || level == egressLevelConfined || level == egressLevelSeatbelt
 }
 
 // lookbackLevelError refuses look-back rules unless egress is CONFINED. At
@@ -50,31 +56,32 @@ func lookbackLevelError(rules []config.LookbackRule, level egressLevel, goos str
 	}
 	fix := "run on Linux with the default proxy mode, syscall enforcement and the filesystem interposer enabled, and network.allow_all = false"
 	if goos != "linux" {
-		fix = "look-back rules are Linux-only (macOS cannot reach CONFINED egress)"
+		fix = "look-back rules are Linux-only (macOS reports SEATBELT, not CONFINED, egress)"
 	}
 	return fmt.Errorf("network.lookback rules require effective egress level CONFINED, but it is %s; %s", level, fix)
 }
 
 func egressRequirementMessage(level egressLevel, goos string) string {
 	fix := "use --net-fence=netns on Linux"
+	macFix := "macOS reaches enforced egress only with the Seatbelt network floor: set filesystem.root and network.allow_all = false; otherwise run on Linux with --net-fence=netns"
 	switch level {
 	case egressLevelOff:
 		if goos == "linux" {
 			fix = "set network.allow and network.allow_all = false, then use --net-fence=netns on Linux"
 		} else {
-			fix = "set network.allow and network.allow_all = false; macOS cannot provide enforced egress today, so run on Linux with --net-fence=netns"
+			fix = "set network.allow and network.allow_all = false; " + macFix
 		}
 	case egressLevelUnreachable:
 		if goos == "linux" {
 			fix = "enable the Linux filesystem interposer for the proxy bridge, or use --net-fence=netns on Linux"
 		} else {
-			fix = "macOS cannot provide enforced egress today; run on Linux with --net-fence=netns"
+			fix = macFix
 		}
 	case egressLevelAdvisory:
 		if goos == "linux" {
 			fix = "use --net-fence=netns on Linux, or enable Linux syscall enforcement and the filesystem interposer for CONFINED proxy mode"
 		} else {
-			fix = "macOS cannot provide enforced egress today; run on Linux with --net-fence=netns"
+			fix = macFix
 		}
 	}
 	return fmt.Sprintf("effective egress level is %s; %s", level, fix)
@@ -86,6 +93,8 @@ func egressBanner(level egressLevel, domainCount int) string {
 		return fmt.Sprintf("NockLock: network fence active — %d domain(s), KERNEL-enforced (netns)", domainCount)
 	case egressLevelConfined:
 		return fmt.Sprintf("NockLock: network fence active — %d domain(s), CONFINED (syscall fence; proxy bridge only)", domainCount)
+	case egressLevelSeatbelt:
+		return fmt.Sprintf("NockLock: network fence active — %d domain(s), SEATBELT (kernel floor; proxy only)", domainCount)
 	case egressLevelAdvisory:
 		return fmt.Sprintf("NockLock: WARNING: network fence is ADVISORY — userspace proxy only, configured allowlist has %d domain(s); a client that ignores HTTP_PROXY can reach any host", domainCount)
 	case egressLevelOff:

@@ -69,11 +69,14 @@ On Linux you can instead pass `--net-fence=netns`. The child then runs in its ow
 |---|---|
 | `KERNEL` | Linux netns with a kernel default-drop floor and the configured HTTP(S)/DNS allowlist. |
 | `CONFINED` | Linux proxy with syscall enforcement and the filesystem interposer bridge; the child can connect only to the proxy's Unix socket. |
+| `SEATBELT` | macOS proxy with a Seatbelt kernel floor (needs `filesystem.root`): the profile denies every outbound network connect except to the proxy's loopback port, and allows no Unix-socket connect, so a client that ignores `HTTP_PROXY` is denied by the kernel. It is not `CONFINED`, which is defined by the Linux syscall and interposer bridge, and look-back rules (Linux CONFINED only) are refused at `SEATBELT`. |
 | `ADVISORY` | Userspace proxy only. A client that ignores `HTTP_PROXY` can reach any host. The wrap warning names this limitation. |
 | `OFF` | `network.allow_all = true`; any host is reachable. |
 | `UNREACHABLE` | Syscall enforcement restricts proxy traffic to Unix sockets, but the filesystem interposer bridge is disabled, so the allowlist cannot be reached. Wrap refuses to start. |
 
-Set `network.require_enforced = true` in `.nock/config.toml` or pass `--require-enforced-egress` to refuse `ADVISORY`, `OFF`, and `UNREACHABLE` levels. Linux can use `--net-fence=netns`; macOS cannot provide enforced egress today.
+Set `network.require_enforced = true` in `.nock/config.toml` or pass `--require-enforced-egress` to refuse `ADVISORY`, `OFF`, and `UNREACHABLE` levels. Linux can use `--net-fence=netns`; macOS meets the requirement through the `SEATBELT` floor.
+
+The macOS floor is the Seatbelt profile that `filesystem.root` already requires: `(deny network-outbound)` plus an allow for `localhost:<proxy port>`. The proxy runs outside the profile, so its upstream connects are unaffected. If the profile is rejected or the proxy is unhealthy, wrap refuses to start, and the signed fence-state row records the floor. The honest limits: Apple deprecates `sandbox-exec`; reads outside `filesystem.root` are not confined; with `filesystem.root = ""` there is no profile and egress is `ADVISORY`; a loopback service on the proxy's port is the only local destination; and hostname resolution that a client performs through the macOS resolver service (not a Unix-socket connect) is outside this rule, so DNS exfiltration through that path is not claimed closed.
 
 #### Look-back rules (Linux, CONFINED only)
 

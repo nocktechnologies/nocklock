@@ -91,7 +91,11 @@ pkg/
 6. With `filesystem.root` configured on macOS, NockLock builds a canonical
    Seatbelt profile that denies writes outside the root and required runtime
    paths, preserves the sensitive-path read and write denies, validates it with
-   `sandbox-exec`, and wraps the child with it. Exactly one fence state is
+   `sandbox-exec`, and wraps the child with it. When the network fence is
+   active, the profile also carries the network floor: wrap reserves the
+   loopback proxy port first, the profile denies `network-outbound` except
+   `localhost:<port>`, the proxy binds that exact address outside the profile,
+   and the signed egress level is `SEATBELT`. Exactly one fence state is
    recorded before launch: ENGAGED, REFUSED-TO-START (always, when the
    profile cannot be applied) or DEGRADED (only via the explicit
    `filesystem.root = ""`). The v0.5 `filesystem.macos_allow_unfenced` escape

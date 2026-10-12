@@ -10,6 +10,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -346,6 +347,9 @@ var wrapCmd = &cobra.Command{
 		var fsFence *fsfence.Fence
 		var fsFenceCancel context.CancelFunc
 		var fsSandboxPrefix []string
+		// seatbeltProxyAddr is the loopback address the Seatbelt network floor
+		// admits; the proxy later binds exactly this address. Empty means no floor.
+		var seatbeltProxyAddr string
 		macOSDenialLog := false
 		var landlockPrefix []string
 		var fsCfg *fsfence.FenceConfig
@@ -474,8 +478,23 @@ var wrapCmd = &cobra.Command{
 					// The audit state is written only by this unfenced parent. It
 					// is already included in sensitive through egressChildDenyPaths,
 					// so never grant its directory to the fenced child.
+					proxyPort := 0
+					if !useNetns && !cfg.Network.AllowAll {
+						addr, err := reserveLoopbackProxyAddr()
+						if err != nil {
+							return refuse("cannot reserve the loopback proxy port for the network floor", err)
+						}
+						_, portStr, err := net.SplitHostPort(addr)
+						if err == nil {
+							proxyPort, err = strconv.Atoi(portStr)
+						}
+						if err != nil {
+							return refuse("cannot parse the reserved proxy address for the network floor", err)
+						}
+						seatbeltProxyAddr = addr
+					}
 					profile, pathCount, err := fsfence.GenerateTaggedWriteConfinementProfile(
-						sensitive, fsCfg.Root, fsCfg.Mode, macOSHardened, fsfence.DenialTag(sessionID),
+						sensitive, fsCfg.Root, fsCfg.Mode, macOSHardened, fsfence.DenialTag(sessionID), proxyPort,
 					)
 					if err != nil {
 						return refuse("profile generation failed", err)
@@ -498,7 +517,7 @@ var wrapCmd = &cobra.Command{
 					fsSandboxPrefix = sandboxArgv[:len(sandboxArgv)-len(args)]
 					macOSDenialLog = true
 
-					if err := recordMacOSFilesystemFenceState("ENGAGED", fmt.Sprintf("Seatbelt root-write confinement applied; root=%s mode=%s sensitive_paths=%d", fsCfg.Root, fsCfg.Mode, pathCount), false); err != nil {
+					if err := recordMacOSFilesystemFenceState("ENGAGED", fmt.Sprintf("Seatbelt root-write confinement applied; root=%s mode=%s sensitive_paths=%d network_floor=%s", fsCfg.Root, fsCfg.Mode, pathCount, networkFloorDetail(seatbeltProxyAddr)), false); err != nil {
 						return fmt.Errorf("cannot record macOS filesystem fence engagement; refusing to start: %w", err)
 					}
 					if macOSHardened {
@@ -558,6 +577,7 @@ var wrapCmd = &cobra.Command{
 			cfg.Network.AllowAll,
 			syscallFenceActive,
 			fsFence != nil,
+			seatbeltProxyAddr != "",
 		)
 		if egressLevel == egressLevelUnreachable {
 			detail := egressRequirementMessage(egressLevel, runtime.GOOS)
@@ -670,6 +690,11 @@ var wrapCmd = &cobra.Command{
 		} else if !cfg.Network.AllowAll {
 			proxyCfg := effectiveCfg.Network
 			proxy := network.NewProxyServer(proxyCfg, logger, sessionID)
+			if seatbeltProxyAddr != "" {
+				// Bind exactly the address the Seatbelt floor admits. A bind failure
+				// below refuses to start (fail closed).
+				proxy = network.NewProxyServerAt(proxyCfg, logger, sessionID, seatbeltProxyAddr)
+			}
 			if len(proxyCfg.Lookback) > 0 {
 				// lookbackLevelError guaranteed CONFINED, so fsFence is non-nil.
 				proxy.EnableLookback(proxyCfg.Lookback)
@@ -1341,6 +1366,15 @@ func findLibFenceFS() (string, error) {
 		return "", fmt.Errorf("cannot resolve current working directory for filesystem fence library trust check: %w", err)
 	}
 	return findTrustedLibFenceFS(exePath, cwd, nil, fileExists)
+}
+
+// networkFloorDetail renders the Seatbelt network-floor state for the signed
+// fence-state row.
+func networkFloorDetail(proxyAddr string) string {
+	if proxyAddr == "" {
+		return "none"
+	}
+	return "deny-outbound-except-" + proxyAddr
 }
 
 func reserveLoopbackProxyAddr() (string, error) {

@@ -17,22 +17,26 @@ func TestEffectiveEgressLevelTruthTable(t *testing.T) {
 			for _, allowAll := range []bool{false, true} {
 				for _, syscallEnforced := range []bool{false, true} {
 					for _, fsInterposer := range []bool{false, true} {
-						want := egressLevelAdvisory
-						switch {
-						case allowAll:
-							want = egressLevelOff
-						case mode == "netns" && goos == "linux":
-							want = egressLevelKernel
-						case mode == "netns":
-							want = egressLevelUnreachable
-						case goos == "linux" && syscallEnforced && fsInterposer:
-							want = egressLevelConfined
-						case goos == "linux" && syscallEnforced:
-							want = egressLevelUnreachable
-						}
-						got := effectiveEgressLevel(goos, mode, allowAll, syscallEnforced, fsInterposer)
-						if got != want {
-							t.Errorf("effectiveEgressLevel(%s, %s, %t, %t, %t) = %s, want %s", goos, mode, allowAll, syscallEnforced, fsInterposer, got, want)
+						for _, floor := range []bool{false, true} {
+							want := egressLevelAdvisory
+							switch {
+							case allowAll:
+								want = egressLevelOff
+							case mode == "netns" && goos == "linux":
+								want = egressLevelKernel
+							case mode == "netns":
+								want = egressLevelUnreachable
+							case goos == "linux" && syscallEnforced && fsInterposer:
+								want = egressLevelConfined
+							case goos == "linux" && syscallEnforced:
+								want = egressLevelUnreachable
+							case goos == "darwin" && floor:
+								want = egressLevelSeatbelt
+							}
+							got := effectiveEgressLevel(goos, mode, allowAll, syscallEnforced, fsInterposer, floor)
+							if got != want {
+								t.Errorf("effectiveEgressLevel(%s, %s, %t, %t, %t, %t) = %s, want %s", goos, mode, allowAll, syscallEnforced, fsInterposer, floor, got, want)
+							}
 						}
 					}
 				}
@@ -49,6 +53,7 @@ func TestEgressBannersNameEveryLevel(t *testing.T) {
 	}{
 		{egressLevelKernel, []string{"KERNEL-enforced (netns)", "3 domain(s)"}},
 		{egressLevelConfined, []string{"CONFINED (syscall fence; proxy bridge only)", "3 domain(s)"}},
+		{egressLevelSeatbelt, []string{"SEATBELT (kernel floor; proxy only)", "3 domain(s)"}},
 		{egressLevelAdvisory, []string{"WARNING", "ADVISORY", "userspace proxy only", "ignores HTTP_PROXY", "any host"}},
 		{egressLevelOff, []string{"WARNING", "OFF", "allow_all = true", "any host"}},
 		{egressLevelUnreachable, []string{"fatal", "UNREACHABLE", "proxy bridge is disabled"}},
@@ -71,6 +76,7 @@ func TestRequireEnforcedEgressAcceptsOnlyEnforcedLevels(t *testing.T) {
 	}{
 		{egressLevelKernel, true},
 		{egressLevelConfined, true},
+		{egressLevelSeatbelt, true},
 		{egressLevelAdvisory, false},
 		{egressLevelOff, false},
 		{egressLevelUnreachable, false},
@@ -79,14 +85,14 @@ func TestRequireEnforcedEgressAcceptsOnlyEnforcedLevels(t *testing.T) {
 			t.Errorf("egressLevelMeetsRequirement(%s) = %t, want %t", tt.level, got, tt.want)
 		}
 	}
-	if got := egressRequirementMessage(egressLevelAdvisory, "darwin"); !strings.Contains(got, "macOS cannot provide enforced egress") {
+	if got := egressRequirementMessage(egressLevelAdvisory, "darwin"); !strings.Contains(got, "Seatbelt network floor") {
 		t.Fatalf("macOS advisory fix is not actionable: %q", got)
 	}
 	if got := egressRequirementMessage(egressLevelAdvisory, "linux"); !strings.Contains(got, "--net-fence=netns") {
 		t.Fatalf("Linux advisory fix does not name --net-fence=netns: %q", got)
 	}
-	if got := egressRequirementMessage(egressLevelOff, "darwin"); !strings.Contains(got, "macOS cannot provide enforced egress today") {
-		t.Fatalf("macOS OFF fix must say enforced egress is unavailable: %q", got)
+	if got := egressRequirementMessage(egressLevelOff, "darwin"); !strings.Contains(got, "Seatbelt network floor") {
+		t.Fatalf("macOS OFF fix must name the Seatbelt floor: %q", got)
 	}
 }
 
@@ -94,7 +100,7 @@ func TestRequireEnforcedEgressAcceptsOnlyEnforcedLevels(t *testing.T) {
 // loads, and no rules load at any level.
 func TestLookbackLevelError(t *testing.T) {
 	rules := []config.LookbackRule{{Name: "r", On: config.LookbackTriggerFileBlocked, Then: config.LookbackActionDenyEgress}}
-	for _, level := range []egressLevel{egressLevelKernel, egressLevelAdvisory, egressLevelOff, egressLevelUnreachable} {
+	for _, level := range []egressLevel{egressLevelKernel, egressLevelSeatbelt, egressLevelAdvisory, egressLevelOff, egressLevelUnreachable} {
 		err := lookbackLevelError(rules, level, "linux")
 		if err == nil || !strings.Contains(err.Error(), string(level)) {
 			t.Errorf("level %s with rules: err = %v, want a refusal naming the level", level, err)
@@ -121,7 +127,7 @@ func TestLookbackRefusedWhenNoInterposer(t *testing.T) {
 		for _, mode := range []string{"proxy", "netns"} {
 			for _, allowAll := range []bool{false, true} {
 				for _, syscallEnforced := range []bool{false, true} {
-					level := effectiveEgressLevel(goos, mode, allowAll, syscallEnforced, false)
+					level := effectiveEgressLevel(goos, mode, allowAll, syscallEnforced, false, false)
 					if err := lookbackLevelError(rules, level, goos); err == nil {
 						t.Errorf("no interposer (%s, %s, allowAll=%t, syscall=%t) reached level %s and loaded look-back rules", goos, mode, allowAll, syscallEnforced, level)
 					}
@@ -129,7 +135,7 @@ func TestLookbackRefusedWhenNoInterposer(t *testing.T) {
 			}
 		}
 	}
-	level := effectiveEgressLevel("linux", "proxy", false, true, true)
+	level := effectiveEgressLevel("linux", "proxy", false, true, true, false)
 	if err := lookbackLevelError(rules, level, "linux"); err != nil {
 		t.Errorf("control: interposer present, level %s refused: %v", level, err)
 	}

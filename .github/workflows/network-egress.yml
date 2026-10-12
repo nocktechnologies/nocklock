@@ -455,7 +455,7 @@ jobs:
           } >> "$GITHUB_STEP_SUMMARY"
 
   dns-escape-macos:
-    name: macOS DNS-escape · proxy enforcement recorded (hosted macOS)
+    name: macOS DNS-escape · Seatbelt network floor (hosted macOS)
     runs-on: macos-latest
     steps:
       - uses: actions/checkout@v4
@@ -475,26 +475,26 @@ jobs:
 
       # NOCKLOCK_DNS_ESCAPE_REQUIRE=1 turns a would-be skip (sandbox-exec missing,
       # or the test host not provisioned) into a HARD FAILURE so a misconfigured
-      # runner is loud, not green. macOS has no kernel egress floor, so this job
-      # RECORDS what the proxy-only fence does: a proxied disallowed host is denied
-      # and signed; the allowed host still works and is signed; direct-IP and
-      # hosts-pin are logged as not-kernel-blocked (see the test log).
-      - name: run macOS DNS-escape recording test (skips forbidden)
-        run: NOCKLOCK_DNS_ESCAPE_REQUIRE=1 go test ./internal/cli/ -run '^TestWrapMacOSDNSEscapeRecordsProxyEnforcement$' -v -count=1
+      # runner is loud, not green. The Seatbelt profile denies all outbound connects
+      # except the proxy's loopback port, so this job ASSERTS inside the fence: raw
+      # TCP gets EPERM, curl via the proxy works, curl --noproxy fails, a direct
+      # resolver query is denied; a proxied disallowed host is denied and signed.
+      - name: run macOS DNS-escape + network-floor tests (skips forbidden)
+        run: NOCKLOCK_DNS_ESCAPE_REQUIRE=1 go test ./internal/cli/ -run '^(TestWrapMacOSDNSEscapeRecordsProxyEnforcement|TestWrapMacOSNetworkFloor)$' -v -count=1
 
       # No `if: always()`: this verdict records the asserted + recorded outcomes,
       # so it must render only when the recording test above actually passed.
       - name: record the macOS per-trick verdict
         run: |
           {
-            echo "### DNS-escape — macOS proxy-only fence (no kernel egress floor)"
+            echo "### DNS-escape — macOS Seatbelt network floor (egress level SEATBELT)"
             echo ""
             echo "| trick | macOS outcome |"
             echo "|---|---|"
             echo "| proxied disallowed host | ASSERTED denied at the proxy and signed as a deny row; verify --audit clean |"
             echo "| proxied allowed host | ASSERTED permitted, reaches the upstream, signed as an allow row |"
-            echo "| T1 direct-IP / raw-socket egress | RECORDED not kernel-blocked — a client ignoring HTTP_PROXY reaches any address (Seatbelt has no network rules); the Linux netns floor closes this |"
+            echo "| T1 direct-IP / raw-socket egress | ASSERTED kernel-denied with EPERM; curl --noproxy to the allowed host fails; a direct resolver query is denied |"
             echo "| T3 /etc/hosts pin | RECORDED shared, root-owned file: a non-root child cannot pin it, and the proxy re-resolves the allowed name itself |"
             echo ""
-            echo "macOS egress enforcement is the local HTTP(S) proxy plus HTTP_PROXY injection, which a cooperating client honors. See the test log for the recorded limitations."
+            echo "macOS egress is the local proxy plus a Seatbelt kernel floor that denies every other outbound connect. See the test log for the in-fence probe output."
           } >> "$GITHUB_STEP_SUMMARY"

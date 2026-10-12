@@ -414,7 +414,7 @@ func sanityDoctorChecks(cfg *config.Config, configPath string, caps doctorCapabi
 			syscallActive = caps.syscallBackend()
 		}
 		fsInterposer := caps.goos == "linux" && cfg.Filesystem.Root != ""
-		level := effectiveEgressLevel(caps.goos, "proxy", cfg.Network.AllowAll, syscallActive, fsInterposer)
+		level := effectiveEgressLevel(caps.goos, "proxy", cfg.Network.AllowAll, syscallActive, fsInterposer, caps.goos == "darwin" && cfg.Filesystem.Root != "")
 		if level == egressLevelAdvisory {
 			fix := "use --net-fence=netns on Linux, or enable Linux syscall enforcement and the filesystem interposer for CONFINED proxy mode"
 			if caps.goos != "linux" {
