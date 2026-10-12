@@ -6,6 +6,7 @@ attempt with the signed row that proves the verdict, runs `nocklock verify
 --audit` and `nockguard verify`, and writes REPORT.md + report.json.
 """
 import argparse
+import contextlib
 import json
 import os
 import signal
@@ -13,6 +14,7 @@ import socket
 import sqlite3
 import subprocess
 import sys
+import time
 import tomllib
 from pathlib import Path
 
@@ -26,17 +28,18 @@ def run(argv, cwd, env, timeout=120):
     try:
         out, _ = p.communicate(timeout=timeout)
     except subprocess.TimeoutExpired:
-        for sig in (signal.SIGTERM, signal.SIGKILL):
-            try:
-                os.killpg(p.pid, sig)
-            except ProcessLookupError:
-                break
-            try:
-                p.communicate(timeout=5)
-                break
-            except subprocess.TimeoutExpired:
-                continue
-        p.communicate()
+        # TERM, short grace, then KILL the group unconditionally: the leader exiting
+        # does not prove descendants are gone. Never wait for pipe EOF (a setsid'd
+        # descendant may hold it); reap the leader and close our end instead.
+        with contextlib.suppress(ProcessLookupError):
+            os.killpg(p.pid, signal.SIGTERM)
+        with contextlib.suppress(subprocess.TimeoutExpired):
+            p.wait(timeout=5)
+        with contextlib.suppress(ProcessLookupError):
+            os.killpg(p.pid, signal.SIGKILL)
+        with contextlib.suppress(subprocess.TimeoutExpired):
+            p.wait(timeout=5)
+        p.stdout.close()
         return 124, f"timed out after {timeout}s"
     return p.returncode, out.strip()
 
@@ -57,14 +60,16 @@ def udp_sink():
     return s, f"{ip}:{s.getsockname()[1]}"
 
 
-def sink_hits(s):
-    n = 0
+def sink_hits(s, deadline=2.0, cap=1000):
+    """Count datagrams, bounded by a wall-clock deadline and packet cap so a flood can't hang the bench."""
+    n, end = 0, time.monotonic() + deadline
     try:
-        while True:
+        while n < cap and time.monotonic() < end:
             s.recvfrom(512)
             n += 1
     except (socket.timeout, BlockingIOError):
-        return n
+        pass
+    return n
 
 
 def find_audit_db(state):
