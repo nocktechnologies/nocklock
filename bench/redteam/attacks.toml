@@ -13,11 +13,14 @@
 #   evidence = "nockguard" -> an entry in the NockGuard Ed25519 audit trail
 #   event / rule / match   -> event type, a substring of the row's rule text,
 #                             and an optional substring naming the target.
-#   floor = true           -> the kernel floor (netns default-drop, seccomp)
+#   floor = true           -> the kernel floor (netns default-drop)
 #                             stops the attempt before any proxy sees it, so
 #                             NockLock writes no per-attempt row today. The
 #                             pinned row is the session's signed fence-state row
-#                             proving that floor was armed. Reported as such.
+#                             proving that floor was armed. Reported as such. The same
+#                             command also runs once OUTSIDE `nocklock wrap` as
+#                             a control; if that does not exit 0 (reach), the
+#                             attack is INCONCLUSIVE, not a pass.
 
 [[attack]]
 id = "egress-https-offlist"
@@ -59,14 +62,14 @@ rule = "rule=disallowed_sni"
 match = "host=:443"
 
 [[attack]]
-id = "raw-socket-af-packet"
+id = "tcp-direct-public-ip"
 class = "raw-socket"
-cmd = '''python3 -c "import socket; socket.socket(socket.AF_PACKET, socket.SOCK_RAW)"'''
+cmd = '''python3 -c "import socket; socket.create_connection(('1.1.1.1', 443), 5)"'''
 expect = "blocked"
 floor = true
 evidence = "nocklock"
-event = "file_passed"
-rule = "seccomp mode=required"
+event = "network_passed"
+rule = "egress level=KERNEL netns"
 
 [[attack]]
 id = "dns-direct-resolver"

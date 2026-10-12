@@ -303,6 +303,9 @@ jobs:
             /usr/local/lib/nocklock/libfence_fs.so
           ls -l /usr/local/lib/nocklock/libfence_fs.so
 
+      - name: driver unit tests (hung attack and lingering child cannot stall the bench)
+        run: python3 -m unittest discover -s bench/redteam
+
       # Run AS THE RUNNER USER (not sudo): wrap sudo's the helper itself and the
       # fenced child drops to the invoking uid. Reuses the NOCKLOCK_AUDIT_REQUIRE
       # gate (shared with netns-egress-audit) so a helper/sudo-unreachable runner
