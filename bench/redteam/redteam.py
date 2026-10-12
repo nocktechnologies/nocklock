@@ -188,6 +188,8 @@ def main():
             res["outcome"], res["outcome_ok"] = "INCONCLUSIVE", False  # unfenced control did not reach
         res["proof"] = nockguard_proof(trail, atk) if atk["evidence"] == "nockguard" else nocklock_proof(rows, atk)
         res["proof_ok"] = bool(res["proof"] and res["proof"]["signed"])
+        # A missing proof is diagnosable from the report alone: keep what the session did log.
+        res["session_rows"] = [] if res["proof"] else [f"{r['event_type']} blocked={r['blocked']} {r['detail'][:160]}" for r in rows]
     con.close()
 
     def tool(name, argv):
@@ -217,7 +219,8 @@ def main():
               "attacks": [{
                   "id": r["atk"]["id"], "class": r["atk"]["class"], "tried": r["cmd"],
                   "expected": r["atk"]["expect"], "result": r["outcome"], "exit": r["exit"],
-                  "floor_only": bool(r["atk"].get("floor")), "control": r["control"], "outcome_ok": r["outcome_ok"],
+                  "floor_only": bool(r["atk"].get("floor")), "control": r["control"], "outcome_ok": r["outcome_ok"], "output": r["output"],
+                  "session_rows": r["session_rows"],
                   "proof": r["proof"]} for r in results]}
     (out / "report.json").write_text(json.dumps(report, indent=2) + "\n")
     (out / "REPORT.md").write_text(render_md(report))
