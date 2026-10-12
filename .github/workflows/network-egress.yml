@@ -498,3 +498,79 @@ jobs:
             echo ""
             echo "macOS egress is the local proxy plus a Seatbelt kernel floor that denies every other outbound connect. See the test log for the in-fence probe output."
           } >> "$GITHUB_STEP_SUMMARY"
+
+  redteam-bench:
+    name: red-team bench · scripted attacks vs NockLock + NockGuard, signed receipt report (root)
+    runs-on: ubuntu-latest
+    env:
+      # Exact NockGuard release; bump deliberately. Never built from a sibling checkout.
+      NOCKGUARD_VERSION: v0.5.0
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: provision iproute2 + nftables + curl + gcc
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y iproute2 nftables curl build-essential
+
+      # Same install shape as netns-egress-audit: the binary plus the privileged
+      # egress helper and the trusted filesystem-fence interposer that `wrap`
+      # needs before it will launch with the netns fence and the fs fence on.
+      - name: build nocklock, install the egress helper and the fs interposer
+        run: |
+          go build -o nocklock ./cmd/nocklock
+          sudo install -m 0755 nocklock /usr/local/bin/nocklock
+          sudo mkdir -p /usr/libexec
+          sudo tee /usr/libexec/nocklock-egress-helper >/dev/null <<'HELPER'
+          #!/bin/sh
+          exec /usr/local/bin/nocklock __netns-helper "$@"
+          HELPER
+          sudo chmod 0755 /usr/libexec/nocklock-egress-helper
+          sudo -n /usr/libexec/nocklock-egress-helper check && echo "helper preflight OK"
+          make build-fence-fs
+          sudo mkdir -p /usr/local/lib/nocklock
+          sudo install -m 0755 internal/fence/fs/interposer/libfence_fs.so \
+            /usr/local/lib/nocklock/libfence_fs.so
+
+      # NockGuard from its published release, pinned by exact version and checked
+      # against the release's SHA256SUMS before it is unpacked or run.
+      - name: install nockguard ${{ env.NOCKGUARD_VERSION }} from its release
+        run: |
+          base="https://github.com/nocktechnologies/nockguard/releases/download/${NOCKGUARD_VERSION}"
+          asset="nockguard_${NOCKGUARD_VERSION#v}_linux_amd64.tar.gz"
+          dl="$(mktemp -d)"
+          curl -fsSL -o "$dl/$asset" "$base/$asset"
+          curl -fsSL -o "$dl/SHA256SUMS" "$base/SHA256SUMS"
+          (cd "$dl" && grep " $asset\$" SHA256SUMS | sha256sum -c -)
+          tar -xzf "$dl/$asset" -C "$dl" nockguard
+          sudo install -m 0755 "$dl/nockguard" /usr/local/bin/nockguard
+          nockguard version
+
+      # Run AS THE RUNNER USER (not sudo): wrap sudo's the helper itself and the
+      # fenced child drops to the invoking uid. The bench exits non-zero when any
+      # pass-bar item fails; the report is uploaded either way.
+      - name: run the red-team bench
+        run: |
+          NOCKLOCK_BIN=/usr/local/bin/nocklock NOCKGUARD_BIN=/usr/local/bin/nockguard \
+            bash bench/redteam/run.sh
+
+      - name: publish the report to the job summary
+        if: always()
+        run: |
+          if [ -f bench/redteam/REPORT.md ]; then cat bench/redteam/REPORT.md >> "$GITHUB_STEP_SUMMARY"; fi
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: redteam-report
+          path: |
+            bench/redteam/REPORT.md
+            bench/redteam/report.json
+          if-no-files-found: error
