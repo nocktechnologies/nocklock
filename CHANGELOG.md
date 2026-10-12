@@ -4,6 +4,10 @@ All notable changes to NockLock will be documented in this file.
 
 ## [Unreleased]
 
+## [0.7.0] - 2026-10-12
+
+On macOS, the Seatbelt profile now acts as a kernel network floor: with the network fence active, outbound traffic can only reach the local proxy, and the signed egress level is the new `SEATBELT`. This release also adds look-back rules, slice 1 (Linux `CONFINED` egress only), and opt-in `[audit.forward]` delivery of fence decisions to Command's ops log. The `claude-code` preset also changes how it treats tokens in the secret fence (see Security below).
+
 ### Added
 
 - Red-team bench, slice 1 (`bench/redteam/`): `attacks.toml` lists scripted attacks (off-allowlist HTTPS and HTTP egress, raw sockets, direct DNS, secret file and env reads, a write outside the fence root, and an MCP `tools/call` denied by a NockGuard policy through `nockguard proxy`). `run.sh` runs each inside `nocklock wrap`, runs `nocklock verify --audit` and `nockguard verify`, and writes `REPORT.md` and `report.json` pairing every attempt with the signed row that stopped it (event id, rule, chain hash). Two allowed actions are negative controls. New `redteam-bench` CI job installs NockGuard v0.5.0 from its release (sha256 pinned in the workflow) and uploads the report. Each attack runs in its own session with output sent to a file (no pipe) under one deadline; on expiry the process group is SIGKILLed, and a process that is still not reaped is recorded as `HARNESS-FAULT`. Two attempts (a direct TCP connect to a literal public IP on 443, a direct resolver query) are stopped by the kernel floor, which writes no per-attempt row today, so the report pins the session's signed fence-state row for them and labels them `blocked by kernel floor`. Each is also run once outside `nocklock wrap`; if that control does not reach, the attack is `INCONCLUSIVE`, not a pass.
@@ -17,12 +21,14 @@ All notable changes to NockLock will be documented in this file.
 
 ### Security
 
+- `claude-code` preset (all platforms): the `*_TOKEN*` block pattern was removed so that `CLAUDE_CODE_OAUTH_TOKEN` can pass the secret fence. A variable whose name matches `*_TOKEN*` is no longer blocked by that pattern. The preset still blocks `*_SECRET*` and `*_PASSWORD*`. Tokens that are not in `secrets.pass` are still stripped, because `pass` is an allowlist (the test `TestClaudeCodePresetPassesOAuthToken` shows `GITHUB_TOKEN` stripped and `CLAUDE_CODE_OAUTH_TOKEN` passing). If you upgrade from v0.6.x: `nocklock init` copies the preset into `.nock/config.toml` and never overwrites an existing file. So a config made by an earlier `init` keeps the old lists: `CLAUDE_CODE_OAUTH_TOKEN` is blocked by `*_TOKEN*` and is missing from `secrets.pass`. To use the token, add `CLAUDE_CODE_OAUTH_TOKEN` to `secrets.pass` and remove `*_TOKEN*` from `secrets.block`. Removing the pattern lets every `*_TOKEN*` name listed in `secrets.pass` reach the child, so check that list first.
 - CI: `claude.yml` now runs only when the triggering author is an `OWNER`,
   `MEMBER` or `COLLABORATOR`, checked per event type. `claude-code-review.yml`
   skips pull requests opened from forks instead of failing on missing secrets.
 
 ### Changed
 
+- Windows probes (N10825/N11601): record the second desktop run (Probe 1 pivot PASS, Probe 2 needs no admin); `run-probe.ps1` runs python in the container by absolute path with a package-SID grant revoked at teardown. Probe 1 adds a literal-IP off-box packet step (`VERDICT(1-ip)`, scored on its own line: only curl exit 7 is BLOCKED, a timeout is INCONCLUSIVE), python is skipped with a SETUP-FAULT when only the Store alias exists, and the README gains a one-shot Scheduled Task recipe for SSH runs (`schtasks /Create` + `/Run` as `nlprobe-runner`, output redirected to `probe-<ts>.log`, stopped and polled before `/Delete`; independent of the SSH session; a one-line `nlprobe-run.cmd` launcher keeps `/TR` short, any old `output.txt` is renamed to `output-prev-<ts>.txt` before the run so completion means `output.txt` ends with a `RUN:` line, and the recipe states one operator, one run at a time), and `run-probe.ps1` fails loudly if a Probe 1 fault entry lacks its step-name prefix and records a SETUP-FAULT (skipping python) when the package-SID `icacls` grant fails.
 - Docs: `docs/design/look-back-rules.md` design note for look-back policy rules over the audit event history. The valid `on` list is now the event types written with `blocked=1`, and the contention paragraph records that `Logger.Log` does not honour `busy_timeout`.
 - Docs: the `.claude/diagrams` Mermaid diagrams now describe the shipped v0.6.1
   fences instead of the original "planned" design, and a new
