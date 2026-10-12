@@ -3,8 +3,10 @@ package cli
 import (
 	"bytes"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
+	"io/fs"
 	"maps"
 	"os"
 	"path/filepath"
@@ -82,7 +84,7 @@ var initCmd = &cobra.Command{
 func runInitDiff(w io.Writer, configPath, runtimeName string) error {
 	existing, err := config.Load(configPath)
 	if err != nil {
-		if os.IsNotExist(err) {
+		if errors.Is(err, fs.ErrNotExist) {
 			return fmt.Errorf("no config at %s to compare against; run 'nocklock init --runtime %s' to create one", configPath, runtimeName)
 		}
 		return fmt.Errorf("failed to load %s: %w", configPath, err)
@@ -131,7 +133,8 @@ func configTree(cfg *config.Config) (map[string]any, error) {
 }
 
 // diffValue compares have and want at path (nil means absent) and appends one
-// "path = value" line to removed or added per difference. Tables recurse key
+// "path = value" line to removed or added per difference (array elements use
+// "path -= value" and "path += value" so they do not read as assignments). Tables recurse key
 // by key, arrays of tables compare entry by entry in order (a missing entry is
 // reported whole as path[i]), and arrays of scalars compare element by element.
 func diffValue(path string, have, want any, removed, added *[]string) {
@@ -161,12 +164,12 @@ func diffValue(path string, have, want any, removed, added *[]string) {
 		if w, ok := want.([]any); ok {
 			for _, e := range h {
 				if !slices.ContainsFunc(w, func(o any) bool { return reflect.DeepEqual(e, o) }) {
-					*removed = append(*removed, path+" = "+renderValue(e))
+					*removed = append(*removed, path+" -= "+renderValue(e))
 				}
 			}
 			for _, e := range w {
 				if !slices.ContainsFunc(h, func(o any) bool { return reflect.DeepEqual(e, o) }) {
-					*added = append(*added, path+" = "+renderValue(e))
+					*added = append(*added, path+" += "+renderValue(e))
 				}
 			}
 			return

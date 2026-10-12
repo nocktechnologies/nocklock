@@ -203,3 +203,37 @@ func TestInitDiffComparesLookbackEntriesStructurally(t *testing.T) {
 		t.Fatalf("identical configs differ: removed=%q added=%q", removed, added)
 	}
 }
+
+func TestInitDiffPrintsArrayElementsAsAppendAndRemove(t *testing.T) {
+	have := config.DefaultConfig()
+	have.Secrets.Block = []string{"*_TOKEN*", "*_SECRET*"}
+	have.Secrets.Pass = []string{"PATH"}
+	want := config.DefaultConfig()
+	want.Secrets.Block = []string{"*_SECRET*"}
+	want.Secrets.Pass = []string{"PATH", "CLAUDE_CODE_OAUTH_TOKEN"}
+	h, err := configTree(&have)
+	if err != nil {
+		t.Fatal(err)
+	}
+	w, err := configTree(&want)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var removed, added []string
+	diffValue("", h, w, &removed, &added)
+	if got, wantLines := removed, []string{`secrets.block -= "*_TOKEN*"`}; !reflect.DeepEqual(got, wantLines) {
+		t.Fatalf("removed = %q, want %q", got, wantLines)
+	}
+	if got, wantLines := added, []string{`secrets.pass += "CLAUDE_CODE_OAUTH_TOKEN"`}; !reflect.DeepEqual(got, wantLines) {
+		t.Fatalf("added = %q, want %q", got, wantLines)
+	}
+}
+
+func TestInitDiffMissingConfigSeesThroughWrappedNotExist(t *testing.T) {
+	missing := filepath.Join(t.TempDir(), "nope", "config.toml")
+	var out strings.Builder
+	err := runInitDiff(&out, missing, "claude-code")
+	if err == nil || !strings.Contains(err.Error(), "no config at") {
+		t.Fatalf("want 'no config at' error for a wrapped not-exist, got %v", err)
+	}
+}
