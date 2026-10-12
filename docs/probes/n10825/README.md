@@ -67,11 +67,16 @@ assembled yet, and on `-Mode Desktop` it refuses the DISPOSABLE-BOX ONLY probes 
    ```
 
    It starts the run through WMI, prints `DETACH: started pid=...` and returns. The run writes
-   `probe-<ts>.log` and `output.txt` in the current directory, and `probe-<ts>.done`
-   (`DONE exit=<n>`) last. Wait for the `.done` file. The detached run keeps your elevated token
-   and is not a child of the SSH session. A `DETACH: FAILED` line means nothing was started.
-   `-Detach` is untested on Windows: check `elevated=True` in `output.txt`, and if no
-   `probe-<ts>.log` appears, run in the foreground from a console PowerShell instead.
+   `probe-<ts>-<id>.log` and `output.txt` in the current directory, and `probe-<ts>-<id>.done` last
+   (`<ts>` has second resolution and `<id>` is random, so two runs never share a file). Wait for the
+   `.done` file. It is written in a `finally`, so it always appears, and reads `DONE exit=<n>`, plus
+   ` error=<message>` when the run threw or was refused. **`exit=0` means the script itself returned
+   0** (`RUN: COMPLETE`); any other value, or an `error=`, means it did not. The detached process is
+   expected to inherit your elevated token and is not a child of the SSH session. It checks its own
+   elevation first: if it is not elevated it refuses with `DONE exit=2 error=REFUSED: detached run
+   is not elevated; nothing was changed` and has changed nothing. A `DETACH: FAILED` line means
+   nothing was started. `-Detach` is untested on Windows: if no `probe-<ts>-<id>.log` appears, run in
+   the foreground from a console PowerShell instead.
 
 5. Bring back both `probe-<ts>.log` (the full transcript) and `output.txt`.
 
@@ -126,7 +131,9 @@ The transcript carries the verdicts: `LAUNCHER-ENV:`, `LIMITED-TOKEN:`,
   `495f2b44`). Probe 1's pivot PASSED (loopback reached, off-box did not resolve), Probe 2
   answered (no admin), Probe 1's 9998 bind + listen is an open SETUP-FAULT (python not on the
   container's PATH) and the SSH drop cut the run before Probe 3. This revision runs python by
-  absolute path with a package-SID grant, and adds `-Detach`.
+  absolute path with a package-SID grant, and adds `-Detach`. Its off-box claim was too strong:
+  `exit=6` shows name resolution failed, not that packets are dropped. Round 2 adds a literal-IP
+  `curl` to 1.1.1.1, scored as `VERDICT(1-ip)` against an outer control.
 
 ## If the run was interrupted
 

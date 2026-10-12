@@ -24,7 +24,7 @@
 
 .PARAMETER Detach
   Start the run through WMI so a dropped SSH session cannot kill it; the transcript goes to
-  probe-<ts>.log and probe-<ts>.done ('DONE exit=<n>') is written last. See README.md.
+  probe-<ts>-<id>.log and probe-<ts>-<id>.done ('DONE exit=<n>') is written last. See README.md.
 #>
 param(
   [ValidateSet('Desktop', 'DisposableBox')][string]$Mode = 'Desktop',
@@ -36,18 +36,35 @@ param(
 # The second desktop run lost its SSH session mid-run (client_loop: send disconnect: Broken
 # pipe), so Probe 3 never ran and the teardown was partial. -Detach starts the real run
 # through WMI (Win32_Process.Create), whose child is not in the SSH session's process tree,
-# writes its transcript to probe-<ts>.log, and writes probe-<ts>.done ('DONE exit=<n>') last.
-# This invocation changes nothing else on the machine and returns at once; poll the .done file.
-# The caller's token is kept, so run it from the same elevated session. No -Detach: run in
-# the foreground from a console PowerShell, as the README says.
+# writes its transcript to probe-<ts>-<id>.log, and writes probe-<ts>-<id>.done last. The marker
+# is 'DONE exit=<n>' (+ ' error=<message>' when the run threw or was refused) and is written in a
+# finally, so it always appears; exit=0 only when the script itself returned 0. The detached
+# process checks its OWN elevation first and refuses (exit 2, before anything changes) when it is
+# not elevated, with the refusal in the marker. This invocation changes nothing else on the machine
+# and returns at once; poll the .done file. Run it from the same elevated session: the detached
+# process is EXPECTED to inherit that token (unobserved until the refusal check says so). No
+# -Detach: run in the foreground from a console PowerShell, as the README says.
 if ($Detach) {
-  $ts = (Get-Date).ToUniversalTime().ToString('yyyyMMdd\THHmm\Z')
+  $id = (New-Guid).ToString('N').Substring(0, 8)                 # seconds alone can collide; the id cannot
+  $ts = (Get-Date).ToUniversalTime().ToString('yyyyMMdd\THHmmss\Z') + "-$id"
   $dir = (Get-Location).Path
   $log = Join-Path $dir "probe-$ts.log"
   $done = Join-Path $dir "probe-$ts.done"
   $q = { param($s) $s.Replace("'", "''") }       # single-quote-safe paths
-  $inner = "& '{0}' -Mode '{1}' -Probes '{2}' *> '{3}'; 'DONE exit={{0}}' -f `$LASTEXITCODE | Set-Content -Encoding ascii '{4}'" -f
-    (& $q $PSCommandPath), $Mode, ($Probes -join ','), (& $q $log), (& $q $done)
+  $inner = @'
+$global:LASTEXITCODE = $null; $rc = 1; $err = $null
+try {
+  $me = [Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()
+  if (-not $me.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)) { $rc = 2; $err = 'REFUSED: detached run is not elevated; nothing was changed' }
+  else {
+    & '@@SCRIPT@@' -Mode '@@MODE@@' -Probes '@@PROBES@@' *> '@@LOG@@'
+    if ($null -eq $global:LASTEXITCODE) { $rc = 1; $err = 'script returned without an exit code' } else { $rc = $global:LASTEXITCODE }
+  }
+} catch { $rc = 1; $err = $_.Exception.Message }
+finally { ('DONE exit=' + $rc + $(if ($err) { ' error=' + ($err -replace '\s+', ' ') })) | Set-Content -Encoding ascii '@@DONE@@' }
+'@
+  $inner = $inner.Replace('@@SCRIPT@@', (& $q $PSCommandPath)).Replace('@@MODE@@', $Mode).Replace('@@PROBES@@', ($Probes -join ',')).
+    Replace('@@LOG@@', (& $q $log)).Replace('@@DONE@@', (& $q $done))
   $enc = [Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes($inner))
   $psExe = (Get-Process -Id $PID).Path
   $r = Invoke-CimMethod -ClassName Win32_Process -MethodName Create -Arguments @{
@@ -175,13 +192,20 @@ try {
   foreach ($probe in $requiredTools.Keys) {
     foreach ($cmd in $requiredTools[$probe]) {
       if (-not $checkedTools.ContainsKey($cmd)) {
-        $loc = Get-Command $cmd -ErrorAction SilentlyContinue
+        # python must be a real python.exe, not the WindowsApps Store alias (a zero-byte stub in a
+        # Windows-managed directory); Probe 1 launches this same $pyExe inside the container.
+        $loc = if ($cmd -eq 'python') {
+          Get-Command python -CommandType Application -ErrorAction SilentlyContinue |
+            Where-Object { $_.Source -notlike '*\WindowsApps\*' } | Select-Object -First 1
+        } else { Get-Command $cmd -ErrorAction SilentlyContinue }
         $checkedTools[$cmd] = $loc
+        if ($cmd -eq 'python') { $pyExe = $loc.Source }
         if ($loc) { "$cmd -> $($loc.Source)" }
       }
       if (-not $checkedTools[$cmd]) {
         $setupFaults += "$probe requires $cmd"
-        "SETUP-FAULT: $probe requires $cmd — tool not found, probe not scored"
+        if ($cmd -eq 'python') { "SETUP-FAULT: no usable python.exe (only the WindowsApps alias or none) — $probe not scored" }
+        else { "SETUP-FAULT: $probe requires $cmd — tool not found, probe not scored" }
       }
     }
   }
@@ -861,8 +885,14 @@ try {
       # Only curl writes CURL_DONE, so a capture without `CURL_DONE exit=<launch exit>` is a
       # SETUP-FAULT, recorded in hex, never a network result.
       $log1 = @(); $fault1 = @()
+      # example.com failing to resolve (exit=6) only shows DNS failed, not that packets are dropped. The 'ip'
+      # curl connects to a literal public IP (no DNS), so it is the off-box packet test; the outer control
+      # below proves this machine can reach that IP, or an inside failure would prove nothing.
+      curl.exe -sS -m 5 -o NUL http://1.1.1.1/ 2>$null
+      $outsideIpRc = $LASTEXITCODE
       foreach ($c in @(@('8899',    'curl.exe -sS -m 5 http://127.0.0.1:8899/'),      # MUST succeed, or Phase 1 is dead
                        @('example', 'curl.exe -sS -m 5 https://example.com/'),        # MUST fail (Block Outbound Default Rule)
+                       @('ip',      'curl.exe -sS -m 5 http://1.1.1.1/'),             # MUST fail to connect: off-box packet egress, no DNS involved
                        @('9999',    'curl.exe -sS -m 5 http://127.0.0.1:9999/'))) {   # unrelated loopback port: EXPECTED reachable
         $capture = Join-Path $out.FullName "_inside-1-$($c[0]).txt"
         try {
@@ -885,23 +915,26 @@ try {
       # granted read+execute on that install directory; the global teardown revokes the grant.
       # python prints PYTHON_RAN first: a capture without it means cmd never started python, a
       # SETUP-FAULT, never the bind's answer.
-      $pyExe = (Get-Command python -CommandType Application -ErrorAction SilentlyContinue |
-        Where-Object { $_.Source -notlike '*\WindowsApps\*' } | Select-Object -First 1).Source   # not the Store alias: a zero-byte stub in a Windows-managed directory
+      # $pyExe comes from the prerequisite check, which skips the WindowsApps Store alias (a zero-byte
+      # stub in a Windows-managed directory); with no usable python.exe nothing is launched.
       if ($pyExe) {
         $script:pyDir = Split-Path $pyExe -Parent        # $script: so the global teardown can revoke it
-        icacls $script:pyDir /grant "*${sid}:(OI)(CI)(RX)" | Out-Null
+        $script:pySid = $sid                             # captured with the grant: the teardown revokes and asserts on this SID
+        icacls $script:pyDir /grant "*${script:pySid}:(OI)(CI)(RX)" | Out-Null
+        $capture = Join-Path $out.FullName '_inside-1-9998.txt'
+        $bind9998 = try {
+          $rc = [NockProbe.AC]::Run($sid, @(), ('cmd.exe /c ""' + $pyExe + '" -c "print(''PYTHON_RAN'', flush=True); import socket; s = socket.socket(); ' +
+            's.bind((''127.0.0.1'', 9998)); s.listen(1); print(''bind+listen OK'', s.getsockname())" > "' + $capture + '" 2>&1"'), 60000)
+          'exit={0} (0x{0:X8})' -f $rc
+        } catch {
+          'threw {0} HResult={1} {2}' -f $_.Exception.GetBaseException().GetType().Name, (Get-BaseHResult $_), $_.Exception.GetBaseException().Message
+        }
+        $got = @(Get-Content $capture -ErrorAction SilentlyContinue)
+        $got | ForEach-Object { "inside(1) 9998: $_" }
+        if (-not ($got -ccontains 'PYTHON_RAN')) { $bind9998 = "SETUP-FAULT - python did not run (no PYTHON_RAN), launch $bind9998" }
+      } else {
+        $bind9998 = 'SETUP-FAULT: no usable python.exe (only the WindowsApps alias or none)'
       }
-      $capture = Join-Path $out.FullName '_inside-1-9998.txt'
-      $bind9998 = try {
-        $rc = [NockProbe.AC]::Run($sid, @(), ('cmd.exe /c ""' + $pyExe + '" -c "print(''PYTHON_RAN'', flush=True); import socket; s = socket.socket(); ' +
-          's.bind((''127.0.0.1'', 9998)); s.listen(1); print(''bind+listen OK'', s.getsockname())" > "' + $capture + '" 2>&1"'), 60000)
-        'exit={0} (0x{0:X8})' -f $rc
-      } catch {
-        'threw {0} HResult={1} {2}' -f $_.Exception.GetBaseException().GetType().Name, (Get-BaseHResult $_), $_.Exception.GetBaseException().Message
-      }
-      $got = @(Get-Content $capture -ErrorAction SilentlyContinue)
-      $got | ForEach-Object { "inside(1) 9998: $_" }
-      if (-not ($got -ccontains 'PYTHON_RAN')) { $bind9998 = "SETUP-FAULT - python did not run (no PYTHON_RAN), launch $bind9998" }
       "inside(1) 9998 bind+listen: $bind9998"
       $exempt1 = Test-ExemptListed        # read BEFORE Probe 1's teardown, like everything scored below
 
@@ -925,6 +958,14 @@ try {
         throw 'Probe 1: Phase 1 dead (8899 unreachable from the container); run stopped as the doc requires'
       } else {
         "VERDICT(1): 8899 reached; read example.com (MUST fail) and 9999 (against its outside control) from the inside(1) lines above, per the doc's Probe 1 rules"
+        # Off-box packets: scored only against the outer control. curl exit 0 means ANY reply came back
+        # (even an HTTP error page), 7 is connection refused or unreachable, 28 a timeout (SYN dropped).
+        $insideIp = @(@($log1) -cmatch '^ip exit=')
+        if ($outsideIpRc -ne 0) { "VERDICT(1-ip): not scored - the outer control to 1.1.1.1 failed (curl exit $outsideIpRc), so this machine has no route to prove a drop" }
+        elseif ($insideIp.Count -ne 1) { "VERDICT(1-ip): not scored - the inside ip curl recorded $($insideIp.Count) 'ip exit=' lines, not 1" }
+        elseif ($insideIp[0] -ceq 'ip exit=0') { "VERDICT(1-ip): OFF-BOX LEAK - the container reached 1.1.1.1 ($($insideIp[0])); the fence does not drop off-box packets" }
+        elseif ($insideIp[0] -cmatch '^ip exit=(7|28)$') { "VERDICT(1-ip): OFF-BOX EGRESS BLOCKED - the outer control reached 1.1.1.1, the container did not ($($insideIp[0]))" }
+        else { "VERDICT(1-ip): INDETERMINATE - the container's curl to 1.1.1.1 ended $($insideIp[0]); read the inside(1) lines" }
       }
     }
   }
@@ -1020,7 +1061,7 @@ try {
   }
   # Probe 1's grant on the python install directory: revoke it before the profiles go (a
   # deleted profile's SID would linger in that ACL). Not limited-task state, so either way.
-  if ($pyDir) { icacls $pyDir /remove:g "*${sid}" | Out-Null }
+  if ($pyDir) { icacls $pyDir /remove:g "*${pySid}" | Out-Null }
   # Probe 9 (VM only): restore firewall to the recorded per-profile state
   if (-not $quiet) {
     # KEEP everything a surviving instance could use or recreate; print it and the recovery.
@@ -1070,7 +1111,7 @@ try {
     Assert-Restored "AppContainer Mappings keys for this run's monikers absent" ($leftMaps.Count -eq 0)
     if ($pyDir) {
       $pyAcl = icacls $pyDir
-      Assert-Restored "python install $pyDir free of this run's SID" (-not ($pyAcl -match [regex]::Escape($sid) -or $pyAcl -match [regex]::Escape($moniker)))
+      Assert-Restored "python install $pyDir free of this run's SID" (-not ($pyAcl -match [regex]::Escape($pySid) -or $pyAcl -match [regex]::Escape($moniker)))
     }
     Assert-Restored "probe root $probeRoot absent" (-not (Test-Path $probeRoot))
   }

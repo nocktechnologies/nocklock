@@ -20,7 +20,7 @@ All notable changes to NockLock will be documented in this file.
 
 ### Changed
 
-- Windows probes (N10825/N11601): record the second desktop run (Probe 1 pivot PASS, Probe 2 needs no admin); `run-probe.ps1` runs python in the container by absolute path with a package-SID grant revoked at teardown, and gains `-Detach` so a dropped SSH session cannot cut a run short.
+- Windows probes (N10825/N11601): record the second desktop run (Probe 1 pivot PASS, Probe 2 needs no admin); `run-probe.ps1` runs python in the container by absolute path with a package-SID grant revoked at teardown, and gains `-Detach` so a dropped SSH session cannot cut a run short. Round 2: the `-Detach` done marker is written in a `finally` (exit 0 only when the script returned 0), the detached run refuses when not elevated, file names carry seconds plus a run id, Probe 1 adds a literal-IP off-box packet step (`VERDICT(1-ip)`), and python is skipped with a SETUP-FAULT when only the Store alias exists.
 - Docs: `docs/design/look-back-rules.md` design note for look-back policy rules over the audit event history. The valid `on` list is now the event types written with `blocked=1`, and the contention paragraph records that `Logger.Log` does not honour `busy_timeout`.
 - Docs: the `.claude/diagrams` Mermaid diagrams now describe the shipped v0.6.1
   fences instead of the original "planned" design, and a new
