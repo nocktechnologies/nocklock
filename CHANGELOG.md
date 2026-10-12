@@ -4,6 +4,12 @@ All notable changes to NockLock will be documented in this file.
 
 ## [Unreleased]
 
+### Changed
+
+- `nocklock init` exits non-zero when `.nock/config.toml` already exists instead of reporting success, and `nocklock init --runtime <name> --diff` prints the policy lines the preset would add or remove (no write). The macOS `claude` hint now points at `--diff`.
+- `--ed25519-pub` accepts the `ed25519 <base64>` line that `verify --export-pubkey` prints, as well as bare base64 or hex.
+- A legacy `[cloud]` section is reported as inert, naming `[audit.forward]`, the real delivery transport.
+
 ## [0.7.0] - 2026-10-12
 
 On macOS, the Seatbelt profile now acts as a kernel network floor: with the network fence active, outbound traffic can only reach the local proxy, and the signed egress level is the new `SEATBELT`. This release also adds look-back rules, slice 1 (Linux `CONFINED` egress only), and opt-in `[audit.forward]` delivery of fence decisions to Command's ops log. The `claude-code` preset also changes how it treats tokens in the secret fence (see Security below).
@@ -20,7 +26,7 @@ On macOS, the Seatbelt profile now acts as a kernel network floor: with the netw
 
 ### Security
 
-- `claude-code` preset (all platforms): the `*_TOKEN*` block pattern was removed so that `CLAUDE_CODE_OAUTH_TOKEN` can pass the secret fence. A variable whose name matches `*_TOKEN*` is no longer blocked by that pattern. The preset still blocks `*_SECRET*` and `*_PASSWORD*`. Tokens that are not in `secrets.pass` are still stripped, because `pass` is an allowlist (the test `TestClaudeCodePresetPassesOAuthToken` shows `GITHUB_TOKEN` stripped and `CLAUDE_CODE_OAUTH_TOKEN` passing). If you upgrade from v0.6.x: `nocklock init` copies the preset into `.nock/config.toml` and never overwrites an existing file. So a config made by an earlier `init` keeps the old lists: `CLAUDE_CODE_OAUTH_TOKEN` is blocked by `*_TOKEN*` and is missing from `secrets.pass`. To use the token, add `CLAUDE_CODE_OAUTH_TOKEN` to `secrets.pass` and remove `*_TOKEN*` from `secrets.block`. Removing the pattern lets every `*_TOKEN*` name listed in `secrets.pass` reach the child, so check that list first.
+- `claude-code` preset (all platforms): the `*_TOKEN*` block pattern was removed so that `CLAUDE_CODE_OAUTH_TOKEN` can pass the secret fence. A variable whose name matches `*_TOKEN*` is no longer blocked by that pattern. The preset still blocks `*_SECRET*` and `*_PASSWORD*`. Tokens that are not in `secrets.pass` are still stripped, because `pass` is an allowlist (the test `TestClaudeCodePresetPassesOAuthToken` shows `GITHUB_TOKEN` stripped and `CLAUDE_CODE_OAUTH_TOKEN` passing). If you upgrade from v0.6.x: `nocklock init` copies the preset into `.nock/config.toml` and never overwrites an existing file (it now exits non-zero when one exists; run `nocklock init --runtime claude-code --diff` to see what the preset would change). So a config made by an earlier `init` keeps the old lists: `CLAUDE_CODE_OAUTH_TOKEN` is blocked by `*_TOKEN*` and is missing from `secrets.pass`. To use the token, add `CLAUDE_CODE_OAUTH_TOKEN` to `secrets.pass` and remove `*_TOKEN*` from `secrets.block`. Removing the pattern lets every `*_TOKEN*` name listed in `secrets.pass` reach the child, so check that list first.
 - CI: `claude.yml` now runs only when the triggering author is an `OWNER`,
   `MEMBER` or `COLLABORATOR`, checked per event type. `claude-code-review.yml`
   skips pull requests opened from forks instead of failing on missing secrets.

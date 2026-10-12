@@ -72,3 +72,60 @@ func TestInitRuntimeRoundTripsThroughConfigLoad(t *testing.T) {
 		})
 	}
 }
+
+func TestInitRuntimeOnExistingConfigFailsAndDiffReports(t *testing.T) {
+	dir := t.TempDir()
+	withWorkingDir(t, dir)
+	t.Cleanup(func() { initRuntime, initDiff = "", false })
+	if err := initCmd.RunE(&cobra.Command{}, nil); err != nil {
+		t.Fatalf("plain init: %v", err)
+	}
+	configPath := filepath.Join(dir, config.Dir, config.File)
+	before, _ := os.ReadFile(configPath)
+
+	initRuntime = "claude-code"
+	err := initCmd.RunE(&cobra.Command{}, nil)
+	if err == nil || !strings.Contains(err.Error(), "--diff") {
+		t.Fatalf("want non-zero error pointing at --diff, got %v", err)
+	}
+
+	var out strings.Builder
+	cmd := &cobra.Command{}
+	cmd.SetOut(&out)
+	initDiff = true
+	if err := initCmd.RunE(cmd, nil); err != nil {
+		t.Fatalf("init --diff: %v", err)
+	}
+	if !strings.Contains(out.String(), "+ ") || !strings.Contains(out.String(), "CLAUDE_CODE_OAUTH_TOKEN") {
+		t.Fatalf("diff missing preset additions:\n%s", out.String())
+	}
+	if !strings.Contains(out.String(), "- ") || !strings.Contains(out.String(), "*_TOKEN*") {
+		t.Fatalf("diff missing removed *_TOKEN* block:\n%s", out.String())
+	}
+	after, _ := os.ReadFile(configPath)
+	if string(before) != string(after) {
+		t.Fatal("--diff modified the config")
+	}
+
+	// Matching config reports no difference; --diff without --runtime errors.
+	if err := os.WriteFile(configPath, []byte(mustProfileTOML(t, "claude-code")), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	out.Reset()
+	if err := initCmd.RunE(cmd, nil); err != nil || !strings.Contains(out.String(), "already matches") {
+		t.Fatalf("identical config: err=%v out=%q", err, out.String())
+	}
+	initRuntime = ""
+	if err := initCmd.RunE(cmd, nil); err == nil {
+		t.Fatal("--diff without --runtime must fail")
+	}
+}
+
+func mustProfileTOML(t *testing.T, name string) string {
+	t.Helper()
+	s, err := config.ProfileTOML(name)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return s
+}
