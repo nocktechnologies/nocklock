@@ -103,7 +103,17 @@ then   = "deny_egress"
 
 After the interposer reports a denied open, the proxy closes open tunnels and requests and denies new ones, each logged as a signed `network_blocked` row citing the rule and the trigger row. `wrap` refuses to start with a rule unless the egress level is `CONFINED`. Static binaries, raw syscalls and a cleared `LD_PRELOAD` bypass the interposer, so they never trip the rule. See `docs/design/look-back-rules.md`.
 
-Linux blocked accesses are logged to the event log (see "Event log" for where it lives). The macOS Seatbelt path records its fence state but does not yet emit one audit event per denied file; Seatbelt returns its native permission error. Blocked domains get a 403.
+Linux blocked accesses are logged to the event log (see "Event log" for where it lives). On macOS, Seatbelt returns its native permission error and a best-effort tailer records file denials as `file_blocked` rows (see "Filesystem platform boundary"). Blocked domains get a 403.
+
+### What the signed log proves
+
+Kernel enforcement and event collection have different coverage. A signed, hash-chained log proves the integrity of the rows it holds. It does not prove that every attempt was observed.
+
+- Linux interposer logging misses static binaries, raw syscalls and children that clear `LD_PRELOAD`; Landlock still denies those opens but writes no row.
+- macOS file-denial capture reads the unified log, which can drop lines under load, so it is best effort.
+- Kernel-floor denials (the netns default-drop floor and the Seatbelt network deny) write no per-attempt row today (design card N11634).
+
+A missing row is therefore not proof that nothing happened. Signed history proves what was recorded, not complete observation.
 
 ### Filesystem platform boundary
 
