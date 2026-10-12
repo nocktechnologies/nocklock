@@ -4,6 +4,7 @@ package landlock
 
 import (
 	"errors"
+	"net"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -14,6 +15,97 @@ import (
 )
 
 const landlockProbeEnv = "NOCKLOCK_LANDLOCK_PROBE"
+const socketOnlyReferProbeEnv = "NOCKLOCK_SOCKET_ONLY_REFER_PROBE"
+
+func TestLandlockSocketOnlyPreservesCrossDirectoryOperations(t *testing.T) {
+	if os.Getenv(socketOnlyReferProbeEnv) != "" {
+		runSocketOnlyReferProbe(t)
+		return
+	}
+
+	abi, err := DetectABI()
+	if err != nil {
+		t.Fatalf("detect Landlock ABI: %v", err)
+	}
+	if abi < MinUnixSocketABI {
+		t.Skipf("pathname Unix-socket isolation requires Landlock ABI v%d; detected v%d", MinUnixSocketABI, abi)
+	}
+
+	root := t.TempDir()
+	leftDir := filepath.Join(root, "left")
+	rightDir := filepath.Join(root, "right")
+	for _, dir := range []string{leftDir, rightDir} {
+		if err := os.Mkdir(dir, 0o700); err != nil {
+			t.Fatalf("create %q: %v", dir, err)
+		}
+	}
+	source := filepath.Join(leftDir, "source")
+	moved := filepath.Join(rightDir, "moved")
+	hardlink := filepath.Join(rightDir, "hardlink")
+	if err := os.WriteFile(source, []byte("socket-only filesystem posture"), 0o600); err != nil {
+		t.Fatalf("create source file: %v", err)
+	}
+	socketPath := filepath.Join(root, "allowed.sock")
+	listener, err := net.Listen("unix", socketPath)
+	if err != nil {
+		t.Fatalf("create throwaway Unix socket: %v", err)
+	}
+	defer listener.Close()
+
+	cmd := exec.Command(os.Args[0], "-test.run=^TestLandlockSocketOnlyPreservesCrossDirectoryOperations$")
+	cmd.Env = append(os.Environ(),
+		socketOnlyReferProbeEnv+"=1",
+		"NOCKLOCK_SOCKET_ONLY_REFER_PATH="+socketPath,
+		"NOCKLOCK_SOCKET_ONLY_REFER_SOURCE="+source,
+		"NOCKLOCK_SOCKET_ONLY_REFER_MOVED="+moved,
+		"NOCKLOCK_SOCKET_ONLY_REFER_HARDLINK="+hardlink,
+	)
+	if output, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("socket-only Landlock child failed: %v\n%s", err, output)
+	}
+	if _, err := os.Stat(source); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("source remained after cross-directory rename: %v", err)
+	}
+	movedInfo, err := os.Stat(moved)
+	if err != nil {
+		t.Fatalf("renamed file is missing: %v", err)
+	}
+	linkInfo, err := os.Stat(hardlink)
+	if err != nil {
+		t.Fatalf("cross-directory hard link is missing: %v", err)
+	}
+	if !os.SameFile(movedInfo, linkInfo) {
+		t.Fatal("cross-directory hard link does not reference the renamed file")
+	}
+}
+
+func runSocketOnlyReferProbe(t *testing.T) {
+	t.Helper()
+	socketPath := os.Getenv("NOCKLOCK_SOCKET_ONLY_REFER_PATH")
+	source := os.Getenv("NOCKLOCK_SOCKET_ONLY_REFER_SOURCE")
+	moved := os.Getenv("NOCKLOCK_SOCKET_ONLY_REFER_MOVED")
+	hardlink := os.Getenv("NOCKLOCK_SOCKET_ONLY_REFER_HARDLINK")
+	if socketPath == "" || source == "" || moved == "" || hardlink == "" {
+		t.Fatal("socket-only Landlock probe paths are required")
+	}
+	abi, err := DetectABI()
+	if err != nil || abi < MinUnixSocketABI {
+		t.Fatalf("detect supported Landlock ABI in child: abi=%d err=%v", abi, err)
+	}
+	spec := Spec{ABI: abi}
+	if err := AddUnixSocketIsolation(&spec, socketPath); err != nil {
+		t.Fatalf("build socket-only Landlock rules: %v", err)
+	}
+	if err := Apply(spec); err != nil {
+		t.Fatalf("apply socket-only Landlock rules: %v", err)
+	}
+	if err := os.Rename(source, moved); err != nil {
+		t.Fatalf("cross-directory rename failed: %v", err)
+	}
+	if err := os.Link(moved, hardlink); err != nil {
+		t.Fatalf("cross-directory hard link failed: %v", err)
+	}
+}
 
 func TestLandlockAllowRWPaths(t *testing.T) {
 	if os.Getenv(landlockProbeEnv) != "" {

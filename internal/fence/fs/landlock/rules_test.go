@@ -61,6 +61,22 @@ func TestAddUnixSocketIsolationAllowsOnlyExactProxyPath(t *testing.T) {
 	}
 }
 
+func TestAddUnixSocketIsolationPreservesFilesystemReferForSocketOnlyRuleset(t *testing.T) {
+	spec := Spec{ABI: MinUnixSocketABI}
+	if err := AddUnixSocketIsolation(&spec, "/run/nocklock/proxy.sock"); err != nil {
+		t.Fatalf("add Unix-socket isolation: %v", err)
+	}
+	if spec.HandledAccessFS&RightRefer == 0 {
+		t.Fatalf("socket-only ruleset handled rights %#x omit REFER", spec.HandledAccessFS)
+	}
+	for _, rule := range spec.Paths {
+		if rule.Path == string(filepath.Separator) && rule.Rights == RightRefer {
+			return
+		}
+	}
+	t.Fatal("socket-only ruleset must grant REFER at filesystem root to preserve filesystem behavior")
+}
+
 func TestAddUnixSocketIsolationRejectsUnsupportedABIAndRelativePath(t *testing.T) {
 	spec := Spec{ABI: MinUnixSocketABI - 1}
 	if err := AddUnixSocketIsolation(&spec, "/tmp/proxy.sock"); err == nil {

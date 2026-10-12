@@ -189,6 +189,18 @@ func AddUnixSocketIsolation(spec *Spec, allowedSocketPaths ...string) error {
 		}
 	}
 
+	// A socket-only ruleset is used when filesystem enforcement is disabled.
+	// Landlock denies REFER by default even when that right is not handled, so
+	// explicitly handle and grant it at / to preserve the configured filesystem
+	// posture while still fencing Unix-socket resolution.
+	if spec.HandledAccessFS == 0 {
+		spec.HandledAccessFS |= RightRefer
+		spec.Paths = append(spec.Paths, PathRule{
+			Path:   string(filepath.Separator),
+			Access: AccessReadWrite,
+			Rights: RightRefer,
+		})
+	}
 	spec.HandledAccessFS |= RightResolveUnix
 	spec.Scoped |= ScopeAbstractUnixSocket
 
