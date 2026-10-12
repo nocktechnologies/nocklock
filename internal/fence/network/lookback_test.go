@@ -14,6 +14,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -132,26 +133,57 @@ func holdTarget(t *testing.T) string {
 type postTarget struct {
 	host     string
 	received atomic.Int64
-	finished atomic.Int64 // requests whose body arrived complete
+	// finished counts requests whose declared body arrived whole: a body of at
+	// least one byte that ended in io.EOF with every declared byte read. A
+	// bodyless request (GET, CONNECT, an empty POST) is counted in bodyless,
+	// not finished.
+	finished atomic.Int64
+	bodyless atomic.Int64 // requests that reached the target with no body bytes
+	cut      atomic.Int64 // requests whose body ended in an error
+
+	mu   sync.Mutex
+	seen []string // one line per request: who sent what, and how its body ended
+}
+
+// observations returns what the target saw, for failure messages.
+func (pt *postTarget) observations() string {
+	pt.mu.Lock()
+	defer pt.mu.Unlock()
+	return strings.Join(pt.seen, "; ")
 }
 
 func newPostTarget(t *testing.T) *postTarget {
 	t.Helper()
 	pt := &postTarget{}
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var got int64
 		buf := make([]byte, 4096)
+		end := func(how string) {
+			pt.mu.Lock()
+			pt.seen = append(pt.seen, fmt.Sprintf("%s %s from %s CL=%d te=%v read=%d %s", r.Method, r.URL, r.RemoteAddr, r.ContentLength, r.TransferEncoding, got, how))
+			pt.mu.Unlock()
+		}
 		for {
 			n, err := r.Body.Read(buf)
+			got += int64(n)
 			pt.received.Add(int64(n))
 			if err == io.EOF {
+				if got == 0 {
+					pt.bodyless.Add(1)
+					end("bodyless")
+					return
+				}
 				pt.finished.Add(1)
-				break
+				end("complete")
+				w.WriteHeader(http.StatusOK)
+				return
 			}
 			if err != nil {
+				pt.cut.Add(1)
+				end("cut: " + err.Error())
 				return
 			}
 		}
-		w.WriteHeader(http.StatusOK)
 	}))
 	t.Cleanup(srv.Close)
 	_, port, _ := net.SplitHostPort(srv.Listener.Addr().String())
