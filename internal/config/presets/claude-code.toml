@@ -72,9 +72,11 @@ allow_all = false
 allow_private_ranges = false
 
 [secrets]
-# Claude Code's OWN provider key passes so the agent works for API-key users;
-# subscription/OAuth users simply won't have it set (harmless). Every OTHER
-# provider's key and all infra secrets stay blocked.
+# Claude Code's OWN credentials pass: the API key for API-key users, and the
+# `claude setup-token` OAuth token for subscription users. On macOS the login
+# keychain is denied by the fence, so the token is the only subscription path.
+# Whichever is unset is harmless. Every OTHER provider's key and all infra
+# secrets stay blocked.
 pass = [
     "HOME",
     "PATH",
@@ -83,6 +85,7 @@ pass = [
     "LANG",
     "TERM",
     "ANTHROPIC_API_KEY",
+    "CLAUDE_CODE_OAUTH_TOKEN",
 ]
 block = [
     "AWS_*",
@@ -91,7 +94,6 @@ block = [
     "OPENAI_API_KEY",
     "*_SECRET*",
     "*_PASSWORD*",
-    "*_TOKEN*",
 ]
 
 [syscall]

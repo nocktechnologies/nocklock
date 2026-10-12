@@ -298,6 +298,9 @@ var wrapCmd = &cobra.Command{
 		} else {
 			fmt.Fprintf(os.Stderr, "NockLock: secret fence active — no variables blocked\n")
 		}
+		if hint := claudeKeychainHint(runtime.GOOS, args, childEnv); hint != "" {
+			fmt.Fprintln(os.Stderr, hint)
+		}
 
 		// Create the per-session egress decision-log (netns path only) BEFORE the
 		// filesystem fence assembles its deny list, so its directory can be denied
@@ -1198,6 +1201,28 @@ const sessionIDEnv = "NOCKLOCK_SESSION_ID"
 // environment can never survive: the child sees only this run's real id.
 func setSessionIDEnv(env []string, sessionID string) []string {
 	return append(removeEnvVars(env, sessionIDEnv), sessionIDEnv+"="+sessionID)
+}
+
+// claudeKeychainHintText is printed when a keychain-logged-in Claude Code is
+// wrapped on macOS: the fence denies ~/Library/Keychains, so the login there is
+// unreachable and the credential has to arrive through the environment.
+const claudeKeychainHintText = "NockLock: Claude Code keeps its login in the macOS keychain, which the fence denies; run 'claude setup-token' once and export CLAUDE_CODE_OAUTH_TOKEN (or ANTHROPIC_API_KEY) before 'nocklock wrap -- claude'."
+
+// claudeKeychainHint returns the one-line hint when goos is darwin, the wrapped
+// command's basename is claude, and childEnv (the post-secret-fence env the
+// child will see) carries neither CLAUDE_CODE_OAUTH_TOKEN nor ANTHROPIC_API_KEY.
+// It returns "" otherwise. The hint is advisory; wrap still launches.
+func claudeKeychainHint(goos string, args, childEnv []string) string {
+	if goos != "darwin" || len(args) == 0 || filepath.Base(args[0]) != "claude" {
+		return ""
+	}
+	for _, entry := range childEnv {
+		name, value, _ := strings.Cut(entry, "=")
+		if (name == "CLAUDE_CODE_OAUTH_TOKEN" || name == "ANTHROPIC_API_KEY") && value != "" {
+			return ""
+		}
+	}
+	return claudeKeychainHintText
 }
 
 // removeEnvVars returns env with any entries whose key matches one of the given

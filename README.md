@@ -25,6 +25,15 @@ nocklock wrap -- claude
 
 Four commands and your agent is fenced.
 
+**macOS and Claude Code:** Claude Code keeps a `claude.ai` login in the macOS login keychain, and the fence denies `~/Library/Keychains` (Seatbelt cannot scope to one keychain item, so NockLock does not open it). Run `claude setup-token` once, then export the token before wrapping:
+
+```bash
+export CLAUDE_CODE_OAUTH_TOKEN=<token from claude setup-token>   # or ANTHROPIC_API_KEY
+nocklock wrap -- claude
+```
+
+The `claude-code` preset passes both variables through the secret fence. If `wrap` sees `claude` on macOS with neither variable set, it prints a one-line hint and still launches. Claude Code's `--bare` mode does not read `CLAUDE_CODE_OAUTH_TOKEN`; use `ANTHROPIC_API_KEY` there.
+
 On Linux, the default read-only system grants cover binaries and libraries, plus
 `/etc/ld.so.cache` (loader cache), `passwd` and `group` (identity lookup),
 `nsswitch.conf`, `hosts`, and `resolv.conf` (name resolution), `localtime`
@@ -375,7 +384,7 @@ The default Linux policy includes the system binary, library, and configuration
 paths needed to launch a shell. Missing read-only paths, such as `~/.claude/`
 in a new home, grant nothing for that session and do not prevent a wrap.
 
-Runtime presets exist for `claude-code`, `codex`, `aider`, `gemini-cli`, `opencode`, and `goose`. Each preset keeps the network default-deny, blocks private ranges, keeps Linux filesystem and syscall enforcement required, and passes only the runtime's documented first-party provider key or keys. `gemini-cli` targets the API-key path; OAuth and Vertex AI setups need explicit operator review before widening the filesystem or egress. `opencode` targets OpenCode Zen/Go through `opencode.ai`; direct third-party providers should use a reviewed custom config. `goose` is a multi-provider preset covering Anthropic, OpenAI, Gemini, Groq, and OpenRouter; only the provider key the user has set is live, and the rest are unset and harmless. MCP extensions that reach additional hosts need an operator overlay.
+Runtime presets exist for `claude-code`, `codex`, `aider`, `gemini-cli`, `opencode`, and `goose`. Each preset keeps the network default-deny, blocks private ranges, keeps Linux filesystem and syscall enforcement required, and passes only the runtime's documented first-party provider key or keys. `claude-code` passes `ANTHROPIC_API_KEY` and `CLAUDE_CODE_OAUTH_TOKEN` (the `claude setup-token` token, needed on macOS where the keychain login is denied). `codex` keeps its login in a file under `~/.codex`; the built-in macOS deny list does not include `~/.codex`, so reads are not blocked, but Codex's token-refresh writes outside the project root would be, and this has not been verified on a macOS runner. Use `OPENAI_API_KEY` if a refresh fails. `gemini-cli` targets the API-key path; OAuth and Vertex AI setups need explicit operator review before widening the filesystem or egress. `opencode` targets OpenCode Zen/Go through `opencode.ai`; direct third-party providers should use a reviewed custom config. `goose` is a multi-provider preset covering Anthropic, OpenAI, Gemini, Groq, and OpenRouter; only the provider key the user has set is live, and the rest are unset and harmless. MCP extensions that reach additional hosts need an operator overlay.
 
 Two candidate runtimes are deliberately left without a preset:
 
