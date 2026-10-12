@@ -50,7 +50,6 @@ nocklock.exe
 .branch-lock
 
 # Red-team bench scratch dirs and generated reports
-bench/redteam/work.*/
 bench/redteam/REPORT.md
 bench/redteam/report.json
 bench/redteam/__pycache__/

@@ -1,10 +1,14 @@
 """Tests for the red-team driver's process handling. Run: python3 -m unittest bench/redteam/test_redteam.py"""
+import json
 import os
 import socket
+import subprocess
 import sys
 import tempfile
+import threading
 import time
 import unittest
+from unittest import mock
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
@@ -41,6 +45,93 @@ class RunTest(unittest.TestCase):
         self.assertEqual(redteam.sink_hits(s, start - 1), 0)  # already expired: drains nothing
         self.assertLess(time.monotonic() - start, 0.1)
         s.close()
+
+
+class RunFaultTest(unittest.TestCase):
+    def test_wrap_that_cannot_launch_is_a_fault_row_not_a_crash(self):
+        with tempfile.TemporaryDirectory() as d:
+            rc, out = redteam.run(["/nonexistent/nocklock"], d, {}, Path(d) / "log", time.monotonic() + 5)
+        self.assertIsNone(rc)
+        self.assertIn("HARNESS-FAULT", out)
+
+    def test_killpg_permission_error_is_recorded_and_the_run_continues(self):
+        with tempfile.TemporaryDirectory() as d, mock.patch("os.killpg", side_effect=PermissionError("root-owned")):
+            rc, out = redteam.run(["/bin/sh", "-c", "echo done"], d, os.environ.copy(), Path(d) / "log", time.monotonic() + 5)
+        self.assertEqual(rc, 0)
+        self.assertIn("done", out)
+        self.assertIn("killpg", out)
+
+
+class SetupCheckTest(unittest.TestCase):
+    def config(self, d, allow):
+        (Path(d) / "root/.nock").mkdir(parents=True)
+        cfg = Path(d) / "root/.nock/config.toml"
+        cfg.write_text('[filesystem]\nroot = "."\nallow = %s\nallow_rw = []\n' % allow)
+        return cfg
+
+    def test_evidence_under_a_grant_is_a_setup_fault(self):
+        with tempfile.TemporaryDirectory() as d:
+            cfg = self.config(d, '["%s/"]' % d)
+            with self.assertRaises(redteam.SetupFault) as cm:
+                redteam.check_setup(cfg, {"nockguard key": Path(d) / "home/key"}, [])
+            self.assertIn("nockguard key", str(cm.exception))
+
+    def test_evidence_beside_the_grants_passes_and_exempt_grants_are_skipped(self):
+        with tempfile.TemporaryDirectory() as d:
+            cfg = self.config(d, '["%s/sock/"]' % d)
+            redteam.check_setup(cfg, {"nockguard key": Path(d) / "home/key"}, [])
+            with self.assertRaises(redteam.SetupFault):
+                redteam.check_setup(cfg, {"x": Path(d) / "sock/x"}, [])
+            redteam.check_setup(cfg, {"x": Path(d) / "sock/x"}, [Path(d) / "sock"])
+
+
+class ClassifyTest(unittest.TestCase):
+    mcp = {"evidence": "nockguard"}
+
+    def test_mcp_client_exit_codes(self):
+        self.assertEqual(redteam.classify(0, self.mcp), (True, False))
+        self.assertEqual(redteam.classify(1, self.mcp), (False, False))
+        self.assertEqual(redteam.classify(5, self.mcp), (True, True))  # breach survives a shutdown fault
+        self.assertEqual(redteam.classify(4, self.mcp), (False, True))  # a fault is never BLOCKED
+        self.assertEqual(redteam.classify(3, self.mcp), (False, True))
+
+    def test_child_output_cannot_declare_a_fault(self):
+        self.assertEqual(redteam.classify(1, {"evidence": "nocklock"}), (False, False))
+
+
+class McpClientTest(unittest.TestCase):
+    """The client decides the verdict when the reply arrives; a hung shutdown cannot undo it."""
+    def run_client(self, reply_text):
+        with tempfile.TemporaryDirectory() as d:
+            path = os.path.join(d, "s")
+            srv = socket.socket(socket.AF_UNIX)
+            srv.bind(path)
+            srv.listen(1)
+
+            def serve():
+                c, _ = srv.accept()
+                f = c.makefile("rw")
+                for _ in range(2):
+                    mid = json.loads(f.readline())["id"]
+                    f.write(json.dumps({"jsonrpc": "2.0", "id": mid, "result": {"content": reply_text}}) + "\n")
+                    f.flush()
+                time.sleep(5)  # never closes: the client's shutdown must time out
+            threading.Thread(target=serve, daemon=True).start()
+            p = subprocess.run([sys.executable, str(Path(redteam.__file__).parent / "mcp_client.py"), "t", path, "1"],
+                               capture_output=True, text=True, timeout=30)
+            srv.close()
+            return p.returncode, p.stdout
+
+    def test_executed_reply_is_a_breach_even_when_shutdown_hangs(self):
+        rc, out = self.run_client("UPSTREAM-EXECUTED:t")
+        self.assertEqual(rc, 5)
+        self.assertIn("EXECUTED", out)
+        self.assertIn("HARNESS-FAULT", out)
+
+    def test_stopped_reply_with_hung_shutdown_is_a_fault_not_a_block(self):
+        rc, out = self.run_client("denied")
+        self.assertEqual(rc, 4)
+        self.assertIn("STOPPED", out)
 
 
 class ControlTest(unittest.TestCase):

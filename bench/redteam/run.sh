@@ -15,21 +15,25 @@ nockguard=${NOCKGUARD_BIN:-$(command -v nockguard || true)}
 [ -x "$nocklock" ] || { echo "run.sh: set NOCKLOCK_BIN or put nocklock on PATH" >&2; exit 2; }
 [ -x "$nockguard" ] || { echo "run.sh: set NOCKGUARD_BIN or put nockguard on PATH" >&2; exit 2; }
 
-# The scratch dir must sit outside every directory the fence allows (/tmp/ is in
-# the stock allow list, and the fs-event socket lives there, so /tmp/ stays
-# allowed), or the "outside the fence root" attacks would be legal.
-# It is gitignored and left in place for inspection; the CI runner is disposable.
-work=$(mktemp -d "$here/work.XXXXXX")
+# The scratch root must sit outside every directory the fence grants (/tmp/ is in the
+# stock allow list and the fs-event socket lives there, so /tmp/ stays granted), or the
+# evidence the verifiers read (canary, audit state, NockGuard key and trail) would be
+# reachable from inside the fence. redteam.py re-checks that against the written config
+# and stops with SETUP-FAULT before any attack runs. Left in place for inspection.
+base=${RUNNER_TEMP:-$HOME/.cache/nocklock-bench}
+mkdir -p "$base"
+work=$(mktemp -d "$base/work.XXXXXX")
 umask 077
-mkdir -p "$work/root/.nock" "$work/logs" "$work/outside" "$work/bin" "$work/policy" "$work/state" \
-  "$work/home/.nockguard/logs"
+mkdir -p "$work/root/.nock" "$work/root/logs" "$work/outside" "$work/bin" "$work/policy" "$work/state" \
+  "$work/sock" "$work/home/.nockguard/logs"
 
 printf 'bench-canary-not-a-real-secret\n' > "$work/outside/canary.txt"
-cp "$nockguard" "$work/bin/nockguard"
 cp "$here/mcp_client.py" "$here/mcp_upstream.py" "$work/bin/"
 
-# NockGuard: default-deny policy for the bench agent, signed trail via the
-# per-agent Ed25519 key that keygen drops under $HOME/.nockguard/keys.
+# NockGuard: default-deny policy for the bench agent, signed trail via the per-agent
+# Ed25519 key that keygen drops under $HOME/.nockguard/keys. The proxy runs on the host
+# side (redteam.py brokers it behind $work/sock); the fenced child gets neither the
+# key, the trail, the policy nor the nockguard binary, only the broker's socket.
 cat > "$work/policy/policy.yaml" <<POLICY
 agents:
   bench:
@@ -45,16 +49,6 @@ audit:
 POLICY
 HOME="$work/home" "$nockguard" keygen --agent bench >/dev/null
 
-# The fenced child fstat()s its stdout, so each attack's own log file (and only that) is read-write.
-if grep -q '@WORK@/logs' "$here/attacks.toml"; then
-  echo "run.sh: an attack targets @WORK@/logs, which the fence grants" >&2; exit 2
-fi
-log_grants=""
-for id in $(sed -n 's/^id = "\(.*\)"$/\1/p' "$here/attacks.toml"); do
-  : > "$work/logs/$id.log"
-  log_grants+=", \"$work/logs/$id.log\""
-done
-
 cat > "$work/root/.nock/config.toml" <<CONFIG
 [project]
 name = "redteam-bench"
@@ -69,9 +63,9 @@ allow = [
     "/etc/ld.so.cache", "/etc/passwd", "/etc/group", "/etc/nsswitch.conf",
     "/etc/hosts", "/etc/resolv.conf", "/etc/localtime",
     "/etc/ssl/certs/", "/etc/pki/tls/certs/", "/etc/pki/ca-trust/extracted/",
-    "$work/bin/", "$work/policy/",
+    "$work/bin/", "$work/sock/",
 ]
-allow_rw = ["$work/home/.nockguard/"$log_grants]
+allow_rw = []
 deny = []
 
 [network]

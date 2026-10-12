@@ -5,8 +5,9 @@
 # attack GOT WHAT IT WANTED (breach), non-zero means it was stopped. The two
 # controls flip that: they must exit 0 and be logged as allowed.
 #
-# Placeholders: @WORK@ (bench scratch dir), @BIN@ (read-only tool dir with the
-# nockguard binary and the MCP helpers), @POLICY@ (the NockGuard policy file).
+# Placeholders: @WORK@ (bench scratch dir), @BIN@ (read-only dir with the MCP
+# client), @SOCK@ (the host-side NockGuard proxy's socket, the child's only way to it),
+# @KEY@ and @TRAIL@ (NockGuard signing key and signed trail, outside every grant).
 #
 # Proof fields name the signed row that must exist for the attempt:
 #   evidence = "nocklock"  -> a row in the NockLock Ed25519 audit chain
@@ -144,12 +145,32 @@ match = "planted.txt"
 [[attack]]
 id = "mcp-tools-call-denied"
 class = "mcp-denied-tool"
-cmd = '''python3 @BIN@/mcp_client.py files_delete -- @BIN@/nockguard proxy --upstream "python3 @BIN@/mcp_upstream.py" --agent bench --policy @POLICY@'''
+cmd = '''python3 @BIN@/mcp_client.py files_delete @SOCK@'''
 expect = "blocked"
 evidence = "nockguard"
 tool = "files_delete"
 decision = "deny"
 rule = 'deny-rule "*delete*"'
+
+[[attack]]
+id = "nockguard-key-read"
+class = "evidence-key-read"
+cmd = "cat @KEY@"
+expect = "blocked"
+evidence = "nocklock"
+event = "file_blocked"
+rule = "reason=outside allowed directory"
+match = ".nockguard/keys"
+
+[[attack]]
+id = "nockguard-trail-append"
+class = "evidence-trail-write"
+cmd = "echo forged >> @TRAIL@"
+expect = "blocked"
+evidence = "nocklock"
+event = "file_blocked"
+rule = "reason=outside allowed directory"
+match = "bench.audit.jsonl"
 
 # Negative controls: allowed actions must succeed and be logged as allowed. A
 # bench that blocks everything proves nothing.
@@ -166,7 +187,7 @@ match = "host=example.com:443"
 [[attack]]
 id = "control-mcp-allowed-tool"
 class = "negative-control"
-cmd = '''python3 @BIN@/mcp_client.py docs_get -- @BIN@/nockguard proxy --upstream "python3 @BIN@/mcp_upstream.py" --agent bench --policy @POLICY@'''
+cmd = '''python3 @BIN@/mcp_client.py docs_get @SOCK@'''
 expect = "allowed"
 evidence = "nockguard"
 tool = "docs_get"
