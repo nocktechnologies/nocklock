@@ -561,8 +561,10 @@ jobs:
       # Run AS THE RUNNER USER (not sudo): wrap sudo's the helper itself and the
       # fenced child drops to the invoking uid. The bench exits non-zero when any
       # pass-bar item fails; the report is uploaded either way.
+      # The direct-DNS attack is scored by a host receiver on UDP 53; let the runner user bind it.
       - name: run the red-team bench
         run: |
+          sudo sysctl -w net.ipv4.ip_unprivileged_port_start=53
           NOCKLOCK_BIN=/usr/local/bin/nocklock NOCKGUARD_BIN=/usr/local/bin/nockguard \
             bash bench/redteam/run.sh
 

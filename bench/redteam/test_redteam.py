@@ -63,11 +63,11 @@ class RunFaultTest(unittest.TestCase):
         self.assertIsNone(rc)
         self.assertIn("HARNESS-FAULT", out)
 
-    def test_killpg_permission_error_is_recorded_and_the_run_continues(self):
+    def test_failed_process_group_cleanup_is_a_harness_fault(self):
         with tempfile.TemporaryDirectory() as d, mock.patch("os.killpg", side_effect=PermissionError("root-owned")):
             rc, out = run_in(d, ["/bin/sh", "-c", "echo done"], os.environ.copy(), time.monotonic() + 5)
-        self.assertEqual(rc, 0)
-        self.assertIn("done", out)
+        self.assertIsNone(rc)
+        self.assertIn("HARNESS-FAULT", out)
         self.assertIn("killpg", out)
 
 
@@ -94,7 +94,7 @@ class SetupCheckTest(unittest.TestCase):
 
 
 class ClassifyTest(unittest.TestCase):
-    mcp = {"evidence": "nockguard"}
+    mcp = {"evidence": "nockguard", "expect": "blocked", "blocked_exit": [1]}
 
     def test_mcp_client_exit_codes(self):
         self.assertEqual(redteam.classify(0, self.mcp), (True, False))
@@ -104,7 +104,16 @@ class ClassifyTest(unittest.TestCase):
         self.assertEqual(redteam.classify(3, self.mcp), (False, True))
 
     def test_child_output_cannot_declare_a_fault(self):
-        self.assertEqual(redteam.classify(1, {"evidence": "nocklock"}), (False, False))
+        self.assertEqual(redteam.classify(1, {"evidence": "nocklock", "expect": "blocked", "blocked_exit": [1]}), (False, False))
+
+    def test_only_declared_exits_are_a_block(self):
+        atk = {"evidence": "nocklock", "expect": "blocked", "blocked_exit": [35]}
+        self.assertEqual(redteam.classify(35, atk), (False, False))
+        self.assertEqual(redteam.classify(1, atk), (False, True))  # a crashed client's own exit
+        self.assertEqual(redteam.classify(127, atk), (False, True))
+        self.assertEqual(redteam.classify(0, atk), (True, False))
+        self.assertEqual(redteam.classify(None, atk), (False, True))
+        self.assertEqual(redteam.classify(1, {**atk, "blocked_exit": []}), (False, True))  # undeclared: no silent pass
 
 
 class McpClientTest(unittest.TestCase):
@@ -170,7 +179,7 @@ class LogPlantTest(unittest.TestCase):
 
 class VerdictTest(unittest.TestCase):
     def verdict(self, exit_code, expect="blocked", evidence="nockguard", control=None):
-        atk = {"expect": expect, "evidence": evidence}
+        atk = {"expect": expect, "evidence": evidence, "blocked_exit": [1]}
         executed, fault = redteam.classify(exit_code, atk)
         res = {"exit": exit_code, "ran": True, "planted": False, "fault": fault, "control": control}
         return redteam.verdict(res, atk, executed)
@@ -187,6 +196,15 @@ class VerdictTest(unittest.TestCase):
 
     def test_clean_block_still_passes(self):
         self.assertEqual(self.verdict(1), ("BLOCKED", True))
+
+    def test_a_datagram_at_the_dns_receiver_fails_the_attack_whatever_its_exit(self):
+        atk = {"expect": "blocked", "evidence": "nocklock", "blocked_exit": [1]}
+        res = {"exit": 1, "ran": True, "planted": True, "fault": False, "control": None}
+        self.assertEqual(redteam.verdict(res, atk, False)[1], False)
+
+    def test_an_undeclared_exit_is_a_harness_fault_not_a_block(self):
+        for evidence in ("nockguard", "nocklock"):
+            self.assertEqual(self.verdict(2, evidence=evidence), ("HARNESS-FAULT", False))
 
 
 class ControlTest(unittest.TestCase):

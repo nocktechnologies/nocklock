@@ -37,7 +37,7 @@ def run(argv, cwd, env, dir_fd, name, until):
     FIFO planted at its path is refused, and is read back through that same fd (pread), never
     by path. A non-regular file is a HARNESS-FAULT. Returns (exit, output). Exit 124 means the
     deadline `until` (a time.monotonic() value) expired and the process group was SIGKILLed;
-    None means a harness fault. Nothing here blocks unbounded, and no pipe is held open.
+    None means a harness fault (including a failed process-group cleanup). Nothing here blocks unbounded, and no pipe is held open.
     """
     try:
         fd = os.open(name, os.O_RDWR | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | os.O_NONBLOCK, 0o600, dir_fd=dir_fd)
@@ -51,7 +51,7 @@ def run(argv, cwd, env, dir_fd, name, until):
                                  stderr=subprocess.STDOUT, start_new_session=True)
         except OSError as e:
             return None, f"HARNESS-FAULT: could not launch {argv[0]}: {e}"
-        rc, timed_out, note = 124, False, ""
+        rc, timed_out = 124, False
         try:
             rc = p.wait(timeout=max(0.0, until - time.monotonic()))
         except subprocess.TimeoutExpired:
@@ -60,22 +60,23 @@ def run(argv, cwd, env, dir_fd, name, until):
             os.killpg(p.pid, signal.SIGKILL)  # also reaps stragglers a finished attack left behind
         except ProcessLookupError:
             pass
-        except PermissionError as e:  # a root-owned helper in the group cannot be signalled
-            note = f"\nHARNESS-NOTE: killpg {p.pid}: {e}; a root-owned member of the group may linger"
+        except OSError as e:  # e.g. a root-owned helper in the group cannot be signalled
+            return None, f"HARNESS-FAULT: process-group cleanup failed (killpg {p.pid}: {e}); attack exit was {rc}"
         if timed_out:
             try:
                 p.wait(timeout=5)
             except subprocess.TimeoutExpired:
                 return None, "HARNESS-FAULT: process not reaped after SIGKILL"
         text = os.pread(f.fileno(), 1 << 20, 0).decode(errors="replace").strip()
-    return rc, (f"timed out; {text[-300:]}" if timed_out else text) + note
+    return rc, f"timed out; {text[-300:]}" if timed_out else text
 
 
 def udp_sink():
-    """Host-side UDP receiver outside the fence: any datagram it sees escaped."""
-    s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-    s.bind(("0.0.0.0", 0))
-    s.settimeout(0.2)
+    """Host-side UDP receiver on port 53 outside the fence: any datagram it sees escaped.
+
+    It binds the host's outbound address, not the wildcard, so a local stub resolver on
+    127.0.0.53:53 does not collide. Port 53 needs privilege (CI lowers ip_unprivileged_port_start).
+    """
     probe = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
     try:
         probe.connect(("8.8.8.8", 53))  # route lookup only, nothing is sent
@@ -84,7 +85,13 @@ def udp_sink():
         ip = "127.0.0.1"
     finally:
         probe.close()
-    return s, f"{ip}:{s.getsockname()[1]}"
+    s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    try:
+        s.bind((ip, 53))
+    except OSError as e:
+        raise SetupFault(f"cannot bind the DNS receiver {ip}:53 (needs root or net.ipv4.ip_unprivileged_port_start<=53): {e}")
+    s.settimeout(0.2)
+    return s, f"{ip}:53"
 
 
 def sink_hits(s, until):
@@ -105,10 +112,22 @@ def control_result(exit_code, sink_count):
 
 
 def classify(rc, atk):
-    """(executed, fault) for an attack's exit status; mcp_client.py: 3 no reply, 4 stopped + shutdown fault, 5 executed + shutdown fault."""
+    """(executed, fault) for an attack's exit status.
+
+    Only the exits an attack declares in `blocked_exit` count as its blocked outcome; any other
+    non-zero exit (a crashed client's own 1, a missing binary's 127) is a fault, never a block. A
+    deadline kill (124) is left to verdict() as INCONCLUSIVE. mcp_client.py: 3 no reply, 4 stopped +
+    shutdown fault, 5 executed + shutdown fault.
+    """
+    if rc is None:
+        return False, True
     if atk["evidence"] == "nockguard":
-        return rc in (0, 5), rc is None or rc in (3, 4, 5)
-    return rc == 0, rc is None
+        executed, fault = rc in (0, 5), rc in (3, 4, 5)
+    else:
+        executed, fault = rc == 0, False
+    if atk["expect"] == "blocked" and not executed and rc != 124 and rc not in atk.get("blocked_exit", []):
+        fault = True
+    return executed, fault
 
 
 def verdict(res, atk, executed):
@@ -209,7 +228,8 @@ def bench(a):
     if not (re.fullmatch(HEX64, seed) and re.fullmatch(HEX64, pub) and seed != pub):
         raise SetupFault("bench.ed25519 must hold the 64-hex private seed and bench.pub a different 64-hex public key")
     # The private seed stays host-side (the proxy finds it by name under HOME). verify runs with an
-    # empty HOME and the public key passed explicitly, so it can never read the seed.
+    # empty HOME and the trail (--audit) and public key (--ed25519-pub-env) passed explicitly: `--agent`
+    # would derive the trail path from HOME and ignore --audit, so it is not used.
     empty_home = tempfile.mkdtemp(prefix="verify-home.", dir=work)
     verify_env = {**env, "HOME": empty_home, "NOCKGUARD_AGENT_BENCH_ED25519_PUB": pub}
     trail_path = work / "home/.nockguard/logs/bench.audit.jsonl"  # <agent>.audit.jsonl beside the policy audit path
@@ -307,7 +327,7 @@ def bench(a):
         return run(argv, root, tool_env, logfd, f"{name}.log", time.monotonic() + 60)
 
     lock_rc, lock_out = tool("verify-nocklock", [a.nocklock, "verify", "--audit"])
-    guard_rc, guard_out = tool("verify-nockguard", [a.nockguard, "verify", "--agent", "bench", "--audit", str(trail_path)], verify_env)
+    guard_rc, guard_out = tool("verify-nockguard", [a.nockguard, "verify", "--ed25519-pub-env", "NOCKGUARD_AGENT_BENCH_ED25519_PUB", "--audit", str(trail_path)], verify_env)
     versions = {"nocklock": tool("version-nocklock", [a.nocklock, "version"])[1],
                 "nockguard": tool("version-nockguard", [a.nockguard, "version"])[1]}
 
@@ -378,7 +398,7 @@ def render_md(rep):
               "Full hashes are in "
               "`report.json`.", "", "## Verification", "",
               f"- `nocklock verify --audit` exit {rep['verify']['nocklock']['exit']}",
-              f"- `nockguard verify --agent bench` exit {rep['verify']['nockguard']['exit']}", ""]
+              f"- `nockguard verify --ed25519-pub-env … --audit <trail>` exit {rep['verify']['nockguard']['exit']}", ""]
     return "\n".join(lines)
 
 
