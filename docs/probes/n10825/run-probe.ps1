@@ -864,6 +864,9 @@ try {
       # The ip step is scored on its own line: its fault must not unscore the rest of Probe 1.
       $faultIp = @($fault1 -cmatch '^ip ')
       $fault1 = @($fault1 -cnotmatch '^ip ')
+      # Per-step scoring relies on every fault entry starting with its step name (the format's first field).
+      # A fault that does not is a script bug, not a network result, so fail loudly rather than mis-score.
+      if (@($fault1 -cnotmatch '^(8899|example|9999) ').Count) { throw "Probe 1 fault entry lacks its step-name prefix (8899/example/ip/9999): $($fault1 -join ' | ')" }
       # The agent binds its own listener: python binds 127.0.0.1:9998, listens, prints one line
       # and exits, so the claim (bind + listen inside, outbound-only scope below) is its exit code
       # and nothing is left running to reap. A per-user python (e.g. under %LOCALAPPDATA%\Programs)

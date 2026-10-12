@@ -20,7 +20,7 @@ All notable changes to NockLock will be documented in this file.
 
 ### Changed
 
-- Windows probes (N10825/N11601): record the second desktop run (Probe 1 pivot PASS, Probe 2 needs no admin); `run-probe.ps1` runs python in the container by absolute path with a package-SID grant revoked at teardown. Probe 1 adds a literal-IP off-box packet step (`VERDICT(1-ip)`, scored on its own line: only curl exit 7 is BLOCKED, a timeout is INCONCLUSIVE), python is skipped with a SETUP-FAULT when only the Store alias exists, and the README gains a `Start-Process` recipe for SSH runs.
+- Windows probes (N10825/N11601): record the second desktop run (Probe 1 pivot PASS, Probe 2 needs no admin); `run-probe.ps1` runs python in the container by absolute path with a package-SID grant revoked at teardown. Probe 1 adds a literal-IP off-box packet step (`VERDICT(1-ip)`, scored on its own line: only curl exit 7 is BLOCKED, a timeout is INCONCLUSIVE), python is skipped with a SETUP-FAULT when only the Store alias exists, and the README gains a one-shot Scheduled Task recipe for SSH runs (`schtasks /Create` + `/Run`, deleted afterwards; independent of the SSH session), and `run-probe.ps1` fails loudly if a Probe 1 fault entry lacks its step-name prefix.
 - Docs: `docs/design/look-back-rules.md` design note for look-back policy rules over the audit event history. The valid `on` list is now the event types written with `blocked=1`, and the contention paragraph records that `Logger.Log` does not honour `busy_timeout`.
 - Docs: the `.claude/diagrams` Mermaid diagrams now describe the shipped v0.6.1
   fences instead of the original "planned" design, and a new

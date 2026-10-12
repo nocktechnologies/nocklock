@@ -22,7 +22,7 @@ assembled yet, and on `-Mode Desktop` it refuses the DISPOSABLE-BOX ONLY probes 
 - `python` and `curl.exe` on `PATH` (Probe 1). Nothing is installed or downloaded in Desktop mode.
 - Ports 8899, 9999 and 9998 free (else Probe 1 records SETUP-FAULT and is not run).
 - Let it finish: the global teardown runs in a `finally`. Do not press Ctrl+C (see "If the
-  run was interrupted"). Over SSH, start it with `Start-Process` (step 4) so a dropped session
+  run was interrupted"). Over SSH, start it as a one-shot Scheduled Task (step 4) so a dropped session
   cannot end the run; from a console PowerShell, run it in the foreground.
 - 64-bit `powershell.exe` (the default). The script refuses a 32-bit host.
 
@@ -60,17 +60,28 @@ assembled yet, and on `-Mode Desktop` it refuses the DISPOSABLE-BOX ONLY probes 
    Replace `<ts>` with a UTC timestamp, e.g. `probe-20260928T1200Z.log`. The run takes a
    few minutes and writes `output.txt` in the same directory.
 
-   **Over SSH**, start the run detached from the session (the second desktop run lost its
-   session mid-run), from an **elevated** session, in the folder holding `run-probe.ps1`:
+   **Over SSH**, run it as a one-shot Scheduled Task. Win32-OpenSSH puts the session in a job
+   that is killed on close, so a `Start-Process` child can die with the session; a task belongs
+   to Task Scheduler and does not depend on the session staying up. From an **elevated** session,
+   with `<dir>` the absolute folder holding `run-probe.ps1`:
 
-   ```powershell
-   Start-Process powershell -ArgumentList '-NoProfile','-ExecutionPolicy','Bypass','-File','run-probe.ps1','-Mode','Desktop','-Probes','1,2,3' -WindowStyle Hidden
+   ```
+   schtasks /Create /TN nocklock-probe-run /TR "cmd /c cd /d <dir> && powershell -NoProfile -ExecutionPolicy Bypass -File <dir>\run-probe.ps1 -Mode Desktop -Probes 1,2,3" /SC ONCE /ST 00:00 /RL HIGHEST /IT /F
+   schtasks /Run /TN nocklock-probe-run
    ```
 
-   The child inherits the session's token, so start it from an elevated session; `output.txt`
-   records `elevated=`, which shows whether it was. The working directory is the script's folder.
+   `/IT` runs it in the logged-on console session and `/RL HIGHEST` elevates it; `output.txt`
+   records `elevated=`, which shows whether it was. The `cmd /c cd /d` wrapper sets the working
+   directory to the script folder.
+
    Then poll `output.txt` for the final `RUN:` line: the script writes it last, so it is the
    completion signal. No `RUN:` line means the run has not finished or was cut short.
+
+   When the run is done, remove the task:
+
+   ```
+   schtasks /Delete /TN nocklock-probe-run /F
+   ```
 
 5. Bring back `output.txt` and, for a foreground run, `probe-<ts>.log` (the full transcript).
 
@@ -125,7 +136,7 @@ The transcript carries the verdicts: `LAUNCHER-ENV:`, `LIMITED-TOKEN:`,
   `495f2b44`). Probe 1's pivot PASSED (loopback reached, off-box did not resolve), Probe 2
   answered (no admin), Probe 1's 9998 bind + listen is an open SETUP-FAULT (python not on the
   container's PATH) and the SSH drop cut the run before Probe 3. This revision runs python by
-  absolute path with a package-SID grant, and (round 3) documents a `Start-Process` recipe for SSH. Its off-box claim was too strong:
+  absolute path with a package-SID grant, and (round 3) documents a one-shot Scheduled Task recipe for SSH (round 4; round 3's `Start-Process` can die with the SSH session). Its off-box claim was too strong:
   `exit=6` shows name resolution failed, not that packets are dropped. Round 2 adds a literal-IP
   `curl` to 1.1.1.1, scored as `VERDICT(1-ip)` against an outer control. Only an immediate connect failure (curl exit 7) is BLOCKED; a timeout (exit 28) is INCONCLUSIVE; any reply is reached. The step is scored on its own line.
 
@@ -133,7 +144,7 @@ The transcript carries the verdicts: `LAUNCHER-ENV:`, `LIMITED-TOKEN:`,
 
 A Ctrl+C, a dropped SSH session or a killed `powershell.exe` can end the run before its
 teardown finishes. Take `run_id` from `output.txt` and, in an elevated PowerShell, remove
-this run's state by exact name. Stop the task first, and run the rest only once it reads
+this run's state by exact name. If the run was started as a Scheduled Task, also run `schtasks /Delete /TN nocklock-probe-run /F`. Stop the limited-token task first, and run the rest only once it reads
 Ready or Disabled:
 
 ```powershell
