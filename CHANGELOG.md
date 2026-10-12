@@ -6,7 +6,7 @@ All notable changes to NockLock will be documented in this file.
 
 ### Breaking
 
-- `nocklock doctor` no longer reports PROTECTED for a config with disabled or advisory boundaries. New verdicts PARTIAL (exit 3) and UNPROTECTED (exit 4); GAPS FOUND now exits 2 (was 1). Automation that treats any non-zero exit as failure is unaffected; scripts matching exit 1 must change. `doctor --json` gains `boundaries` and `egress_level`. A config with `filesystem.root = ""`, `network.allow_all = true`, empty secret patterns and `syscall.enforcement = "off"` is now UNPROTECTED instead of PROTECTED.
+- `nocklock doctor` no longer reports PROTECTED for a config with disabled or advisory boundaries. New verdicts PARTIAL (exit 3) and UNPROTECTED (exit 4); GAPS FOUND now exits 2 (was 1). Exit codes are now 0 PROTECTED, 2 GAPS FOUND, 3 PARTIAL, 4 UNPROTECTED. A project that used to read PROTECTED with fences off now exits non-zero (3 or 4); that is intended, and automation that fails on any non-zero exit will now fail for such configs. Scripts matching exit 1 must change to 2. A network fence whose egress is UNREACHABLE reports posture `unavailable` and never counts toward PROTECTED. `doctor --json` gains `boundaries` and `egress_level`. A config with `filesystem.root = ""`, `network.allow_all = true`, empty secret patterns and `syscall.enforcement = "off"` is now UNPROTECTED instead of PROTECTED.
 
 ### Added
 

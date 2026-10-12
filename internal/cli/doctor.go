@@ -70,7 +70,10 @@ const (
 	postureEnforced doctorPosture = "enforced"
 	postureAdvisory doctorPosture = "advisory"
 	postureDisabled doctorPosture = "disabled"
-	postureEnabled  doctorPosture = "enabled"
+	// postureUnavailable: the fence cannot enforce on this host or config
+	// (egress UNREACHABLE); never counts toward PROTECTED.
+	postureUnavailable doctorPosture = "unavailable"
+	postureEnabled     doctorPosture = "enabled"
 )
 
 type doctorBoundary struct {
@@ -547,7 +550,8 @@ func doctorEgressLevel(cfg *config.Config, caps doctorCapabilities) egressLevel 
 }
 
 // doctorBoundaries derives each boundary's posture from the fence checks; a
-// network fence below the required egress level reads as advisory.
+// network fence below the required egress level reads as advisory, or
+// unavailable when egress is UNREACHABLE.
 func doctorBoundaries(cfg *config.Config, goos string, level egressLevel, checks []doctorCheck) []doctorBoundary {
 	byName := map[string]doctorCheck{}
 	for _, c := range checks {
@@ -574,6 +578,9 @@ func doctorBoundaries(cfg *config.Config, goos string, level egressLevel, checks
 	}
 	if net == postureEnforced && !egressLevelMeetsRequirement(level) {
 		net = postureAdvisory
+		if level == egressLevelUnreachable {
+			net = postureUnavailable
+		}
 	}
 	return []doctorBoundary{
 		{"filesystem", fs},

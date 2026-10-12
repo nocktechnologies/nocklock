@@ -110,3 +110,19 @@ func TestDoctorPartialNamesDisabledBoundary(t *testing.T) {
 		t.Fatalf("postures = %v", p)
 	}
 }
+
+// TestDoctorUnreachableEgressIsUnavailable: UNREACHABLE egress cannot enforce,
+// so the network boundary reads unavailable and the verdict is not PROTECTED.
+func TestDoctorUnreachableEgressIsUnavailable(t *testing.T) {
+	toml := strings.Replace(config.DefaultTOML(), "[filesystem]\nroot = \".\"", "[filesystem]\nroot = \"\"", 1)
+	got, code := runDoctorJSON(t, toml, "linux")
+	if got.EgressLevel != egressLevelUnreachable {
+		t.Fatalf("egress = %q, want UNREACHABLE", got.EgressLevel)
+	}
+	if p := postures(got); p["network"] != postureUnavailable {
+		t.Fatalf("network posture = %q, want unavailable", p["network"])
+	}
+	if got.Verdict == doctorVerdictProtected || code == doctorExitProtected {
+		t.Fatalf("verdict=%q exit=%d, must not be PROTECTED", got.Verdict, code)
+	}
+}
