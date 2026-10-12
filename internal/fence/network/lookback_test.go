@@ -169,18 +169,18 @@ func newPostTarget(t *testing.T) *postTarget {
 			pt.received.Add(int64(n))
 			if err == io.EOF {
 				if got == 0 {
-					pt.bodyless.Add(1)
 					end("bodyless")
+					pt.bodyless.Add(1)
 					return
 				}
-				pt.finished.Add(1)
 				end("complete")
+				pt.finished.Add(1)
 				w.WriteHeader(http.StatusOK)
 				return
 			}
 			if err != nil {
+				end("cut: " + err.Error()) // publish the line before the counter a test waits on
 				pt.cut.Add(1)
-				end("cut: " + err.Error())
 				return
 			}
 		}

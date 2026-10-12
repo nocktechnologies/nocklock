@@ -327,9 +327,9 @@ func TestLookbackTripLeavesTargetBodyIncomplete(t *testing.T) {
 			e, tr := newTripEnv(t, denyRule("r", ""))
 			pt := newPostTarget(t)
 			gate := make(chan struct{})
+			defer close(gate) // released on every exit, including a failed wait below
 			post(t, e, pt.host, chunked, gate)
 			waitFor(t, 5*time.Second, "POST body to start arriving", func() bool { return pt.received.Load() > 0 && e.liveCount() == 1 })
-			defer close(gate)
 			if err := tr.report(); err != nil {
 				t.Fatalf("report: %v", err)
 			}
