@@ -97,18 +97,16 @@ func runInitDiff(w io.Writer, configPath, runtimeName string) error {
 		return err
 	}
 	n := 0
-	for _, l := range have {
-		if !slices.Contains(want, l) {
-			fmt.Fprintf(w, "- %s\n", l)
-			n++
+	emit := func(prefix string, src, other []string) {
+		for _, l := range src {
+			if !slices.Contains(other, l) {
+				fmt.Fprintf(w, "%s %s\n", prefix, l)
+				n++
+			}
 		}
 	}
-	for _, l := range want {
-		if !slices.Contains(have, l) {
-			fmt.Fprintf(w, "+ %s\n", l)
-			n++
-		}
-	}
+	emit("-", have, want)
+	emit("+", want, have)
 	if n == 0 {
 		fmt.Fprintf(w, "%s already matches the %s preset.\n", configPath, runtimeName)
 	} else {
@@ -128,11 +126,12 @@ func policyLines(cfg *config.Config) ([]string, error) {
 	section := ""
 	for _, l := range strings.Split(buf.String(), "\n") {
 		l = strings.TrimSpace(l)
-		switch {
-		case l == "":
-		case strings.HasPrefix(l, "["):
+		if l == "" {
+			continue
+		}
+		if strings.HasPrefix(l, "[") {
 			section = l
-		default:
+		} else {
 			out = append(out, section+" "+l)
 		}
 	}
