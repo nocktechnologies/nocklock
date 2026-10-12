@@ -4,6 +4,10 @@ All notable changes to NockLock will be documented in this file.
 
 ## [Unreleased]
 
+## [0.7.0] - 2026-10-12
+
+On macOS, the Seatbelt profile now acts as a kernel network floor: with the network fence active, outbound traffic can only reach the local proxy, and the signed egress level is the new `SEATBELT`. This release also adds look-back rules, slice 1 (Linux `CONFINED` egress only), and opt-in `[audit.forward]` delivery of fence decisions to Command's ops log. The `claude-code` preset also changes how it treats tokens in the secret fence (see Security below).
+
 ### Added
 
 - `claude-code` preset (all platforms): passes `CLAUDE_CODE_OAUTH_TOKEN` (from `claude setup-token`) through the secret fence; the preset's `*_TOKEN*` block pattern is dropped because block outranks pass, and `pass` is an allowlist so other tokens stay blocked. On macOS, `wrap` prints a one-line hint when the wrapped command is `claude` and neither it nor `ANTHROPIC_API_KEY` reaches the child: it says whether the secret fence stripped a variable set in the parent (naming the preset fix, or removing the matching `secrets.block` pattern and adding the name to `secrets.pass`) or it is unset (run `claude setup-token`), and never prints a value. The keychain stays closed. The macOS Quick start now uses `nocklock init --runtime claude-code`. See README.
@@ -16,6 +20,7 @@ All notable changes to NockLock will be documented in this file.
 
 ### Security
 
+- `claude-code` preset (all platforms): the `*_TOKEN*` block pattern was removed so that `CLAUDE_CODE_OAUTH_TOKEN` can pass the secret fence. A variable whose name matches `*_TOKEN*` is no longer blocked by that pattern. The preset still blocks `*_SECRET*` and `*_PASSWORD*`. Tokens that are not in `secrets.pass` are still stripped, because `pass` is an allowlist (the test `TestClaudeCodePresetPassesOAuthToken` shows `GITHUB_TOKEN` stripped and `CLAUDE_CODE_OAUTH_TOKEN` passing). If you upgrade from v0.6.x: `nocklock init` copies the preset into `.nock/config.toml` and never overwrites an existing file. So a config made by an earlier `init` keeps the old lists: `CLAUDE_CODE_OAUTH_TOKEN` is blocked by `*_TOKEN*` and is missing from `secrets.pass`. To use the token, add `CLAUDE_CODE_OAUTH_TOKEN` to `secrets.pass` and remove `*_TOKEN*` from `secrets.block`. Removing the pattern lets every `*_TOKEN*` name listed in `secrets.pass` reach the child, so check that list first.
 - CI: `claude.yml` now runs only when the triggering author is an `OWNER`,
   `MEMBER` or `COLLABORATOR`, checked per event type. `claude-code-review.yml`
   skips pull requests opened from forks instead of failing on missing secrets.
