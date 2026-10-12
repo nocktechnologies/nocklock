@@ -34,7 +34,7 @@ nocklock init --runtime claude-code
 nocklock wrap -- claude
 ```
 
-The `claude-code` preset passes both variables through the secret fence. With a custom config, add the exact name to `secrets.pass` instead. If `wrap` sees `claude` on macOS with neither variable reaching the child, it prints a one-line hint (stripped by the fence, or unset so run `claude setup-token`; never the value) and still launches. Claude Code's `--bare` mode does not read `CLAUDE_CODE_OAUTH_TOKEN`; use `ANTHROPIC_API_KEY` there.
+The `claude-code` preset passes both variables through the secret fence. With a custom config, remove the matching pattern from `secrets.block` (for example `*_TOKEN*`) and add the exact name to `secrets.pass`; block outranks pass, so adding to pass alone does not work. If `wrap` sees `claude` on macOS with neither variable reaching the child, it prints a one-line hint (stripped by the fence, or unset so run `claude setup-token`; never the value) and still launches. Claude Code's `--bare` mode does not read `CLAUDE_CODE_OAUTH_TOKEN`; use `ANTHROPIC_API_KEY` there.
 
 On Linux, the default read-only system grants cover binaries and libraries, plus
 `/etc/ld.so.cache` (loader cache), `passwd` and `group` (identity lookup),

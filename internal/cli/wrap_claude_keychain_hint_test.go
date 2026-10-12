@@ -42,6 +42,11 @@ func TestClaudeKeychainHint(t *testing.T) {
 			}
 		})
 	}
+	for _, want := range []string{"remove the secrets.block pattern", "*_TOKEN*", "to secrets.pass", "nocklock init --runtime claude-code"} {
+		if !strings.Contains(stripped("CLAUDE_CODE_OAUTH_TOKEN"), want) {
+			t.Fatalf("stripped hint missing %q", want)
+		}
+	}
 	for _, h := range []string{claudeHintUnset, stripped("CLAUDE_CODE_OAUTH_TOKEN")} {
 		if strings.Contains(h, "\n") {
 			t.Fatal("hint must be a single line")

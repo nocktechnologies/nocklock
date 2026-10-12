@@ -1214,7 +1214,7 @@ const claudeHintUnset = "NockLock: Claude Code keeps its login in the macOS keyc
 
 // claudeHintStrippedFormat is printed when a credential variable is set in the
 // parent environment but the secret fence removed it. %s is the variable name.
-const claudeHintStrippedFormat = "NockLock: %s is set but the secret fence stripped it; run 'nocklock init --runtime claude-code' (the claude-code preset passes it) or add %q to secrets.pass in your config."
+const claudeHintStrippedFormat = "NockLock: %s is set but the secret fence stripped it; run 'nocklock init --runtime claude-code' (the claude-code preset passes it), or in a custom config remove the secrets.block pattern that matches it (for example *_TOKEN*) and add %q to secrets.pass."
 
 // claudeKeychainHint returns a one-line hint when goos is darwin, the wrapped
 // command's basename is claude, and childEnv (the post-secret-fence env the
