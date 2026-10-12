@@ -1043,6 +1043,18 @@ into the directory it is run from, never under `$probeRoot`, which the teardown 
 Placeholders such as `<Probe 3 body, below>` are expanded there with the named block; a
 change to any block here must land in `run-probe.ps1` in the same commit.
 
+### Probes status
+
+| Probe | Status (latest desktop run: 2026-10-12 19:47Z, [results](../probes/n10825/RESULTS-20261012T1947Z.md)) |
+|---|---|
+| 1, pivot: zero-capability loopback | **PASS** for loopback: container `curl` reached the exempted listener. `example.com`: name resolution failed (`exit=6`); off-box packet egress not yet tested (the next run adds a literal-IP `curl` to 1.1.1.1, scored as `VERDICT(1-ip)` against an outer control). A second loopback listener (9999) is also reachable: the exemption is per container, not per port. |
+| 1, 9998 bind + listen | **Open SETUP-FAULT.** python was not on the container's PATH. Fixed in the script (absolute path plus package-SID grant); not yet re-run. |
+| 2, exemption needs admin? | **Answered: no.** `VERDICT(1-exempt)` is NON-ELEVATED OK under the limited token (an Administrators-group user's filtered Medium-IL token; a true standard-user account is untested). |
+| 3, AppContainer launch under the limited token | Not run (the SSH session dropped). Next desktop round, started with the Scheduled Task recipe (see the probe README). |
+
+The first desktop run (2026-09-28, [output](../probes/n10825/output-20260928T0558Z.txt)) ended
+Probe 1 as a SETUP-FAULT (`powershell.exe` in the container, `0xC0000142`) and Probe 3 INDETERMINATE.
+
 **Box setup** (DISPOSABLE-BOX ONLY — run on a throwaway VM, never on the
 desktop):
 
@@ -1749,8 +1761,15 @@ $verdict1x = if (-not $preClean) {
 # Only curl writes CURL_DONE, so a capture without `CURL_DONE exit=<launch exit>` is a
 # SETUP-FAULT, recorded in hex, never a network result.
 $log1 = @(); $fault1 = @()
+# example.com failing to resolve (exit=6) only shows DNS failed, not that packets are dropped. The 'ip'
+# curl connects to a literal public IP (no DNS), so it is the off-box packet test; the outer control
+# below proves this machine can reach that IP, or an inside failure would prove nothing.
+# cmd /c keeps curl's stderr out of PowerShell: under $ErrorActionPreference='Stop' on PS 5.1, 2>$null on a native command can throw.
+cmd.exe /c 'curl.exe -sS -m 5 -o NUL http://1.1.1.1/ 2>nul'
+$outsideIpRc = $LASTEXITCODE
 foreach ($c in @(@('8899',    'curl.exe -sS -m 5 http://127.0.0.1:8899/'),      # MUST succeed, or Phase 1 is dead
                  @('example', 'curl.exe -sS -m 5 https://example.com/'),        # MUST fail (Block Outbound Default Rule)
+                 @('ip',      'curl.exe -sS -m 5 http://1.1.1.1/'),             # MUST fail to connect: off-box packet egress, no DNS involved
                  @('9999',    'curl.exe -sS -m 5 http://127.0.0.1:9999/'))) {   # unrelated loopback port: EXPECTED reachable
   $capture = Join-Path $out.FullName "_inside-1-$($c[0]).txt"
   try {
@@ -1765,23 +1784,46 @@ foreach ($c in @(@('8899',    'curl.exe -sS -m 5 http://127.0.0.1:8899/'),      
   }
 }
 $log1 | ForEach-Object { "inside(1): $_" }
+# The ip step is scored on its own line: its fault must not unscore the rest of Probe 1.
+$faultIp = @($fault1 -cmatch '^ip ')
+$fault1 = @($fault1 -cnotmatch '^ip ')
+# Per-step scoring relies on every fault entry starting with its step name (the format's first field).
+# A fault that does not is a script bug, not a network result, so fail loudly rather than mis-score.
+if (@($fault1 -cnotmatch '^(8899|example|9999) ').Count) { throw "Probe 1 fault entry lacks its step-name prefix (8899/example/ip/9999): $($fault1 -join ' | ')" }
 # The agent binds its own listener: python binds 127.0.0.1:9998, listens, prints one line
 # and exits, so the claim (bind + listen inside, outbound-only scope below) is its exit code
 # and nothing is left running to reap. A per-user python (e.g. under %LOCALAPPDATA%\Programs)
-# is unreadable to a zero-capability container: cmd's error text then shows in the capture.
+# is neither on a zero-capability container's PATH nor readable to it (second desktop run:
+# "'python' is not recognized"). So python runs by its absolute path, after the package SID is
+# granted read+execute on that install directory; the global teardown revokes the grant.
 # python prints PYTHON_RAN first: a capture without it means cmd never started python, a
 # SETUP-FAULT, never the bind's answer.
-$capture = Join-Path $out.FullName '_inside-1-9998.txt'
-$bind9998 = try {
-  $rc = [NockProbe.AC]::Run($sid, @(), ('cmd.exe /c python -c "print(''PYTHON_RAN'', flush=True); import socket; s = socket.socket(); ' +
-    's.bind((''127.0.0.1'', 9998)); s.listen(1); print(''bind+listen OK'', s.getsockname())" > "' + $capture + '" 2>&1'), 60000)
-  'exit={0} (0x{0:X8})' -f $rc
-} catch {
-  'threw {0} HResult={1} {2}' -f $_.Exception.GetBaseException().GetType().Name, (Get-BaseHResult $_), $_.Exception.GetBaseException().Message
+# $pyExe comes from the prerequisite check, which skips the WindowsApps Store alias (a zero-byte
+# stub in a Windows-managed directory); with no usable python.exe nothing is launched.
+if ($pyExe) {
+  $script:pyDir = Split-Path $pyExe -Parent        # $script: so the global teardown can revoke it
+  $script:pySid = $sid                             # captured with the grant: the teardown revokes and asserts on this SID
+  icacls $script:pyDir /grant "*${script:pySid}:(OI)(CI)(RX)" | Out-Null
+  $grantRc = $LASTEXITCODE
+  if ($grantRc -ne 0) {
+    # The grant did not take, so the container cannot read python: a SETUP-FAULT, and python is not launched.
+    $bind9998 = 'SETUP-FAULT - icacls grant on the python directory failed (exit {0}); python step skipped' -f $grantRc
+  } else {
+    $capture = Join-Path $out.FullName '_inside-1-9998.txt'
+    $bind9998 = try {
+      $rc = [NockProbe.AC]::Run($sid, @(), ('cmd.exe /c ""' + $pyExe + '" -c "print(''PYTHON_RAN'', flush=True); import socket; s = socket.socket(); ' +
+        's.bind((''127.0.0.1'', 9998)); s.listen(1); print(''bind+listen OK'', s.getsockname())" > "' + $capture + '" 2>&1"'), 60000)
+      'exit={0} (0x{0:X8})' -f $rc
+    } catch {
+      'threw {0} HResult={1} {2}' -f $_.Exception.GetBaseException().GetType().Name, (Get-BaseHResult $_), $_.Exception.GetBaseException().Message
+    }
+    $got = @(Get-Content $capture -ErrorAction SilentlyContinue)
+    $got | ForEach-Object { "inside(1) 9998: $_" }
+    if (-not ($got -ccontains 'PYTHON_RAN')) { $bind9998 = "SETUP-FAULT - python did not run (no PYTHON_RAN), launch $bind9998" }
+  }
+} else {
+  $bind9998 = 'SETUP-FAULT: no usable python.exe (only the WindowsApps alias or none)'
 }
-$got = @(Get-Content $capture -ErrorAction SilentlyContinue)
-$got | ForEach-Object { "inside(1) 9998: $_" }
-if (-not ($got -ccontains 'PYTHON_RAN')) { $bind9998 = "SETUP-FAULT - python did not run (no PYTHON_RAN), launch $bind9998" }
 "inside(1) 9998 bind+listen: $bind9998"
 $exempt1 = Test-ExemptListed        # read BEFORE Probe 1's teardown, like everything scored below
 
@@ -1805,6 +1847,17 @@ if ($unscored1.Count) {
   throw 'Probe 1: Phase 1 dead (8899 unreachable from the container); run stopped as the doc requires'
 } else {
   "VERDICT(1): 8899 reached; read example.com (MUST fail) and 9999 (against its outside control) from the inside(1) lines above, per the doc's Probe 1 rules"
+  # Off-box packets: scored only against the outer control. curl exit 0 means ANY reply came back
+  # (even an HTTP error page): reached. 7 is an immediate connect failure: the only BLOCKED score.
+  # 28 is a timeout: a slow network looks the same, so it is INCONCLUSIVE, never a kernel block.
+  $insideIp = @(@($log1) -cmatch '^ip exit=')
+  if ($outsideIpRc -ne 0) { "VERDICT(1-ip): not scored - the outer control to 1.1.1.1 failed (curl exit $outsideIpRc), so this machine has no route to prove a drop" }
+  elseif ($faultIp.Count) { "VERDICT(1-ip): not scored - $($faultIp -join '; ')" }
+  elseif ($insideIp.Count -ne 1) { "VERDICT(1-ip): not scored - the inside ip curl recorded $($insideIp.Count) 'ip exit=' lines, not 1" }
+  elseif ($insideIp[0] -ceq 'ip exit=0') { "VERDICT(1-ip): OFF-BOX LEAK - the container reached 1.1.1.1 ($($insideIp[0])); the fence does not drop off-box packets" }
+  elseif ($insideIp[0] -ceq 'ip exit=7') { "VERDICT(1-ip): OFF-BOX EGRESS BLOCKED - the outer control reached 1.1.1.1, the container's connect failed at once ($($insideIp[0]))" }
+  elseif ($insideIp[0] -ceq 'ip exit=28') { "VERDICT(1-ip): INCONCLUSIVE - the container's curl to 1.1.1.1 timed out ($($insideIp[0])); a timeout is not a block (a slow network looks the same)" }
+  else { "VERDICT(1-ip): INDETERMINATE - the container's curl to 1.1.1.1 ended $($insideIp[0]); read the inside(1) lines" }
 }
 ```
 
@@ -1838,7 +1891,8 @@ proxy design, which only needs the container to reach out to the proxy.
 If the first `curl` fails, the recommendation's Phase 1 is dead and Phase 2
 becomes mandatory — report immediately, do not run the rest.
 
-**Teardown.** Stop the two outer `python` listeners by handle
+**Teardown.** The `icacls` grant on the python install directory is revoked in the global
+teardown (`icacls $pyDir /remove:g "*$pySid"`, the SID captured at grant time), before the profiles are deleted. Stop the two outer `python` listeners by handle
 (`$job8899, $job9999 | Stop-Job -PassThru | Remove-Job`); the inside 9998 check
 exits on its own after `listen()`. Never `Get-Job | Stop-Job` — that kills every job in the operator's session. The
 loopback exemption is machine-wide session state shared by every probe, so it is
@@ -1852,9 +1906,9 @@ stop (see the quiescence gate above).
 
 | State touched | Detail |
 |---|---|
-| Creates | 2 outer jobs (`$job8899`, `$job9999`); 4 transient container processes (3 curls, 1 python bind + listen that exits); loopback exemption (machine-wide; removed and proven absent before each measured attempt, then added by the limited task or the elevated retry, kept until global teardown); `limited\exempt-<GUID>.*` files under `$probeRoot` (one run of the scaffold's scheduled task, when the pre-clean succeeds) |
+| Creates | a read + execute ACE for the package SID on the python install directory (revoked in the global teardown); 2 outer jobs (`$job8899`, `$job9999`); 4 transient container processes (3 curls, 1 python bind + listen that exits); loopback exemption (machine-wide; removed and proven absent before each measured attempt, then added by the limited task or the elevated retry, kept until global teardown); `limited\exempt-<GUID>.*` files under `$probeRoot` (one run of the scaffold's scheduled task, when the pre-clean succeeds) |
 | Removes | the 2 outer jobs (by handle) |
-| Must never touch | other user jobs; loopback exemptions not created by this run; scheduled tasks other than `nocklock-probe-limited-$runId` |
+| Must never touch | other user jobs; any other ACE on the python install directory; loopback exemptions not created by this run; scheduled tasks other than `nocklock-probe-limited-$runId` |
 
 ### Probe 2: does the exemption need elevation?
 
@@ -2670,6 +2724,9 @@ if ($etwCreated) { logman stop $etwSession -ets 2>$null }  # only if THIS run cr
 foreach ($idFile in @((Join-Path $probeRoot 'out\wmi-child.txt'))) {
   Stop-VerifiedProcess -IdentityFile $idFile
 }
+# Probe 1's grant on the python install directory: revoke it before the profiles go (a
+# deleted profile's SID would linger in that ACL). Not limited-task state, so either way.
+if ($pyDir) { icacls $pyDir /remove:g "*${pySid}" | Out-Null }
 # Probe 9 (VM only): restore firewall to the recorded per-profile state
 if (-not $quiet) {
   # KEEP everything a surviving instance could use or recreate; print it and the recovery.
@@ -2717,6 +2774,10 @@ if (-not $quiet) {
     Assert-Restored "AppContainer profile folder $n absent" (-not (Test-Path (Join-Path $env:LOCALAPPDATA "Packages\$n")))
   }
   Assert-Restored "AppContainer Mappings keys for this run's monikers absent" ($leftMaps.Count -eq 0)
+  if ($pyDir) {
+    $pyAcl = icacls $pyDir
+    Assert-Restored "python install $pyDir free of this run's SID" (-not ($pyAcl -match [regex]::Escape($pySid) -or $pyAcl -match [regex]::Escape($moniker)))
+  }
   Assert-Restored "probe root $probeRoot absent" (-not (Test-Path $probeRoot))
 }
 logman query -ets                                          # ETW: diff by eye against BEFORE
