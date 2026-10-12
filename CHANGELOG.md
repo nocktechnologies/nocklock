@@ -8,6 +8,10 @@ All notable changes to NockLock will be documented in this file.
 
 - Look-back race test: the POST target records how each request body ended and counts a bodyless request apart from a finished body; new `TestLookbackTripLeavesTargetBodyIncomplete` pins that a trip cuts Content-Length and chunked bodies. Test-only.
 
+### Fixed
+
+- Linux netns: the concurrent subnet test now checks atomic reservation claims instead of random, unreserved bridge candidates; two processes also contend for one subnet in a regression test.
+
 ## [0.7.0] - 2026-10-12
 
 On macOS, the Seatbelt profile now acts as a kernel network floor: with the network fence active, outbound traffic can only reach the local proxy, and the signed egress level is the new `SEATBELT`. This release also adds look-back rules, slice 1 (Linux `CONFINED` egress only), and opt-in `[audit.forward]` delivery of fence decisions to Command's ops log. The `claude-code` preset also changes how it treats tokens in the secret fence (see Security below).
