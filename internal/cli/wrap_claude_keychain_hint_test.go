@@ -14,26 +14,22 @@ func TestClaudeKeychainHint(t *testing.T) {
 		goos    string
 		args    []string
 		environ []string
-		want    bool
+		want    string
 	}{
-		{"darwin claude unset", "darwin", []string{"claude", "-p", "hi"}, []string{"HOME=/h"}, true},
-		{"darwin absolute claude path", "darwin", []string{"/opt/homebrew/bin/claude"}, nil, true},
-		{"oauth token set", "darwin", []string{"claude"}, []string{"CLAUDE_CODE_OAUTH_TOKEN=x"}, false},
-		{"api key set", "darwin", []string{"claude"}, []string{"ANTHROPIC_API_KEY=x"}, false},
-		{"empty value counts as unset", "darwin", []string{"claude"}, []string{"ANTHROPIC_API_KEY="}, true},
-		{"other basename", "darwin", []string{"claude-code"}, nil, false},
-		{"other command", "darwin", []string{"codex"}, nil, false},
-		{"linux", "linux", []string{"claude"}, nil, false},
-		{"no args", "darwin", nil, nil, false},
+		{"darwin claude unset", "darwin", []string{"claude", "-p", "hi"}, []string{"HOME=/h"}, claudeKeychainHintText},
+		{"darwin absolute claude path", "darwin", []string{"/opt/homebrew/bin/claude"}, nil, claudeKeychainHintText},
+		{"oauth token set", "darwin", []string{"claude"}, []string{"CLAUDE_CODE_OAUTH_TOKEN=x"}, ""},
+		{"api key set", "darwin", []string{"claude"}, []string{"ANTHROPIC_API_KEY=x"}, ""},
+		{"empty value counts as unset", "darwin", []string{"claude"}, []string{"ANTHROPIC_API_KEY="}, claudeKeychainHintText},
+		{"other basename", "darwin", []string{"claude-code"}, nil, ""},
+		{"other command", "darwin", []string{"codex"}, nil, ""},
+		{"linux", "linux", []string{"claude"}, nil, ""},
+		{"no args", "darwin", nil, nil, ""},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			got := claudeKeychainHint(tc.goos, tc.args, tc.environ)
-			if tc.want && got != claudeKeychainHintText {
-				t.Fatalf("hint = %q, want the keychain hint", got)
-			}
-			if !tc.want && got != "" {
-				t.Fatalf("hint = %q, want none", got)
+			if got := claudeKeychainHint(tc.goos, tc.args, tc.environ); got != tc.want {
+				t.Fatalf("hint = %q, want %q", got, tc.want)
 			}
 		})
 	}
