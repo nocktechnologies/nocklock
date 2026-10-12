@@ -3,8 +3,11 @@
 package netns
 
 import (
+	"bytes"
+	"errors"
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -19,50 +22,136 @@ func useTempSubnetReservationDir(t *testing.T) {
 	t.Cleanup(func() { subnetReservationDir = old })
 }
 
-// TestSubnetReservation_NoCollisionsOnConcurrentAllocation verifies that
-// concurrent calls to NewBridgeSpec never allocate the same subnet address,
-// even with many simultaneous allocations.
+// TestSubnetReservation_NoCollisionsOnConcurrentAllocation verifies that exactly one contender
+// can claim a subnet. NewBridgeSpec only makes candidates; the privileged
+// helper claims them and retries on SubnetCollisionError.
 func TestSubnetReservation_NoCollisionsOnConcurrentAllocation(t *testing.T) {
 	useTempSubnetReservationDir(t)
 	const concurrentAllocations = 20
-	bridges := make([]BridgeSpec, concurrentAllocations)
-	errors := make([]error, concurrentAllocations)
+	const subnet = "169.254.65.29"
+	tokens := make([]string, concurrentAllocations)
+	claimErrors := make([]error, concurrentAllocations)
 	var wg sync.WaitGroup
 
-	// Allocate bridges concurrently.
 	for i := 0; i < concurrentAllocations; i++ {
 		wg.Add(1)
 		go func(idx int) {
 			defer wg.Done()
-			bridge, err := NewBridgeSpec()
-			bridges[idx] = bridge
-			errors[idx] = err
+			token, err := reserveSubnet(subnet)
+			tokens[idx] = token
+			claimErrors[idx] = err
 		}(i)
 	}
 	wg.Wait()
 
-	// Check for allocation errors.
-	for idx, err := range errors {
-		if err != nil {
-			t.Errorf("allocation %d failed: %v", idx, err)
+	winners := 0
+	for idx, err := range claimErrors {
+		if err == nil {
+			winners++
+			if tokens[idx] == "" {
+				t.Errorf("claim %d returned an empty ownership token", idx)
+			}
+			continue
+		}
+		var collision *SubnetCollisionError
+		if !errors.As(err, &collision) {
+			t.Errorf("claim %d: expected subnet collision, got %v", idx, err)
 		}
 	}
-
-	// Verify no two bridges share the same host address (subnet collision).
-	seen := make(map[string]bool)
-	for _, bridge := range bridges {
-		if bridge.HostAddress == "" {
-			continue // Skip failed allocations.
-		}
-		if seen[bridge.HostAddress] {
-			t.Errorf("subnet collision: %s allocated multiple times", bridge.HostAddress)
-		}
-		seen[bridge.HostAddress] = true
+	if winners != 1 {
+		t.Errorf("subnet %s had %d successful claims, want one", subnet, winners)
 	}
 
-	// Clean up reservations.
-	for _, bridge := range bridges {
-		_ = ReleaseSubnetReservation(bridge.ReservationID, bridge.ReservationToken)
+	for _, token := range tokens {
+		if token != "" {
+			if err := ReleaseSubnetReservation(subnet, token); err != nil {
+				t.Errorf("release winning claim: %v", err)
+			}
+		}
+	}
+}
+
+// TestSubnetReservation_CrossProcessClaim verifies that only one process wins
+// when both try to claim the same subnet at the same time.
+func TestSubnetReservation_CrossProcessClaim(t *testing.T) {
+	const subnet = "169.254.65.29"
+	if dir := os.Getenv("NOCKLOCK_TEST_SUBNET_RESERVATION_DIR"); dir != "" {
+		subnetReservationDir = dir
+		gate := os.NewFile(3, "claim gate")
+		if gate == nil {
+			t.Fatal("second process has no claim gate")
+		}
+		defer gate.Close()
+		var signal [1]byte
+		if _, err := gate.Read(signal[:]); err != nil {
+			t.Fatalf("wait for claim gate: %v", err)
+		}
+		token, err := reserveSubnet(subnet)
+		if err == nil {
+			fmt.Printf("CLAIMED:%s\n", token)
+			return
+		}
+		var collision *SubnetCollisionError
+		if !errors.As(err, &collision) {
+			t.Fatalf("claim from second process: got %v, want subnet collision", err)
+		}
+		fmt.Println("COLLISION")
+		return
+	}
+
+	useTempSubnetReservationDir(t)
+	gateRead, gateWrite, err := os.Pipe()
+	if err != nil {
+		t.Fatalf("create claim gate: %v", err)
+	}
+	defer gateRead.Close()
+	defer gateWrite.Close()
+	exe, err := os.Executable()
+	if err != nil {
+		t.Fatalf("find test executable: %v", err)
+	}
+	var commands [2]*exec.Cmd
+	var outputs [2]bytes.Buffer
+	for i := range commands {
+		cmd := exec.Command(exe, "-test.run=^TestSubnetReservation_CrossProcessClaim$")
+		cmd.Env = append(os.Environ(), "NOCKLOCK_TEST_SUBNET_RESERVATION_DIR="+subnetReservationDir)
+		cmd.ExtraFiles = []*os.File{gateRead}
+		cmd.Stdout = &outputs[i]
+		cmd.Stderr = &outputs[i]
+		if err := cmd.Start(); err != nil {
+			t.Fatalf("start claimant %d: %v", i, err)
+		}
+		commands[i] = cmd
+	}
+	if _, err := gateWrite.Write([]byte{1, 1}); err != nil {
+		t.Fatalf("release claim gate: %v", err)
+	}
+	if err := gateWrite.Close(); err != nil {
+		t.Fatalf("close claim gate: %v", err)
+	}
+	winners := 0
+	var winningTokens []string
+	for i, cmd := range commands {
+		if err := cmd.Wait(); err != nil {
+			t.Errorf("claimant %d failed: %v\n%s", i, err, outputs[i].String())
+			continue
+		}
+		output := outputs[i].String()
+		if _, token, ok := strings.Cut(output, "CLAIMED:"); ok {
+			winners++
+			token, _, _ = strings.Cut(token, "\n")
+			winningTokens = append(winningTokens, token)
+		} else if !strings.Contains(output, "COLLISION\n") {
+			t.Errorf("claimant %d returned no claim result:\n%s", i, output)
+		}
+	}
+	if winners != 1 {
+		t.Errorf("subnet %s had %d successful cross-process claims, want one", subnet, winners)
+	}
+	for _, token := range winningTokens {
+		if err := ReleaseSubnetReservation(subnet, token); err != nil {
+			t.Errorf("release winning claim: %v", err)
+		}
 	}
 }
 

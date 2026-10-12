@@ -4,7 +4,11 @@ All notable changes to NockLock will be documented in this file.
 
 ## [Unreleased]
 
-### Changed
+### Fixed
+
+- Linux netns: the concurrent subnet test now checks atomic reservation claims instead of random, unreserved bridge candidates; two processes also contend for one subnet in a regression test.
+
+### Added
 
 - Docs: compare NFLOG, seccomp and Seatbelt denial evidence and propose bounded,
   signed Linux packet-drop observations in `docs/design/kernel-floor-denial-evidence.md`
