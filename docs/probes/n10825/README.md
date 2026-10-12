@@ -63,23 +63,36 @@ assembled yet, and on `-Mode Desktop` it refuses the DISPOSABLE-BOX ONLY probes 
    **Over SSH**, run it as a one-shot Scheduled Task. Win32-OpenSSH puts the session in a job
    that is killed on close, so a `Start-Process` child can die with the session; a task belongs
    to Task Scheduler and does not depend on the session staying up. From an **elevated** session,
-   with `<dir>` the absolute folder holding `run-probe.ps1`:
+   with `<dir>` the absolute folder holding `run-probe.ps1`. Use a short `<dir>` without spaces,
+   for example `C:\nlprobe`, because `/TR` is length-limited.
+
+   Step 1: write a one-line launcher, `<dir>\nlprobe-run.cmd`, holding:
 
    ```
-   schtasks /Create /TN nlprobe-runner /TR "cmd /c cd /d <dir> && powershell -NoProfile -ExecutionPolicy Bypass -File <dir>\run-probe.ps1 -Mode Desktop -Probes 1,2,3 > <dir>\probe-<ts>.log 2>&1" /SC ONCE /ST 00:00 /RL HIGHEST /IT /F
+   cd /d <dir> && powershell -NoProfile -ExecutionPolicy Bypass -File <dir>\run-probe.ps1 -Mode Desktop -Probes 1,2,3 > <dir>\probe-<ts>.log 2>&1
+   ```
+
+   Step 2: clear any earlier result by exact name, then create and start the task:
+
+   ```
+   if exist <dir>\output.txt ren <dir>\output.txt output-prev-<ts>.txt
+   schtasks /Create /TN nlprobe-runner /TR "<dir>\nlprobe-run.cmd" /SC ONCE /ST 00:00 /RL HIGHEST /IT /F
    schtasks /Run /TN nlprobe-runner
    ```
 
-   Replace `<ts>` as above and keep `<dir>` free of spaces. The redirect saves the full
-   transcript (every `VERDICT` line) to `probe-<ts>.log` in the script folder. The task is named
-   `nlprobe-runner` so it never matches the script's own `nocklock-probe-*` leftover glob.
+   Replace `<ts>` with a UTC timestamp, as above. The redirect saves the full transcript (every
+   `VERDICT` line) to `probe-<ts>.log` in the script folder. The task is named `nlprobe-runner`
+   so it never matches the script's own `nocklock-probe-*` leftover glob.
 
    `/IT` runs it in the logged-on console session and `/RL HIGHEST` elevates it; `output.txt`
-   records `elevated=`, which shows whether it was. The `cmd /c cd /d` wrapper sets the working
+   records `elevated=`, which shows whether it was. The `cd /d` in the launcher sets the working
    directory to the script folder, so the log and `output.txt` land there.
 
-   Then poll `output.txt` for the final `RUN:` line: the script writes it last, so it is the
-   completion signal. No `RUN:` line means the run has not finished or was cut short.
+   Then poll for completion: `output.txt` exists and ends with a `RUN:` line. The script writes
+   that line last, and the rename above means a new `output.txt` can only come from this run.
+   No `output.txt`, or no final `RUN:` line, means the run has not finished or was cut short.
+
+   One operator, one run at a time. Do not start a run while `nlprobe-runner` exists.
 
    When the run is done, stop the task, poll until it is no longer running, then delete it:
 
