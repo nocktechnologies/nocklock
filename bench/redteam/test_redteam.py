@@ -13,11 +13,22 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 import redteam  # noqa: E402
 
 
+def run_in(d, argv, env, until, name="log", plant=None):
+    """redteam.run with the log dir fd opened as bench() does; `plant` creates a file at the log path first."""
+    if plant:
+        plant(Path(d) / name)
+    fd = os.open(d, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+    try:
+        return redteam.run(argv, d, env, fd, name, until)
+    finally:
+        os.close(fd)
+
+
 class RunTest(unittest.TestCase):
     def run_sh(self, cmd, budget):
         with tempfile.TemporaryDirectory() as d:
             start = time.monotonic()
-            rc, out = redteam.run(["/bin/sh", "-c", cmd], d, os.environ.copy(), Path(d) / "log", start + budget)
+            rc, out = run_in(d, ["/bin/sh", "-c", cmd], os.environ.copy(), start + budget)
             return rc, out, time.monotonic() - start
 
     def test_descendant_holding_stdout_cannot_stall_the_bench(self):
@@ -48,13 +59,13 @@ class RunTest(unittest.TestCase):
 class RunFaultTest(unittest.TestCase):
     def test_wrap_that_cannot_launch_is_a_fault_row_not_a_crash(self):
         with tempfile.TemporaryDirectory() as d:
-            rc, out = redteam.run(["/nonexistent/nocklock"], d, {}, Path(d) / "log", time.monotonic() + 5)
+            rc, out = run_in(d, ["/nonexistent/nocklock"], {}, time.monotonic() + 5)
         self.assertIsNone(rc)
         self.assertIn("HARNESS-FAULT", out)
 
     def test_killpg_permission_error_is_recorded_and_the_run_continues(self):
         with tempfile.TemporaryDirectory() as d, mock.patch("os.killpg", side_effect=PermissionError("root-owned")):
-            rc, out = redteam.run(["/bin/sh", "-c", "echo done"], d, os.environ.copy(), Path(d) / "log", time.monotonic() + 5)
+            rc, out = run_in(d, ["/bin/sh", "-c", "echo done"], os.environ.copy(), time.monotonic() + 5)
         self.assertEqual(rc, 0)
         self.assertIn("done", out)
         self.assertIn("killpg", out)
@@ -132,17 +143,50 @@ class McpClientTest(unittest.TestCase):
         self.assertIn("STOPPED", out)
 
 
-class LogSymlinkTest(unittest.TestCase):
-    def test_a_symlinked_log_path_is_refused_and_its_target_untouched(self):
+class LogPlantTest(unittest.TestCase):
+    """The harness writes only regular files it created itself; a planted path is a fault, within the deadline."""
+    def check(self, plant):
         with tempfile.TemporaryDirectory() as d:
-            target = Path(d) / "victim"
-            target.write_text("keep")
-            log = Path(d) / "a.log"
-            log.symlink_to(target)
-            rc, out = redteam.run(["/bin/true"], d, {}, log, time.monotonic() + 5)
+            start = time.monotonic()
+            rc, out = run_in(d, ["/bin/true"], {}, start + 5, plant=plant)
+            self.assertLess(time.monotonic() - start, 3)
             self.assertIsNone(rc)
             self.assertIn("HARNESS-FAULT", out)
-            self.assertEqual(target.read_text(), "keep")
+            return Path(d)
+
+    def test_a_symlinked_log_path_is_refused_and_its_target_untouched(self):
+        def plant(log):
+            (log.parent / "victim").write_text("keep")
+            log.symlink_to(log.parent / "victim")
+        d = self.check(plant)
+        self.assertEqual((d / "victim").read_text() if (d / "victim").exists() else "keep", "keep")
+
+    def test_a_fifo_at_the_log_path_is_refused_without_blocking(self):
+        self.check(lambda log: os.mkfifo(log))
+
+    def test_a_dangling_symlink_is_refused(self):
+        self.check(lambda log: log.symlink_to(log.parent / "nowhere"))
+
+
+class VerdictTest(unittest.TestCase):
+    def verdict(self, exit_code, expect="blocked", evidence="nockguard", control=None):
+        atk = {"expect": expect, "evidence": evidence}
+        executed, fault = redteam.classify(exit_code, atk)
+        res = {"exit": exit_code, "ran": True, "planted": False, "fault": fault, "control": control}
+        return redteam.verdict(res, atk, executed)
+
+    def test_a_timed_out_attack_is_inconclusive_never_blocked(self):
+        for evidence in ("nockguard", "nocklock"):
+            self.assertEqual(self.verdict(124, evidence=evidence), ("INCONCLUSIVE", False))
+
+    def test_a_timed_out_negative_control_is_inconclusive(self):
+        self.assertEqual(self.verdict(124, expect="allowed"), ("INCONCLUSIVE", False))
+
+    def test_a_timed_out_unfenced_control_is_inconclusive(self):
+        self.assertEqual(self.verdict(1, control={"exit": 124, "reached": True}), ("INCONCLUSIVE", False))
+
+    def test_clean_block_still_passes(self):
+        self.assertEqual(self.verdict(1), ("BLOCKED", True))
 
 
 class ControlTest(unittest.TestCase):

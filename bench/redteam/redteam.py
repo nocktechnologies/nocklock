@@ -13,9 +13,11 @@ import signal
 import socket
 import sqlite3
 import shlex
+import stat
 import subprocess
 import sys
 import time
+import tempfile
 import tomllib
 from pathlib import Path
 
@@ -28,45 +30,44 @@ class SetupFault(Exception):
     """The bench is mis-set-up; no attack may run, because its verdicts would mean nothing."""
 
 
-def open_nofollow(path, flags, mode=0o600):
-    """Open a harness log without following a symlink a fenced child may have planted."""
-    return os.fdopen(os.open(path, flags | os.O_NOFOLLOW, mode), "rb" if flags == os.O_RDONLY else "wb")
+def run(argv, cwd, env, dir_fd, name, until):
+    """Run argv in its own session, output to the regular file `name` under `dir_fd`.
 
-
-def run(argv, cwd, env, log, until):
-    """Run argv in its own session, output to a file (no pipe a descendant could hold open).
-
-    Returns (exit, output). Exit 124 means the deadline `until` (a time.monotonic()
-    value) expired and the process group was SIGKILLed; None means the process was
-    still not reaped after the kill (HARNESS-FAULT). Nothing here blocks unbounded.
+    The log is created O_EXCL|O_NOFOLLOW|O_NONBLOCK through the directory fd, so a symlink or
+    FIFO planted at its path is refused, and is read back through that same fd (pread), never
+    by path. A non-regular file is a HARNESS-FAULT. Returns (exit, output). Exit 124 means the
+    deadline `until` (a time.monotonic() value) expired and the process group was SIGKILLed;
+    None means a harness fault. Nothing here blocks unbounded, and no pipe is held open.
     """
     try:
-        with open_nofollow(log, os.O_WRONLY | os.O_CREAT | os.O_TRUNC) as f:
+        fd = os.open(name, os.O_RDWR | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | os.O_NONBLOCK, 0o600, dir_fd=dir_fd)
+    except OSError as e:
+        return None, f"HARNESS-FAULT: could not create log {name}: {e}"
+    with os.fdopen(fd, "r+b") as f:
+        if not stat.S_ISREG(os.fstat(f.fileno()).st_mode):
+            return None, f"HARNESS-FAULT: log {name} is not a regular file"
+        try:
             p = subprocess.Popen(argv, cwd=cwd, env=env, stdin=subprocess.DEVNULL, stdout=f,
                                  stderr=subprocess.STDOUT, start_new_session=True)
-    except OSError as e:
-        return None, f"HARNESS-FAULT: could not launch {argv[0]}: {e}"
-    rc, timed_out, note = 124, False, ""
-    try:
-        rc = p.wait(timeout=max(0.0, until - time.monotonic()))
-    except subprocess.TimeoutExpired:
-        timed_out = True
-    try:
-        os.killpg(p.pid, signal.SIGKILL)  # also reaps stragglers a finished attack left behind
-    except ProcessLookupError:
-        pass
-    except PermissionError as e:  # a root-owned helper in the group cannot be signalled
-        note = f"\nHARNESS-NOTE: killpg {p.pid}: {e}; a root-owned member of the group may linger"
-    if timed_out:
+        except OSError as e:
+            return None, f"HARNESS-FAULT: could not launch {argv[0]}: {e}"
+        rc, timed_out, note = 124, False, ""
         try:
-            p.wait(timeout=5)
+            rc = p.wait(timeout=max(0.0, until - time.monotonic()))
         except subprocess.TimeoutExpired:
-            return None, "HARNESS-FAULT: process not reaped after SIGKILL"
-    try:
-        with open_nofollow(log, os.O_RDONLY) as f:
-            text = f.read().decode(errors="replace").strip()
-    except OSError as e:
-        return None, f"HARNESS-FAULT: could not read {log}: {e}"
+            timed_out = True
+        try:
+            os.killpg(p.pid, signal.SIGKILL)  # also reaps stragglers a finished attack left behind
+        except ProcessLookupError:
+            pass
+        except PermissionError as e:  # a root-owned helper in the group cannot be signalled
+            note = f"\nHARNESS-NOTE: killpg {p.pid}: {e}; a root-owned member of the group may linger"
+        if timed_out:
+            try:
+                p.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                return None, "HARNESS-FAULT: process not reaped after SIGKILL"
+        text = os.pread(f.fileno(), 1 << 20, 0).decode(errors="replace").strip()
     return rc, (f"timed out; {text[-300:]}" if timed_out else text) + note
 
 
@@ -108,6 +109,16 @@ def classify(rc, atk):
     if atk["evidence"] == "nockguard":
         return rc in (0, 5), rc is None or rc in (3, 4, 5)
     return rc == 0, rc is None
+
+
+def verdict(res, atk, executed):
+    """(outcome, ok) for one attack. A timeout (exit 124) or an unreached control is INCONCLUSIVE, never a block."""
+    ctl = res["control"]
+    if res["exit"] == 124 or (ctl is not None and (ctl["exit"] == 124 or not ctl["reached"])):
+        return "INCONCLUSIVE", False
+    outcome = "ALLOWED" if executed else "HARNESS-FAULT" if res["fault"] else "BLOCKED"
+    ok = res["ran"] and executed == (atk["expect"] == "allowed") and not res["planted"] and not res["fault"]
+    return outcome, ok
 
 
 def find_audit_db(state):
@@ -197,8 +208,10 @@ def bench(a):
         raise SetupFault(f"nockguard keygen left no key pair under {keydir}: {e}")
     if not (re.fullmatch(HEX64, seed) and re.fullmatch(HEX64, pub) and seed != pub):
         raise SetupFault("bench.ed25519 must hold the 64-hex private seed and bench.pub a different 64-hex public key")
-    # The private seed stays host-side (the proxy finds it by name under HOME); verify gets only the public key.
-    verify_env = {**env, "NOCKGUARD_AGENT_BENCH_ED25519_PUB": pub}
+    # The private seed stays host-side (the proxy finds it by name under HOME). verify runs with an
+    # empty HOME and the public key passed explicitly, so it can never read the seed.
+    empty_home = tempfile.mkdtemp(prefix="verify-home.", dir=work)
+    verify_env = {**env, "HOME": empty_home, "NOCKGUARD_AGENT_BENCH_ED25519_PUB": pub}
     trail_path = work / "home/.nockguard/logs/bench.audit.jsonl"  # <agent>.audit.jsonl beside the policy audit path
     subst = {"@WORK@": str(work), "@BIN@": str(work / "bin"),
              "@KEY@": str(key), "@TRAIL@": str(trail_path)}
@@ -221,7 +234,9 @@ def bench(a):
             text = text.replace(k, v)
         return text
 
-    logs = root / "logs"  # inside the fence root: the fenced child fstat()s its stdout, so the log must be reachable
+    # Inside the fence root: the fenced child fstat()s its stdout, so the log must be reachable.
+    # Opened once; every log is created through this fd, never by a path the child could redirect.
+    logfd = os.open(root / "logs", os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
     results = []
     for atk in attacks:
         cmd = sub(atk["cmd"])
@@ -229,16 +244,16 @@ def bench(a):
         control = None
         if atk.get("floor"):
             # Same command outside the fence: the attack must reach, or the fenced block proves nothing.
-            crc, _ = run(["/bin/sh", "-c", cmd], root, env, logs / f"{atk['id']}.control.log", until)
+            crc, _ = run(["/bin/sh", "-c", cmd], root, env, logfd, f"{atk['id']}.control.log", until)
             control = control_result(crc, sink_hits(sink, until))
         if atk.get("host"):
             # NockGuard's own proof is its signed policy deny: run the client on the host, outside the fence.
             argv = [sys.executable, str(work / "bin/mcp_client.py"), atk["tool"], "10", "--", *proxy]
             cmd = shlex.join(argv)  # report the command that really ran
-            rc, output = run(argv, root, env, logs / f"{atk['id']}.log", until)
+            rc, output = run(argv, root, env, logfd, f"{atk['id']}.log", until)
         else:
             rc, output = run([a.nocklock, "wrap", "--net-fence=netns", "--", "/bin/sh", "-c", cmd],
-                             root, env, logs / f"{atk['id']}.log", until)
+                             root, env, logfd, f"{atk['id']}.log", until)
         # "planted": the attack left its mark (file written / datagram reached the sink).
         planted = (bool(atk.get("absent")) and Path(sub(atk["absent"])).exists()) or sink_hits(sink, until) > 0
         results.append({"atk": atk, "cmd": cmd, "exit": rc, "output": output[-400:], "planted": planted,
@@ -280,11 +295,7 @@ def bench(a):
         # and the fault is reported beside it. Faults come only from harness-side signals (no result from
         # run(), the MCP client's exit codes), never from text the fenced child printed.
         executed, res["fault"] = classify(res["exit"], atk)
-        res["outcome"] = ("TIMEOUT" if res["exit"] == 124 else "ALLOWED" if executed
-                          else "HARNESS-FAULT" if res["fault"] else "BLOCKED")
-        res["outcome_ok"] = res["ran"] and executed == (atk["expect"] == "allowed") and not res["planted"] and not res["fault"]
-        if res["control"] is not None and not res["control"]["reached"]:
-            res["outcome"], res["outcome_ok"] = "INCONCLUSIVE", False  # unfenced control did not reach
+        res["outcome"], res["outcome_ok"] = verdict(res, atk, executed)
         res["proof"] = nockguard_proof(trail, atk) if atk["evidence"] == "nockguard" else nocklock_proof(rows, atk)
         res["proof_ok"] = bool(res["proof"] and res["proof"]["signed"])
         # A missing proof is diagnosable from the report alone: keep what the session did log.
@@ -293,7 +304,7 @@ def bench(a):
         con.close()
 
     def tool(name, argv, tool_env=env):
-        return run(argv, root, tool_env, logs / f"{name}.log", time.monotonic() + 60)
+        return run(argv, root, tool_env, logfd, f"{name}.log", time.monotonic() + 60)
 
     lock_rc, lock_out = tool("verify-nocklock", [a.nocklock, "verify", "--audit"])
     guard_rc, guard_out = tool("verify-nockguard", [a.nockguard, "verify", "--agent", "bench", "--audit", str(trail_path)], verify_env)
@@ -305,6 +316,7 @@ def bench(a):
     bar = {
         "every_attack_has_signed_deny_row_naming_rule": all(r["proof_ok"] for r in attack_rows),
         "kernel_floor_attacks_reached_when_unfenced": all(r["control"]["reached"] for r in attack_rows if r["control"]),
+        "no_attack_inconclusive": all(r["outcome"] != "INCONCLUSIVE" for r in results),
         "no_attack_succeeds": all(r["outcome_ok"] for r in attack_rows),
         "no_deny_unsigned": all(r["proof"] is None or r["proof"]["signed"] for r in attack_rows),
         "nocklock_verify_audit_exit0": lock_rc == 0,
