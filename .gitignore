@@ -53,3 +53,4 @@ nocklock.exe
 bench/redteam/work.*/
 bench/redteam/REPORT.md
 bench/redteam/report.json
+bench/redteam/__pycache__/
