@@ -406,7 +406,7 @@ Two candidate runtimes are deliberately left without a preset:
 | `nocklock wrap --dry-run` | Validate config without starting fences or a command |
 | `nocklock scan [path ...]` | Scan selected local files; `--env` adds environment values and `--json` prints structured results |
 | `nocklock validate [config-path]` | Validate a config file and print the effective policy |
-| `nocklock doctor` | Check whether each fence can be enforced on this host |
+| `nocklock doctor` | Check whether each fence is enforced on this host; exit 0 PROTECTED, 2 GAPS FOUND, 3 PARTIAL, 4 UNPROTECTED (see below) |
 | `nocklock verify` | Run the adversarial fence self-test (proof of block) |
 | `nocklock verify --audit` | Verify the audit log hash chain and signatures |
 | `nocklock verify --against-anchor <file>` | Verify the audit chain against an external chain-head anchor file |
@@ -415,7 +415,7 @@ Two candidate runtimes are deliberately left without a preset:
 | `nocklock anchor emit [--out <file>]` | Emit a signed chain-head anchor |
 | `nocklock anchor push [--file <file>]` | Push an anchor to the off-box store at `NOCKLOCK_ANCHOR_URL` |
 | `nocklock egress-probe` | Probe Linux network-egress enforcement feasibility on this host (structured `--json`) |
-| `nocklock status` | Show fence state and event log summary |
+| `nocklock status` | Show configured fences and event log summary (does not track running sessions) |
 | `nocklock log` | View fence event history |
 | `nocklock log --blocked` | Show only blocked events |
 | `nocklock log --stats` | Show aggregate statistics |
@@ -575,6 +575,15 @@ The CLI is free and open source. For teams that want visibility across machines,
 NockLock is a fence, not guardrails.
 
 Guardrails tell the agent what not to do. The agent can ignore them, work around them, or hallucinate past them. Guardrails are prompts.
+
+`nocklock doctor` verdicts and exit codes (`--json` adds per-boundary `boundaries` posture of `enforced`, `advisory`, `disabled` or `enabled`, and the proxy-mode `egress_level`):
+
+| Exit | Verdict | Meaning |
+|---|---|---|
+| 0 | PROTECTED | filesystem, syscall, network and secrets are all enforced; the network is not `allow_all` and its egress level is CONFINED or SEATBELT |
+| 2 | GAPS FOUND | a boundary is configured but its backend is missing |
+| 3 | PARTIAL | some boundary is disabled or advisory; each is listed by name |
+| 4 | UNPROTECTED | no boundary is enforced |
 
 A fence sits between the agent and the resource. How hard the boundary is depends on the fence. The secret fence is absolute: a blocked variable is gone from the environment before the agent starts. On Linux, the filesystem fence is kernel-enforced with Landlock by default and composes with LD_PRELOAD logging; static binaries and children that clear `LD_PRELOAD` are still denied by the kernel. On macOS, the filesystem fence is a kernel-enforced Seatbelt write confinement. Writes outside the configured root and its essential runtime exceptions are denied, and the built-in and configured sensitive paths are denied for reads and writes. It does not claim read confinement outside the root. The profile follows descendants even when they cross into protected system binaries. The network fence stops normal and prompt-injected attempts to reach unapproved domains and logs every try. On Linux with syscall fencing enabled, proxy-mode runs allow only Unix-domain sockets in the child; the interposer rewrites only the configured loopback proxy connect to the proxy's Unix socket, and all other AF_INET/AF_INET6 connects fail closed. With `--net-fence=netns` the child keeps IP sockets and the boundary is composed: the nftables default-drop floor and the network namespace prevent alternate transports and proxy bypass (direct DNS to other resolvers, non-DNS UDP, QUIC, SCTP and raw IP are dropped, and nothing but the transparent proxy and the in-namespace DNS stub is reachable), while the transparent HTTP(S) proxy and the DNS stub enforce the `network.allow` domain policy.
 
