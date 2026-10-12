@@ -255,8 +255,8 @@ def render_md(rep):
             f"`{r['id']}`", r["class"], "`" + cell(" ".join(r["tried"].split()))[:110] + "…` (full command in report.json)", ctl, verdict, proof,
             str(p["event_id"]) if p else "-", f"`{cell(p['rule'])}`" if p else "-",
             f"`{p['chain_hash'][:16]}…`" if p and p["chain_hash"] else "-"]) + " |")
-    lines += ["", "Attempts marked *blocked by kernel floor* are stopped by the kernel floor (netns default-drop, "
-              "seccomp) before any proxy sees them; NockLock writes no per-attempt row for those today, so "
+    lines += ["", "Attempts marked *blocked by kernel floor* are stopped by the kernel floor (netns default-drop) "
+              "before any proxy sees them; NockLock writes no per-attempt row for those today, so "
               "the pinned row is the session's signed row proving the floor was armed. Each is also run once "
               "outside `nocklock wrap`; if that control does not reach, the attack is INCONCLUSIVE, not a pass. "
               "Full hashes are in "
