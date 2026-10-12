@@ -66,24 +66,32 @@ assembled yet, and on `-Mode Desktop` it refuses the DISPOSABLE-BOX ONLY probes 
    with `<dir>` the absolute folder holding `run-probe.ps1`:
 
    ```
-   schtasks /Create /TN nocklock-probe-run /TR "cmd /c cd /d <dir> && powershell -NoProfile -ExecutionPolicy Bypass -File <dir>\run-probe.ps1 -Mode Desktop -Probes 1,2,3" /SC ONCE /ST 00:00 /RL HIGHEST /IT /F
-   schtasks /Run /TN nocklock-probe-run
+   schtasks /Create /TN nlprobe-runner /TR "cmd /c cd /d <dir> && powershell -NoProfile -ExecutionPolicy Bypass -File <dir>\run-probe.ps1 -Mode Desktop -Probes 1,2,3 > <dir>\probe-<ts>.log 2>&1" /SC ONCE /ST 00:00 /RL HIGHEST /IT /F
+   schtasks /Run /TN nlprobe-runner
    ```
+
+   Replace `<ts>` as above and keep `<dir>` free of spaces. The redirect saves the full
+   transcript (every `VERDICT` line) to `probe-<ts>.log` in the script folder. The task is named
+   `nlprobe-runner` so it never matches the script's own `nocklock-probe-*` leftover glob.
 
    `/IT` runs it in the logged-on console session and `/RL HIGHEST` elevates it; `output.txt`
    records `elevated=`, which shows whether it was. The `cmd /c cd /d` wrapper sets the working
-   directory to the script folder.
+   directory to the script folder, so the log and `output.txt` land there.
 
    Then poll `output.txt` for the final `RUN:` line: the script writes it last, so it is the
    completion signal. No `RUN:` line means the run has not finished or was cut short.
 
-   When the run is done, remove the task:
+   When the run is done, stop the task, poll until it is no longer running, then delete it:
 
    ```
-   schtasks /Delete /TN nocklock-probe-run /F
+   schtasks /End /TN nlprobe-runner
+   schtasks /Query /TN nlprobe-runner /FO LIST
+   schtasks /Delete /TN nlprobe-runner /F
    ```
 
-5. Bring back `output.txt` and, for a foreground run, `probe-<ts>.log` (the full transcript).
+   Repeat the `/Query` until its `Status:` line is not `Running`, and only then run `/Delete`.
+
+5. Bring back `output.txt` and `probe-<ts>.log` (the full transcript), for foreground and task runs alike.
 
 ## Reading the result
 
@@ -144,7 +152,7 @@ The transcript carries the verdicts: `LAUNCHER-ENV:`, `LIMITED-TOKEN:`,
 
 A Ctrl+C, a dropped SSH session or a killed `powershell.exe` can end the run before its
 teardown finishes. Take `run_id` from `output.txt` and, in an elevated PowerShell, remove
-this run's state by exact name. If the run was started as a Scheduled Task, also run `schtasks /Delete /TN nocklock-probe-run /F`. Stop the limited-token task first, and run the rest only once it reads
+this run's state by exact name. If the run was started as a Scheduled Task, also run `schtasks /End /TN nlprobe-runner`, repeat `schtasks /Query /TN nlprobe-runner /FO LIST` until `Status:` is not `Running`, then `schtasks /Delete /TN nlprobe-runner /F`. Stop the limited-token task first, and run the rest only once it reads
 Ready or Disabled:
 
 ```powershell
