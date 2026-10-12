@@ -10,6 +10,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -346,6 +347,10 @@ var wrapCmd = &cobra.Command{
 		var fsFence *fsfence.Fence
 		var fsFenceCancel context.CancelFunc
 		var fsSandboxPrefix []string
+		// seatbeltProxyAddr is the loopback address the Seatbelt network floor
+		// admits; the proxy serves the listener bound on it. Empty means no floor.
+		var seatbeltProxyAddr string
+		var seatbeltListener net.Listener
 		macOSDenialLog := false
 		var landlockPrefix []string
 		var fsCfg *fsfence.FenceConfig
@@ -474,8 +479,24 @@ var wrapCmd = &cobra.Command{
 					// The audit state is written only by this unfenced parent. It
 					// is already included in sensitive through egressChildDenyPaths,
 					// so never grant its directory to the fenced child.
+					proxyPort := 0
+					if !useNetns && !cfg.Network.AllowAll {
+						ln, hold, err := reserveSeatbeltProxyListeners()
+						if err != nil {
+							return refuse("cannot bind the loopback proxy port for the network floor", err)
+						}
+						// The proxy takes ln over; hold keeps [::1]:port for the whole
+						// session. Closing after the proxy stopped is a harmless no-op.
+						defer ln.Close()
+						if hold != nil {
+							defer hold.Close()
+						}
+						seatbeltListener = ln
+						proxyPort = ln.Addr().(*net.TCPAddr).Port
+						seatbeltProxyAddr = ln.Addr().String()
+					}
 					profile, pathCount, err := fsfence.GenerateTaggedWriteConfinementProfile(
-						sensitive, fsCfg.Root, fsCfg.Mode, macOSHardened, fsfence.DenialTag(sessionID),
+						sensitive, fsCfg.Root, fsCfg.Mode, macOSHardened, fsfence.DenialTag(sessionID), proxyPort,
 					)
 					if err != nil {
 						return refuse("profile generation failed", err)
@@ -498,7 +519,7 @@ var wrapCmd = &cobra.Command{
 					fsSandboxPrefix = sandboxArgv[:len(sandboxArgv)-len(args)]
 					macOSDenialLog = true
 
-					if err := recordMacOSFilesystemFenceState("ENGAGED", fmt.Sprintf("Seatbelt root-write confinement applied; root=%s mode=%s sensitive_paths=%d", fsCfg.Root, fsCfg.Mode, pathCount), false); err != nil {
+					if err := recordMacOSFilesystemFenceState("ENGAGED", fmt.Sprintf("Seatbelt root-write confinement applied; root=%s mode=%s sensitive_paths=%d network_floor=%s", fsCfg.Root, fsCfg.Mode, pathCount, networkFloorDetail(seatbeltProxyAddr)), false); err != nil {
 						return fmt.Errorf("cannot record macOS filesystem fence engagement; refusing to start: %w", err)
 					}
 					if macOSHardened {
@@ -558,6 +579,7 @@ var wrapCmd = &cobra.Command{
 			cfg.Network.AllowAll,
 			syscallFenceActive,
 			fsFence != nil,
+			seatbeltProxyAddr != "",
 		)
 		if egressLevel == egressLevelUnreachable {
 			detail := egressRequirementMessage(egressLevel, runtime.GOOS)
@@ -708,6 +730,9 @@ var wrapCmd = &cobra.Command{
 					return fmt.Errorf("reserve loopback proxy token address: %w", err)
 				}
 				addr, proxyErr = proxy.StartUnix(proxyUnixSocket, addr)
+			} else if seatbeltListener != nil {
+				// Serve the already-bound listener the Seatbelt floor admits.
+				addr, proxyErr = proxy.StartOn(seatbeltListener)
 			} else {
 				addr, proxyErr = proxy.Start()
 			}
@@ -1341,6 +1366,60 @@ func findLibFenceFS() (string, error) {
 		return "", fmt.Errorf("cannot resolve current working directory for filesystem fence library trust check: %w", err)
 	}
 	return findTrustedLibFenceFS(exePath, cwd, nil, fileExists)
+}
+
+// networkFloorDetail renders the Seatbelt network-floor state for the signed
+// fence-state row.
+func networkFloorDetail(proxyAddr string) string {
+	if proxyAddr == "" {
+		return "none"
+	}
+	return "deny-outbound-except-" + proxyAddr
+}
+
+// reserveSeatbeltProxyListeners binds 127.0.0.1:<port> for the proxy and holds
+// [::1]:<port> on the same port. The Seatbelt rule `localhost:<port>` admits
+// both loopback families, so holding the IPv6 side (or refusing to start when it
+// is taken) keeps NockLock's proxy the only loopback destination the floor
+// admits. Where the host has no IPv6 loopback at all, nothing can listen there
+// and no hold is needed.
+func reserveSeatbeltProxyListeners() (proxy, hold net.Listener, err error) {
+	for attempt := 0; attempt < 8; attempt++ {
+		proxy, err = net.Listen("tcp4", "127.0.0.1:0")
+		if err != nil {
+			return nil, nil, err
+		}
+		hold, err = holdLoopbackV6(proxy.Addr().(*net.TCPAddr).Port)
+		if err == nil {
+			return proxy, hold, nil
+		}
+		proxy.Close()
+	}
+	return nil, nil, err
+}
+
+// holdLoopbackV6 binds [::1]:port and returns the listener. It returns an error
+// when the port is taken, and a nil listener (nothing to hold) when IPv6 loopback
+// is unavailable on the host.
+func holdLoopbackV6(port int) (net.Listener, error) {
+	ln, err := net.Listen("tcp6", net.JoinHostPort("::1", strconv.Itoa(port)))
+	if err == nil {
+		// Refuse stray connects (accept and close) instead of letting them queue.
+		go func() {
+			for {
+				c, err := ln.Accept()
+				if err != nil {
+					return
+				}
+				c.Close()
+			}
+		}()
+		return ln, nil
+	}
+	if errors.Is(err, syscall.EADDRNOTAVAIL) || errors.Is(err, syscall.EAFNOSUPPORT) {
+		return nil, nil
+	}
+	return nil, fmt.Errorf("[::1]:%d is not free, so the network floor cannot make the proxy the only loopback destination: %w", port, err)
 }
 
 func reserveLoopbackProxyAddr() (string, error) {

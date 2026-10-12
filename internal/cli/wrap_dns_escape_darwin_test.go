@@ -22,28 +22,20 @@ import (
 	_ "modernc.org/sqlite"
 )
 
-// wrap_dns_escape_darwin_test.go RECORDS what NockLock's macOS egress fence does
-// against the three July-2026 DNS-escape tricks. macOS has NO kernel egress floor
-// (the Seatbelt profile in sbpl.go carries zero network rules, and the netns
-// enforcement spec is explicitly Linux-only): the fence is the local HTTP(S)
-// proxy plus HTTP_PROXY injection, which a COOPERATING client honors.
-//
-// So this test asserts only what is true on macOS and records the rest:
+// wrap_dns_escape_darwin_test.go asserts what NockLock's macOS egress fence does
+// against the three July-2026 DNS-escape tricks. The Seatbelt profile carries a
+// kernel network floor: every outbound connect from the fenced child is denied
+// except to NockLock's own loopback proxy (see sbpl.go and
+// wrap_network_floor_darwin_test.go for the in-fence probes).
 //
 //   ASSERTED  A proxied request to a DISALLOWED host is denied at the proxy and
 //             signed as a deny row; a proxied request to the ALLOWED host is
 //             permitted and signed as an allow row; `verify --audit` finds the
 //             chain intact and every signature valid.
-//   RECORDED  Direct-IP egress and /etc/hosts pinning are NOT kernel-blocked on
-//             macOS — a client that ignores HTTP_PROXY reaches any address, and
-//             only root can write the shared /etc/hosts. These are logged as the
-//             honest platform limitation, not asserted as blocks (asserting a
-//             block macOS does not provide would only invite a fail-open repair).
-//
-// The proxy resolves the allowlisted hostname ITSELF (network/dnscache.go), so
-// the getaddrinfo-override trick cannot steer a PROXIED request off the allowed
-// host — but a non-cooperating client is out of the proxy's reach entirely,
-// which is the whole reason the Linux netns floor exists.
+//   ASSERTED  The signed session-start row names egress level SEATBELT.
+//   ASSERTED  Direct-IP egress is kernel-denied (T1, floor test).
+//   RECORDED  /etc/hosts pinning: a shared, root-owned file a non-root child
+//             cannot write, and the proxy resolves the allowed name itself.
 //
 // SAFETY: proxy + Seatbelt only; no root, no kernel mutation. macOS CI job.
 
@@ -120,10 +112,41 @@ enforcement = "off"
 	// ...and both decisions landed signed, chained, and verifiable.
 	assertMacOSEgressDecisionsSigned(t, project)
 
-	// RECORD the honest platform limitations (not asserted as blocks).
-	t.Logf("macOS egress model: proxy + HTTP_PROXY injection only — no kernel egress floor (sbpl.go has no network rules).")
-	t.Logf("T1 direct-IP / raw-socket egress: NOT kernel-blocked on macOS; a client ignoring HTTP_PROXY reaches any address. The Linux netns floor closes this; macOS relies on client cooperation.")
+	assertSessionEgressLevel(t, project, string(egressLevelSeatbelt))
+
+	t.Logf("macOS egress model: proxy + HTTP_PROXY injection backed by a Seatbelt kernel floor (deny network-outbound except the proxy's loopback port).")
+	t.Logf("T1 direct-IP / raw-socket egress: kernel-denied by the Seatbelt floor (asserted in TestWrapMacOSNetworkFloor).")
 	t.Logf("T3 /etc/hosts pin: /etc/hosts is shared with the host and root-owned, so a non-root child cannot pin it; and the proxy re-resolves the allowlisted name itself, so pinning the child's view would not steer a proxied request.")
+}
+
+// assertSessionEgressLevel asserts the signed session-start row names want.
+func assertSessionEgressLevel(t *testing.T, project, want string) {
+	t.Helper()
+	configPath := filepath.Join(project, config.Dir, config.File)
+	cfg, err := config.Load(configPath)
+	if err != nil {
+		t.Fatalf("load config: %v", err)
+	}
+	dbPath, _, err := config.ResolveDBPath(cfg, configPath)
+	if err != nil {
+		t.Fatalf("resolve event log: %v", err)
+	}
+	logger, err := logging.NewLogger(dbPath, project, signingLoggerOpts()...)
+	if err != nil {
+		t.Fatalf("open event log at %s: %v", dbPath, err)
+	}
+	defer logger.Close()
+	start := logging.EventSessionStart
+	rows, err := logger.Query(logging.QueryOptions{EventType: &start})
+	if err != nil {
+		t.Fatalf("query session-start rows: %v", err)
+	}
+	for _, r := range rows {
+		if r.EgressLevel == want {
+			return
+		}
+	}
+	t.Errorf("no signed session-start row with egress level %s; got %d session-start row(s)", want, len(rows))
 }
 
 func assertMacOSEgressDecisionsSigned(t *testing.T, project string) {

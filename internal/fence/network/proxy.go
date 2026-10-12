@@ -221,6 +221,21 @@ func (p *ProxyServer) Start() (string, error) {
 		p.MarkDegraded("bind failure")
 		return "", fmt.Errorf("network fence: failed to bind proxy: %w", err)
 	}
+	return p.serve(ln)
+}
+
+// StartOn begins serving on an already-bound listener and returns its address.
+// The macOS Seatbelt floor admits exactly one loopback port, so the caller binds
+// it first and hands the open listener over; there is no close-and-rebind window
+// in which another process could take the port.
+func (p *ProxyServer) StartOn(ln net.Listener) (string, error) {
+	if p.listener != nil {
+		return "", fmt.Errorf("proxy already started at %s", p.listener.Addr())
+	}
+	return p.serve(ln)
+}
+
+func (p *ProxyServer) serve(ln net.Listener) (string, error) {
 	p.listener = ln
 	p.advertisedAddr = ln.Addr().String()
 	p.degraded.Store(false)
