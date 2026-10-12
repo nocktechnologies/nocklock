@@ -2,6 +2,7 @@
 """Probe AF_UNIX pathname and abstract reachability in Linux CONFINED mode."""
 
 import datetime
+import errno
 import os
 import pathlib
 import platform
@@ -13,6 +14,45 @@ import tempfile
 import threading
 
 WRAP_TIMEOUT_SECONDS = 30
+
+
+def run_bounded(
+    args: list[str], cwd: pathlib.Path, timeout: int
+) -> tuple[subprocess.CompletedProcess[str], bool]:
+    process = subprocess.Popen(
+        args,
+        cwd=cwd,
+        text=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        start_new_session=True,
+    )
+    timed_out = False
+    try:
+        stdout, stderr = process.communicate(timeout=timeout)
+    except subprocess.TimeoutExpired:
+        timed_out = True
+        try:
+            os.killpg(process.pid, signal.SIGKILL)
+        except ProcessLookupError:
+            pass
+        try:
+            stdout, stderr = process.communicate(timeout=5)
+        except subprocess.TimeoutExpired as exc:
+            stdout = exc.stdout or b""
+            stderr = exc.stderr or b""
+            if isinstance(stdout, bytes):
+                stdout = stdout.decode(errors="replace")
+            if isinstance(stderr, bytes):
+                stderr = stderr.decode(errors="replace")
+            for pipe in (process.stdout, process.stderr):
+                if pipe is not None:
+                    pipe.close()
+            process.wait(timeout=5)
+    result = subprocess.CompletedProcess(
+        args, 124 if timed_out else process.returncode, stdout, stderr
+    )
+    return result, timed_out
 
 
 def main() -> int:
@@ -51,17 +91,16 @@ def main() -> int:
     print("uid=" + str(os.geteuid()))
     print("probe_dir=" + str(work))
 
-    build = subprocess.run(
-        ["go", "build", "-o", str(binary), "./cmd/nocklock"],
-        cwd=repo,
-        text=True,
-        capture_output=True,
+    build, build_timed_out = run_bounded(
+        ["go", "build", "-o", str(binary), "./cmd/nocklock"], repo, 180,
     )
     print("build_exit=" + str(build.returncode))
     if build.stdout.strip():
         print("build_stdout=" + build.stdout.strip())
     if build.stderr.strip():
         print("build_stderr=" + build.stderr.strip())
+    if build_timed_out:
+        print("build_timeout=180", file=sys.stderr)
     if build.returncode != 0:
         return build.returncode
 
@@ -76,12 +115,14 @@ def main() -> int:
             thread.start()
             threads.append(thread)
 
-        init = subprocess.run([str(binary), "init"], cwd=project, text=True, capture_output=True)
+        init, init_timed_out = run_bounded([str(binary), "init"], project, 15)
         print("init_exit=" + str(init.returncode))
         if init.stdout.strip():
             print("init_stdout=" + init.stdout.strip())
         if init.stderr.strip():
             print("init_stderr=" + init.stderr.strip())
+        if init_timed_out:
+            print("init_timeout=15", file=sys.stderr)
         if init.returncode != 0:
             return init.returncode
 
@@ -102,36 +143,10 @@ try:
 except OSError as e:
     print('inet_datagram=DENIED errno=' + str(e.errno) + ' ' + e.strerror)
 '''
-        run = subprocess.Popen(
+        run, timed_out = run_bounded(
             [str(binary), "wrap", "--", "/usr/bin/python3", "-c", child],
-            cwd=project,
-            text=True,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            start_new_session=True,
+            project, WRAP_TIMEOUT_SECONDS,
         )
-        timed_out = False
-        try:
-            stdout, stderr = run.communicate(timeout=WRAP_TIMEOUT_SECONDS)
-        except subprocess.TimeoutExpired:
-            timed_out = True
-            try:
-                os.killpg(run.pid, signal.SIGKILL)
-            except ProcessLookupError:
-                pass
-            try:
-                stdout, stderr = run.communicate(timeout=5)
-            except subprocess.TimeoutExpired as exc:
-                stdout = exc.stdout or b""
-                stderr = exc.stderr or b""
-                if isinstance(stdout, bytes):
-                    stdout = stdout.decode(errors="replace")
-                if isinstance(stderr, bytes):
-                    stderr = stderr.decode(errors="replace")
-                for pipe in (run.stdout, run.stderr):
-                    if pipe is not None:
-                        pipe.close()
-                run.wait(timeout=5)
 
         print("path_socket=" + str(pathname))
         print("abstract_socket=@" + abstract[1:])
@@ -139,27 +154,38 @@ except OSError as e:
         if timed_out:
             print("wrap_timeout=" + str(WRAP_TIMEOUT_SECONDS))
         print("child_stdout_begin")
-        print(stdout.rstrip())
+        print(run.stdout.rstrip())
         print("child_stdout_end")
         print("wrap_stderr_begin")
-        print(stderr.rstrip())
+        print(run.stderr.rstrip())
         print("wrap_stderr_end")
 
-        if timed_out:
-            return 124
-        if run.returncode != 0:
-            return run.returncode
-        if "CONFINED (syscall fence; proxy bridge only)" not in stderr:
-            print("probe did not reach CONFINED egress", file=sys.stderr)
-            return 1
-        return 0
     finally:
-        for listener in listeners:
-            listener.close()
         for thread in threads:
             thread.join(timeout=9)
+        for listener in listeners:
+            listener.close()
         print("server_accepts=" + repr(sorted(accepted)))
         print("probe_artifacts_retained=yes")
+
+    if run.returncode != 0:
+        return run.returncode
+    if "CONFINED (syscall fence; proxy bridge only)" not in run.stderr:
+        print("probe did not reach CONFINED egress", file=sys.stderr)
+        return 1
+    if not any(
+        line.startswith(f"inet_datagram=DENIED errno={errno.EPERM} ")
+        for line in run.stdout.splitlines()
+    ):
+        print("probe IP negative control failed: expected EPERM", file=sys.stderr)
+        return 1
+    if not {"path=CONNECTED", "abstract=CONNECTED"}.issubset(run.stdout.splitlines()):
+        print("probe did not observe both Unix-socket connections", file=sys.stderr)
+        return 1
+    if sorted(accepted) != [("abstract", "probe"), ("path", "probe")]:
+        print("probe listeners did not receive both payloads", file=sys.stderr)
+        return 1
+    return 0
 
 
 if __name__ == "__main__":
