@@ -51,7 +51,7 @@ try:
     data = s.recv(100)
 except socket.timeout:
     data = b''
-sys.exit(0 if data else 1)"'''
+sys.exit(0 if data[:1] in (b'\x15', b'\x16') else 1)"'''
 expect = "blocked"
 evidence = "nocklock"
 event = "network_blocked"

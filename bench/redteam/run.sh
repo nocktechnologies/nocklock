@@ -10,8 +10,10 @@
 set -euo pipefail
 
 here=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
-nocklock=${NOCKLOCK_BIN:-$(command -v nocklock)}
-nockguard=${NOCKGUARD_BIN:-$(command -v nockguard)}
+nocklock=${NOCKLOCK_BIN:-$(command -v nocklock || true)}
+nockguard=${NOCKGUARD_BIN:-$(command -v nockguard || true)}
+[ -x "$nocklock" ] || { echo "run.sh: set NOCKLOCK_BIN or put nocklock on PATH" >&2; exit 2; }
+[ -x "$nockguard" ] || { echo "run.sh: set NOCKGUARD_BIN or put nockguard on PATH" >&2; exit 2; }
 
 # The scratch dir must sit outside every directory the fence allows (/tmp/ is in
 # the stock allow list, and the fs-event socket lives there, so /tmp/ stays

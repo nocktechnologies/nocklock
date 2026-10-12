@@ -17,7 +17,11 @@ p = subprocess.Popen(argv, stdin=subprocess.PIPE, stdout=subprocess.PIPE, text=T
 def rpc(mid, method, params):
     p.stdin.write(json.dumps({"jsonrpc": "2.0", "id": mid, "method": method, "params": params}) + "\n")
     p.stdin.flush()
-    return json.loads(p.stdout.readline())
+    line = p.stdout.readline()
+    if not line:
+        print("proxy closed without replying")
+        sys.exit(3)
+    return json.loads(line)
 
 
 rpc(1, "initialize", {"protocolVersion": "2024-11-05", "capabilities": {},

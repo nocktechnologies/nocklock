@@ -18,7 +18,10 @@ CANARY_ENV = {"BENCH_SECRET_TOKEN": "bench-canary-not-a-real-secret"}
 
 
 def run(argv, cwd, env, timeout=120):
-    p = subprocess.run(argv, cwd=cwd, env=env, capture_output=True, text=True, timeout=timeout)
+    try:
+        p = subprocess.run(argv, cwd=cwd, env=env, capture_output=True, text=True, timeout=timeout)
+    except subprocess.TimeoutExpired:
+        return 124, f"timed out after {timeout}s"
     return p.returncode, (p.stdout + p.stderr).strip()
 
 
@@ -132,7 +135,7 @@ def main():
               "verify": {"nocklock": {"exit": lock_rc, "output": lock_out},
                          "nockguard": {"exit": guard_rc, "output": guard_out}},
               "attacks": [{
-                  "id": r["atk"]["id"], "class": r["atk"]["class"], "tried": " ".join(r["atk"]["cmd"].split()),
+                  "id": r["atk"]["id"], "class": r["atk"]["class"], "tried": r["cmd"],
                   "expected": r["atk"]["expect"], "result": r["outcome"], "exit": r["exit"],
                   "floor_only": bool(r["atk"].get("floor")), "outcome_ok": r["outcome_ok"],
                   "proof": r["proof"]} for r in results]}
@@ -153,7 +156,7 @@ def render_md(rep):
              "## Pass bar", ""]
     lines += [f"- [{'x' if ok else ' '}] {k.replace('_', ' ')}" for k, ok in rep["pass_bar"].items()]
     lines += ["", "## Attempts", "",
-              "| attack | class | tried | result | proof | event id | rule | chain hash |",
+              "| attack | class | tried | result | proof | event id | rule | chain hash (NockGuard: entry signature) |",
               "|---|---|---|---|---|---|---|---|"]
     for r in rep["attacks"]:
         p = r["proof"]
@@ -161,7 +164,7 @@ def render_md(rep):
                                          + (" (fence-state only)" if r["floor_only"] else ""))
         verdict = r["result"] + ("" if r["outcome_ok"] else " ✗ UNEXPECTED")
         lines.append("| " + " | ".join([
-            f"`{r['id']}`", r["class"], "`" + cell(r["tried"]) + "`", verdict, proof,
+            f"`{r['id']}`", r["class"], "`" + cell(" ".join(r["tried"].split()))[:110] + "…` (full command in report.json)", verdict, proof,
             str(p["event_id"]) if p else "-", f"`{cell(p['rule'])}`" if p else "-",
             f"`{p['chain_hash'][:16]}…`" if p and p["chain_hash"] else "-"]) + " |")
     lines += ["", "Attempts marked *fence-state only* are stopped by the kernel floor (netns default-drop, "

@@ -500,11 +500,14 @@ jobs:
           } >> "$GITHUB_STEP_SUMMARY"
 
   redteam-bench:
-    name: red-team bench · scripted attacks vs NockLock + NockGuard, signed receipt report (root)
+    name: red-team bench · scripted attacks vs NockLock + NockGuard, signed receipt report
     runs-on: ubuntu-latest
     env:
       # Exact NockGuard release; bump deliberately. Never built from a sibling checkout.
       NOCKGUARD_VERSION: v0.5.0
+      # sha256 of nockguard_0.5.0_linux_amd64.tar.gz, committed here so the pin
+      # does not trust a checksum file served from the same release as the binary.
+      NOCKGUARD_SHA256: dda9c859bdea0d3eb0378ca29f95e5fef4cc2a04d8b5f1b4b8f9c6bae4907d27
     steps:
       - uses: actions/checkout@v4
         with:
@@ -540,15 +543,14 @@ jobs:
             /usr/local/lib/nocklock/libfence_fs.so
 
       # NockGuard from its published release, pinned by exact version and checked
-      # against the release's SHA256SUMS before it is unpacked or run.
+      # against the sha256 committed above before it is unpacked or run.
       - name: install nockguard ${{ env.NOCKGUARD_VERSION }} from its release
         run: |
           base="https://github.com/nocktechnologies/nockguard/releases/download/${NOCKGUARD_VERSION}"
           asset="nockguard_${NOCKGUARD_VERSION#v}_linux_amd64.tar.gz"
           dl="$(mktemp -d)"
           curl -fsSL -o "$dl/$asset" "$base/$asset"
-          curl -fsSL -o "$dl/SHA256SUMS" "$base/SHA256SUMS"
-          (cd "$dl" && grep " $asset\$" SHA256SUMS | sha256sum -c -)
+          echo "$NOCKGUARD_SHA256  $dl/$asset" | sha256sum -c -
           tar -xzf "$dl/$asset" -C "$dl" nockguard
           sudo install -m 0755 "$dl/nockguard" /usr/local/bin/nockguard
           nockguard version
