@@ -27,6 +27,54 @@ func TestRightsForABIMasksUnknownBits(t *testing.T) {
 	}
 }
 
+func TestAddUnixSocketIsolationAllowsOnlyExactProxyPath(t *testing.T) {
+	root := resolvedTempDir(t)
+	proxySocket := filepath.Join(t.TempDir(), "proxy.sock")
+	filesystemEventSocket := filepath.Join(t.TempDir(), "fence.sock")
+	spec, err := RulesFromConfig(&fsfence.FenceConfig{Root: root, Mode: "read-write"}, nil, MinUnixSocketABI)
+	if err != nil {
+		t.Fatalf("build filesystem rules: %v", err)
+	}
+	if err := AddUnixSocketIsolation(&spec, proxySocket, filesystemEventSocket); err != nil {
+		t.Fatalf("add Unix-socket isolation: %v", err)
+	}
+	if spec.Scoped != ScopeAbstractUnixSocket {
+		t.Fatalf("scope flags = %#x, want abstract Unix-socket scope %#x", spec.Scoped, ScopeAbstractUnixSocket)
+	}
+	if spec.HandledAccessFS&RightResolveUnix == 0 {
+		t.Fatalf("handled filesystem rights %#x omit pathname Unix-socket resolution", spec.HandledAccessFS)
+	}
+	want := map[string]bool{proxySocket: false, filesystemEventSocket: false}
+	for _, rule := range spec.Paths {
+		if rule.Rights&RightResolveUnix == 0 {
+			continue
+		}
+		if _, ok := want[rule.Path]; !ok || rule.Rights != RightResolveUnix {
+			t.Fatalf("unexpected pathname Unix-socket rule: %+v", rule)
+		}
+		want[rule.Path] = true
+	}
+	for path, found := range want {
+		if !found {
+			t.Errorf("exact allowed socket path %q has no pathname resolution rule", path)
+		}
+	}
+}
+
+func TestAddUnixSocketIsolationRejectsUnsupportedABIAndRelativePath(t *testing.T) {
+	spec := Spec{ABI: MinUnixSocketABI - 1}
+	if err := AddUnixSocketIsolation(&spec, "/tmp/proxy.sock"); err == nil {
+		t.Fatal("expected ABI below 9 to be rejected")
+	}
+	spec.ABI = MinUnixSocketABI
+	if err := AddUnixSocketIsolation(&spec, "proxy.sock"); err == nil {
+		t.Fatal("expected a relative proxy path to be rejected")
+	}
+	if err := AddUnixSocketIsolation(&spec); err == nil {
+		t.Fatal("expected an empty allowed socket list to be rejected")
+	}
+}
+
 // resolvedTempDir returns a t.TempDir() with symlinks resolved. RulesFromConfig
 // canonicalizes the Landlock root (filepath.EvalSymlinks) for security, so the
 // emitted root-child rule paths are always the resolved form. On macOS
@@ -590,12 +638,14 @@ func TestRulesFromConfigRejectsEmptyABI(t *testing.T) {
 }
 
 func TestSpecRoundTrip(t *testing.T) {
+	rights := RightsForABI(MinUnixSocketABI) | RightResolveUnix
 	spec := Spec{
-		ABI:             3,
-		HandledAccessFS: RightsForABI(3),
+		ABI:             MinUnixSocketABI,
+		HandledAccessFS: rights,
+		Scoped:          ScopeAbstractUnixSocket,
 		Paths: []PathRule{
-			{Path: "/tmp/project", Access: AccessReadWrite, Rights: RightsForABI(3)},
-			{Path: "/tmp/events.db", Access: AccessReadWrite, Rights: RightsForABI(3)},
+			{Path: "/tmp/project", Access: AccessReadWrite, Rights: rights},
+			{Path: "/tmp/events.db", Access: AccessReadWrite, Rights: rights},
 		},
 	}
 
@@ -607,8 +657,8 @@ func TestSpecRoundTrip(t *testing.T) {
 	if err != nil {
 		t.Fatalf("UnmarshalSpec failed: %v", err)
 	}
-	if decoded.ABI != spec.ABI || decoded.HandledAccessFS != spec.HandledAccessFS {
-		t.Fatalf("decoded header = ABI %d rights %#x, want ABI %d rights %#x", decoded.ABI, decoded.HandledAccessFS, spec.ABI, spec.HandledAccessFS)
+	if decoded.ABI != spec.ABI || decoded.HandledAccessFS != spec.HandledAccessFS || decoded.Scoped != spec.Scoped {
+		t.Fatalf("decoded header = ABI %d rights %#x scope %#x, want ABI %d rights %#x scope %#x", decoded.ABI, decoded.HandledAccessFS, decoded.Scoped, spec.ABI, spec.HandledAccessFS, spec.Scoped)
 	}
 	if len(decoded.Paths) != len(spec.Paths) {
 		t.Fatalf("decoded %d paths, want %d", len(decoded.Paths), len(spec.Paths))

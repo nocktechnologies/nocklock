@@ -44,6 +44,35 @@ func TestDoctorProtectedConfig(t *testing.T) {
 	}
 }
 
+func TestUnixSocketDoctorCheckReportsLandlockPosture(t *testing.T) {
+	cases := []struct {
+		name       string
+		goos       string
+		abi        int
+		wantSev    doctorSeverity
+		wantStatus string
+	}{
+		{name: "ABI 9 enforces both socket types", goos: "linux", abi: 9, wantSev: doctorOK, wantStatus: "enforceable"},
+		{name: "older ABI warns", goos: "linux", abi: 5, wantSev: doctorWarning, wantStatus: "unsupported"},
+		{name: "Landlock unavailable warns", goos: "linux", abi: 0, wantSev: doctorWarning, wantStatus: "landlock-unavailable"},
+		{name: "macOS is not applicable", goos: "darwin", wantSev: doctorInfo, wantStatus: "not-applicable"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			check := unixSocketDoctorCheck(doctorCapabilities{
+				goos:        tc.goos,
+				landlockABI: func() (int, error) { return tc.abi, nil },
+			})
+			if check.Severity != tc.wantSev || check.Status != tc.wantStatus {
+				t.Fatalf("unix-socket doctor check = %+v, want severity=%q status=%q", check, tc.wantSev, tc.wantStatus)
+			}
+			if tc.wantSev == doctorWarning && (check.Fix == "" || !strings.Contains(check.Message, "CONFINED")) {
+				t.Fatalf("unsupported posture must explain the CONFINED gap and remediation: %+v", check)
+			}
+		})
+	}
+}
+
 func TestDoctorNetworkAllowAllWarnsButDoesNotFail(t *testing.T) {
 	dir := t.TempDir()
 	writeTestConfig(t, dir, doctorTestTOML(true))

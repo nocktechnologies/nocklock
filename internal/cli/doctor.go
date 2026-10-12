@@ -152,6 +152,7 @@ func runDoctor(caps doctorCapabilities) doctorReport {
 		checks = append(checks, check)
 	}
 	checks = append(checks, filesystemDoctorCheck(cfg, caps))
+	checks = append(checks, unixSocketDoctorCheck(caps))
 	checks = append(checks, syscallDoctorCheck(cfg, caps))
 	checks = append(checks, networkDoctorCheck(cfg, caps))
 	checks = append(checks, secretDoctorCheck(cfg))
@@ -168,6 +169,46 @@ func runDoctor(caps doctorCapabilities) doctorReport {
 	})
 
 	return finishDoctorReport(checks, activity)
+}
+
+func unixSocketDoctorCheck(caps doctorCapabilities) doctorCheck {
+	if caps.goos != "linux" {
+		return doctorCheck{
+			Group:    "Fences",
+			Name:     "unix-sockets",
+			Severity: doctorInfo,
+			Status:   "not-applicable",
+			Message:  "Landlock Unix-socket isolation is Linux-only.",
+		}
+	}
+	check := doctorCheck{
+		Group:    "Fences",
+		Name:     "unix-sockets",
+		Severity: doctorWarning,
+		Status:   "capability-unknown",
+		Message:  "Cannot check whether this kernel can block pathname and abstract Unix sockets in CONFINED mode.",
+		Fix:      "run on Linux with Landlock ABI v9 or later, or pass --allow-unix-sockets to explicitly accept local socket reachability",
+	}
+	if caps.landlockABI == nil {
+		return check
+	}
+	abi, err := caps.landlockABI()
+	if err != nil {
+		check.Message = fmt.Sprintf("Landlock Unix-socket isolation capability check failed: %v", err)
+		return check
+	}
+	if abi < landlock.MinUnixSocketABI {
+		check.Status = "landlock-unavailable"
+		check.Message = "Landlock is unavailable; CONFINED mode cannot block pathname and abstract Unix sockets."
+		if abi > 0 {
+			check.Status = "unsupported"
+			check.Message = fmt.Sprintf("Landlock ABI v%d cannot block both pathname and abstract Unix sockets in CONFINED mode.", abi)
+		}
+		check.Fix = "use Landlock ABI v9 or later, or pass --allow-unix-sockets to explicitly accept local socket reachability"
+		return check
+	}
+	return doctorOKCheck("Fences", "unix-sockets", "enforceable",
+		fmt.Sprintf("Landlock ABI v%d can block pathname and abstract Unix sockets in CONFINED mode; wrap allows only its exact proxy and filesystem event sockets.", abi))
 }
 
 // sandboxExecErr reports why sandbox-exec is unusable; a nil probe counts as

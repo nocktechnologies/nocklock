@@ -51,7 +51,7 @@ var wrapCmd = &cobra.Command{
 			return nil
 		}
 		if len(args) == 0 && !wrapFlags.DryRun {
-			return fmt.Errorf("no command specified. Usage: nocklock wrap [--profile <name>] [--dry-run] [--allow-private-ranges] -- <command> [args...]")
+			return fmt.Errorf("no command specified. Usage: nocklock wrap [--profile <name>] [--dry-run] [--allow-private-ranges] [--allow-unix-sockets] -- <command> [args...]")
 		}
 
 		cfg, configPath, err := loadWrapConfig(wrapFlags)
@@ -356,6 +356,8 @@ var wrapCmd = &cobra.Command{
 		var seatbeltListener net.Listener
 		macOSDenialLog := false
 		var landlockPrefix []string
+		var landlockSpec *landlock.Spec
+		landlockABI := 0
 		var fsCfg *fsfence.FenceConfig
 		if cfg.Filesystem.Root != "" {
 			// Fence the audit log from the CHILD so the fenced agent can't delete
@@ -429,6 +431,7 @@ var wrapCmd = &cobra.Command{
 							fmt.Fprintln(os.Stderr, msg)
 							logEvent(logging.EventFilePassed, "filesystem", "kernel fence unavailable, userspace-only", false)
 						} else {
+							landlockABI = abi
 							exe, err := os.Executable()
 							if err != nil {
 								return fmt.Errorf("cannot resolve nocklock executable for Landlock shim: %w", err)
@@ -438,11 +441,7 @@ var wrapCmd = &cobra.Command{
 							if err != nil {
 								return fmt.Errorf("failed to build Landlock rules: %w", err)
 							}
-							encoded, err := landlock.MarshalSpec(spec)
-							if err != nil {
-								return fmt.Errorf("failed to serialize Landlock rules: %w", err)
-							}
-							childEnv = append(removeEnvVars(childEnv, landlockRulesEnv), landlockRulesEnv+"="+encoded)
+							landlockSpec = &spec
 							landlockPrefix = []string{exe, "__landlock-exec", "--"}
 							fmt.Fprintf(os.Stderr, "NockLock: Linux Landlock filesystem fence active — ABI v%d\n", spec.ABI)
 							logEvent(logging.EventFilePassed, "filesystem", fmt.Sprintf("landlock abi=%d paths=%d", spec.ABI, len(spec.Paths)), false)
@@ -584,6 +583,31 @@ var wrapCmd = &cobra.Command{
 			fsFence != nil,
 			seatbeltProxyAddr != "",
 		)
+		unixSocketIsolation := false
+		if egressLevel == egressLevelConfined {
+			var detectErr error
+			if landlockABI == 0 {
+				landlockABI, detectErr = landlock.DetectABI()
+			}
+			var policyErr error
+			var warning string
+			unixSocketIsolation, warning, policyErr = confinedUnixSocketPolicy(landlockABI, detectErr, wrapFlags.AllowUnixSockets)
+			if policyErr != nil {
+				detail := policyErr.Error() + "; refusing to start"
+				logEvent(logging.EventNetworkError, "network", detail, true)
+				fmt.Fprintf(cmd.ErrOrStderr(), "NockLock: fatal: %s\n", detail)
+				cmd.SilenceUsage = true
+				cmd.SilenceErrors = true
+				return &exitCodeError{code: 2}
+			}
+			if warning != "" {
+				fmt.Fprintf(cmd.ErrOrStderr(), "NockLock: WARNING: %s.\n", warning)
+				logEvent(logging.EventNetworkPassed, "network", warning, false)
+			}
+			if unixSocketIsolation && landlockSpec == nil {
+				landlockSpec = &landlock.Spec{ABI: landlockABI}
+			}
+		}
 		if egressLevel == egressLevelUnreachable {
 			detail := egressRequirementMessage(egressLevel, runtime.GOOS)
 			logEvent(logging.EventNetworkError, "network", detail, true)
@@ -760,6 +784,18 @@ var wrapCmd = &cobra.Command{
 					cmd.SilenceErrors = true
 					return &exitCodeError{code: 2}
 				}
+				if unixSocketIsolation {
+					if err := landlock.AddUnixSocketIsolation(landlockSpec, proxyUnixSocket, fsFence.SocketPath); err != nil {
+						detail := fmt.Sprintf("failed to configure Landlock Unix-socket isolation: %v", err)
+						logEvent(logging.EventNetworkError, "network", detail, true)
+						fmt.Fprintf(cmd.ErrOrStderr(), "NockLock: fatal: %s — refusing to start\n", detail)
+						cmd.SilenceUsage = true
+						cmd.SilenceErrors = true
+						return &exitCodeError{code: 2}
+					}
+					fmt.Fprintln(cmd.ErrOrStderr(), "NockLock: Linux Unix-socket isolation active — external pathname and abstract sockets are blocked; only the proxy and filesystem event sockets are allowed")
+					logEvent(logging.EventNetworkPassed, "network", "Landlock Unix-socket isolation active; exact proxy and filesystem event sockets allow-listed", false)
+				}
 				defer proxy.Stop()
 
 				// Launch watchdog: if proxy crashes mid-session, cancel childCtx to kill the child.
@@ -805,6 +841,13 @@ var wrapCmd = &cobra.Command{
 		} else {
 			fmt.Fprintln(os.Stderr, egressBanner(egressLevel, 0))
 			logEvent(logging.EventNetworkPassed, "network", "egress level=OFF allow_all=true", false)
+		}
+		if landlockSpec != nil {
+			encoded, err := landlock.MarshalSpec(*landlockSpec)
+			if err != nil {
+				return fmt.Errorf("failed to serialize Landlock rules: %w", err)
+			}
+			childEnv = append(removeEnvVars(childEnv, landlockRulesEnv), landlockRulesEnv+"="+encoded)
 		}
 
 		// Record the effective egress level in the signed session-start row only

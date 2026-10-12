@@ -4,6 +4,10 @@ All notable changes to NockLock will be documented in this file.
 
 ## [Unreleased]
 
+### Security
+
+- Linux `CONFINED` egress uses Landlock ABI v9 pathname resolution and abstract-socket scoping to block external Unix-socket connections while allowing NockLock's exact proxy and filesystem event sockets. On kernels without both controls, `wrap` refuses `CONFINED` unless `--allow-unix-sockets` is explicitly supplied; `doctor` reports the available posture.
+
 ### Fixed
 
 - Linux netns: the concurrent subnet test now checks atomic reservation claims instead of random, unreserved bridge candidates; two processes also contend for one subnet in a regression test.

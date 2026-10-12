@@ -11,6 +11,12 @@ import (
 	"golang.org/x/sys/unix"
 )
 
+type rulesetAttr struct {
+	HandledAccessFS  uint64
+	HandledAccessNet uint64
+	Scoped           uint64
+}
+
 func DetectABI() (int, error) {
 	abi, _, errno := unix.Syscall(unix.SYS_LANDLOCK_CREATE_RULESET, 0, 0, uintptr(unix.LANDLOCK_CREATE_RULESET_VERSION))
 	if errno != 0 {
@@ -31,12 +37,25 @@ func Apply(spec Spec) error {
 	if spec.ABI <= 0 || spec.HandledAccessFS == 0 {
 		return fmt.Errorf("invalid Landlock ruleset")
 	}
+	if spec.Scoped&^ScopeAbstractUnixSocket != 0 {
+		return fmt.Errorf("invalid Landlock scope flags %#x", spec.Scoped)
+	}
+	if spec.Scoped != 0 && spec.ABI < 6 {
+		return fmt.Errorf("Landlock ABI v%d does not support scoped Unix sockets", spec.ABI)
+	}
+	if spec.HandledAccessFS&RightResolveUnix != 0 && spec.ABI < MinUnixSocketABI {
+		return fmt.Errorf("Landlock ABI v%d does not support pathname Unix-socket resolution", spec.ABI)
+	}
 
-	attr := unix.LandlockRulesetAttr{Access_fs: spec.HandledAccessFS}
+	attr := rulesetAttr{HandledAccessFS: spec.HandledAccessFS, Scoped: spec.Scoped}
+	attrSize := unsafe.Offsetof(attr.Scoped)
+	if spec.Scoped != 0 {
+		attrSize = unsafe.Sizeof(attr)
+	}
 	fd, _, errno := unix.Syscall(
 		unix.SYS_LANDLOCK_CREATE_RULESET,
 		uintptr(unsafe.Pointer(&attr)),
-		unsafe.Sizeof(attr),
+		attrSize,
 		0,
 	)
 	if errno != 0 {

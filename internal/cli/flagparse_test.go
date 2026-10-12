@@ -30,6 +30,19 @@ func TestParseWrapFlagsAllowPrivateRanges(t *testing.T) {
 	}
 }
 
+func TestParseWrapFlagsAllowUnixSockets(t *testing.T) {
+	flags, childArgs, err := parseWrapFlags([]string{"--allow-unix-sockets", "--", "mycommand"})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !flags.AllowUnixSockets {
+		t.Fatal("expected AllowUnixSockets to be true")
+	}
+	if len(childArgs) != 1 || childArgs[0] != "mycommand" {
+		t.Fatalf("unexpected child args: %v", childArgs)
+	}
+}
+
 func TestParseWrapFlagsDryRun(t *testing.T) {
 	flags, childArgs, err := parseWrapFlags([]string{"--dry-run", "--", "cmd", "arg"})
 	if err != nil {

@@ -7,6 +7,7 @@ import "fmt"
 // not forwarded to the child process.
 type WrapFlags struct {
 	AllowPrivateRanges    bool // --allow-private-ranges: permit RFC1918/loopback connections
+	AllowUnixSockets      bool // --allow-unix-sockets: accept CONFINED local socket reachability on older kernels
 	DryRun                bool // --dry-run: validate config without starting fences or child process
 	RequireEnforcedEgress bool // --require-enforced-egress: refuse advisory or disabled egress
 	Profile               string
@@ -65,6 +66,8 @@ func parseWrapFlags(args []string) (WrapFlags, []string, error) {
 			return WrapFlags{}, nil, fmt.Errorf("--allow-unfenced has been removed: NockLock now fails closed when the network fence is unavailable")
 		case "--allow-private-ranges":
 			flags.AllowPrivateRanges = true
+		case "--allow-unix-sockets":
+			flags.AllowUnixSockets = true
 		case "--dry-run":
 			flags.DryRun = true
 		case "--require-enforced-egress":
@@ -111,7 +114,7 @@ func allRecognizedWrapFlags(args []string) bool {
 	for i := 0; i < len(args); i++ {
 		a := args[i]
 		switch a {
-		case "--allow-unfenced", "--allow-private-ranges", "--dry-run", "--require-enforced-egress":
+		case "--allow-unfenced", "--allow-private-ranges", "--allow-unix-sockets", "--dry-run", "--require-enforced-egress":
 		case "--profile", "--net-fence":
 			if i+1 >= len(args) {
 				return false

@@ -79,13 +79,15 @@ On Linux you can instead pass `--net-fence=netns`. The child then runs in its ow
 | Level | Boundary |
 |---|---|
 | `KERNEL` | Linux netns with a kernel default-drop floor and the configured HTTP(S)/DNS allowlist. |
-| `CONFINED` | Linux proxy with syscall enforcement and the filesystem interposer bridge; the child can connect only to the proxy's Unix socket. |
+| `CONFINED` | Linux proxy with syscall enforcement and the filesystem interposer bridge; Landlock blocks external pathname and abstract Unix sockets and permits only the exact proxy and filesystem event sockets. This requires Landlock ABI v9 or later. |
 | `SEATBELT` | macOS proxy with a Seatbelt kernel floor (needs `filesystem.root`): the profile denies every outbound network connect except to the proxy's loopback port, and allows no Unix-socket connect, so a client that ignores `HTTP_PROXY` is denied by the kernel. It is not `CONFINED`, which is defined by the Linux syscall and interposer bridge, and look-back rules (Linux CONFINED only) are refused at `SEATBELT`. |
 | `ADVISORY` | Userspace proxy only. A client that ignores `HTTP_PROXY` can reach any host. The wrap warning names this limitation. |
 | `OFF` | `network.allow_all = true`; any host is reachable. |
 | `UNREACHABLE` | Syscall enforcement restricts proxy traffic to Unix sockets, but the filesystem interposer bridge is disabled, so the allowlist cannot be reached. Wrap refuses to start. |
 
 Set `network.require_enforced = true` in `.nock/config.toml` or pass `--require-enforced-egress` to refuse `ADVISORY`, `OFF`, and `UNREACHABLE` levels. Linux can use `--net-fence=netns`; macOS meets the requirement through the `SEATBELT` floor.
+
+On Linux, `CONFINED` also requires Landlock ABI v9 or later to block pathname and abstract Unix sockets outside NockLock's proxy and filesystem event channels. Older kernels refuse to start `CONFINED`; `nocklock doctor` reports this limitation. Pass `--allow-unix-sockets` only when accepting that the child can reach user-accessible Unix sockets.
 
 The macOS floor is the Seatbelt profile that `filesystem.root` already requires: `(deny network-outbound)` plus a TCP-only allow (`remote tcp`) for `localhost:<proxy port>`, and a deny of the resolver's Mach services (`com.apple.mDNSResponder`, `com.apple.mDNSResponderHelper`). `getaddrinfo` reaches mDNSResponder over Mach, not a socket, so without that deny a fenced agent could put data into DNS queries; with it, the agent cannot resolve names itself, and proxy-aware clients send the hostname to the proxy, which resolves it outside the profile. NockLock holds the proxy's port on `[::1]` too (wrap refuses to start if that port is taken), because `localhost` in the rule admits both loopback families. The proxy runs outside the profile, so its upstream connects are unaffected. If the profile is rejected or the proxy is unhealthy, wrap refuses to start, and the signed fence-state row records the floor. The honest limits: Apple deprecates `sandbox-exec`; reads outside `filesystem.root` are not confined; with `filesystem.root = ""` there is no profile and egress is `ADVISORY`; the proxy's loopback port is the only local destination; `/etc/hosts` lookups stay allowed (a local file read, no query leaves the host); a tool that must resolve a public name itself (not through the proxy) fails inside the fence; and the Mach deny covers the resolver services named above, so a resolver service not on that list is not claimed closed.
 
@@ -402,6 +404,7 @@ Two candidate runtimes are deliberately left without a preset:
 | `nocklock wrap -- <cmd>` | Run a command inside the fence |
 | `nocklock wrap --net-fence=netns -- <cmd>` | Linux only: run inside the kernel-enforced netns egress fence (needs the privileged helper) |
 | `nocklock wrap --require-enforced-egress -- <cmd>` | Refuse to start unless egress is `KERNEL` or `CONFINED` |
+| `nocklock wrap --allow-unix-sockets -- <cmd>` | Explicitly allow local Unix-socket reachability when older Linux kernels cannot enforce it in `CONFINED` mode |
 | `nocklock wrap --profile list` | List embedded runtime presets |
 | `nocklock wrap --dry-run` | Validate config without starting fences or a command |
 | `nocklock scan [path ...]` | Scan selected local files; `--env` adds environment values and `--json` prints structured results |
