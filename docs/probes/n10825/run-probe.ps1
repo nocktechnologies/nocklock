@@ -881,17 +881,23 @@ try {
         $script:pyDir = Split-Path $pyExe -Parent        # $script: so the global teardown can revoke it
         $script:pySid = $sid                             # captured with the grant: the teardown revokes and asserts on this SID
         icacls $script:pyDir /grant "*${script:pySid}:(OI)(CI)(RX)" | Out-Null
-        $capture = Join-Path $out.FullName '_inside-1-9998.txt'
-        $bind9998 = try {
-          $rc = [NockProbe.AC]::Run($sid, @(), ('cmd.exe /c ""' + $pyExe + '" -c "print(''PYTHON_RAN'', flush=True); import socket; s = socket.socket(); ' +
-            's.bind((''127.0.0.1'', 9998)); s.listen(1); print(''bind+listen OK'', s.getsockname())" > "' + $capture + '" 2>&1"'), 60000)
-          'exit={0} (0x{0:X8})' -f $rc
-        } catch {
-          'threw {0} HResult={1} {2}' -f $_.Exception.GetBaseException().GetType().Name, (Get-BaseHResult $_), $_.Exception.GetBaseException().Message
+        $grantRc = $LASTEXITCODE
+        if ($grantRc -ne 0) {
+          # The grant did not take, so the container cannot read python: a SETUP-FAULT, and python is not launched.
+          $bind9998 = 'SETUP-FAULT - icacls grant on the python directory failed (exit {0}); python step skipped' -f $grantRc
+        } else {
+          $capture = Join-Path $out.FullName '_inside-1-9998.txt'
+          $bind9998 = try {
+            $rc = [NockProbe.AC]::Run($sid, @(), ('cmd.exe /c ""' + $pyExe + '" -c "print(''PYTHON_RAN'', flush=True); import socket; s = socket.socket(); ' +
+              's.bind((''127.0.0.1'', 9998)); s.listen(1); print(''bind+listen OK'', s.getsockname())" > "' + $capture + '" 2>&1"'), 60000)
+            'exit={0} (0x{0:X8})' -f $rc
+          } catch {
+            'threw {0} HResult={1} {2}' -f $_.Exception.GetBaseException().GetType().Name, (Get-BaseHResult $_), $_.Exception.GetBaseException().Message
+          }
+          $got = @(Get-Content $capture -ErrorAction SilentlyContinue)
+          $got | ForEach-Object { "inside(1) 9998: $_" }
+          if (-not ($got -ccontains 'PYTHON_RAN')) { $bind9998 = "SETUP-FAULT - python did not run (no PYTHON_RAN), launch $bind9998" }
         }
-        $got = @(Get-Content $capture -ErrorAction SilentlyContinue)
-        $got | ForEach-Object { "inside(1) 9998: $_" }
-        if (-not ($got -ccontains 'PYTHON_RAN')) { $bind9998 = "SETUP-FAULT - python did not run (no PYTHON_RAN), launch $bind9998" }
       } else {
         $bind9998 = 'SETUP-FAULT: no usable python.exe (only the WindowsApps alias or none)'
       }

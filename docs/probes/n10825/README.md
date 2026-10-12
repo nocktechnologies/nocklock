@@ -75,7 +75,7 @@ assembled yet, and on `-Mode Desktop` it refuses the DISPOSABLE-BOX ONLY probes 
    Step 2: clear any earlier result by exact name, then create and start the task:
 
    ```
-   if exist <dir>\output.txt ren <dir>\output.txt output-prev-<ts>.txt
+   if (Test-Path <dir>\output.txt) { Rename-Item <dir>\output.txt output-prev-<ts>.txt }
    schtasks /Create /TN nlprobe-runner /TR "<dir>\nlprobe-run.cmd" /SC ONCE /ST 00:00 /RL HIGHEST /IT /F
    schtasks /Run /TN nlprobe-runner
    ```
@@ -157,7 +157,7 @@ The transcript carries the verdicts: `LAUNCHER-ENV:`, `LIMITED-TOKEN:`,
   `495f2b44`). Probe 1's pivot PASSED (loopback reached, off-box did not resolve), Probe 2
   answered (no admin), Probe 1's 9998 bind + listen is an open SETUP-FAULT (python not on the
   container's PATH) and the SSH drop cut the run before Probe 3. This revision runs python by
-  absolute path with a package-SID grant, and (round 3) documents a one-shot Scheduled Task recipe for SSH (round 4; round 3's `Start-Process` can die with the SSH session). Its off-box claim was too strong:
+  absolute path with a package-SID grant, and documents a one-shot Scheduled Task recipe for SSH (round 3 first used `Start-Process`, which can die with the SSH session; round 4 replaced it). Its off-box claim was too strong:
   `exit=6` shows name resolution failed, not that packets are dropped. Round 2 adds a literal-IP
   `curl` to 1.1.1.1, scored as `VERDICT(1-ip)` against an outer control. Only an immediate connect failure (curl exit 7) is BLOCKED; a timeout (exit 28) is INCONCLUSIVE; any reply is reached. The step is scored on its own line.
 

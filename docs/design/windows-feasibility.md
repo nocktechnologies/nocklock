@@ -1050,7 +1050,7 @@ change to any block here must land in `run-probe.ps1` in the same commit.
 | 1, pivot: zero-capability loopback | **PASS** for loopback: container `curl` reached the exempted listener. `example.com`: name resolution failed (`exit=6`); off-box packet egress not yet tested (the next run adds a literal-IP `curl` to 1.1.1.1, scored as `VERDICT(1-ip)` against an outer control). A second loopback listener (9999) is also reachable: the exemption is per container, not per port. |
 | 1, 9998 bind + listen | **Open SETUP-FAULT.** python was not on the container's PATH. Fixed in the script (absolute path plus package-SID grant); not yet re-run. |
 | 2, exemption needs admin? | **Answered: no.** `VERDICT(1-exempt)` is NON-ELEVATED OK under the limited token (an Administrators-group user's filtered Medium-IL token; a true standard-user account is untested). |
-| 3, AppContainer launch under the limited token | Not run (the SSH session dropped). Next desktop round, started with `Start-Process` (see the probe README). |
+| 3, AppContainer launch under the limited token | Not run (the SSH session dropped). Next desktop round, started with the Scheduled Task recipe (see the probe README). |
 
 The first desktop run (2026-09-28, [output](../probes/n10825/output-20260928T0558Z.txt)) ended
 Probe 1 as a SETUP-FAULT (`powershell.exe` in the container, `0xC0000142`) and Probe 3 INDETERMINATE.
@@ -1787,6 +1787,9 @@ $log1 | ForEach-Object { "inside(1): $_" }
 # The ip step is scored on its own line: its fault must not unscore the rest of Probe 1.
 $faultIp = @($fault1 -cmatch '^ip ')
 $fault1 = @($fault1 -cnotmatch '^ip ')
+# Per-step scoring relies on every fault entry starting with its step name (the format's first field).
+# A fault that does not is a script bug, not a network result, so fail loudly rather than mis-score.
+if (@($fault1 -cnotmatch '^(8899|example|9999) ').Count) { throw "Probe 1 fault entry lacks its step-name prefix (8899/example/ip/9999): $($fault1 -join ' | ')" }
 # The agent binds its own listener: python binds 127.0.0.1:9998, listens, prints one line
 # and exits, so the claim (bind + listen inside, outbound-only scope below) is its exit code
 # and nothing is left running to reap. A per-user python (e.g. under %LOCALAPPDATA%\Programs)
@@ -1801,17 +1804,23 @@ if ($pyExe) {
   $script:pyDir = Split-Path $pyExe -Parent        # $script: so the global teardown can revoke it
   $script:pySid = $sid                             # captured with the grant: the teardown revokes and asserts on this SID
   icacls $script:pyDir /grant "*${script:pySid}:(OI)(CI)(RX)" | Out-Null
-  $capture = Join-Path $out.FullName '_inside-1-9998.txt'
-  $bind9998 = try {
-    $rc = [NockProbe.AC]::Run($sid, @(), ('cmd.exe /c ""' + $pyExe + '" -c "print(''PYTHON_RAN'', flush=True); import socket; s = socket.socket(); ' +
-      's.bind((''127.0.0.1'', 9998)); s.listen(1); print(''bind+listen OK'', s.getsockname())" > "' + $capture + '" 2>&1"'), 60000)
-    'exit={0} (0x{0:X8})' -f $rc
-  } catch {
-    'threw {0} HResult={1} {2}' -f $_.Exception.GetBaseException().GetType().Name, (Get-BaseHResult $_), $_.Exception.GetBaseException().Message
+  $grantRc = $LASTEXITCODE
+  if ($grantRc -ne 0) {
+    # The grant did not take, so the container cannot read python: a SETUP-FAULT, and python is not launched.
+    $bind9998 = 'SETUP-FAULT - icacls grant on the python directory failed (exit {0}); python step skipped' -f $grantRc
+  } else {
+    $capture = Join-Path $out.FullName '_inside-1-9998.txt'
+    $bind9998 = try {
+      $rc = [NockProbe.AC]::Run($sid, @(), ('cmd.exe /c ""' + $pyExe + '" -c "print(''PYTHON_RAN'', flush=True); import socket; s = socket.socket(); ' +
+        's.bind((''127.0.0.1'', 9998)); s.listen(1); print(''bind+listen OK'', s.getsockname())" > "' + $capture + '" 2>&1"'), 60000)
+      'exit={0} (0x{0:X8})' -f $rc
+    } catch {
+      'threw {0} HResult={1} {2}' -f $_.Exception.GetBaseException().GetType().Name, (Get-BaseHResult $_), $_.Exception.GetBaseException().Message
+    }
+    $got = @(Get-Content $capture -ErrorAction SilentlyContinue)
+    $got | ForEach-Object { "inside(1) 9998: $_" }
+    if (-not ($got -ccontains 'PYTHON_RAN')) { $bind9998 = "SETUP-FAULT - python did not run (no PYTHON_RAN), launch $bind9998" }
   }
-  $got = @(Get-Content $capture -ErrorAction SilentlyContinue)
-  $got | ForEach-Object { "inside(1) 9998: $_" }
-  if (-not ($got -ccontains 'PYTHON_RAN')) { $bind9998 = "SETUP-FAULT - python did not run (no PYTHON_RAN), launch $bind9998" }
 } else {
   $bind9998 = 'SETUP-FAULT: no usable python.exe (only the WindowsApps alias or none)'
 }
