@@ -184,8 +184,9 @@ func NewProxyServer(cfg config.NetworkConfig, logger *logging.Logger, sessionID 
 }
 
 // NewProxyServerAt creates an allowlist proxy bound to listenAddr. It is used by
-// the netns egress helper for its private veth peer; ordinary callers should use
-// NewProxyServer, which binds only to localhost.
+// the netns egress helper for its private veth peer and by the macOS Seatbelt
+// network floor, whose profile admits exactly one pre-reserved loopback port;
+// ordinary callers should use NewProxyServer, which binds only to localhost.
 func NewProxyServerAt(cfg config.NetworkConfig, logger *logging.Logger, sessionID, listenAddr string) *ProxyServer {
 	p := NewProxyServer(cfg, logger, sessionID)
 	p.listenAddr = listenAddr

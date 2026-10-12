@@ -69,7 +69,7 @@ func egressRequirementMessage(level egressLevel, goos string) string {
 		if goos == "linux" {
 			fix = "set network.allow and network.allow_all = false, then use --net-fence=netns on Linux"
 		} else {
-			fix = "set network.allow and network.allow_all = false; " + macFix
+			fix = "set network.allow; " + macFix
 		}
 	case egressLevelUnreachable:
 		if goos == "linux" {

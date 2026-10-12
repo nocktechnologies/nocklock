@@ -689,11 +689,13 @@ var wrapCmd = &cobra.Command{
 			fmt.Fprintln(os.Stderr, egressBanner(egressLevel, len(netnsEgress.Allow)))
 		} else if !cfg.Network.AllowAll {
 			proxyCfg := effectiveCfg.Network
-			proxy := network.NewProxyServer(proxyCfg, logger, sessionID)
+			var proxy *network.ProxyServer
 			if seatbeltProxyAddr != "" {
 				// Bind exactly the address the Seatbelt floor admits. A bind failure
 				// below refuses to start (fail closed).
 				proxy = network.NewProxyServerAt(proxyCfg, logger, sessionID, seatbeltProxyAddr)
+			} else {
+				proxy = network.NewProxyServer(proxyCfg, logger, sessionID)
 			}
 			if len(proxyCfg.Lookback) > 0 {
 				// lookbackLevelError guaranteed CONFINED, so fsFence is non-nil.

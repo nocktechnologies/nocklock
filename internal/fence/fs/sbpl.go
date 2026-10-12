@@ -91,9 +91,11 @@ func GenerateWriteConfinementProfile(sensitivePaths []string, root, mode string,
 //
 // A non-zero proxyPort engages the kernel network floor: all outbound network
 // connects are denied except to localhost:proxyPort (NockLock's own proxy). The
-// floor carries the same tag. No Unix-socket connect is allowed, so in
-// particular mDNSResponder stays unreachable and DNS cannot leave the box except
-// through the proxy; zero leaves the network unrestricted.
+// floor carries the same tag. No Unix-socket connect is allowed (the
+// mDNSResponder socket included). Resolver lookups that a client makes over a
+// non-socket channel (Mach) are NOT covered; zero leaves the network
+// unrestricted. "localhost" matches both loopback families, so a service on the
+// proxy's port at ::1 is also reachable.
 func GenerateTaggedWriteConfinementProfile(sensitivePaths []string, root, mode string, hardened bool, tag string, proxyPort int) (string, int, error) {
 	if strings.TrimSpace(root) == "" {
 		return "", 0, fmt.Errorf("refusing to generate write-confinement profile with an empty root")
