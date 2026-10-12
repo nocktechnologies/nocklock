@@ -4,9 +4,13 @@ All notable changes to NockLock will be documented in this file.
 
 ## [Unreleased]
 
+### Breaking
+
+- `init` now exits non-zero when a config exists; scripts that call init repeatedly should check for `.nock/config.toml` first.
+
 ### Changed
 
-- `nocklock init` exits non-zero when `.nock/config.toml` already exists instead of reporting success, and `nocklock init --runtime <name> --diff` prints the policy lines the preset would add or remove (no write). The macOS `claude` hint now points at `--diff`.
+- `nocklock init` exits non-zero when `.nock/config.toml` already exists instead of reporting success, and `nocklock init --runtime <name> --diff` prints the policy entries the preset would add or remove (no write), comparing the two configs key by key and `[[network.lookback]]` entries in order. The "config already exists" error no longer prints the Cobra usage. The macOS `claude` hint now points at `--diff`.
 - `--ed25519-pub` accepts the `ed25519 <base64>` line that `verify --export-pubkey` prints, as well as bare base64 or hex.
 - A legacy `[cloud]` section is reported as inert, naming `[audit.forward]`, the real delivery transport.
 
