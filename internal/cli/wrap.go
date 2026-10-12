@@ -298,7 +298,7 @@ var wrapCmd = &cobra.Command{
 		} else {
 			fmt.Fprintf(os.Stderr, "NockLock: secret fence active — no variables blocked\n")
 		}
-		if hint := claudeKeychainHint(runtime.GOOS, args, childEnv); hint != "" {
+		if hint := claudeKeychainHint(runtime.GOOS, args, os.Environ(), childEnv); hint != "" {
 			fmt.Fprintln(os.Stderr, hint)
 		}
 
@@ -1203,26 +1203,49 @@ func setSessionIDEnv(env []string, sessionID string) []string {
 	return append(removeEnvVars(env, sessionIDEnv), sessionIDEnv+"="+sessionID)
 }
 
-// claudeKeychainHintText is printed when a keychain-logged-in Claude Code is
-// wrapped on macOS: the fence denies ~/Library/Keychains, so the login there is
-// unreachable and the credential has to arrive through the environment.
-const claudeKeychainHintText = "NockLock: Claude Code keeps its login in the macOS keychain, which the fence denies; run 'claude setup-token' once and export CLAUDE_CODE_OAUTH_TOKEN (or ANTHROPIC_API_KEY) before 'nocklock wrap -- claude'."
+// claudeAuthEnvNames are the environment variables Claude Code can authenticate
+// with when the keychain login is unreachable.
+var claudeAuthEnvNames = []string{"CLAUDE_CODE_OAUTH_TOKEN", "ANTHROPIC_API_KEY"}
 
-// claudeKeychainHint returns the one-line hint when goos is darwin, the wrapped
+// claudeHintUnset is printed when no Claude credential variable is set in the
+// parent environment: the fence denies ~/Library/Keychains, so the keychain
+// login is unreachable and the credential has to arrive through the environment.
+const claudeHintUnset = "NockLock: Claude Code keeps its login in the macOS keychain, which the fence denies; run 'claude setup-token' once and export CLAUDE_CODE_OAUTH_TOKEN (or ANTHROPIC_API_KEY) before 'nocklock wrap -- claude'."
+
+// claudeHintStrippedFormat is printed when a credential variable is set in the
+// parent environment but the secret fence removed it. %s is the variable name.
+const claudeHintStrippedFormat = "NockLock: %s is set but the secret fence stripped it; run 'nocklock init --runtime claude-code' (the claude-code preset passes it) or add %q to secrets.pass in your config."
+
+// claudeKeychainHint returns a one-line hint when goos is darwin, the wrapped
 // command's basename is claude, and childEnv (the post-secret-fence env the
 // child will see) carries neither CLAUDE_CODE_OAUTH_TOKEN nor ANTHROPIC_API_KEY.
-// It returns "" otherwise. The hint is advisory; wrap still launches.
-func claudeKeychainHint(goos string, args, childEnv []string) string {
+// If parentEnv had one of them set, the hint says the fence stripped it and names
+// the config fix; otherwise it says to run claude setup-token. It never includes
+// a value. It returns "" otherwise. The hint is advisory; wrap still launches.
+func claudeKeychainHint(goos string, args, parentEnv, childEnv []string) string {
 	if goos != "darwin" || len(args) == 0 || filepath.Base(args[0]) != "claude" {
 		return ""
 	}
-	for _, entry := range childEnv {
-		name, value, _ := strings.Cut(entry, "=")
-		if (name == "CLAUDE_CODE_OAUTH_TOKEN" || name == "ANTHROPIC_API_KEY") && value != "" {
-			return ""
+	if claudeAuthEnvName(childEnv) != "" {
+		return ""
+	}
+	if name := claudeAuthEnvName(parentEnv); name != "" {
+		return fmt.Sprintf(claudeHintStrippedFormat, name, name)
+	}
+	return claudeHintUnset
+}
+
+// claudeAuthEnvName returns the first Claude credential variable name with a
+// non-empty value in env, or "".
+func claudeAuthEnvName(env []string) string {
+	for _, name := range claudeAuthEnvNames {
+		for _, entry := range env {
+			if k, v, _ := strings.Cut(entry, "="); k == name && v != "" {
+				return name
+			}
 		}
 	}
-	return claudeKeychainHintText
+	return ""
 }
 
 // removeEnvVars returns env with any entries whose key matches one of the given

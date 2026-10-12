@@ -25,14 +25,16 @@ nocklock wrap -- claude
 
 Four commands and your agent is fenced.
 
-**macOS and Claude Code:** Claude Code keeps a `claude.ai` login in the macOS login keychain, and the fence denies `~/Library/Keychains` (Seatbelt cannot scope to one keychain item, so NockLock does not open it). Run `claude setup-token` once, then export the token before wrapping:
+**macOS and Claude Code:** Claude Code keeps a `claude.ai` login in the macOS login keychain, and the fence denies `~/Library/Keychains` (Seatbelt cannot scope to one keychain item, so NockLock does not open it). The login has to arrive through the environment, and the default secret fence blocks `*_TOKEN*`, so plain `nocklock init` strips an exported `CLAUDE_CODE_OAUTH_TOKEN`. Use the `claude-code` preset:
 
 ```bash
+claude setup-token
 export CLAUDE_CODE_OAUTH_TOKEN=<token from claude setup-token>   # or ANTHROPIC_API_KEY
+nocklock init --runtime claude-code
 nocklock wrap -- claude
 ```
 
-The `claude-code` preset passes both variables through the secret fence. If `wrap` sees `claude` on macOS with neither variable set, it prints a one-line hint and still launches. Claude Code's `--bare` mode does not read `CLAUDE_CODE_OAUTH_TOKEN`; use `ANTHROPIC_API_KEY` there.
+The `claude-code` preset passes both variables through the secret fence. With a custom config, add the exact name to `secrets.pass` instead. If `wrap` sees `claude` on macOS with neither variable reaching the child, it prints a one-line hint (stripped by the fence, or unset so run `claude setup-token`; never the value) and still launches. Claude Code's `--bare` mode does not read `CLAUDE_CODE_OAUTH_TOKEN`; use `ANTHROPIC_API_KEY` there.
 
 On Linux, the default read-only system grants cover binaries and libraries, plus
 `/etc/ld.so.cache` (loader cache), `passwd` and `group` (identity lookup),

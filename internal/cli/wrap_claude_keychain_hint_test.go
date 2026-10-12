@@ -1,6 +1,7 @@
 package cli
 
 import (
+	"fmt"
 	"strings"
 	"testing"
 
@@ -9,32 +10,42 @@ import (
 )
 
 func TestClaudeKeychainHint(t *testing.T) {
+	stripped := func(name string) string { return fmt.Sprintf(claudeHintStrippedFormat, name, name) }
 	tests := []struct {
 		name    string
 		goos    string
 		args    []string
+		parent  []string
 		environ []string
 		want    string
 	}{
-		{"darwin claude unset", "darwin", []string{"claude", "-p", "hi"}, []string{"HOME=/h"}, claudeKeychainHintText},
-		{"darwin absolute claude path", "darwin", []string{"/opt/homebrew/bin/claude"}, nil, claudeKeychainHintText},
-		{"oauth token set", "darwin", []string{"claude"}, []string{"CLAUDE_CODE_OAUTH_TOKEN=x"}, ""},
-		{"api key set", "darwin", []string{"claude"}, []string{"ANTHROPIC_API_KEY=x"}, ""},
-		{"empty value counts as unset", "darwin", []string{"claude"}, []string{"ANTHROPIC_API_KEY="}, claudeKeychainHintText},
-		{"other basename", "darwin", []string{"claude-code"}, nil, ""},
-		{"other command", "darwin", []string{"codex"}, nil, ""},
-		{"linux", "linux", []string{"claude"}, nil, ""},
-		{"no args", "darwin", nil, nil, ""},
+		{"darwin claude unset", "darwin", []string{"claude", "-p", "hi"}, []string{"HOME=/h"}, []string{"HOME=/h"}, claudeHintUnset},
+		{"darwin absolute claude path", "darwin", []string{"/opt/homebrew/bin/claude"}, nil, nil, claudeHintUnset},
+		{"oauth token stripped", "darwin", []string{"claude"}, []string{"CLAUDE_CODE_OAUTH_TOKEN=sekrit"}, nil, stripped("CLAUDE_CODE_OAUTH_TOKEN")},
+		{"api key stripped", "darwin", []string{"claude"}, []string{"ANTHROPIC_API_KEY=sekrit"}, nil, stripped("ANTHROPIC_API_KEY")},
+		{"oauth token passed", "darwin", []string{"claude"}, []string{"CLAUDE_CODE_OAUTH_TOKEN=x"}, []string{"CLAUDE_CODE_OAUTH_TOKEN=x"}, ""},
+		{"api key passed", "darwin", []string{"claude"}, []string{"ANTHROPIC_API_KEY=x"}, []string{"ANTHROPIC_API_KEY=x"}, ""},
+		{"empty value counts as unset", "darwin", []string{"claude"}, []string{"ANTHROPIC_API_KEY="}, []string{"ANTHROPIC_API_KEY="}, claudeHintUnset},
+		{"other basename", "darwin", []string{"claude-code"}, nil, nil, ""},
+		{"other command", "darwin", []string{"codex"}, nil, nil, ""},
+		{"linux", "linux", []string{"claude"}, nil, nil, ""},
+		{"no args", "darwin", nil, nil, nil, ""},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			if got := claudeKeychainHint(tc.goos, tc.args, tc.environ); got != tc.want {
+			got := claudeKeychainHint(tc.goos, tc.args, tc.parent, tc.environ)
+			if got != tc.want {
 				t.Fatalf("hint = %q, want %q", got, tc.want)
+			}
+			if strings.Contains(got, "sekrit") {
+				t.Fatalf("hint leaked a value: %q", got)
 			}
 		})
 	}
-	if strings.Contains(claudeKeychainHintText, "\n") {
-		t.Fatal("hint must be a single line")
+	for _, h := range []string{claudeHintUnset, stripped("CLAUDE_CODE_OAUTH_TOKEN")} {
+		if strings.Contains(h, "\n") {
+			t.Fatal("hint must be a single line")
+		}
 	}
 }
 
