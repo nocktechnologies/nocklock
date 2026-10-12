@@ -10,6 +10,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -297,6 +298,9 @@ var wrapCmd = &cobra.Command{
 		} else {
 			fmt.Fprintf(os.Stderr, "NockLock: secret fence active — no variables blocked\n")
 		}
+		if hint := claudeKeychainHint(runtime.GOOS, args, os.Environ(), childEnv); hint != "" {
+			fmt.Fprintln(os.Stderr, hint)
+		}
 
 		// Create the per-session egress decision-log (netns path only) BEFORE the
 		// filesystem fence assembles its deny list, so its directory can be denied
@@ -346,6 +350,10 @@ var wrapCmd = &cobra.Command{
 		var fsFence *fsfence.Fence
 		var fsFenceCancel context.CancelFunc
 		var fsSandboxPrefix []string
+		// seatbeltProxyAddr is the loopback address the Seatbelt network floor
+		// admits; the proxy serves the listener bound on it. Empty means no floor.
+		var seatbeltProxyAddr string
+		var seatbeltListener net.Listener
 		macOSDenialLog := false
 		var landlockPrefix []string
 		var fsCfg *fsfence.FenceConfig
@@ -474,8 +482,24 @@ var wrapCmd = &cobra.Command{
 					// The audit state is written only by this unfenced parent. It
 					// is already included in sensitive through egressChildDenyPaths,
 					// so never grant its directory to the fenced child.
+					proxyPort := 0
+					if !useNetns && !cfg.Network.AllowAll {
+						ln, hold, err := reserveSeatbeltProxyListeners()
+						if err != nil {
+							return refuse("cannot bind the loopback proxy port for the network floor", err)
+						}
+						// The proxy takes ln over; hold keeps [::1]:port for the whole
+						// session. Closing after the proxy stopped is a harmless no-op.
+						defer ln.Close()
+						if hold != nil {
+							defer hold.Close()
+						}
+						seatbeltListener = ln
+						proxyPort = ln.Addr().(*net.TCPAddr).Port
+						seatbeltProxyAddr = ln.Addr().String()
+					}
 					profile, pathCount, err := fsfence.GenerateTaggedWriteConfinementProfile(
-						sensitive, fsCfg.Root, fsCfg.Mode, macOSHardened, fsfence.DenialTag(sessionID),
+						sensitive, fsCfg.Root, fsCfg.Mode, macOSHardened, fsfence.DenialTag(sessionID), proxyPort,
 					)
 					if err != nil {
 						return refuse("profile generation failed", err)
@@ -498,7 +522,7 @@ var wrapCmd = &cobra.Command{
 					fsSandboxPrefix = sandboxArgv[:len(sandboxArgv)-len(args)]
 					macOSDenialLog = true
 
-					if err := recordMacOSFilesystemFenceState("ENGAGED", fmt.Sprintf("Seatbelt root-write confinement applied; root=%s mode=%s sensitive_paths=%d", fsCfg.Root, fsCfg.Mode, pathCount), false); err != nil {
+					if err := recordMacOSFilesystemFenceState("ENGAGED", fmt.Sprintf("Seatbelt root-write confinement applied; root=%s mode=%s sensitive_paths=%d network_floor=%s", fsCfg.Root, fsCfg.Mode, pathCount, networkFloorDetail(seatbeltProxyAddr)), false); err != nil {
 						return fmt.Errorf("cannot record macOS filesystem fence engagement; refusing to start: %w", err)
 					}
 					if macOSHardened {
@@ -558,6 +582,7 @@ var wrapCmd = &cobra.Command{
 			cfg.Network.AllowAll,
 			syscallFenceActive,
 			fsFence != nil,
+			seatbeltProxyAddr != "",
 		)
 		if egressLevel == egressLevelUnreachable {
 			detail := egressRequirementMessage(egressLevel, runtime.GOOS)
@@ -708,6 +733,9 @@ var wrapCmd = &cobra.Command{
 					return fmt.Errorf("reserve loopback proxy token address: %w", err)
 				}
 				addr, proxyErr = proxy.StartUnix(proxyUnixSocket, addr)
+			} else if seatbeltListener != nil {
+				// Serve the already-bound listener the Seatbelt floor admits.
+				addr, proxyErr = proxy.StartOn(seatbeltListener)
 			} else {
 				addr, proxyErr = proxy.Start()
 			}
@@ -1175,6 +1203,51 @@ func setSessionIDEnv(env []string, sessionID string) []string {
 	return append(removeEnvVars(env, sessionIDEnv), sessionIDEnv+"="+sessionID)
 }
 
+// claudeAuthEnvNames are the environment variables Claude Code can authenticate
+// with when the keychain login is unreachable.
+var claudeAuthEnvNames = []string{"CLAUDE_CODE_OAUTH_TOKEN", "ANTHROPIC_API_KEY"}
+
+// claudeHintUnset is printed when no Claude credential variable is set in the
+// parent environment: the fence denies ~/Library/Keychains, so the keychain
+// login is unreachable and the credential has to arrive through the environment.
+const claudeHintUnset = "NockLock: Claude Code keeps its login in the macOS keychain, which the fence denies; run 'claude setup-token' once and export CLAUDE_CODE_OAUTH_TOKEN (or ANTHROPIC_API_KEY) before 'nocklock wrap -- claude'."
+
+// claudeHintStrippedFormat is printed when a credential variable is set in the
+// parent environment but the secret fence removed it. %s is the variable name.
+const claudeHintStrippedFormat = "NockLock: %s is set but the secret fence stripped it; run 'nocklock init --runtime claude-code' (the claude-code preset passes it), or in a custom config remove the secrets.block pattern that matches it (for example *_TOKEN*) and add %q to secrets.pass."
+
+// claudeKeychainHint returns a one-line hint when goos is darwin, the wrapped
+// command's basename is claude, and childEnv (the post-secret-fence env the
+// child will see) carries neither CLAUDE_CODE_OAUTH_TOKEN nor ANTHROPIC_API_KEY.
+// If parentEnv had one of them set, the hint says the fence stripped it and names
+// the config fix; otherwise it says to run claude setup-token. It never includes
+// a value. It returns "" otherwise. The hint is advisory; wrap still launches.
+func claudeKeychainHint(goos string, args, parentEnv, childEnv []string) string {
+	if goos != "darwin" || len(args) == 0 || filepath.Base(args[0]) != "claude" {
+		return ""
+	}
+	if claudeAuthEnvName(childEnv) != "" {
+		return ""
+	}
+	if name := claudeAuthEnvName(parentEnv); name != "" {
+		return fmt.Sprintf(claudeHintStrippedFormat, name, name)
+	}
+	return claudeHintUnset
+}
+
+// claudeAuthEnvName returns the first Claude credential variable name with a
+// non-empty value in env, or "".
+func claudeAuthEnvName(env []string) string {
+	for _, name := range claudeAuthEnvNames {
+		for _, entry := range env {
+			if k, v, _ := strings.Cut(entry, "="); k == name && v != "" {
+				return name
+			}
+		}
+	}
+	return ""
+}
+
 // removeEnvVars returns env with any entries whose key matches one of the given
 // keys removed. Keys are matched case-sensitively by prefix ("KEY=").
 func removeEnvVars(env []string, keys ...string) []string {
@@ -1341,6 +1414,60 @@ func findLibFenceFS() (string, error) {
 		return "", fmt.Errorf("cannot resolve current working directory for filesystem fence library trust check: %w", err)
 	}
 	return findTrustedLibFenceFS(exePath, cwd, nil, fileExists)
+}
+
+// networkFloorDetail renders the Seatbelt network-floor state for the signed
+// fence-state row.
+func networkFloorDetail(proxyAddr string) string {
+	if proxyAddr == "" {
+		return "none"
+	}
+	return "deny-outbound-except-" + proxyAddr
+}
+
+// reserveSeatbeltProxyListeners binds 127.0.0.1:<port> for the proxy and holds
+// [::1]:<port> on the same port. The Seatbelt rule `localhost:<port>` admits
+// both loopback families, so holding the IPv6 side (or refusing to start when it
+// is taken) keeps NockLock's proxy the only loopback destination the floor
+// admits. Where the host has no IPv6 loopback at all, nothing can listen there
+// and no hold is needed.
+func reserveSeatbeltProxyListeners() (proxy, hold net.Listener, err error) {
+	for attempt := 0; attempt < 8; attempt++ {
+		proxy, err = net.Listen("tcp4", "127.0.0.1:0")
+		if err != nil {
+			return nil, nil, err
+		}
+		hold, err = holdLoopbackV6(proxy.Addr().(*net.TCPAddr).Port)
+		if err == nil {
+			return proxy, hold, nil
+		}
+		proxy.Close()
+	}
+	return nil, nil, err
+}
+
+// holdLoopbackV6 binds [::1]:port and returns the listener. It returns an error
+// when the port is taken, and a nil listener (nothing to hold) when IPv6 loopback
+// is unavailable on the host.
+func holdLoopbackV6(port int) (net.Listener, error) {
+	ln, err := net.Listen("tcp6", net.JoinHostPort("::1", strconv.Itoa(port)))
+	if err == nil {
+		// Refuse stray connects (accept and close) instead of letting them queue.
+		go func() {
+			for {
+				c, err := ln.Accept()
+				if err != nil {
+					return
+				}
+				c.Close()
+			}
+		}()
+		return ln, nil
+	}
+	if errors.Is(err, syscall.EADDRNOTAVAIL) || errors.Is(err, syscall.EAFNOSUPPORT) {
+		return nil, nil
+	}
+	return nil, fmt.Errorf("[::1]:%d is not free, so the network floor cannot make the proxy the only loopback destination: %w", port, err)
 }
 
 func reserveLoopbackProxyAddr() (string, error) {

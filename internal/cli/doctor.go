@@ -170,6 +170,15 @@ func runDoctor(caps doctorCapabilities) doctorReport {
 	return finishDoctorReport(checks, activity)
 }
 
+// sandboxExecErr reports why sandbox-exec is unusable; a nil probe counts as
+// unavailable so a partially built capability set fails closed.
+func sandboxExecErr(caps doctorCapabilities) error {
+	if caps.sandboxExec == nil {
+		return errors.New("sandbox-exec probe not configured")
+	}
+	return caps.sandboxExec()
+}
+
 func filesystemDoctorCheck(cfg *config.Config, caps doctorCapabilities) doctorCheck {
 	if cfg.Filesystem.Root == "" {
 		return doctorCheck{
@@ -183,7 +192,7 @@ func filesystemDoctorCheck(cfg *config.Config, caps doctorCapabilities) doctorCh
 
 	switch caps.goos {
 	case "darwin":
-		if err := caps.sandboxExec(); err != nil {
+		if err := sandboxExecErr(caps); err != nil {
 			return doctorCriticalCheck("Fences", "filesystem", "configured-but-backend-missing",
 				fmt.Sprintf("Filesystem fence configured, but macOS Seatbelt is unavailable: %v", err),
 				"install or restore sandbox-exec; wrap will otherwise refuse to start")
@@ -243,7 +252,7 @@ func syscallDoctorCheck(cfg *config.Config, caps doctorCapabilities) doctorCheck
 				fmt.Sprintf("Syscall fence configured, but %v.", err),
 				"set filesystem.root or set syscall.enforcement = \"off\" if intentionally disabled")
 		}
-		if err := caps.sandboxExec(); err != nil {
+		if err := sandboxExecErr(caps); err != nil {
 			return doctorCriticalCheck("Fences", "syscall", "configured-but-backend-missing",
 				fmt.Sprintf("Syscall fence configured, but macOS Seatbelt backend is unavailable: %v", err),
 				"install or restore sandbox-exec support before wrapping agents")
@@ -414,11 +423,13 @@ func sanityDoctorChecks(cfg *config.Config, configPath string, caps doctorCapabi
 			syscallActive = caps.syscallBackend()
 		}
 		fsInterposer := caps.goos == "linux" && cfg.Filesystem.Root != ""
-		level := effectiveEgressLevel(caps.goos, "proxy", cfg.Network.AllowAll, syscallActive, fsInterposer)
+		// wrap applies the floor only when sandbox-exec is usable.
+		seatbeltFloor := caps.goos == "darwin" && cfg.Filesystem.Root != "" && sandboxExecErr(caps) == nil
+		level := effectiveEgressLevel(caps.goos, "proxy", cfg.Network.AllowAll, syscallActive, fsInterposer, seatbeltFloor)
 		if level == egressLevelAdvisory {
 			fix := "use --net-fence=netns on Linux, or enable Linux syscall enforcement and the filesystem interposer for CONFINED proxy mode"
 			if caps.goos != "linux" {
-				fix = "macOS cannot provide enforced egress today; run on Linux with --net-fence=netns"
+				fix = "on macOS set filesystem.root and make sandbox-exec available for the SEATBELT floor, or run on Linux with --net-fence=netns"
 			}
 			checks = append(checks, doctorCheck{
 				Group:    "Sanity",
