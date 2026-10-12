@@ -365,6 +365,29 @@ func TestProgram_PtraceAndProcessVMDenied(t *testing.T) {
 	}
 }
 
+func TestProgram_IORingSyscallsDenied(t *testing.T) {
+	filters, err := (Policy{Mode: ModeRequired}).buildABIFilters()
+	if err != nil {
+		t.Fatal(err)
+	}
+	prog := assembleProgram(filters)
+	for _, filter := range filters {
+		for _, name := range []string{"io_uring_setup", "io_uring_enter", "io_uring_register"} {
+			nr, ok := syscallNr(name, filter.arch)
+			if !ok {
+				t.Fatalf("%s should resolve on %s", name, filter.arch)
+			}
+			got, err := simulate(prog, seccompData{nr: nr, arch: filter.auditArch})
+			if err != nil {
+				t.Fatalf("simulate %s on %s: %v", name, filter.arch, err)
+			}
+			if got != eperm() {
+				t.Errorf("%s on %s (nr=%d): got %#x, want EPERM", name, filter.arch, nr, got)
+			}
+		}
+	}
+}
+
 func TestProgram_WithinInstructionCap(t *testing.T) {
 	// Worst case: every option on. The classic-BPF cap is 4096 instructions.
 	p := Policy{
