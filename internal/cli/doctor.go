@@ -135,7 +135,8 @@ var doctorCmd = &cobra.Command{
 
 Exit codes:
   0  PROTECTED    every boundary enforced
-  2  GAPS FOUND   a boundary is configured but its backend is missing
+  2  GAPS FOUND   a boundary is configured but its backend is missing,
+                  or the config is missing or unparseable
   3  PARTIAL      some boundary is disabled or advisory (listed by name)
   4  UNPROTECTED  no boundary is enforced`,
 	RunE: func(cmd *cobra.Command, args []string) error {

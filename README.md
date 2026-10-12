@@ -576,7 +576,7 @@ NockLock is a fence, not guardrails.
 
 Guardrails tell the agent what not to do. The agent can ignore them, work around them, or hallucinate past them. Guardrails are prompts.
 
-`nocklock doctor` verdicts and exit codes (`--json` adds per-boundary `boundaries` posture of `enforced`, `advisory`, `disabled` or `enabled`, and the proxy-mode `egress_level`):
+`nocklock doctor` verdicts and exit codes (`--json` adds per-boundary `boundaries` posture of `enforced`, `advisory`, `disabled`, `unavailable` or `enabled`, and the proxy-mode `egress_level`):
 
 | Exit | Verdict | Meaning |
 |---|---|---|
@@ -584,6 +584,10 @@ Guardrails tell the agent what not to do. The agent can ignore them, work around
 | 2 | GAPS FOUND | a boundary is configured but its backend is missing |
 | 3 | PARTIAL | some boundary is disabled or advisory; each is listed by name |
 | 4 | UNPROTECTED | no boundary is enforced |
+
+A missing or unparseable `.nock/config.toml` also exits 2.
+
+Boundary postures: `enforced` (the fence is active), `advisory` (logs or warns but does not block), `disabled` (turned off in config), `enabled` (configured but its backend is missing), and `unavailable` (the fence cannot enforce on this host or config; it never counts toward PROTECTED). `unavailable` is how doctor reports the `UNREACHABLE` egress level: syscall enforcement restricts proxy traffic to Unix sockets while the interposer bridge is disabled, so the allowlist cannot be reached.
 
 A fence sits between the agent and the resource. How hard the boundary is depends on the fence. The secret fence is absolute: a blocked variable is gone from the environment before the agent starts. On Linux, the filesystem fence is kernel-enforced with Landlock by default and composes with LD_PRELOAD logging; static binaries and children that clear `LD_PRELOAD` are still denied by the kernel. On macOS, the filesystem fence is a kernel-enforced Seatbelt write confinement. Writes outside the configured root and its essential runtime exceptions are denied, and the built-in and configured sensitive paths are denied for reads and writes. It does not claim read confinement outside the root. The profile follows descendants even when they cross into protected system binaries. The network fence stops normal and prompt-injected attempts to reach unapproved domains and logs every try. On Linux with syscall fencing enabled, proxy-mode runs allow only Unix-domain sockets in the child; the interposer rewrites only the configured loopback proxy connect to the proxy's Unix socket, and all other AF_INET/AF_INET6 connects fail closed. With `--net-fence=netns` the child keeps IP sockets and the boundary is composed: the nftables default-drop floor and the network namespace prevent alternate transports and proxy bypass (direct DNS to other resolvers, non-DNS UDP, QUIC, SCTP and raw IP are dropped, and nothing but the transparent proxy and the in-namespace DNS stub is reachable), while the transparent HTTP(S) proxy and the DNS stub enforce the `network.allow` domain policy.
 
