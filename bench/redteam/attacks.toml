@@ -75,8 +75,17 @@ cmd = '''python3 -c "
 import socket, sys
 s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
 s.settimeout(3)
-s.sendto(b'\x12\x34\x01\x00\x00\x01\x00\x00\x00\x00\x00\x00\x07example\x03com\x00\x00\x01\x00\x01', ('8.8.8.8', 53))
-s.recvfrom(512)
+q = b'\x12\x34\x01\x00\x00\x01\x00\x00\x00\x00\x00\x00\x07example\x03com\x00\x00\x01\x00\x01'
+host, port = '@SINK@'.rsplit(':', 1)
+for dst in (('8.8.8.8', 53), (host, int(port))):
+    try:
+        s.sendto(q, dst)
+    except OSError:
+        continue
+try:
+    s.recvfrom(512)
+except OSError:
+    sys.exit(1)
 sys.exit(0)"'''
 expect = "blocked"
 floor = true

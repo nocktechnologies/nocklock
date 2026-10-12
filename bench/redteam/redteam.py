@@ -8,6 +8,8 @@ attempt with the signed row that proves the verdict, runs `nocklock verify
 import argparse
 import json
 import os
+import signal
+import socket
 import sqlite3
 import subprocess
 import sys
@@ -18,11 +20,51 @@ CANARY_ENV = {"BENCH_SECRET_TOKEN": "bench-canary-not-a-real-secret"}
 
 
 def run(argv, cwd, env, timeout=120):
+    # Own session so a timeout can reap the whole tree (wrap, shell, client, proxy), not just wrap.
+    p = subprocess.Popen(argv, cwd=cwd, env=env, text=True, stdout=subprocess.PIPE,
+                         stderr=subprocess.STDOUT, start_new_session=True)
     try:
-        p = subprocess.run(argv, cwd=cwd, env=env, capture_output=True, text=True, timeout=timeout)
+        out, _ = p.communicate(timeout=timeout)
     except subprocess.TimeoutExpired:
+        for sig in (signal.SIGTERM, signal.SIGKILL):
+            try:
+                os.killpg(p.pid, sig)
+            except ProcessLookupError:
+                break
+            try:
+                p.communicate(timeout=5)
+                break
+            except subprocess.TimeoutExpired:
+                continue
+        p.communicate()
         return 124, f"timed out after {timeout}s"
-    return p.returncode, (p.stdout + p.stderr).strip()
+    return p.returncode, out.strip()
+
+
+def udp_sink():
+    """Host-side UDP receiver outside the fence: any datagram it sees escaped."""
+    s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    s.bind(("0.0.0.0", 0))
+    s.settimeout(0.2)
+    probe = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    try:
+        probe.connect(("8.8.8.8", 53))  # route lookup only, nothing is sent
+        ip = probe.getsockname()[0]
+    except OSError:
+        ip = "127.0.0.1"
+    finally:
+        probe.close()
+    return s, f"{ip}:{s.getsockname()[1]}"
+
+
+def sink_hits(s):
+    n = 0
+    try:
+        while True:
+            s.recvfrom(512)
+            n += 1
+    except (socket.timeout, BlockingIOError):
+        return n
 
 
 def find_audit_db(state):
@@ -74,6 +116,13 @@ def main():
     env = {"PATH": os.environ["PATH"], "HOME": str(work / "home"), "XDG_STATE_HOME": str(work / "state"),
            "LANG": "C.UTF-8", **CANARY_ENV}
     subst = {"@WORK@": str(work), "@BIN@": str(work / "bin"), "@POLICY@": str(work / "policy" / "policy.yaml")}
+    sink, subst["@SINK@"] = udp_sink()
+    # Sink self-check: a sink that cannot receive would make "nothing escaped" meaningless.
+    chk = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    chk.sendto(b"x", sink.getsockname())
+    chk.close()
+    if sink_hits(sink) != 1:
+        sys.exit("UDP sink failed its self-check; refusing to run")
 
     def sub(text):
         for k, v in subst.items():
@@ -84,7 +133,8 @@ def main():
     for atk in attacks:
         cmd = sub(atk["cmd"])
         rc, output = run([a.nocklock, "wrap", "--net-fence=netns", "--", "/bin/sh", "-c", cmd], root, env)
-        planted = bool(atk.get("absent")) and Path(sub(atk["absent"])).exists()
+        # "planted": the attack left its mark (file written / datagram reached the sink).
+        planted = (bool(atk.get("absent")) and Path(sub(atk["absent"])).exists()) or sink_hits(sink) > 0
         results.append({"atk": atk, "cmd": cmd, "exit": rc, "output": output[-400:], "planted": planted})
         print(f"[{atk['id']}] exit={rc}", flush=True)
         if os.environ.get("REDTEAM_VERBOSE"):
