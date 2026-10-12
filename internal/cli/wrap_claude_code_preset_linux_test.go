@@ -400,7 +400,7 @@ func TestWrapClaudeCodePresetDeviceAndSystemPaths(t *testing.T) {
 
 	// One wrapped shell: write /dev/null, then run git status. Any fence denial
 	// (exec failure, EACCES on /dev/null) makes the shell exit non-zero.
-	cmd := exec.Command(bin, "wrap", "--profile", "claude-code", "--",
+	cmd := exec.Command(bin, "wrap", "--profile", "claude-code", "--allow-unix-sockets", "--",
 		"/bin/sh", "-c", "echo x > /dev/null && git status >/dev/null 2>&1")
 	cmd.Dir = repo
 	out, err := cmd.CombinedOutput()
@@ -470,7 +470,7 @@ for path in sys.argv[1:]:
         continue
     raise AssertionError('protected file was readable: ' + path)
 print('ROOT_LISTED_AUDIT_AND_DENY_BLOCKED')`
-	cmd := exec.Command(bin, "wrap", "--profile", "claude-code", "--",
+	cmd := exec.Command(bin, "wrap", "--profile", "claude-code", "--allow-unix-sockets", "--",
 		"/bin/sh", "-c", `set -e; ls . >/dev/null; env -u LD_PRELOAD "$1" -c "$2" "$3" "$4"`,
 		"root-list-proof", python, probe, auditDB, deniedFile)
 	cmd.Dir = repo
@@ -624,7 +624,7 @@ func main() {
 	// access leaks its marker and fails even on hosts where ptrace also protects
 	// environ. Assert on content so a masked command status cannot make this green.
 	startupMarker := "NOCKLOCK_PRESET_TEST_STARTED_" + strconv.FormatInt(time.Now().UnixNano(), 36)
-	cmd := exec.Command(bin, "wrap", "--profile", "claude-code", "--",
+	cmd := exec.Command(bin, "wrap", "--profile", "claude-code", "--allow-unix-sockets", "--",
 		"/bin/sh", "-c", `echo "$1"; "$2" "$3"; cat "$4"`,
 		"preset-proc-test", startupMarker, readerBinary, environPath, cmdlinePath)
 	cmd.Dir = repo
