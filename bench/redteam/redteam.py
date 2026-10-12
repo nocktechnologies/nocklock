@@ -8,23 +8,29 @@ attempt with the signed row that proves the verdict, runs `nocklock verify
 import argparse
 import json
 import os
+import re
 import signal
 import socket
-import socketserver
 import sqlite3
+import shlex
 import subprocess
 import sys
-import threading
 import time
 import tomllib
 from pathlib import Path
 
 ATTACK_DEADLINE = 120  # seconds per attack
+HEX64 = r"[0-9a-fA-F]{64}"
 CANARY_ENV = {"BENCH_SECRET_TOKEN": "bench-canary-not-a-real-secret"}
 
 
 class SetupFault(Exception):
     """The bench is mis-set-up; no attack may run, because its verdicts would mean nothing."""
+
+
+def open_nofollow(path, flags, mode=0o600):
+    """Open a harness log without following a symlink a fenced child may have planted."""
+    return os.fdopen(os.open(path, flags | os.O_NOFOLLOW, mode), "rb" if flags == os.O_RDONLY else "wb")
 
 
 def run(argv, cwd, env, log, until):
@@ -35,7 +41,7 @@ def run(argv, cwd, env, log, until):
     still not reaped after the kill (HARNESS-FAULT). Nothing here blocks unbounded.
     """
     try:
-        with open(log, "wb") as f:
+        with open_nofollow(log, os.O_WRONLY | os.O_CREAT | os.O_TRUNC) as f:
             p = subprocess.Popen(argv, cwd=cwd, env=env, stdin=subprocess.DEVNULL, stdout=f,
                                  stderr=subprocess.STDOUT, start_new_session=True)
     except OSError as e:
@@ -56,7 +62,11 @@ def run(argv, cwd, env, log, until):
             p.wait(timeout=5)
         except subprocess.TimeoutExpired:
             return None, "HARNESS-FAULT: process not reaped after SIGKILL"
-    text = Path(log).read_text(errors="replace").strip()
+    try:
+        with open_nofollow(log, os.O_RDONLY) as f:
+            text = f.read().decode(errors="replace").strip()
+    except OSError as e:
+        return None, f"HARNESS-FAULT: could not read {log}: {e}"
     return rc, (f"timed out; {text[-300:]}" if timed_out else text) + note
 
 
@@ -107,57 +117,20 @@ def find_audit_db(state):
     return dbs[0]
 
 
-def check_setup(config, evidence, exempt):
+def check_setup(config, evidence):
     """Raise SetupFault if any evidence path lies under a directory or file the fence grants.
 
     Grants are read from the config the fence will enforce (root, allow, allow_rw).
-    `exempt` grants (the broker socket dir) are skipped. Reading the config file is equivalent to
+    Reading the config file is equivalent to
     the effective config here because run.sh writes every grant into it explicitly.
     """
     fs = tomllib.loads(Path(config).read_text())["filesystem"]
     base = Path(config).parent.parent
-    skip = {os.path.realpath(p) for p in exempt}
     grants = [os.path.realpath(base / g) for g in [fs["root"], *fs.get("allow", []), *fs.get("allow_rw", [])]]
     bad = [f"{name} {p} is under grant {g}" for name, p in evidence.items()
-           for g in grants if g not in skip and Path(os.path.realpath(p)).is_relative_to(g)]
+           for g in grants if Path(os.path.realpath(p)).is_relative_to(g)]
     if bad:
         raise SetupFault("evidence reachable from inside the fence: " + "; ".join(bad))
-
-
-def serve_proxy(sock_path, argv, env):
-    """Host-side bridge: each connection to sock_path gets its own `nockguard proxy` (argv).
-
-    The proxy, its signing key and its trail stay outside the fence; the fenced MCP
-    client only holds this socket.
-    """
-    class Bridge(socketserver.StreamRequestHandler):
-        def handle(self):
-            p = subprocess.Popen(argv, env=env, stdin=subprocess.PIPE, stdout=subprocess.PIPE)
-
-            def to_proxy():
-                try:
-                    for line in iter(self.rfile.readline, b""):
-                        p.stdin.write(line)
-                        p.stdin.flush()
-                except OSError:
-                    pass
-                p.stdin.close()
-            threading.Thread(target=to_proxy, daemon=True).start()
-            try:
-                for line in iter(p.stdout.readline, b""):
-                    self.wfile.write(line)
-            except OSError:
-                pass
-            try:
-                p.wait(timeout=5)  # let it finish writing its last signed trail entry
-            except subprocess.TimeoutExpired:
-                p.kill()
-                p.wait()
-
-    srv = socketserver.ThreadingUnixStreamServer(str(sock_path), Bridge)
-    srv.daemon_threads = True
-    threading.Thread(target=srv.serve_forever, daemon=True).start()
-    return srv
 
 
 def nocklock_proof(rows, atk):
@@ -216,19 +189,25 @@ def bench(a):
 
     env = {"PATH": os.environ["PATH"], "HOME": str(work / "home"), "XDG_STATE_HOME": str(work / "state"),
            "LANG": "C.UTF-8", **CANARY_ENV}
-    keys = sorted((work / "home/.nockguard/keys").glob("*"))
-    if not keys:
-        raise SetupFault("nockguard keygen left no signing key under home/.nockguard/keys")
+    keydir = work / "home/.nockguard/keys"
+    key, pubfile = keydir / "bench.ed25519", keydir / "bench.pub"  # nockguard keygen --agent bench
+    try:
+        seed, pub = key.read_text().strip(), pubfile.read_text().strip()
+    except OSError as e:
+        raise SetupFault(f"nockguard keygen left no key pair under {keydir}: {e}")
+    if not (re.fullmatch(HEX64, seed) and re.fullmatch(HEX64, pub) and seed != pub):
+        raise SetupFault("bench.ed25519 must hold the 64-hex private seed and bench.pub a different 64-hex public key")
+    # The private seed stays host-side (the proxy finds it by name under HOME); verify gets only the public key.
+    verify_env = {**env, "NOCKGUARD_AGENT_BENCH_ED25519_PUB": pub}
     trail_path = work / "home/.nockguard/logs/bench.audit.jsonl"  # <agent>.audit.jsonl beside the policy audit path
-    subst = {"@WORK@": str(work), "@BIN@": str(work / "bin"), "@SOCK@": str(work / "sock/mcp.sock"),
-             "@KEY@": str(keys[0]), "@TRAIL@": str(trail_path)}
+    subst = {"@WORK@": str(work), "@BIN@": str(work / "bin"),
+             "@KEY@": str(key), "@TRAIL@": str(trail_path)}
     check_setup(work / "root/.nock/config.toml",
                 {"scratch root": work, "canary": work / "outside/canary.txt", "outside dir": work / "outside",
-                 "audit state": work / "state", "nockguard key": keys[0], "nockguard trail": trail_path,
-                 "nockguard policy": work / "policy"},
-                [work / "sock"])
-    serve_proxy(work / "sock/mcp.sock", [a.nockguard, "proxy", "--upstream", f"python3 {work}/bin/mcp_upstream.py",
-                                         "--agent", "bench", "--policy", str(work / "policy/policy.yaml")], env)
+                 "audit state": work / "state", "nockguard key": key, "nockguard trail": trail_path,
+                 "nockguard policy": work / "policy"})
+    proxy = [a.nockguard, "proxy", "--upstream", f"python3 {work}/bin/mcp_upstream.py",
+             "--agent", "bench", "--policy", str(work / "policy/policy.yaml")]
     sink, subst["@SINK@"] = udp_sink()
     # Sink self-check: a sink that cannot receive would make "nothing escaped" meaningless.
     chk = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
@@ -252,8 +231,14 @@ def bench(a):
             # Same command outside the fence: the attack must reach, or the fenced block proves nothing.
             crc, _ = run(["/bin/sh", "-c", cmd], root, env, logs / f"{atk['id']}.control.log", until)
             control = control_result(crc, sink_hits(sink, until))
-        rc, output = run([a.nocklock, "wrap", "--net-fence=netns", "--", "/bin/sh", "-c", cmd],
-                         root, env, logs / f"{atk['id']}.log", until)
+        if atk.get("host"):
+            # NockGuard's own proof is its signed policy deny: run the client on the host, outside the fence.
+            argv = [sys.executable, str(work / "bin/mcp_client.py"), atk["tool"], "10", "--", *proxy]
+            cmd = shlex.join(argv)  # report the command that really ran
+            rc, output = run(argv, root, env, logs / f"{atk['id']}.log", until)
+        else:
+            rc, output = run([a.nocklock, "wrap", "--net-fence=netns", "--", "/bin/sh", "-c", cmd],
+                             root, env, logs / f"{atk['id']}.log", until)
         # "planted": the attack left its mark (file written / datagram reached the sink).
         planted = (bool(atk.get("absent")) and Path(sub(atk["absent"])).exists()) or sink_hits(sink, until) > 0
         results.append({"atk": atk, "cmd": cmd, "exit": rc, "output": output[-400:], "planted": planted,
@@ -281,13 +266,16 @@ def bench(a):
             pass  # a damaged line is `nockguard verify`'s to report, not a reason to lose the run
 
     # After a timeout, a launch failure or a session-count mismatch the pairing is unreliable, so no proof is claimed.
-    paired = len(sessions) == len(attacks)
-    for res, sid in zip(results, sessions if paired else [None] * len(results)):
+    fenced = [r for r in results if not r["atk"].get("host")]  # host attacks open no NockLock session
+    paired = len(sessions) == len(fenced)
+    sids = iter(sessions if paired else [])
+    for res in results:
         atk = res["atk"]
-        rows = [dict(r) for r in con.execute("SELECT * FROM events WHERE session_id=? ORDER BY id", (sid,))] if paired else []
+        sid = None if atk.get("host") else next(sids, None)
+        rows = [dict(r) for r in con.execute("SELECT * FROM events WHERE session_id=? ORDER BY id", (sid,))] if paired and sid else []
         end = next((r["detail"] for r in rows if r["event_type"] == "session_end"), "")
         # A wrap that failed to launch has no session_end matching the child's status.
-        res["ran"] = end == f"exit_code={res['exit']}"
+        res["ran"] = res["exit"] is not None if atk.get("host") else end == f"exit_code={res['exit']}"
         # A fault never turns a verdict into BLOCKED: a breach seen before a shutdown fault stays ALLOWED
         # and the fault is reported beside it. Faults come only from harness-side signals (no result from
         # run(), the MCP client's exit codes), never from text the fenced child printed.
@@ -304,11 +292,11 @@ def bench(a):
     if con:
         con.close()
 
-    def tool(name, argv):
-        return run(argv, root, env, logs / f"{name}.log", time.monotonic() + 60)
+    def tool(name, argv, tool_env=env):
+        return run(argv, root, tool_env, logs / f"{name}.log", time.monotonic() + 60)
 
     lock_rc, lock_out = tool("verify-nocklock", [a.nocklock, "verify", "--audit"])
-    guard_rc, guard_out = tool("verify-nockguard", [a.nockguard, "verify", "--agent", "bench", "--audit", str(trail_path)])
+    guard_rc, guard_out = tool("verify-nockguard", [a.nockguard, "verify", "--agent", "bench", "--audit", str(trail_path)], verify_env)
     versions = {"nocklock": tool("version-nocklock", [a.nocklock, "version"])[1],
                 "nockguard": tool("version-nockguard", [a.nockguard, "version"])[1]}
 
@@ -331,7 +319,7 @@ def bench(a):
               "attacks": [{
                   "id": r["atk"]["id"], "class": r["atk"]["class"], "tried": r["cmd"],
                   "expected": r["atk"]["expect"], "result": r["outcome"], "exit": r["exit"],
-                  "floor_only": bool(r["atk"].get("floor")), "control": r["control"], "outcome_ok": r["outcome_ok"], "harness_fault": r["fault"], "output": r["output"],
+                  "host": bool(r["atk"].get("host")), "floor_only": bool(r["atk"].get("floor")), "control": r["control"], "outcome_ok": r["outcome_ok"], "harness_fault": r["fault"], "output": r["output"],
                   "session_rows": r["session_rows"],
                   "proof": r["proof"]} for r in results]}
     (out / "report.json").write_text(json.dumps(report, indent=2) + "\n")
@@ -368,7 +356,7 @@ def render_md(rep):
         verdict = (r["result"] + (" + HARNESS-FAULT" if r["harness_fault"] and r["result"] != "HARNESS-FAULT" else "")
                    + ("" if r["outcome_ok"] else " ✗ UNEXPECTED"))
         lines.append("| " + " | ".join([
-            f"`{r['id']}`", r["class"], "`" + cell(" ".join(r["tried"].split()))[:110] + "…` (full command in report.json)", ctl, verdict, proof,
+            f"`{r['id']}`", ("NockGuard (host): " if r["host"] else "") + r["class"], "`" + cell(" ".join(r["tried"].split()))[:110] + "…` (full command in report.json)", ctl, verdict, proof,
             str(p["event_id"]) if p else "-", f"`{cell(p['rule'])}`" if p else "-",
             f"`{p['chain_hash'][:16]}…`" if p and p["chain_hash"] else "-"]) + " |")
     lines += ["", "Attempts marked *blocked by kernel floor* are stopped by the kernel floor (netns default-drop) "

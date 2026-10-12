@@ -1,11 +1,9 @@
 """Tests for the red-team driver's process handling. Run: python3 -m unittest bench/redteam/test_redteam.py"""
-import json
 import os
 import socket
 import subprocess
 import sys
 import tempfile
-import threading
 import time
 import unittest
 from unittest import mock
@@ -73,16 +71,15 @@ class SetupCheckTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as d:
             cfg = self.config(d, '["%s/"]' % d)
             with self.assertRaises(redteam.SetupFault) as cm:
-                redteam.check_setup(cfg, {"nockguard key": Path(d) / "home/key"}, [])
+                redteam.check_setup(cfg, {"nockguard key": Path(d) / "home/key"})
             self.assertIn("nockguard key", str(cm.exception))
 
-    def test_evidence_beside_the_grants_passes_and_exempt_grants_are_skipped(self):
+    def test_evidence_beside_the_grants_passes(self):
         with tempfile.TemporaryDirectory() as d:
-            cfg = self.config(d, '["%s/sock/"]' % d)
-            redteam.check_setup(cfg, {"nockguard key": Path(d) / "home/key"}, [])
+            cfg = self.config(d, '["%s/granted/"]' % d)
+            redteam.check_setup(cfg, {"nockguard key": Path(d) / "home/key"})
             with self.assertRaises(redteam.SetupFault):
-                redteam.check_setup(cfg, {"x": Path(d) / "sock/x"}, [])
-            redteam.check_setup(cfg, {"x": Path(d) / "sock/x"}, [Path(d) / "sock"])
+                redteam.check_setup(cfg, {"x": Path(d) / "granted/x"})
 
 
 class ClassifyTest(unittest.TestCase):
@@ -101,37 +98,51 @@ class ClassifyTest(unittest.TestCase):
 
 class McpClientTest(unittest.TestCase):
     """The client decides the verdict when the reply arrives; a hung shutdown cannot undo it."""
-    def run_client(self, reply_text):
+    def run_client(self, reply_text, hang=False):
         with tempfile.TemporaryDirectory() as d:
-            path = os.path.join(d, "s")
-            srv = socket.socket(socket.AF_UNIX)
-            srv.bind(path)
-            srv.listen(1)
-
-            def serve():
-                c, _ = srv.accept()
-                f = c.makefile("rw")
-                for _ in range(2):
-                    mid = json.loads(f.readline())["id"]
-                    f.write(json.dumps({"jsonrpc": "2.0", "id": mid, "result": {"content": reply_text}}) + "\n")
-                    f.flush()
-                time.sleep(5)  # never closes: the client's shutdown must time out
-            threading.Thread(target=serve, daemon=True).start()
-            p = subprocess.run([sys.executable, str(Path(redteam.__file__).parent / "mcp_client.py"), "t", path, "1"],
-                               capture_output=True, text=True, timeout=30)
-            srv.close()
+            fake = Path(d) / "proxy.py"
+            fake.write_text(
+                "import json, sys, time\n"
+                "for line in sys.stdin:\n"
+                "    mid = json.loads(line)['id']\n"
+                "    print(json.dumps({'jsonrpc': '2.0', 'id': mid, 'result': {'content': %r}}), flush=True)\n"
+                "    if mid == 2 and %r:\n"
+                "        time.sleep(30)  # ignores stdin EOF: the client's shutdown must time out\n" % (reply_text, hang))
+            p = subprocess.run([sys.executable, str(Path(redteam.__file__).parent / "mcp_client.py"), "t", "1",
+                                "--", sys.executable, str(fake)], capture_output=True, text=True, timeout=30)
             return p.returncode, p.stdout
 
+    def test_executed_reply_exits_zero(self):
+        self.assertEqual(self.run_client("UPSTREAM-EXECUTED:t")[0], 0)
+
+    def test_stopped_reply_exits_one(self):
+        rc, out = self.run_client("denied")
+        self.assertEqual(rc, 1)
+        self.assertIn("STOPPED", out)
+
     def test_executed_reply_is_a_breach_even_when_shutdown_hangs(self):
-        rc, out = self.run_client("UPSTREAM-EXECUTED:t")
+        rc, out = self.run_client("UPSTREAM-EXECUTED:t", hang=True)
         self.assertEqual(rc, 5)
         self.assertIn("EXECUTED", out)
         self.assertIn("HARNESS-FAULT", out)
 
     def test_stopped_reply_with_hung_shutdown_is_a_fault_not_a_block(self):
-        rc, out = self.run_client("denied")
+        rc, out = self.run_client("denied", hang=True)
         self.assertEqual(rc, 4)
         self.assertIn("STOPPED", out)
+
+
+class LogSymlinkTest(unittest.TestCase):
+    def test_a_symlinked_log_path_is_refused_and_its_target_untouched(self):
+        with tempfile.TemporaryDirectory() as d:
+            target = Path(d) / "victim"
+            target.write_text("keep")
+            log = Path(d) / "a.log"
+            log.symlink_to(target)
+            rc, out = redteam.run(["/bin/true"], d, {}, log, time.monotonic() + 5)
+            self.assertIsNone(rc)
+            self.assertIn("HARNESS-FAULT", out)
+            self.assertEqual(target.read_text(), "keep")
 
 
 class ControlTest(unittest.TestCase):

@@ -5,11 +5,13 @@
 # attack GOT WHAT IT WANTED (breach), non-zero means it was stopped. The two
 # controls flip that: they must exit 0 and be logged as allowed.
 #
-# Placeholders: @WORK@ (bench scratch dir), @BIN@ (read-only dir with the MCP
-# client), @SOCK@ (the host-side NockGuard proxy's socket, the child's only way to it),
-# @KEY@ and @TRAIL@ (NockGuard signing key and signed trail, outside every grant).
+# Placeholders: @WORK@ (bench scratch dir), @BIN@ (dir with the MCP client), @KEY@ and @TRAIL@ (NockGuard signing key and signed trail, outside every grant).
 #
 # Proof fields name the signed row that must exist for the attempt:
+#   host = true            -> the attack runs on the host, outside the fence, directly
+#                             against `nockguard proxy` (tool = the tools/call name). The
+#                             proof is NockGuard's signed policy deny; the fence adds
+#                             nothing to it, and the report labels the row "NockGuard (host)".
 #   evidence = "nocklock"  -> a row in the NockLock Ed25519 audit chain
 #   evidence = "nockguard" -> an entry in the NockGuard Ed25519 audit trail
 #   event / rule / match   -> event type, a substring of the row's rule text,
@@ -145,9 +147,10 @@ match = "planted.txt"
 [[attack]]
 id = "mcp-tools-call-denied"
 class = "mcp-denied-tool"
-cmd = '''python3 @BIN@/mcp_client.py files_delete @SOCK@'''
+cmd = '''python3 @BIN@/mcp_client.py files_delete'''
 expect = "blocked"
 evidence = "nockguard"
+host = true
 tool = "files_delete"
 decision = "deny"
 rule = 'deny-rule "*delete*"'
@@ -187,9 +190,10 @@ match = "host=example.com:443"
 [[attack]]
 id = "control-mcp-allowed-tool"
 class = "negative-control"
-cmd = '''python3 @BIN@/mcp_client.py docs_get @SOCK@'''
+cmd = '''python3 @BIN@/mcp_client.py docs_get'''
 expect = "allowed"
 evidence = "nockguard"
+host = true
 tool = "docs_get"
 decision = "allow"
 rule = 'allow-rule "docs_get"'

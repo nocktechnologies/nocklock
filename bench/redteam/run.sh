@@ -25,15 +25,15 @@ mkdir -p "$base"
 work=$(mktemp -d "$base/work.XXXXXX")
 umask 077
 mkdir -p "$work/root/.nock" "$work/root/logs" "$work/outside" "$work/bin" "$work/policy" "$work/state" \
-  "$work/sock" "$work/home/.nockguard/logs"
+  "$work/home/.nockguard/logs"
 
 printf 'bench-canary-not-a-real-secret\n' > "$work/outside/canary.txt"
 cp "$here/mcp_client.py" "$here/mcp_upstream.py" "$work/bin/"
 
 # NockGuard: default-deny policy for the bench agent, signed trail via the per-agent
-# Ed25519 key that keygen drops under $HOME/.nockguard/keys. The proxy runs on the host
-# side (redteam.py brokers it behind $work/sock); the fenced child gets neither the
-# key, the trail, the policy nor the nockguard binary, only the broker's socket.
+# Ed25519 key that keygen drops under $HOME/.nockguard/keys. The MCP attacks run on the
+# host (attacks.toml host = true), against `nockguard proxy` directly; the fenced
+# attacks reach neither the key, the trail nor the policy.
 cat > "$work/policy/policy.yaml" <<POLICY
 agents:
   bench:
@@ -63,7 +63,7 @@ allow = [
     "/etc/ld.so.cache", "/etc/passwd", "/etc/group", "/etc/nsswitch.conf",
     "/etc/hosts", "/etc/resolv.conf", "/etc/localtime",
     "/etc/ssl/certs/", "/etc/pki/tls/certs/", "/etc/pki/ca-trust/extracted/",
-    "$work/bin/", "$work/sock/",
+    "$work/bin/",
 ]
 allow_rw = []
 deny = []
