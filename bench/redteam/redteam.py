@@ -72,14 +72,17 @@ def main():
            "LANG": "C.UTF-8", **CANARY_ENV}
     subst = {"@WORK@": str(work), "@BIN@": str(work / "bin"), "@POLICY@": str(work / "policy" / "policy.yaml")}
 
+    def sub(text):
+        for k, v in subst.items():
+            text = text.replace(k, v)
+        return text
+
     results = []
     for atk in attacks:
-        cmd = atk["cmd"]
-        for k, v in subst.items():
-            cmd = cmd.replace(k, v)
+        cmd = sub(atk["cmd"])
         rc, output = run([a.nocklock, "wrap", "--net-fence=netns", "--", "/bin/sh", "-c", cmd], root, env)
-        planted = atk.get("absent") and Path(atk["absent"].replace("@WORK@", str(work))).exists()
-        results.append({"atk": atk, "cmd": cmd, "exit": rc, "output": output[-400:], "planted": bool(planted)})
+        planted = bool(atk.get("absent")) and Path(sub(atk["absent"])).exists()
+        results.append({"atk": atk, "cmd": cmd, "exit": rc, "output": output[-400:], "planted": planted})
         print(f"[{atk['id']}] exit={rc}", flush=True)
         if os.environ.get("REDTEAM_VERBOSE"):
             print(output, flush=True)
@@ -93,27 +96,23 @@ def main():
     if len(sessions) != len(attacks):
         sys.exit(f"audit chain holds {len(sessions)} sessions for {len(attacks)} attacks; refusing to pair")
     trail_path = work / "home/.nockguard/logs/bench.audit.jsonl"  # <agent>.audit.jsonl beside the policy audit path
-    trail = [json.loads(line) for line in trail_path.read_text().splitlines() if line.strip()] \
-        if trail_path.exists() else []
+    lines = trail_path.read_text().splitlines() if trail_path.exists() else []
+    trail = [json.loads(line) for line in lines if line.strip()]
 
     for res, sid in zip(results, sessions):
         atk = res["atk"]
         rows = [dict(r) for r in con.execute("SELECT * FROM events WHERE session_id=? ORDER BY id", (sid,))]
         end = next((r["detail"] for r in rows if r["event_type"] == "session_end"), "")
-        res["session_end"] = end
         # A wrap that failed to launch has no session_end matching the child's status.
         res["ran"] = end == f"exit_code={res['exit']}"
-        want_exit0 = atk["expect"] == "allowed"
         res["outcome"] = "ALLOWED" if res["exit"] == 0 else "BLOCKED"
-        res["outcome_ok"] = res["ran"] and (res["exit"] == 0) == want_exit0 and not res["planted"]
+        res["outcome_ok"] = res["ran"] and (res["exit"] == 0) == (atk["expect"] == "allowed") and not res["planted"]
         res["proof"] = nockguard_proof(trail, atk) if atk["evidence"] == "nockguard" else nocklock_proof(rows, atk)
         res["proof_ok"] = bool(res["proof"] and res["proof"]["signed"])
     con.close()
 
-    env_verify = {**env}
-    lock_rc, lock_out = run([a.nocklock, "verify", "--audit"], root, env_verify)
-    guard_rc, guard_out = run([a.nockguard, "verify", "--agent", "bench", "--audit", str(trail_path)],
-                              root, env_verify)
+    lock_rc, lock_out = run([a.nocklock, "verify", "--audit"], root, env)
+    guard_rc, guard_out = run([a.nockguard, "verify", "--agent", "bench", "--audit", str(trail_path)], root, env)
     versions = {"nocklock": run([a.nocklock, "version"], root, env)[1],
                 "nockguard": run([a.nockguard, "version"], root, env)[1]}
 
