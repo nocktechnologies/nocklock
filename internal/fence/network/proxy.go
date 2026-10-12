@@ -184,9 +184,8 @@ func NewProxyServer(cfg config.NetworkConfig, logger *logging.Logger, sessionID 
 }
 
 // NewProxyServerAt creates an allowlist proxy bound to listenAddr. It is used by
-// the netns egress helper for its private veth peer and by the macOS Seatbelt
-// network floor, whose profile admits exactly one pre-reserved loopback port;
-// ordinary callers should use NewProxyServer, which binds only to localhost.
+// the netns egress helper for its private veth peer; ordinary callers should use
+// NewProxyServer, which binds only to localhost.
 func NewProxyServerAt(cfg config.NetworkConfig, logger *logging.Logger, sessionID, listenAddr string) *ProxyServer {
 	p := NewProxyServer(cfg, logger, sessionID)
 	p.listenAddr = listenAddr
@@ -222,6 +221,21 @@ func (p *ProxyServer) Start() (string, error) {
 		p.MarkDegraded("bind failure")
 		return "", fmt.Errorf("network fence: failed to bind proxy: %w", err)
 	}
+	return p.serve(ln)
+}
+
+// StartOn begins serving on an already-bound listener and returns its address.
+// The macOS Seatbelt floor admits exactly one loopback port, so the caller binds
+// it first and hands the open listener over; there is no close-and-rebind window
+// in which another process could take the port.
+func (p *ProxyServer) StartOn(ln net.Listener) (string, error) {
+	if p.listener != nil {
+		return "", fmt.Errorf("proxy already started at %s", p.listener.Addr())
+	}
+	return p.serve(ln)
+}
+
+func (p *ProxyServer) serve(ln net.Listener) (string, error) {
 	p.listener = ln
 	p.advertisedAddr = ln.Addr().String()
 	p.degraded.Store(false)

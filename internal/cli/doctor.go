@@ -414,11 +414,13 @@ func sanityDoctorChecks(cfg *config.Config, configPath string, caps doctorCapabi
 			syscallActive = caps.syscallBackend()
 		}
 		fsInterposer := caps.goos == "linux" && cfg.Filesystem.Root != ""
-		level := effectiveEgressLevel(caps.goos, "proxy", cfg.Network.AllowAll, syscallActive, fsInterposer, caps.goos == "darwin" && cfg.Filesystem.Root != "")
+		// wrap applies the floor only when sandbox-exec is usable.
+		seatbeltFloor := caps.goos == "darwin" && cfg.Filesystem.Root != "" && caps.sandboxExec() == nil
+		level := effectiveEgressLevel(caps.goos, "proxy", cfg.Network.AllowAll, syscallActive, fsInterposer, seatbeltFloor)
 		if level == egressLevelAdvisory {
 			fix := "use --net-fence=netns on Linux, or enable Linux syscall enforcement and the filesystem interposer for CONFINED proxy mode"
 			if caps.goos != "linux" {
-				fix = "macOS cannot provide enforced egress today; run on Linux with --net-fence=netns"
+				fix = "on macOS set filesystem.root and make sandbox-exec available for the SEATBELT floor, or run on Linux with --net-fence=netns"
 			}
 			checks = append(checks, doctorCheck{
 				Group:    "Sanity",

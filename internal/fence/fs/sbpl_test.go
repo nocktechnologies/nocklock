@@ -486,10 +486,17 @@ func TestGenerateTaggedWriteConfinementProfile_NetworkFloor(t *testing.T) {
 	if got := strings.Count(profile, "network-outbound"); got != 2 {
 		t.Errorf("want exactly the deny and one allow, got %d network-outbound mentions:\n%s", got, profile)
 	}
-	for _, banned := range []string{"unix-socket", "mDNSResponder", `(remote ip "*`, "network*"} {
+	for _, banned := range []string{"unix-socket", `(remote ip "*`, "network*"} {
 		if strings.Contains(profile, banned) {
 			t.Errorf("floor must not contain %q:\n%s", banned, profile)
 		}
+	}
+
+	mach := `(deny mach-lookup (with message "nocklock:s1")
+    (global-name "com.apple.mDNSResponder")
+    (global-name "com.apple.mDNSResponderHelper"))`
+	if !strings.Contains(profile, mach) {
+		t.Errorf("floor must deny the resolver's Mach services:\n%s", profile)
 	}
 
 	// Negative control: without a proxy port the profile has no network rule.

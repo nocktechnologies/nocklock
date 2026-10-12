@@ -91,11 +91,13 @@ func GenerateWriteConfinementProfile(sensitivePaths []string, root, mode string,
 //
 // A non-zero proxyPort engages the kernel network floor: all outbound network
 // connects are denied except to localhost:proxyPort (NockLock's own proxy). The
-// floor carries the same tag. No Unix-socket connect is allowed (the
-// mDNSResponder socket included). Resolver lookups that a client makes over a
-// non-socket channel (Mach) are NOT covered; zero leaves the network
-// unrestricted. "localhost" matches both loopback families, so a service on the
-// proxy's port at ::1 is also reachable.
+// floor carries the same tag. No Unix-socket connect is allowed, and Mach
+// lookups of the macOS resolver services are denied, because getaddrinfo reaches
+// mDNSResponder over Mach and would otherwise carry data out in DNS queries.
+// Proxy-aware clients do not resolve the target themselves. Zero leaves the
+// network unrestricted. "localhost" matches both loopback families, so a service
+// on the proxy's port at ::1 is also reachable; the caller must hold that port
+// (wrap does, see reserveSeatbeltProxyListeners).
 func GenerateTaggedWriteConfinementProfile(sensitivePaths []string, root, mode string, hardened bool, tag string, proxyPort int) (string, int, error) {
 	if strings.TrimSpace(root) == "" {
 		return "", 0, fmt.Errorf("refusing to generate write-confinement profile with an empty root")
@@ -195,6 +197,11 @@ func generateProfile(sensitivePaths []string, hardened bool, writePaths []string
 		b.WriteString(";; own loopback proxy. The proxy runs outside this profile.\n")
 		b.WriteString("(deny network-outbound" + msg + ")\n")
 		b.WriteString("(allow network-outbound (remote ip \"localhost:" + strconv.Itoa(proxyPort) + "\"))\n")
+		b.WriteString(";; Resolver over Mach: getaddrinfo asks mDNSResponder, which queries DNS\n")
+		b.WriteString(";; on the child's behalf, outside the socket rules above.\n")
+		b.WriteString("(deny mach-lookup" + msg + "\n")
+		b.WriteString("    (global-name \"com.apple.mDNSResponder\")\n")
+		b.WriteString("    (global-name \"com.apple.mDNSResponderHelper\"))\n")
 	}
 
 	return b.String(), len(canonical), nil
