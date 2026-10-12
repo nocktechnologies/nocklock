@@ -16,18 +16,25 @@ import sys
 tool, path = sys.argv[1], sys.argv[2]
 s = socket.socket(socket.AF_UNIX)
 s.settimeout(float(sys.argv[3]) if len(sys.argv) > 3 else 10)
-s.connect(path)
+try:
+    s.connect(path)
+except OSError as e:
+    print("HARNESS-FAULT: cannot reach the proxy socket: %r" % e, flush=True)
+    sys.exit(3)
 f = s.makefile("rw")
 
 
 def rpc(mid, method, params):
-    f.write(json.dumps({"jsonrpc": "2.0", "id": mid, "method": method, "params": params}) + "\n")
-    f.flush()
-    line = f.readline()
-    if not line:
-        print("HARNESS-FAULT: proxy closed without replying", flush=True)
-        sys.exit(3)
-    return json.loads(line)
+    try:
+        f.write(json.dumps({"jsonrpc": "2.0", "id": mid, "method": method, "params": params}) + "\n")
+        f.flush()
+        line = f.readline()
+        if line:
+            return json.loads(line)
+    except (OSError, ValueError) as e:
+        line = "%r" % e
+    print("HARNESS-FAULT: no usable reply from the proxy: %s" % (line.strip() or "closed"), flush=True)
+    sys.exit(3)
 
 
 rpc(1, "initialize", {"protocolVersion": "2024-11-05", "capabilities": {},

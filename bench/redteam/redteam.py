@@ -148,8 +148,11 @@ def serve_proxy(sock_path, argv, env):
                     self.wfile.write(line)
             except OSError:
                 pass
-            p.kill()
-            p.wait()
+            try:
+                p.wait(timeout=5)  # let it finish writing its last signed trail entry
+            except subprocess.TimeoutExpired:
+                p.kill()
+                p.wait()
 
     srv = socketserver.ThreadingUnixStreamServer(str(sock_path), Bridge)
     srv.daemon_threads = True
@@ -270,7 +273,12 @@ def bench(a):
         con, sessions = None, []
         print(f"no audit pairing: {e}", file=sys.stderr)
     lines = trail_path.read_text().splitlines() if trail_path.exists() else []
-    trail = [json.loads(line) for line in lines if line.strip()]
+    trail = []
+    for line in lines:
+        try:
+            trail.append(json.loads(line))
+        except ValueError:
+            pass  # a damaged line is `nockguard verify`'s to report, not a reason to lose the run
 
     # After a timeout, a launch failure or a session-count mismatch the pairing is unreliable, so no proof is claimed.
     paired = len(sessions) == len(attacks)
