@@ -45,6 +45,16 @@ audit:
 POLICY
 HOME="$work/home" "$nockguard" keygen --agent bench >/dev/null
 
+# The fenced child fstat()s its stdout, so each attack's own log file (and only that) is read-write.
+if grep -q '@WORK@/logs' "$here/attacks.toml"; then
+  echo "run.sh: an attack targets @WORK@/logs, which the fence grants" >&2; exit 2
+fi
+log_grants=""
+for id in $(sed -n 's/^id = "\(.*\)"$/\1/p' "$here/attacks.toml"); do
+  : > "$work/logs/$id.log"
+  log_grants+=", \"$work/logs/$id.log\""
+done
+
 cat > "$work/root/.nock/config.toml" <<CONFIG
 [project]
 name = "redteam-bench"
@@ -61,8 +71,7 @@ allow = [
     "/etc/ssl/certs/", "/etc/pki/tls/certs/", "/etc/pki/ca-trust/extracted/",
     "$work/bin/", "$work/policy/",
 ]
-# logs/: attack stdout/stderr files; the child fstat()s its stdout, so it must be reachable.
-allow_rw = ["$work/home/.nockguard/", "$work/logs/"]
+allow_rw = ["$work/home/.nockguard/"$log_grants]
 deny = []
 
 [network]

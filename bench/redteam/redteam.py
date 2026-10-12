@@ -77,6 +77,11 @@ def sink_hits(s, until):
     return n
 
 
+def control_result(exit_code, sink_count):
+    """An unfenced control reached if it exited 0 or a datagram arrived at the host sink."""
+    return {"exit": exit_code, "reached": exit_code == 0 or sink_count > 0}
+
+
 def find_audit_db(state):
     dbs = sorted(Path(state).rglob("events.db"))
     if len(dbs) != 1:
@@ -149,8 +154,7 @@ def main():
         if atk.get("floor"):
             # Same command outside the fence: the attack must reach, or the fenced block proves nothing.
             crc, _ = run(["/bin/sh", "-c", cmd], root, env, logs / f"{atk['id']}.control.log", until)
-            sink_hits(sink, until)  # discard what the control sent
-            control = {"exit": crc, "reached": crc == 0}
+            control = control_result(crc, sink_hits(sink, until))
         rc, output = run([a.nocklock, "wrap", "--net-fence=netns", "--", "/bin/sh", "-c", cmd],
                          root, env, logs / f"{atk['id']}.log", until)
         # "planted": the attack left its mark (file written / datagram reached the sink).

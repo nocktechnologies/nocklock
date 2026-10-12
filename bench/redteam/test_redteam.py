@@ -43,5 +43,22 @@ class RunTest(unittest.TestCase):
         s.close()
 
 
+class ControlTest(unittest.TestCase):
+    def test_sink_packet_counts_as_reached_even_on_nonzero_exit(self):
+        s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        s.bind(("127.0.0.1", 0))
+        s.settimeout(0.2)
+        c = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        c.sendto(b"x", s.getsockname())
+        c.close()
+        hits = redteam.sink_hits(s, time.monotonic() + 2)
+        s.close()
+        self.assertEqual(hits, 1)
+        self.assertTrue(redteam.control_result(1, hits)["reached"])
+
+    def test_no_packet_and_failed_exit_is_not_reached(self):
+        self.assertFalse(redteam.control_result(1, 0)["reached"])
+
+
 if __name__ == "__main__":
     unittest.main()
