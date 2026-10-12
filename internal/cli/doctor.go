@@ -415,7 +415,7 @@ func sanityDoctorChecks(cfg *config.Config, configPath string, caps doctorCapabi
 		}
 		fsInterposer := caps.goos == "linux" && cfg.Filesystem.Root != ""
 		// wrap applies the floor only when sandbox-exec is usable.
-		seatbeltFloor := caps.goos == "darwin" && cfg.Filesystem.Root != "" && caps.sandboxExec() == nil
+		seatbeltFloor := caps.goos == "darwin" && cfg.Filesystem.Root != "" && caps.sandboxExec != nil && caps.sandboxExec() == nil
 		level := effectiveEgressLevel(caps.goos, "proxy", cfg.Network.AllowAll, syscallActive, fsInterposer, seatbeltFloor)
 		if level == egressLevelAdvisory {
 			fix := "use --net-fence=netns on Linux, or enable Linux syscall enforcement and the filesystem interposer for CONFINED proxy mode"

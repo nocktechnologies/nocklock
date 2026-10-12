@@ -189,14 +189,15 @@ func generateProfile(sensitivePaths []string, hardened bool, writePaths []string
 	}
 
 	if proxyPort > 0 {
-		// Seatbelt's `remote ip` host filter accepts only "localhost" or "*", so
-		// the floor is pinned to the exact proxy port. Later rules win, so the
-		// allow must follow the deny. network-outbound also covers Unix-socket
+		// Seatbelt's remote host filter accepts only "localhost" or "*", so the
+		// floor is pinned to the exact proxy port. `remote tcp` (not `remote ip`)
+		// admits TCP only; UDP to the proxy port stays denied. Later rules win,
+		// so the allow must follow the deny. network-outbound also covers Unix-socket
 		// connects; none is allowed.
 		b.WriteString(";; Network floor: deny every outbound connect except NockLock's\n")
 		b.WriteString(";; own loopback proxy. The proxy runs outside this profile.\n")
 		b.WriteString("(deny network-outbound" + msg + ")\n")
-		b.WriteString("(allow network-outbound (remote ip \"localhost:" + strconv.Itoa(proxyPort) + "\"))\n")
+		b.WriteString("(allow network-outbound (remote tcp \"localhost:" + strconv.Itoa(proxyPort) + "\"))\n")
 		b.WriteString(";; Resolver over Mach: getaddrinfo asks mDNSResponder, which queries DNS\n")
 		b.WriteString(";; on the child's behalf, outside the socket rules above.\n")
 		b.WriteString("(deny mach-lookup" + msg + "\n")

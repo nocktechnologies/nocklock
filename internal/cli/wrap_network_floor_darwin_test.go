@@ -12,7 +12,6 @@ import (
 	"regexp"
 	"strings"
 	"testing"
-	"time"
 
 	"github.com/nocktechnologies/nocklock/internal/config"
 	"github.com/spf13/cobra"
@@ -93,7 +92,17 @@ enforcement = "off"
 	if err := os.WriteFile(probePy, []byte(floorProbePython), 0o644); err != nil {
 		t.Fatalf("write probe script: %v", err)
 	}
-	uniqueName := fmt.Sprintf("nocklock-floor-%d.example.com", time.Now().UnixNano())
+	// A real public name, proven to resolve OUTSIDE the fence: a lookup that
+	// fails inside the fence then means the Mach deny held, not that the name
+	// does not exist (an /etc/hosts pin is a local file read and proves nothing).
+	const publicName = "example.com"
+	if addrs, err := net.LookupHost(publicName); err != nil || len(addrs) == 0 {
+		msg := fmt.Sprintf("%s must resolve outside the fence for the resolver-deny probe to mean anything: addrs=%v err=%v", publicName, addrs, err)
+		if dnsEscapeStrictlyRequired() {
+			t.Fatalf("%s; strict-required mode forbids skipping", msg)
+		}
+		t.Skip(msg)
+	}
 	// Each probe prints one line "<name>: rc=<status> <tool output>"; the python
 	// probes print the OS error ("EPERM Operation not permitted"), so a timeout
 	// or a refusal cannot pass as kernel-denied. proxy_loopback is the negative
@@ -108,13 +117,15 @@ probe proxy_loopback python3 "$PY" tcp 127.0.0.1 "$P"
 probe raw_tcp python3 "$PY" tcp 1.1.1.1 443
 probe loopback_other python3 "$PY" tcp 127.0.0.1 %[3]s
 probe raw_dns_udp python3 "$PY" udp 8.8.8.8 53
-probe resolve_pinned python3 "$PY" resolve %[2]s
-probe resolve_unique python3 "$PY" resolve %[6]s
+probe udp_proxy_port python3 "$PY" udp 127.0.0.1 "$P"
+probe resolve_hosts python3 "$PY" resolve %[2]s
+probe resolve_public python3 "$PY" resolve %[6]s
+for v in HTTP_PROXY HTTPS_PROXY ALL_PROXY; do eval "echo \"env_$v: rc=0 \$$v\" >>\"$O\""; done
 if command -v dig >/dev/null 2>&1; then probe dig_direct dig +time=2 +tries=1 +noall +answer @8.8.8.8 example.com; fi
 probe via_proxy curl -s -o /dev/null --max-time 20 http://%[2]s:%[3]s/
 probe noproxy curl -s -o /dev/null --noproxy '*' --max-time 10 http://%[2]s:%[3]s/
 true
-`, out, dnsEscapeAllowedHost, port, probePy, port, uniqueName)
+`, out, dnsEscapeAllowedHost, port, probePy, port, publicName)
 
 	cmd := &cobra.Command{}
 	cmd.SetContext(context.Background())
@@ -140,20 +151,24 @@ true
 	if l := line("proxy_loopback"); !strings.Contains(l, "rc=0") {
 		t.Errorf("negative control: the proxy's loopback port must stay reachable: %q", l)
 	}
-	for _, name := range []string{"raw_tcp", "loopback_other", "raw_dns_udp"} {
+	for _, name := range []string{"raw_tcp", "loopback_other", "raw_dns_udp", "udp_proxy_port"} {
 		if l := line(name); !strings.Contains(l, "EPERM Operation not permitted") {
 			t.Errorf("%s must be kernel-denied with EPERM (a timeout or refusal is not a pass): %q", name, l)
 		}
 	}
 	// The resolver rides Mach to mDNSResponder, not a socket the connect rules
-	// see. The pinned name resolves outside the fence (requireProvisionedAllowedHost),
-	// so a failed lookup inside it proves the Mach deny; the unique name records
-	// whether a lookup could leave (it must fail too).
-	if l := line("resolve_pinned"); !strings.Contains(l, "gaierror") {
-		t.Errorf("getaddrinfo of a name the host resolves must fail inside the fence (resolver Mach service denied): %q", l)
+	// see. A public name that resolved outside the fence must fail inside it. If
+	// it resolves, the Mach deny is not holding and SEATBELT must not be claimed.
+	// resolve_hosts is local-only (/etc/hosts, no query leaves the box) and is
+	// allowed to succeed or fail; it is logged, not asserted.
+	if l := line("resolve_public"); !strings.Contains(l, "gaierror") {
+		t.Errorf("a public name that resolves outside the fence resolved inside it: the resolver Mach deny is not holding, so the SEATBELT floor does not hold: %q", l)
 	}
-	if l := line("resolve_unique"); !strings.Contains(l, "gaierror") {
-		t.Errorf("getaddrinfo of a unique name must not resolve inside the fence: %q", l)
+	for _, v := range []string{"HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY"} {
+		// localhost will not resolve inside the fence, so the proxy URL is numeric.
+		if l := line("env_" + v); !strings.Contains(l, "http://127.0.0.1:") {
+			t.Errorf("%s must carry the numeric 127.0.0.1:<port> proxy inside the fence: %q", v, l)
+		}
 	}
 	if l := line("dig_direct"); l != "" && dnsAnswer.MatchString(l) {
 		t.Errorf("dig received an answer section from an external resolver through the floor: %q", l)

@@ -30,6 +30,9 @@ func TestDoctorSeatbeltAdvisoryNeedsSandboxExec(t *testing.T) {
 	if has(func() error { return nil }) {
 		t.Error("sandbox-exec available with filesystem.root set: floor applies, no advisory expected")
 	}
+	if !has(nil) {
+		t.Error("nil sandboxExec capability must not panic and must warn ADVISORY")
+	}
 	if !has(func() error { return errors.New("sandbox-exec not found") }) {
 		t.Error("sandbox-exec missing: wrap cannot apply the floor, doctor must warn ADVISORY")
 	}

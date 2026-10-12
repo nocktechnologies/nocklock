@@ -475,7 +475,7 @@ func TestGenerateTaggedWriteConfinementProfile_NetworkFloor(t *testing.T) {
 		t.Fatalf("GenerateTaggedWriteConfinementProfile: %v", err)
 	}
 	deny := `(deny network-outbound (with message "nocklock:s1"))`
-	allow := `(allow network-outbound (remote ip "localhost:43127"))`
+	allow := `(allow network-outbound (remote tcp "localhost:43127"))`
 	di, ai := strings.Index(profile, deny), strings.Index(profile, allow)
 	if di < 0 || ai < 0 {
 		t.Fatalf("floor rules missing (deny at %d, allow at %d):\n%s", di, ai, profile)
@@ -486,7 +486,7 @@ func TestGenerateTaggedWriteConfinementProfile_NetworkFloor(t *testing.T) {
 	if got := strings.Count(profile, "network-outbound"); got != 2 {
 		t.Errorf("want exactly the deny and one allow, got %d network-outbound mentions:\n%s", got, profile)
 	}
-	for _, banned := range []string{"unix-socket", `(remote ip "*`, "network*"} {
+	for _, banned := range []string{"unix-socket", `(remote ip`, `(remote udp`, `(remote tcp "*`, "network*"} {
 		if strings.Contains(profile, banned) {
 			t.Errorf("floor must not contain %q:\n%s", banned, profile)
 		}
