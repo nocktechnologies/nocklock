@@ -21,8 +21,9 @@ assembled yet, and on `-Mode Desktop` it refuses the DISPOSABLE-BOX ONLY probes 
   member of Administrators is elevated (the doc's "Elevation on the desktop" section).
 - `python` and `curl.exe` on `PATH` (Probe 1). Nothing is installed or downloaded in Desktop mode.
 - Ports 8899, 9999 and 9998 free (else Probe 1 records SETUP-FAULT and is not run).
-- Run it in the foreground and let it finish: the global teardown runs in a `finally`.
-  Do not press Ctrl+C (see "If the run was interrupted").
+- Let it finish: the global teardown runs in a `finally`. Do not press Ctrl+C (see "If the
+  run was interrupted"). Over SSH, pass `-Detach` (step 4) so a dropped session cannot end
+  the run; from a console PowerShell, run it in the foreground.
 - 64-bit `powershell.exe` (the default). The script refuses a 32-bit host.
 
 ## Operator commands
@@ -58,6 +59,19 @@ assembled yet, and on `-Mode Desktop` it refuses the DISPOSABLE-BOX ONLY probes 
 
    Replace `<ts>` with a UTC timestamp, e.g. `probe-20260928T1200Z.log`. The run takes a
    few minutes and writes `output.txt` in the same directory.
+
+   **Over SSH, use `-Detach`** (the second desktop run lost its session mid-run):
+
+   ```powershell
+   powershell -NoProfile -ExecutionPolicy Bypass -File run-probe.ps1 -Mode Desktop -Probes 1,2,3 -Detach
+   ```
+
+   It starts the run through WMI, prints `DETACH: started pid=...` and returns. The run writes
+   `probe-<ts>.log` and `output.txt` in the current directory, and `probe-<ts>.done`
+   (`DONE exit=<n>`) last. Wait for the `.done` file. The detached run keeps your elevated token
+   and is not a child of the SSH session. A `DETACH: FAILED` line means nothing was started.
+   `-Detach` is untested on Windows: check `elevated=True` in `output.txt`, and if no
+   `probe-<ts>.log` appears, run in the foreground from a console PowerShell instead.
 
 5. Bring back both `probe-<ts>.log` (the full transcript) and `output.txt`.
 
@@ -107,6 +121,13 @@ The transcript carries the verdicts: `LAUNCHER-ENV:`, `LIMITED-TOKEN:`,
   `VERDICT(1)` was a SETUP-FAULT (`powershell.exe` exited `0xC0000142` inside the
   container) and `VERDICT(3)` INDETERMINATE, which this revision of the script addresses.
 
+- [`output-20261012T1947Z.txt`](output-20261012T1947Z.txt) and
+  [`RESULTS-20261012T1947Z.md`](RESULTS-20261012T1947Z.md): the second desktop run (script
+  `495f2b44`). Probe 1's pivot PASSED (loopback reached, off-box did not resolve), Probe 2
+  answered (no admin), Probe 1's 9998 bind + listen is an open SETUP-FAULT (python not on the
+  container's PATH) and the SSH drop cut the run before Probe 3. This revision runs python by
+  absolute path with a package-SID grant, and adds `-Detach`.
+
 ## If the run was interrupted
 
 A Ctrl+C, a dropped SSH session or a killed `powershell.exe` can end the run before its
@@ -123,6 +144,17 @@ $probeRoot = Join-Path $env:TEMP "nocklock-probe-$runId"
 [void][Reflection.Assembly]::Load([IO.File]::ReadAllBytes("$probeRoot\_launcher.dll"))
 foreach ($n in "nocklock-probe-$runId", "nocklock-p3-$runId") { '{0} -> 0x{1:X8}' -f $n, [NockProbe.AC]::DeleteProfile($n) }
 Remove-Item -Recurse -Force $probeRoot
+```
+
+If Probe 1 reached its 9998 step, also revoke the package SID's read + execute grant on the
+python install directory (the directory of `python.exe`, e.g.
+`C:\Users\<user>\AppData\Local\Programs\Python\Python312`). Do it **before** the
+`DeleteProfile` line above (run it first if you already ran the block, and the SID then shows
+as a bare `S-1-15-2-...` entry): read the SID from `icacls <python dir>`, where this run's
+entry is named `nocklock-probe-<run_id>`:
+
+```powershell
+icacls '<python dir>' /remove:g '*<this run SID>'
 ```
 
 Stop any `python` still listening on 8899, 9999 or 9998 only after checking that its

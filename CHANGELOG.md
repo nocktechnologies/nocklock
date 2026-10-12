@@ -20,6 +20,7 @@ All notable changes to NockLock will be documented in this file.
 
 ### Changed
 
+- Windows probes (N10825/N11601): record the second desktop run (Probe 1 pivot PASS, Probe 2 needs no admin); `run-probe.ps1` runs python in the container by absolute path with a package-SID grant revoked at teardown, and gains `-Detach` so a dropped SSH session cannot cut a run short.
 - Docs: `docs/design/look-back-rules.md` design note for look-back policy rules over the audit event history. The valid `on` list is now the event types written with `blocked=1`, and the contention paragraph records that `Logger.Log` does not honour `busy_timeout`.
 - Docs: the `.claude/diagrams` Mermaid diagrams now describe the shipped v0.6.1
   fences instead of the original "planned" design, and a new

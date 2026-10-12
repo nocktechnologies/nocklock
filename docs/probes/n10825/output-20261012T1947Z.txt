@@ -1,0 +1,183 @@
+# Second desktop run of run-probe.ps1 (script 495f2b44), 2026-10-12 19:47Z, run_id 562bebd3b2f6420fbc5cec0f69c17a72.
+# Verbatim byte copies of the two files the run produced, in this order (SHA-256 of each source file):
+# 1. output.txt                 01206e450440ead995dcd38413004e1bb48ca007f8d4f4b9ca967e3cd105558b (BEFORE state only: the SSH session dropped before the AFTER listing)
+# 2. probe-20261012T1947Z.log   ce4208d5e068cf7b2c4646a0f2037b424840785dabb63c4bcfcb336f0d2aed30 (the transcript, cut off at Probe 1's 9998 line)
+# Results and what the run does and does not show: RESULTS-20261012T1947Z.md
+
+===== output.txt =====
+﻿# NockLock N10825 Windows probes (run-probe.ps1)
+date_utc=2026-10-12T19:47:42Z
+script_sha256=495F2B449BBCB6B0E927B3470C25173BE15E3CAC9FD45AE0FD132039C8D52237
+run_id=562bebd3b2f6420fbc5cec0f69c17a72 mode=Desktop probes=1,2,3
+os_version=Microsoft Windows NT 10.0.26300.0
+os_build=26300.9550
+os_edition=Professional (Microsoft Windows 11 Pro)
+os_arch=64-bit process_64bit=True
+ps=5.1.26100.9549
+user=Kevins-Desktop\kkwil elevated=True
+STATE(BEFORE) exemptions: (none)
+STATE(BEFORE) ports: (none)
+STATE(BEFORE) tasks: (none)
+STATE(BEFORE) profiles: (none)
+STATE(BEFORE) probeRoots: (none)
+
+===== probe-20261012T1947Z.log =====
+date_utc=2026-10-12T19:47:42Z
+script_sha256=495F2B449BBCB6B0E927B3470C25173BE15E3CAC9FD45AE0FD132039C8D52237
+run_id=562bebd3b2f6420fbc5cec0f69c17a72 mode=Desktop probes=1,2,3
+os_version=Microsoft Windows NT 10.0.26300.0
+os_build=26300.9550
+os_edition=Professional (Microsoft Windows 11 Pro)
+os_arch=64-bit process_64bit=True
+ps=5.1.26100.9549
+user=Kevins-Desktop\kkwil elevated=True
+STATE(BEFORE) exemptions: (none)
+STATE(BEFORE) ports: (none)
+STATE(BEFORE) tasks: (none)
+STATE(BEFORE) profiles: (none)
+STATE(BEFORE) probeRoots: (none)
+
+List Loopback Exempted AppContainers 
+
+OK.
+
+Data Collector Set                      Type                          Status
+-------------------------------------------------------------------------------
+Circular Kernel Context Logger          Trace                         Running 
+Eventlog-Security                       Trace                         Running 
+CimFSUnionFS-Filter                     Trace                         Running 
+DiagLog                                 Trace                         Running 
+Diagtrack-Listener                      Trace                         Running 
+EventLog-Application                    Trace                         Running 
+EventLog-System                         Trace                         Running 
+FilterMgr-Logger                        Trace                         Running 
+iclsClient                              Trace                         Running 
+iclsProxy                               Trace                         Running 
+IntelRST                                Trace                         Running 
+LwtNetLog                               Trace                         Running 
+Microsoft-Windows-Rdp-Graphics-RdpIdd-Trace Trace                         Running 
+NetCore                                 Trace                         Running 
+NtfsLog                                 Trace                         Running 
+PlatformLicenseManagerService           Trace                         Running 
+RadioMgr                                Trace                         Running 
+ETWSENSORTraceSession{F86D80AD-974D-41CC-B1D3-2C4203B8AC09}{B0434862-52B3-48DA-A25B-752EF26C58CA} Trace                         Running 
+ReFSLog                                 Trace                         Running 
+UBPM                                    Trace                         Running 
+WdiContextLog                           Trace                         Running 
+WiFiDriverIHVSession                    Trace                         Running 
+WiFiSession                             Trace                         Running 
+WPR_initiated_DiagTrackMiniLogger_OneTrace_User_Logger_20261005_1_EC_0 Trace                         Running 
+WPR_initiated_DiagTrackMiniLogger_WPR System Collector Trace                         Running 
+DtpMsbSession                           Trace                         Running 
+SleepStudyTraceSession                  Trace                         Running 
+CldFltLog                               Trace                         Running 
+Windows-Compat-Inventory-InstallMon     Trace                         Running 
+MpWppCoreTracing-20261008-005958-00000003-100000000 Trace                         Running 
+NVIDIA-NVTOPPS-NOCAT                    Trace                         Running 
+NVIDIA-NVTOPPS-NOCAT-SDK                Trace                         Running 
+NVIDIA-NVTOPPS-FILTER                   Trace                         Running 
+1DSListener                             Trace                         Running 
+ScreenOnPowerStudyTraceSession          Trace                         Running 
+SHS-10082026-010020-7-1ff               Trace                         Running 
+WINNETESP                               Trace                         Running 
+Steam Event Tracing                     Trace                         Running 
+Admin_PS_Provider                       Trace                         Running 
+8696EAC4-1288-4288-A4EE-49EE431B0AD9    Trace                         Running 
+DtpSleepStudySession                    Trace                         Running 
+DtpEnergyEstimationSession              Trace                         Running 
+AppDomainStatistics_Activity-{5BD54C15-D8A4-4089-AB87-E5BE3348E0E4} Trace                         Running 
+IntelligenceEvents_Activity-{FE327C96-3A32-4D73-A695-FE13C1301CFE} Trace                         Running 
+ExternalProvider_Session-{3AE2EFD0-4B5C-4EE7-B4DB-5781A6D0FCB3} Trace                         Running 
+UpdateSessionOrchestration              Trace                         Running 
+MoUxCoreWorker                          Trace                         Running 
+WinDiag-Realtime-Session                Trace                         Running 
+
+The command completed successfully.
+
+Domain Profile Settings: 
+----------------------------------------------------------------------
+State                                 ON
+
+Private Profile Settings: 
+----------------------------------------------------------------------
+State                                 ON
+
+Public Profile Settings: 
+----------------------------------------------------------------------
+State                                 ON
+Ok.
+
+False
+curl.exe -> C:\Windows\system32\curl.exe
+git -> C:\Program Files\Git\cmd\git.exe
+node -> C:\Program Files\nodejs\node.exe
+python -> C:\Users\kkwil\AppData\Local\Programs\Python\Python312\python.exe
+npm -> C:\Program Files\nodejs\npm.ps1
+pip -> C:\Users\kkwil\AppData\Local\Programs\Python\Python312\Scripts\pip.exe
+nslookup -> C:\Windows\system32\nslookup.exe
+BEFORE: loopbackexempt_count=0 ports_in_use(8899,9999,9998)=0 (documented desktop baseline: 0, 0)
+S-1-15-2-3482642125-4257376707-2968601254-1774957243-971363233-1587660273-898777979
+processed file: C:\Users\kkwil\AppData\Local\Temp\nocklock-probe-562bebd3b2f6420fbc5cec0f69c17a72\_launcher.dll
+Successfully processed 1 files; Failed processing 0 files
+processed file: C:\Users\kkwil\AppData\Local\Temp\nocklock-probe-562bebd3b2f6420fbc5cec0f69c17a72\out
+Successfully processed 1 files; Failed processing 0 files
+LAUNCHER-ENV: PASS - TEMP=C:\Users\kkwil\AppData\Local\Packages\nocklock-probe-562bebd3b2f6420fbc5cec0f69c17a72\AC\Temp LOCALAPPDATA=C:\Users\kkwil\AppData\Local\Packages\nocklock-probe-562bebd3b2f6420fbc5cec0f69c17a72\AC
+0
+LIMITED-TOKEN: PASS - task token is Medium IL with High absent
+===== Probe 1: zero-capability loopback =====
+outside 8899 -> live
+outside 9999 -> live
+VERDICT(1-exempt): NON-ELEVATED OK - limited-token -a exited 0 and listed the entry (Probe 2: admin not required) [exit=0]
+inside(1): <!DOCTYPE HTML>
+inside(1): <html lang="en">
+inside(1): <head>
+inside(1): <meta charset="utf-8">
+inside(1): <title>Directory listing for /</title>
+inside(1): </head>
+inside(1): <body>
+inside(1): <h1>Directory listing for /</h1>
+inside(1): <hr>
+inside(1): <ul>
+inside(1): <li><a href="_launcher.cs">_launcher.cs</a></li>
+inside(1): <li><a href="_launcher.dll">_launcher.dll</a></li>
+inside(1): <li><a href="_limited.ps1">_limited.ps1</a></li>
+inside(1): <li><a href="csc-tmp/">csc-tmp/</a></li>
+inside(1): <li><a href="limited/">limited/</a></li>
+inside(1): <li><a href="out/">out/</a></li>
+inside(1): </ul>
+inside(1): <hr>
+inside(1): </body>
+inside(1): </html>
+inside(1): 
+inside(1): CURL_DONE exit=0
+inside(1): 8899 exit=0
+inside(1): curl: (6) Could not resolve host: example.com
+inside(1): 
+inside(1): CURL_DONE exit=6
+inside(1): example exit=6
+inside(1): <!DOCTYPE HTML>
+inside(1): <html lang="en">
+inside(1): <head>
+inside(1): <meta charset="utf-8">
+inside(1): <title>Directory listing for /</title>
+inside(1): </head>
+inside(1): <body>
+inside(1): <h1>Directory listing for /</h1>
+inside(1): <hr>
+inside(1): <ul>
+inside(1): <li><a href="_launcher.cs">_launcher.cs</a></li>
+inside(1): <li><a href="_launcher.dll">_launcher.dll</a></li>
+inside(1): <li><a href="_limited.ps1">_limited.ps1</a></li>
+inside(1): <li><a href="csc-tmp/">csc-tmp/</a></li>
+inside(1): <li><a href="limited/">limited/</a></li>
+inside(1): <li><a href="out/">out/</a></li>
+inside(1): </ul>
+inside(1): <hr>
+inside(1): </body>
+inside(1): </html>
+inside(1): 
+inside(1): CURL_DONE exit=0
+inside(1): 9999 exit=0
+inside(1) 9998: 'python' is not recognized as an internal or external command,
+inside(1) 9998: operable program or batch file.
+inside(1) 9998 bind+listen: SETUP-FAULT - python did not run (no PYTHON_RAN), launch exit=1 (0x00000001)

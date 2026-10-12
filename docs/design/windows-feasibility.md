@@ -1043,6 +1043,18 @@ into the directory it is run from, never under `$probeRoot`, which the teardown 
 Placeholders such as `<Probe 3 body, below>` are expanded there with the named block; a
 change to any block here must land in `run-probe.ps1` in the same commit.
 
+### Probes status
+
+| Probe | Status (latest desktop run: 2026-10-12 19:47Z, [results](../probes/n10825/RESULTS-20261012T1947Z.md)) |
+|---|---|
+| 1, pivot: zero-capability loopback | **PASS.** Container `curl` reached the exempted loopback listener; `example.com` did not resolve (`exit=6`), so no off-box path. A second loopback listener (9999) is also reachable: the exemption is per container, not per port. |
+| 1, 9998 bind + listen | **Open SETUP-FAULT.** python was not on the container's PATH. Fixed in the script (absolute path plus package-SID grant); not yet re-run. |
+| 2, exemption needs admin? | **Answered: no.** `VERDICT(1-exempt)` is NON-ELEVATED OK under the limited token (an Administrators-group user's filtered Medium-IL token; a true standard-user account is untested). |
+| 3, AppContainer launch under the limited token | Not run (the SSH session dropped). The script now has `-Detach`; next desktop round. |
+
+The first desktop run (2026-09-28, [output](../probes/n10825/output-20260928T0558Z.txt)) ended
+Probe 1 as a SETUP-FAULT (`powershell.exe` in the container, `0xC0000142`) and Probe 3 INDETERMINATE.
+
 **Box setup** (DISPOSABLE-BOX ONLY — run on a throwaway VM, never on the
 desktop):
 
@@ -1768,13 +1780,21 @@ $log1 | ForEach-Object { "inside(1): $_" }
 # The agent binds its own listener: python binds 127.0.0.1:9998, listens, prints one line
 # and exits, so the claim (bind + listen inside, outbound-only scope below) is its exit code
 # and nothing is left running to reap. A per-user python (e.g. under %LOCALAPPDATA%\Programs)
-# is unreadable to a zero-capability container: cmd's error text then shows in the capture.
+# is neither on a zero-capability container's PATH nor readable to it (second desktop run:
+# "'python' is not recognized"). So python runs by its absolute path, after the package SID is
+# granted read+execute on that install directory; the global teardown revokes the grant.
 # python prints PYTHON_RAN first: a capture without it means cmd never started python, a
 # SETUP-FAULT, never the bind's answer.
+$pyExe = (Get-Command python -CommandType Application -ErrorAction SilentlyContinue |
+  Where-Object { $_.Source -notlike '*\WindowsApps\*' } | Select-Object -First 1).Source   # not the Store alias: a zero-byte stub in a Windows-managed directory
+if ($pyExe) {
+  $script:pyDir = Split-Path $pyExe -Parent        # $script: so the global teardown can revoke it
+  icacls $script:pyDir /grant "*${sid}:(OI)(CI)(RX)" | Out-Null
+}
 $capture = Join-Path $out.FullName '_inside-1-9998.txt'
 $bind9998 = try {
-  $rc = [NockProbe.AC]::Run($sid, @(), ('cmd.exe /c python -c "print(''PYTHON_RAN'', flush=True); import socket; s = socket.socket(); ' +
-    's.bind((''127.0.0.1'', 9998)); s.listen(1); print(''bind+listen OK'', s.getsockname())" > "' + $capture + '" 2>&1'), 60000)
+  $rc = [NockProbe.AC]::Run($sid, @(), ('cmd.exe /c ""' + $pyExe + '" -c "print(''PYTHON_RAN'', flush=True); import socket; s = socket.socket(); ' +
+    's.bind((''127.0.0.1'', 9998)); s.listen(1); print(''bind+listen OK'', s.getsockname())" > "' + $capture + '" 2>&1"'), 60000)
   'exit={0} (0x{0:X8})' -f $rc
 } catch {
   'threw {0} HResult={1} {2}' -f $_.Exception.GetBaseException().GetType().Name, (Get-BaseHResult $_), $_.Exception.GetBaseException().Message
@@ -1838,7 +1858,8 @@ proxy design, which only needs the container to reach out to the proxy.
 If the first `curl` fails, the recommendation's Phase 1 is dead and Phase 2
 becomes mandatory — report immediately, do not run the rest.
 
-**Teardown.** Stop the two outer `python` listeners by handle
+**Teardown.** The `icacls` grant on the python install directory is revoked in the global
+teardown (`icacls $pyDir /remove:g "*$sid"`), before the profiles are deleted. Stop the two outer `python` listeners by handle
 (`$job8899, $job9999 | Stop-Job -PassThru | Remove-Job`); the inside 9998 check
 exits on its own after `listen()`. Never `Get-Job | Stop-Job` — that kills every job in the operator's session. The
 loopback exemption is machine-wide session state shared by every probe, so it is
@@ -1852,9 +1873,9 @@ stop (see the quiescence gate above).
 
 | State touched | Detail |
 |---|---|
-| Creates | 2 outer jobs (`$job8899`, `$job9999`); 4 transient container processes (3 curls, 1 python bind + listen that exits); loopback exemption (machine-wide; removed and proven absent before each measured attempt, then added by the limited task or the elevated retry, kept until global teardown); `limited\exempt-<GUID>.*` files under `$probeRoot` (one run of the scaffold's scheduled task, when the pre-clean succeeds) |
+| Creates | a read + execute ACE for the package SID on the python install directory (revoked in the global teardown); 2 outer jobs (`$job8899`, `$job9999`); 4 transient container processes (3 curls, 1 python bind + listen that exits); loopback exemption (machine-wide; removed and proven absent before each measured attempt, then added by the limited task or the elevated retry, kept until global teardown); `limited\exempt-<GUID>.*` files under `$probeRoot` (one run of the scaffold's scheduled task, when the pre-clean succeeds) |
 | Removes | the 2 outer jobs (by handle) |
-| Must never touch | other user jobs; loopback exemptions not created by this run; scheduled tasks other than `nocklock-probe-limited-$runId` |
+| Must never touch | other user jobs; any other ACE on the python install directory; loopback exemptions not created by this run; scheduled tasks other than `nocklock-probe-limited-$runId` |
 
 ### Probe 2: does the exemption need elevation?
 
@@ -2670,6 +2691,9 @@ if ($etwCreated) { logman stop $etwSession -ets 2>$null }  # only if THIS run cr
 foreach ($idFile in @((Join-Path $probeRoot 'out\wmi-child.txt'))) {
   Stop-VerifiedProcess -IdentityFile $idFile
 }
+# Probe 1's grant on the python install directory: revoke it before the profiles go (a
+# deleted profile's SID would linger in that ACL). Not limited-task state, so either way.
+if ($pyDir) { icacls $pyDir /remove:g "*${sid}" | Out-Null }
 # Probe 9 (VM only): restore firewall to the recorded per-profile state
 if (-not $quiet) {
   # KEEP everything a surviving instance could use or recreate; print it and the recovery.
@@ -2717,6 +2741,10 @@ if (-not $quiet) {
     Assert-Restored "AppContainer profile folder $n absent" (-not (Test-Path (Join-Path $env:LOCALAPPDATA "Packages\$n")))
   }
   Assert-Restored "AppContainer Mappings keys for this run's monikers absent" ($leftMaps.Count -eq 0)
+  if ($pyDir) {
+    $pyAcl = icacls $pyDir
+    Assert-Restored "python install $pyDir free of this run's SID" (-not ($pyAcl -match [regex]::Escape($sid) -or $pyAcl -match [regex]::Escape($moniker)))
+  }
   Assert-Restored "probe root $probeRoot absent" (-not (Test-Path $probeRoot))
 }
 logman query -ets                                          # ETW: diff by eye against BEFORE

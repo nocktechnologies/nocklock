@@ -21,11 +21,41 @@
 
 .PARAMETER Probes
   Probe numbers, e.g. -Probes 1,2,3. Probe 2 is scored from Probe 1, so it needs 1.
+
+.PARAMETER Detach
+  Start the run through WMI so a dropped SSH session cannot kill it; the transcript goes to
+  probe-<ts>.log and probe-<ts>.done ('DONE exit=<n>') is written last. See README.md.
 #>
 param(
   [ValidateSet('Desktop', 'DisposableBox')][string]$Mode = 'Desktop',
-  [string[]]$Probes = @('1', '2', '3')
+  [string[]]$Probes = @('1', '2', '3'),
+  [switch]$Detach
 )
+
+# --- -Detach: survive a dropped SSH session -------------------------------------------
+# The second desktop run lost its SSH session mid-run (client_loop: send disconnect: Broken
+# pipe), so Probe 3 never ran and the teardown was partial. -Detach starts the real run
+# through WMI (Win32_Process.Create), whose child is not in the SSH session's process tree,
+# writes its transcript to probe-<ts>.log, and writes probe-<ts>.done ('DONE exit=<n>') last.
+# This invocation changes nothing else on the machine and returns at once; poll the .done file.
+# The caller's token is kept, so run it from the same elevated session. No -Detach: run in
+# the foreground from a console PowerShell, as the README says.
+if ($Detach) {
+  $ts = (Get-Date).ToUniversalTime().ToString('yyyyMMdd\THHmm\Z')
+  $dir = (Get-Location).Path
+  $log = Join-Path $dir "probe-$ts.log"
+  $done = Join-Path $dir "probe-$ts.done"
+  $q = { param($s) $s.Replace("'", "''") }       # single-quote-safe paths
+  $inner = "& '{0}' -Mode '{1}' -Probes '{2}' *> '{3}'; 'DONE exit={{0}}' -f `$LASTEXITCODE | Set-Content -Encoding ascii '{4}'" -f
+    (& $q $PSCommandPath), $Mode, ($Probes -join ','), (& $q $log), (& $q $done)
+  $enc = [Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes($inner))
+  $psExe = (Get-Process -Id $PID).Path
+  $r = Invoke-CimMethod -ClassName Win32_Process -MethodName Create -Arguments @{
+    CommandLine = "`"$psExe`" -NoProfile -ExecutionPolicy Bypass -EncodedCommand $enc"; CurrentDirectory = $dir }
+  if ($r.ReturnValue -ne 0) { "DETACH: FAILED - Win32_Process.Create returned $($r.ReturnValue); nothing was started. Run in the foreground instead."; exit 2 }
+  "DETACH: started pid=$($r.ProcessId); transcript=$log; done marker=$done (appears when the run ends; output.txt is written next to them)"
+  exit 0
+}
 
 # --- output.txt: environment stamps and the BEFORE/AFTER state -------------------------
 # Lives in the current directory, NOT under $probeRoot (the teardown deletes that).
@@ -850,13 +880,21 @@ try {
       # The agent binds its own listener: python binds 127.0.0.1:9998, listens, prints one line
       # and exits, so the claim (bind + listen inside, outbound-only scope below) is its exit code
       # and nothing is left running to reap. A per-user python (e.g. under %LOCALAPPDATA%\Programs)
-      # is unreadable to a zero-capability container: cmd's error text then shows in the capture.
+      # is neither on a zero-capability container's PATH nor readable to it (second desktop run:
+      # "'python' is not recognized"). So python runs by its absolute path, after the package SID is
+      # granted read+execute on that install directory; the global teardown revokes the grant.
       # python prints PYTHON_RAN first: a capture without it means cmd never started python, a
       # SETUP-FAULT, never the bind's answer.
+      $pyExe = (Get-Command python -CommandType Application -ErrorAction SilentlyContinue |
+        Where-Object { $_.Source -notlike '*\WindowsApps\*' } | Select-Object -First 1).Source   # not the Store alias: a zero-byte stub in a Windows-managed directory
+      if ($pyExe) {
+        $script:pyDir = Split-Path $pyExe -Parent        # $script: so the global teardown can revoke it
+        icacls $script:pyDir /grant "*${sid}:(OI)(CI)(RX)" | Out-Null
+      }
       $capture = Join-Path $out.FullName '_inside-1-9998.txt'
       $bind9998 = try {
-        $rc = [NockProbe.AC]::Run($sid, @(), ('cmd.exe /c python -c "print(''PYTHON_RAN'', flush=True); import socket; s = socket.socket(); ' +
-          's.bind((''127.0.0.1'', 9998)); s.listen(1); print(''bind+listen OK'', s.getsockname())" > "' + $capture + '" 2>&1'), 60000)
+        $rc = [NockProbe.AC]::Run($sid, @(), ('cmd.exe /c ""' + $pyExe + '" -c "print(''PYTHON_RAN'', flush=True); import socket; s = socket.socket(); ' +
+          's.bind((''127.0.0.1'', 9998)); s.listen(1); print(''bind+listen OK'', s.getsockname())" > "' + $capture + '" 2>&1"'), 60000)
         'exit={0} (0x{0:X8})' -f $rc
       } catch {
         'threw {0} HResult={1} {2}' -f $_.Exception.GetBaseException().GetType().Name, (Get-BaseHResult $_), $_.Exception.GetBaseException().Message
@@ -980,6 +1018,9 @@ try {
   foreach ($idFile in @((Join-Path $probeRoot 'out\wmi-child.txt'))) {
     Stop-VerifiedProcess -IdentityFile $idFile
   }
+  # Probe 1's grant on the python install directory: revoke it before the profiles go (a
+  # deleted profile's SID would linger in that ACL). Not limited-task state, so either way.
+  if ($pyDir) { icacls $pyDir /remove:g "*${sid}" | Out-Null }
   # Probe 9 (VM only): restore firewall to the recorded per-profile state
   if (-not $quiet) {
     # KEEP everything a surviving instance could use or recreate; print it and the recovery.
@@ -1027,6 +1068,10 @@ try {
       Assert-Restored "AppContainer profile folder $n absent" (-not (Test-Path (Join-Path $env:LOCALAPPDATA "Packages\$n")))
     }
     Assert-Restored "AppContainer Mappings keys for this run's monikers absent" ($leftMaps.Count -eq 0)
+    if ($pyDir) {
+      $pyAcl = icacls $pyDir
+      Assert-Restored "python install $pyDir free of this run's SID" (-not ($pyAcl -match [regex]::Escape($sid) -or $pyAcl -match [regex]::Escape($moniker)))
+    }
     Assert-Restored "probe root $probeRoot absent" (-not (Test-Path $probeRoot))
   }
   logman query -ets                                          # ETW: diff by eye against BEFORE
