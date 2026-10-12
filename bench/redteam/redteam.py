@@ -140,7 +140,7 @@ def main():
         return text
 
     logs = work / "logs"
-    logs.mkdir()
+    logs.mkdir(exist_ok=True)
     results = []
     for atk in attacks:
         cmd = sub(atk["cmd"])

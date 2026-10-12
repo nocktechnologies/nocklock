@@ -21,7 +21,7 @@ nockguard=${NOCKGUARD_BIN:-$(command -v nockguard || true)}
 # It is gitignored and left in place for inspection; the CI runner is disposable.
 work=$(mktemp -d "$here/work.XXXXXX")
 umask 077
-mkdir -p "$work/root/.nock" "$work/outside" "$work/bin" "$work/policy" "$work/state" \
+mkdir -p "$work/root/.nock" "$work/logs" "$work/outside" "$work/bin" "$work/policy" "$work/state" \
   "$work/home/.nockguard/logs"
 
 printf 'bench-canary-not-a-real-secret\n' > "$work/outside/canary.txt"
@@ -61,7 +61,8 @@ allow = [
     "/etc/ssl/certs/", "/etc/pki/tls/certs/", "/etc/pki/ca-trust/extracted/",
     "$work/bin/", "$work/policy/",
 ]
-allow_rw = ["$work/home/.nockguard/"]
+# logs/: attack stdout/stderr files; the child fstat()s its stdout, so it must be reachable.
+allow_rw = ["$work/home/.nockguard/", "$work/logs/"]
 deny = []
 
 [network]
