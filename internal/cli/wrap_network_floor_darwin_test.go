@@ -103,6 +103,15 @@ enforcement = "off"
 		}
 		t.Skip(msg)
 	}
+	// The noproxy probe targets the allowlisted host's IP literal, resolved
+	// here outside the fence, so a resolver failure inside it cannot pass as a
+	// kernel deny.
+	var allowedIP string
+	if addrs, err := net.LookupHost(dnsEscapeAllowedHost); err != nil || len(addrs) == 0 {
+		t.Fatalf("%s must resolve outside the fence: addrs=%v err=%v", dnsEscapeAllowedHost, addrs, err)
+	} else {
+		allowedIP = addrs[0]
+	}
 	// Each probe prints one line "<name>: rc=<status> <tool output>"; the python
 	// probes print the OS error ("EPERM Operation not permitted"), so a timeout
 	// or a refusal cannot pass as kernel-denied. proxy_loopback is the negative
@@ -123,9 +132,9 @@ probe resolve_public python3 "$PY" resolve %[6]s
 for v in HTTP_PROXY HTTPS_PROXY ALL_PROXY; do eval "echo \"env_$v: rc=0 \$$v\" >>\"$O\""; done
 if command -v dig >/dev/null 2>&1; then probe dig_direct dig +time=2 +tries=1 +noall +answer @8.8.8.8 example.com; fi
 probe via_proxy curl -s -o /dev/null --max-time 20 http://%[2]s:%[3]s/
-probe noproxy curl -s -o /dev/null --noproxy '*' --max-time 10 http://%[2]s:%[3]s/
+probe noproxy python3 "$PY" tcp %[7]s %[3]s
 true
-`, out, dnsEscapeAllowedHost, port, probePy, port, publicName)
+`, out, dnsEscapeAllowedHost, port, probePy, port, publicName, allowedIP)
 
 	cmd := &cobra.Command{}
 	cmd.SetContext(context.Background())
@@ -159,8 +168,11 @@ true
 	// The resolver rides Mach to mDNSResponder, not a socket the connect rules
 	// see. A public name that resolved outside the fence must fail inside it. If
 	// it resolves, the Mach deny is not holding and SEATBELT must not be claimed.
-	// resolve_hosts is local-only (/etc/hosts, no query leaves the box) and is
-	// allowed to succeed or fail; it is logged, not asserted.
+	// resolve_hosts is local-only (/etc/hosts, no query leaves the box) and must
+	// still work inside the fence: it is the README's /etc/hosts claim.
+	if l := line("resolve_hosts"); !strings.Contains(l, "rc=0") || !strings.Contains(l, "127.0.0.1") {
+		t.Errorf("resolve_hosts must resolve %s to 127.0.0.1 from /etc/hosts inside the fence: %q", dnsEscapeAllowedHost, l)
+	}
 	if l := line("resolve_public"); !strings.Contains(l, "gaierror") {
 		t.Errorf("a public name that resolves outside the fence resolved inside it: the resolver Mach deny is not holding, so the SEATBELT floor does not hold: %q", l)
 	}
@@ -176,11 +188,11 @@ true
 	if l := line("via_proxy"); !strings.Contains(l, "rc=0") {
 		t.Errorf("curl via the proxy to the allowlisted host must succeed: %q", l)
 	}
-	if l := line("noproxy"); l == "" || strings.Contains(l, "rc=0") {
-		t.Errorf("curl --noproxy to the allowlisted host must fail inside the fence: %q", l)
+	if l := line("noproxy"); !strings.Contains(l, "EPERM Operation not permitted") {
+		t.Errorf("a direct connect to the allowlisted host's IP %s must be kernel-denied with EPERM: %q", allowedIP, l)
 	}
 	if hits := allowedHits.Load(); hits != 1 {
-		t.Errorf("allowed upstream hits = %d, want exactly 1 (the proxied request; the --noproxy request must never arrive)", hits)
+		t.Errorf("allowed upstream hits = %d, want exactly 1 (the proxied request; the direct connect must never arrive)", hits)
 	}
 	assertSessionEgressLevel(t, project, string(egressLevelSeatbelt))
 }
