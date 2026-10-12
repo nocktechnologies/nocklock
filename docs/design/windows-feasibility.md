@@ -1050,7 +1050,7 @@ change to any block here must land in `run-probe.ps1` in the same commit.
 | 1, pivot: zero-capability loopback | **PASS** for loopback: container `curl` reached the exempted listener. `example.com`: name resolution failed (`exit=6`); off-box packet egress not yet tested (the next run adds a literal-IP `curl` to 1.1.1.1, scored as `VERDICT(1-ip)` against an outer control). A second loopback listener (9999) is also reachable: the exemption is per container, not per port. |
 | 1, 9998 bind + listen | **Open SETUP-FAULT.** python was not on the container's PATH. Fixed in the script (absolute path plus package-SID grant); not yet re-run. |
 | 2, exemption needs admin? | **Answered: no.** `VERDICT(1-exempt)` is NON-ELEVATED OK under the limited token (an Administrators-group user's filtered Medium-IL token; a true standard-user account is untested). |
-| 3, AppContainer launch under the limited token | Not run (the SSH session dropped). The script now has `-Detach`; next desktop round. |
+| 3, AppContainer launch under the limited token | Not run (the SSH session dropped). Next desktop round, started with `Start-Process` (see the probe README). |
 
 The first desktop run (2026-09-28, [output](../probes/n10825/output-20260928T0558Z.txt)) ended
 Probe 1 as a SETUP-FAULT (`powershell.exe` in the container, `0xC0000142`) and Probe 3 INDETERMINATE.
@@ -1764,7 +1764,8 @@ $log1 = @(); $fault1 = @()
 # example.com failing to resolve (exit=6) only shows DNS failed, not that packets are dropped. The 'ip'
 # curl connects to a literal public IP (no DNS), so it is the off-box packet test; the outer control
 # below proves this machine can reach that IP, or an inside failure would prove nothing.
-curl.exe -sS -m 5 -o NUL http://1.1.1.1/ 2>$null
+# cmd /c keeps curl's stderr out of PowerShell: under $ErrorActionPreference='Stop' on PS 5.1, 2>$null on a native command can throw.
+cmd.exe /c 'curl.exe -sS -m 5 -o NUL http://1.1.1.1/ 2>nul'
 $outsideIpRc = $LASTEXITCODE
 foreach ($c in @(@('8899',    'curl.exe -sS -m 5 http://127.0.0.1:8899/'),      # MUST succeed, or Phase 1 is dead
                  @('example', 'curl.exe -sS -m 5 https://example.com/'),        # MUST fail (Block Outbound Default Rule)
@@ -1783,6 +1784,9 @@ foreach ($c in @(@('8899',    'curl.exe -sS -m 5 http://127.0.0.1:8899/'),      
   }
 }
 $log1 | ForEach-Object { "inside(1): $_" }
+# The ip step is scored on its own line: its fault must not unscore the rest of Probe 1.
+$faultIp = @($fault1 -cmatch '^ip ')
+$fault1 = @($fault1 -cnotmatch '^ip ')
 # The agent binds its own listener: python binds 127.0.0.1:9998, listens, prints one line
 # and exits, so the claim (bind + listen inside, outbound-only scope below) is its exit code
 # and nothing is left running to reap. A per-user python (e.g. under %LOCALAPPDATA%\Programs)
@@ -1835,12 +1839,15 @@ if ($unscored1.Count) {
 } else {
   "VERDICT(1): 8899 reached; read example.com (MUST fail) and 9999 (against its outside control) from the inside(1) lines above, per the doc's Probe 1 rules"
   # Off-box packets: scored only against the outer control. curl exit 0 means ANY reply came back
-  # (even an HTTP error page), 7 is connection refused or unreachable, 28 a timeout (SYN dropped).
+  # (even an HTTP error page): reached. 7 is an immediate connect failure: the only BLOCKED score.
+  # 28 is a timeout: a slow network looks the same, so it is INCONCLUSIVE, never a kernel block.
   $insideIp = @(@($log1) -cmatch '^ip exit=')
   if ($outsideIpRc -ne 0) { "VERDICT(1-ip): not scored - the outer control to 1.1.1.1 failed (curl exit $outsideIpRc), so this machine has no route to prove a drop" }
+  elseif ($faultIp.Count) { "VERDICT(1-ip): not scored - $($faultIp -join '; ')" }
   elseif ($insideIp.Count -ne 1) { "VERDICT(1-ip): not scored - the inside ip curl recorded $($insideIp.Count) 'ip exit=' lines, not 1" }
   elseif ($insideIp[0] -ceq 'ip exit=0') { "VERDICT(1-ip): OFF-BOX LEAK - the container reached 1.1.1.1 ($($insideIp[0])); the fence does not drop off-box packets" }
-  elseif ($insideIp[0] -cmatch '^ip exit=(7|28)$') { "VERDICT(1-ip): OFF-BOX EGRESS BLOCKED - the outer control reached 1.1.1.1, the container did not ($($insideIp[0]))" }
+  elseif ($insideIp[0] -ceq 'ip exit=7') { "VERDICT(1-ip): OFF-BOX EGRESS BLOCKED - the outer control reached 1.1.1.1, the container's connect failed at once ($($insideIp[0]))" }
+  elseif ($insideIp[0] -ceq 'ip exit=28') { "VERDICT(1-ip): INCONCLUSIVE - the container's curl to 1.1.1.1 timed out ($($insideIp[0])); a timeout is not a block (a slow network looks the same)" }
   else { "VERDICT(1-ip): INDETERMINATE - the container's curl to 1.1.1.1 ended $($insideIp[0]); read the inside(1) lines" }
 }
 ```

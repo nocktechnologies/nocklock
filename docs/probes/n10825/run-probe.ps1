@@ -21,58 +21,11 @@
 
 .PARAMETER Probes
   Probe numbers, e.g. -Probes 1,2,3. Probe 2 is scored from Probe 1, so it needs 1.
-
-.PARAMETER Detach
-  Start the run through WMI so a dropped SSH session cannot kill it; the transcript goes to
-  probe-<ts>-<id>.log and probe-<ts>-<id>.done ('DONE exit=<n>') is written last. See README.md.
 #>
 param(
   [ValidateSet('Desktop', 'DisposableBox')][string]$Mode = 'Desktop',
-  [string[]]$Probes = @('1', '2', '3'),
-  [switch]$Detach
+  [string[]]$Probes = @('1', '2', '3')
 )
-
-# --- -Detach: survive a dropped SSH session -------------------------------------------
-# The second desktop run lost its SSH session mid-run (client_loop: send disconnect: Broken
-# pipe), so Probe 3 never ran and the teardown was partial. -Detach starts the real run
-# through WMI (Win32_Process.Create), whose child is not in the SSH session's process tree,
-# writes its transcript to probe-<ts>-<id>.log, and writes probe-<ts>-<id>.done last. The marker
-# is 'DONE exit=<n>' (+ ' error=<message>' when the run threw or was refused) and is written in a
-# finally, so it always appears; exit=0 only when the script itself returned 0. The detached
-# process checks its OWN elevation first and refuses (exit 2, before anything changes) when it is
-# not elevated, with the refusal in the marker. This invocation changes nothing else on the machine
-# and returns at once; poll the .done file. Run it from the same elevated session: the detached
-# process is EXPECTED to inherit that token (unobserved until the refusal check says so). No
-# -Detach: run in the foreground from a console PowerShell, as the README says.
-if ($Detach) {
-  $id = (New-Guid).ToString('N').Substring(0, 8)                 # seconds alone can collide; the id cannot
-  $ts = (Get-Date).ToUniversalTime().ToString('yyyyMMdd\THHmmss\Z') + "-$id"
-  $dir = (Get-Location).Path
-  $log = Join-Path $dir "probe-$ts.log"
-  $done = Join-Path $dir "probe-$ts.done"
-  $q = { param($s) $s.Replace("'", "''") }       # single-quote-safe paths
-  $inner = @'
-$global:LASTEXITCODE = $null; $rc = 1; $err = $null
-try {
-  $me = [Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()
-  if (-not $me.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)) { $rc = 2; $err = 'REFUSED: detached run is not elevated; nothing was changed' }
-  else {
-    & '@@SCRIPT@@' -Mode '@@MODE@@' -Probes '@@PROBES@@' *> '@@LOG@@'
-    if ($null -eq $global:LASTEXITCODE) { $rc = 1; $err = 'script returned without an exit code' } else { $rc = $global:LASTEXITCODE }
-  }
-} catch { $rc = 1; $err = $_.Exception.Message }
-finally { ('DONE exit=' + $rc + $(if ($err) { ' error=' + ($err -replace '\s+', ' ') })) | Set-Content -Encoding ascii '@@DONE@@' }
-'@
-  $inner = $inner.Replace('@@SCRIPT@@', (& $q $PSCommandPath)).Replace('@@MODE@@', $Mode).Replace('@@PROBES@@', ($Probes -join ',')).
-    Replace('@@LOG@@', (& $q $log)).Replace('@@DONE@@', (& $q $done))
-  $enc = [Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes($inner))
-  $psExe = (Get-Process -Id $PID).Path
-  $r = Invoke-CimMethod -ClassName Win32_Process -MethodName Create -Arguments @{
-    CommandLine = "`"$psExe`" -NoProfile -ExecutionPolicy Bypass -EncodedCommand $enc"; CurrentDirectory = $dir }
-  if ($r.ReturnValue -ne 0) { "DETACH: FAILED - Win32_Process.Create returned $($r.ReturnValue); nothing was started. Run in the foreground instead."; exit 2 }
-  "DETACH: started pid=$($r.ProcessId); transcript=$log; done marker=$done (appears when the run ends; output.txt is written next to them)"
-  exit 0
-}
 
 # --- output.txt: environment stamps and the BEFORE/AFTER state -------------------------
 # Lives in the current directory, NOT under $probeRoot (the teardown deletes that).
@@ -888,7 +841,8 @@ try {
       # example.com failing to resolve (exit=6) only shows DNS failed, not that packets are dropped. The 'ip'
       # curl connects to a literal public IP (no DNS), so it is the off-box packet test; the outer control
       # below proves this machine can reach that IP, or an inside failure would prove nothing.
-      curl.exe -sS -m 5 -o NUL http://1.1.1.1/ 2>$null
+      # cmd /c keeps curl's stderr out of PowerShell: under $ErrorActionPreference='Stop' on PS 5.1, 2>$null on a native command can throw.
+      cmd.exe /c 'curl.exe -sS -m 5 -o NUL http://1.1.1.1/ 2>nul'
       $outsideIpRc = $LASTEXITCODE
       foreach ($c in @(@('8899',    'curl.exe -sS -m 5 http://127.0.0.1:8899/'),      # MUST succeed, or Phase 1 is dead
                        @('example', 'curl.exe -sS -m 5 https://example.com/'),        # MUST fail (Block Outbound Default Rule)
@@ -907,6 +861,9 @@ try {
         }
       }
       $log1 | ForEach-Object { "inside(1): $_" }
+      # The ip step is scored on its own line: its fault must not unscore the rest of Probe 1.
+      $faultIp = @($fault1 -cmatch '^ip ')
+      $fault1 = @($fault1 -cnotmatch '^ip ')
       # The agent binds its own listener: python binds 127.0.0.1:9998, listens, prints one line
       # and exits, so the claim (bind + listen inside, outbound-only scope below) is its exit code
       # and nothing is left running to reap. A per-user python (e.g. under %LOCALAPPDATA%\Programs)
@@ -959,12 +916,15 @@ try {
       } else {
         "VERDICT(1): 8899 reached; read example.com (MUST fail) and 9999 (against its outside control) from the inside(1) lines above, per the doc's Probe 1 rules"
         # Off-box packets: scored only against the outer control. curl exit 0 means ANY reply came back
-        # (even an HTTP error page), 7 is connection refused or unreachable, 28 a timeout (SYN dropped).
+        # (even an HTTP error page): reached. 7 is an immediate connect failure: the only BLOCKED score.
+        # 28 is a timeout: a slow network looks the same, so it is INCONCLUSIVE, never a kernel block.
         $insideIp = @(@($log1) -cmatch '^ip exit=')
         if ($outsideIpRc -ne 0) { "VERDICT(1-ip): not scored - the outer control to 1.1.1.1 failed (curl exit $outsideIpRc), so this machine has no route to prove a drop" }
+        elseif ($faultIp.Count) { "VERDICT(1-ip): not scored - $($faultIp -join '; ')" }
         elseif ($insideIp.Count -ne 1) { "VERDICT(1-ip): not scored - the inside ip curl recorded $($insideIp.Count) 'ip exit=' lines, not 1" }
         elseif ($insideIp[0] -ceq 'ip exit=0') { "VERDICT(1-ip): OFF-BOX LEAK - the container reached 1.1.1.1 ($($insideIp[0])); the fence does not drop off-box packets" }
-        elseif ($insideIp[0] -cmatch '^ip exit=(7|28)$') { "VERDICT(1-ip): OFF-BOX EGRESS BLOCKED - the outer control reached 1.1.1.1, the container did not ($($insideIp[0]))" }
+        elseif ($insideIp[0] -ceq 'ip exit=7') { "VERDICT(1-ip): OFF-BOX EGRESS BLOCKED - the outer control reached 1.1.1.1, the container's connect failed at once ($($insideIp[0]))" }
+        elseif ($insideIp[0] -ceq 'ip exit=28') { "VERDICT(1-ip): INCONCLUSIVE - the container's curl to 1.1.1.1 timed out ($($insideIp[0])); a timeout is not a block (a slow network looks the same)" }
         else { "VERDICT(1-ip): INDETERMINATE - the container's curl to 1.1.1.1 ended $($insideIp[0]); read the inside(1) lines" }
       }
     }

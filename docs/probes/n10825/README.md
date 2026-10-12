@@ -22,8 +22,8 @@ assembled yet, and on `-Mode Desktop` it refuses the DISPOSABLE-BOX ONLY probes 
 - `python` and `curl.exe` on `PATH` (Probe 1). Nothing is installed or downloaded in Desktop mode.
 - Ports 8899, 9999 and 9998 free (else Probe 1 records SETUP-FAULT and is not run).
 - Let it finish: the global teardown runs in a `finally`. Do not press Ctrl+C (see "If the
-  run was interrupted"). Over SSH, pass `-Detach` (step 4) so a dropped session cannot end
-  the run; from a console PowerShell, run it in the foreground.
+  run was interrupted"). Over SSH, start it with `Start-Process` (step 4) so a dropped session
+  cannot end the run; from a console PowerShell, run it in the foreground.
 - 64-bit `powershell.exe` (the default). The script refuses a 32-bit host.
 
 ## Operator commands
@@ -60,25 +60,19 @@ assembled yet, and on `-Mode Desktop` it refuses the DISPOSABLE-BOX ONLY probes 
    Replace `<ts>` with a UTC timestamp, e.g. `probe-20260928T1200Z.log`. The run takes a
    few minutes and writes `output.txt` in the same directory.
 
-   **Over SSH, use `-Detach`** (the second desktop run lost its session mid-run):
+   **Over SSH**, start the run detached from the session (the second desktop run lost its
+   session mid-run), from an **elevated** session, in the folder holding `run-probe.ps1`:
 
    ```powershell
-   powershell -NoProfile -ExecutionPolicy Bypass -File run-probe.ps1 -Mode Desktop -Probes 1,2,3 -Detach
+   Start-Process powershell -ArgumentList '-NoProfile','-ExecutionPolicy','Bypass','-File','run-probe.ps1','-Mode','Desktop','-Probes','1,2,3' -WindowStyle Hidden
    ```
 
-   It starts the run through WMI, prints `DETACH: started pid=...` and returns. The run writes
-   `probe-<ts>-<id>.log` and `output.txt` in the current directory, and `probe-<ts>-<id>.done` last
-   (`<ts>` has second resolution and `<id>` is random, so two runs never share a file). Wait for the
-   `.done` file. It is written in a `finally`, so it always appears, and reads `DONE exit=<n>`, plus
-   ` error=<message>` when the run threw or was refused. **`exit=0` means the script itself returned
-   0** (`RUN: COMPLETE`); any other value, or an `error=`, means it did not. The detached process is
-   expected to inherit your elevated token and is not a child of the SSH session. It checks its own
-   elevation first: if it is not elevated it refuses with `DONE exit=2 error=REFUSED: detached run
-   is not elevated; nothing was changed` and has changed nothing. A `DETACH: FAILED` line means
-   nothing was started. `-Detach` is untested on Windows: if no `probe-<ts>-<id>.log` appears, run in
-   the foreground from a console PowerShell instead.
+   The child inherits the session's token, so start it from an elevated session; `output.txt`
+   records `elevated=`, which shows whether it was. The working directory is the script's folder.
+   Then poll `output.txt` for the final `RUN:` line: the script writes it last, so it is the
+   completion signal. No `RUN:` line means the run has not finished or was cut short.
 
-5. Bring back both `probe-<ts>.log` (the full transcript) and `output.txt`.
+5. Bring back `output.txt` and, for a foreground run, `probe-<ts>.log` (the full transcript).
 
 ## Reading the result
 
@@ -131,9 +125,9 @@ The transcript carries the verdicts: `LAUNCHER-ENV:`, `LIMITED-TOKEN:`,
   `495f2b44`). Probe 1's pivot PASSED (loopback reached, off-box did not resolve), Probe 2
   answered (no admin), Probe 1's 9998 bind + listen is an open SETUP-FAULT (python not on the
   container's PATH) and the SSH drop cut the run before Probe 3. This revision runs python by
-  absolute path with a package-SID grant, and adds `-Detach`. Its off-box claim was too strong:
+  absolute path with a package-SID grant, and (round 3) documents a `Start-Process` recipe for SSH. Its off-box claim was too strong:
   `exit=6` shows name resolution failed, not that packets are dropped. Round 2 adds a literal-IP
-  `curl` to 1.1.1.1, scored as `VERDICT(1-ip)` against an outer control.
+  `curl` to 1.1.1.1, scored as `VERDICT(1-ip)` against an outer control. Only an immediate connect failure (curl exit 7) is BLOCKED; a timeout (exit 28) is INCONCLUSIVE; any reply is reached. The step is scored on its own line.
 
 ## If the run was interrupted
 
