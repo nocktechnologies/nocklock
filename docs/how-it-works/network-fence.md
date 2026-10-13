@@ -1,6 +1,6 @@
 # Network fence
 
-Citations are `file:line` at `origin/main` 89c02fa. The boundary table and limits follow `README.md` ("What network fence active means").
+Citations name source files at `origin/main` 89c02fa (no line numbers, so they do not go stale). The boundary table and limits follow `README.md` ("What network fence active means").
 
 ## Default: local proxy with a domain allowlist
 `wrap` starts a local HTTP/HTTPS proxy (`internal/cli/wrap.go`, `internal/fence/network/proxy.go`) and routes the child through it. Hostnames are checked against `network.allow`; blocked requests get a 403 and a `network_blocked` row. For HTTPS only the hostname is inspected (CONNECT, `internal/fence/network/connect.go`): no certificate injection and no decryption. Private ranges are blocked unless `--allow-private-ranges` (`proxy.go`). If the proxy is not healthy, the agent does not start.

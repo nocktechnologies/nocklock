@@ -1,6 +1,6 @@
 # Syscall fence
 
-Citations are `file:line` at `origin/main` 89c02fa.
+Citations name source files at `origin/main` 89c02fa (no line numbers, so they do not go stale).
 
 ## Linux: seccomp filter
 - Config: `[syscall] enforcement = "required" | "preferred" | "off"` (default `required`), `allow_namespaces` (default false), `socket_families` (default `unix`, `inet`, `inet6`).

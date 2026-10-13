@@ -1,6 +1,6 @@
 # Runbook: incident (a fence failed, or may have)
 
-Citations are `file:line` at `origin/main` 89c02fa. Evidence first, then containment, then fix. Do not "fix" by weakening a fence.
+Citations name source files at `origin/main` 89c02fa (no line numbers, so they do not go stale). Evidence first, then containment, then fix. Do not "fix" by weakening a fence.
 
 ## Triage: which kind?
 | Symptom | Likely cause | First move |

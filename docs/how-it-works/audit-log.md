@@ -1,6 +1,6 @@
 # Audit log
 
-Citations are `file:line` at `origin/main` 89c02fa. Wording of limits follows `README.md` ("Tamper-evident audit log", "Signed audit log", "External chain-head anchor", "Event log").
+Citations name source files at `origin/main` 89c02fa (no line numbers, so they do not go stale). Wording of limits follows `README.md` ("Tamper-evident audit log", "Signed audit log", "External chain-head anchor", "Event log").
 
 ## What is recorded
 Most fence decisions are a row in a SQLite `events` table (`internal/logging/logger.go`): secret, file, network, proxy, session, config and filesystem-fence-state events (`logger.go`). Each row carries a SHA-256 hash linked to the previous row (v1). Query with `nocklock log`, `log --blocked`, `log --stats`, `status`. `log --prune <age>` compacts and re-anchors the chain (`internal/cli/log.go`, `logger.go`).
