@@ -4,6 +4,10 @@ All notable changes to NockLock will be documented in this file.
 
 ## [Unreleased]
 
+### Breaking
+
+- Linux `CONFINED` below Landlock ABI 9 (every kernel we have tested): `nocklock doctor` now reports the Unix-socket boundary as unavailable and returns `PARTIAL` (exit 3) where v0.8.0 returned `PROTECTED` (exit 0). Automation that fails on any non-zero `doctor` exit will fail on these kernels. That is intended: Unix sockets are reachable there. Set `network.require_unix_socket_isolation = true` to make `wrap` refuse instead.
+
 ### Changed
 
 - Red-team bench hardening (N11676): a verifier, version or process-group cleanup fault after scoring now fails the run (`no_harness_fault_after_scoring`); a nonzero NockGuard proxy exit at shutdown is a HARNESS-FAULT; the raw-socket and DNS attacks exit 42 when refused, so Python's own exit 1 (an uncaught exception) is a fault, not a block; datagrams already queued at the sink when an attack's deadline passes are counted before scoring. Test fixes: the interrupt test now requires the attack to have started, and the symlink-plant test checks the victim file while it still exists.
