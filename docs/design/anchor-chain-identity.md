@@ -25,6 +25,10 @@ The store owns one latest anchor per verified pair. Registration of a new pair i
 
 Remote verification first authenticates the anchor and compares its signed pair with the trusted local pair. Only then does it apply the existing row-count and head-at-count checks in `internal/logging/anchor.go`: fewer local rows means `TRUNCATION`, a different head at the anchored count means tampering, and a matching prefix passes. A 404, unsupported endpoint, store error, absent trusted ID, malformed record, forged signature, or identity mismatch exits non-zero. `wrap`'s off-box push can retain its current warning and fail-open session-exit behavior, but it must never report a successful push on a conflict (`internal/cli/anchor_push.go`).
 
+## Prune on an enrolled chain
+
+`nocklock log --prune` (`internal/cli/log.go`, `internal/logging/logger.go`) rewrites the chain and lowers its `row_count`, so a pruned chain can neither satisfy the store's monotonic rule nor reproduce the previous remote head. Phase 2 therefore **refuses** `log --prune` on a v2-enrolled chain, with an actionable error naming the remote pin, until a separate prune-epoch transition is designed and gated. That transition would be a signed anchor carrying the previous anchor's snapshot digest and the authenticated prune boundary, accepted only as an explicit operator-acknowledged compare-and-swap. Refusing keeps the rollback pin fail-closed instead of locking it for good; a pruned chain is never silently re-pinned. Legacy v1 chains keep today's behavior (prune invalidates earlier anchors, `verify` prints a `NOTE`).
+
 ## Compatibility and explicit migration
 
 | Client / store | Required behavior |
@@ -57,6 +61,7 @@ Use a disposable HOME/XDG state/config and a contract-compatible local HTTP stor
 | Swapped project anchor | Return B's valid signed anchor for A's URL, including a case where B has more rows. A fails identity verification, not `TRUNCATION`; B still verifies. Also reject URL/body pair disagreement at the server. |
 | Missing or unreachable anchor | V2 remote verification exits non-zero as unavailable; ordinary push cannot recreate a missing enrolled slot. There is no local-only success fallback. |
 | Legacy and migration | V1 signature verification still works explicitly. New client against old store fails without downgrade; old client against new store retains v1 behavior only before that key has a v2 stream, then fails on the frozen v1 route. Wrong-project, truncated, divergent, stale-digest, and duplicate-claim migrations fail with legacy and v2 rows unchanged. The correct explicit migration succeeds, freezes ordinary v1 access, and v2 verification passes. An existing unanchored DB enrolls only through the acknowledged one-time path; ordinary push/verify never invents its ID. |
+| Prune after anchor | `log --prune` on an enrolled v2 chain is refused before any row changes, with the DB and remote pin unchanged; B is unaffected. The same command on an unenrolled/legacy chain still prunes. |
 | Rename, move, or clone | Moving DB and identity record preserves the pair and verification, including a legacy DB located inside the project with its identity record in trusted external state. Missing identity record fails. A deliberate fork gets a new ID; an accidental copied ID with divergent history conflicts instead of replacing the first stream. |
 
 The current one-chain-per-key limitation and workaround remain in `docs/how-it-works/audit-log.md` and `docs/reference/cli.md` until the protocol, client, and server changes have shipped and passed these tests.
