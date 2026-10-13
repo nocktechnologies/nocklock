@@ -3,12 +3,15 @@
 package syscallfence
 
 import (
+	"context"
+	"errors"
 	"net"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"strconv"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
 
@@ -28,9 +31,13 @@ import (
 // host they do not build (linux tag); they run on the Linux CI runner.
 
 const (
-	scenarioEnv     = "NOCKLOCK_SCFENCE_SCENARIO"
-	ioUringProbeEnv = "NOCKLOCK_SCFENCE_IO_URING_PROBE"
-	ioUringPortEnv  = "NOCKLOCK_SCFENCE_IO_URING_PORT"
+	scenarioEnv                   = "NOCKLOCK_SCFENCE_SCENARIO"
+	ioUringProbeEnv               = "NOCKLOCK_SCFENCE_IO_URING_PROBE"
+	ioUringPortEnv                = "NOCKLOCK_SCFENCE_IO_URING_PORT"
+	ioUringProbeTimeout           = 5 * time.Second
+	ioUringProbeExitSetupEPERM    = 10
+	ioUringProbeExitSetupENOSYS   = 11
+	ioUringProbeExitSocketFailure = 14
 )
 
 // TestMain intercepts helper-subprocess invocations before the test framework
@@ -221,8 +228,9 @@ func runScenario(scenario string) int {
 		if probe == "" || port == "" {
 			return exitOtherErrno
 		}
-		cmd := exec.Command(probe, port)
-		output, err := cmd.CombinedOutput()
+		ctx, cancel := context.WithTimeout(context.Background(), ioUringProbeTimeout)
+		defer cancel()
+		output, err := runProbeCommand(ctx, probe, port)
 		if len(output) > 0 {
 			_, _ = os.Stdout.Write(output)
 		}
@@ -231,9 +239,9 @@ func runScenario(scenario string) int {
 		}
 		if exitErr, ok := err.(*exec.ExitError); ok {
 			switch exitErr.ExitCode() {
-			case 10:
+			case ioUringProbeExitSetupEPERM:
 				return exitDeniedEPERM
-			case 11:
+			case ioUringProbeExitSetupENOSYS:
 				return exitDeniedENOSYS
 			}
 		}
@@ -433,6 +441,9 @@ func TestEnforce_IORingSocketConnectDenied(t *testing.T) {
 	probe := filepath.Join(t.TempDir(), "io_uring_probe")
 	build := exec.Command(cc, "-O2", "-Wall", "-Wextra", "-Werror", "-o", probe, filepath.Join("testdata", "io_uring_probe.c"))
 	if output, err := build.CombinedOutput(); err != nil {
+		if missingIoUringHeader(output) {
+			t.Skipf("C compiler %q cannot find linux/io_uring.h: %s", cc, strings.TrimSpace(string(output)))
+		}
 		t.Fatalf("build raw io_uring probe: %v\n%s", err, output)
 	}
 
@@ -445,11 +456,22 @@ func TestEnforce_IORingSocketConnectDenied(t *testing.T) {
 		t.Skipf("cannot bind local io_uring control listener: %v", err)
 	}
 	_ = controlListener.SetDeadline(time.Now().Add(5 * time.Second))
-	controlCmd := exec.Command(probe, strconv.Itoa(controlListener.Addr().(*net.TCPAddr).Port))
-	controlOutput, controlErr := controlCmd.CombinedOutput()
+	controlCtx, cancelControl := context.WithTimeout(context.Background(), ioUringProbeTimeout)
+	controlOutput, controlErr := runProbeCommand(controlCtx, probe, strconv.Itoa(controlListener.Addr().(*net.TCPAddr).Port))
+	cancelControl()
 	if controlErr != nil {
 		controlListener.Close()
-		t.Skipf("ambient io_uring control is unavailable: %v\n%s", controlErr, controlOutput)
+		if errors.Is(controlErr, context.DeadlineExceeded) {
+			t.Fatalf("ambient io_uring control probe timed out after %s: %v\n%s", ioUringProbeTimeout, controlErr, controlOutput)
+		}
+		var exitErr *exec.ExitError
+		if errors.As(controlErr, &exitErr) {
+			switch exitErr.ExitCode() {
+			case ioUringProbeExitSetupEPERM, ioUringProbeExitSetupENOSYS, ioUringProbeExitSocketFailure:
+				t.Skipf("ambient io_uring control is unavailable (probe exit %d): %s", exitErr.ExitCode(), strings.TrimSpace(string(controlOutput)))
+			}
+		}
+		t.Fatalf("ambient io_uring control probe failed unexpectedly: %v\n%s", controlErr, controlOutput)
 	}
 	controlConn, err := controlListener.AcceptTCP()
 	controlListener.Close()
@@ -479,6 +501,72 @@ func TestEnforce_IORingSocketConnectDenied(t *testing.T) {
 	if code != exitDeniedEPERM {
 		t.Errorf("io_uring_setup under syscall fence: exit %d, want EPERM(%d)", code, exitDeniedEPERM)
 	}
+}
+
+func TestRunProbeCommandKillsProcessGroupOnTimeout(t *testing.T) {
+	marker := filepath.Join(t.TempDir(), "orphan-survived")
+	script := `(sleep 2; printf leaked > "$1") & echo started; wait`
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	output, err := runProbeCommand(ctx, "sh", "-c", script, "io_uring-probe", marker)
+	cancel()
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("runProbeCommand error = %v, want context deadline exceeded; output: %s", err, output)
+	}
+	if !strings.Contains(string(output), "started") {
+		t.Fatalf("probe did not start before its deadline: %s", output)
+	}
+	time.Sleep(1200 * time.Millisecond)
+	if _, err := os.Stat(marker); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("probe child survived timeout and wrote marker (stat error: %v)", err)
+	}
+}
+
+func TestMissingIoUringHeaderDiagnostic(t *testing.T) {
+	for name, diagnostic := range map[string]string{
+		"gcc":   "test.c:1:10: fatal error: linux/io_uring.h: No such file or directory",
+		"clang": "test.c:1:10: fatal error: 'linux/io_uring.h' file not found",
+		"included header missing": "In file included from test.c:4:\n" +
+			"/usr/include/linux/io_uring.h:15:10: fatal error: linux/time_types.h: No such file or directory",
+		"other header":    "test.c:1:10: fatal error: linux/types.h: No such file or directory",
+		"unrelated error": "test.c:1: expected expression",
+	} {
+		t.Run(name, func(t *testing.T) {
+			want := name == "gcc" || name == "clang"
+			if got := missingIoUringHeader([]byte(diagnostic)); got != want {
+				t.Fatalf("missingIoUringHeader(%q) = %t", diagnostic, got)
+			}
+		})
+	}
+}
+
+func missingIoUringHeader(output []byte) bool {
+	for _, line := range strings.Split(string(output), "\n") {
+		if !strings.Contains(line, "fatal error:") {
+			continue
+		}
+		if strings.Contains(line, "linux/io_uring.h: No such file or directory") ||
+			strings.Contains(line, "'linux/io_uring.h' file not found") {
+			return true
+		}
+	}
+	return false
+}
+
+func runProbeCommand(ctx context.Context, executable string, args ...string) ([]byte, error) {
+	cmd := exec.CommandContext(ctx, executable, args...)
+	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	cmd.Cancel = func() error {
+		if cmd.Process != nil {
+			_ = syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
+		}
+		return nil
+	}
+	cmd.WaitDelay = time.Second
+	output, err := cmd.CombinedOutput()
+	if ctx.Err() != nil {
+		return output, ctx.Err()
+	}
+	return output, err
 }
 
 func TestEnforce_PthreadCreateStillWorks(t *testing.T) {
