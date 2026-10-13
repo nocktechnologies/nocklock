@@ -4,6 +4,10 @@ All notable changes to NockLock will be documented in this file.
 
 ## [Unreleased]
 
+### Documentation
+
+- Add "Replacing the signing key" to `docs/how-it-works/audit-log.md`: what `wrap` and `verify` do after the managed key moves aside, how to archive the old log and public key so old rows still verify, and the limits (N11718).
+
 ### Security
 
 - Protect the managed Ed25519 signing-key directory from fenced children even when `XDG_CONFIG_HOME` relocates it outside `~/.config`. Linux Landlock refuses an overlapping filesystem grant; macOS denies the canonical key directory and prevents renaming sensitive-path ancestors to move protected files outside their deny rules. Parent signing and normal project reads/writes remain available.

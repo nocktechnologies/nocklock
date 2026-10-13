@@ -21,6 +21,33 @@ Anchors use a distinct domain-separation byte (`0x05`; rows `0x01`, head `0x03`)
 ## Where the log lives
 Outside the project: `$XDG_STATE_HOME/nocklock/<project-key>/` (or `~/.local/state/nocklock/<project-key>/`). The filesystem fence grants the project root and Landlock cannot exclude a path beneath a grant, so a log inside the project would be editable by the agent. An existing `.nock/events.db` stays where it is (the README explains why NockLock does not move it). Path resolution fails closed (`internal/config/state.go`); `wrap` refuses to start when `logging.db` resolves to the project root. Decision record: `docs/decisions/010-audit-state-outside-project.md`.
 
+## Replacing the signing key
+Use this when the managed key (`~/.config/nocklock/signing-ed25519.key`, or under `$XDG_CONFIG_HOME`) may have been read by something other than NockLock. There is no `rotate` command; the procedure below uses `mv` and `verify --export-pubkey`.
+
+**What happens if you only move the key aside** (observed on Linux, v0.9.0 source plus #187):
+- `wrap` refuses to start: `failed to load signing key: lstat ...: no such file or directory`. It does not fall through to unsigned logging.
+- `nocklock verify --export-pubkey` creates a new key when none exists. After that, `wrap` still refuses: `audit log signing key does not match the adopted public key fingerprint; refusing to write`.
+- `verify --audit` against the old log with the new key reports `FORGED` (`chain_head signing public key fingerprint does not match the supplied key`), exit `1`. Rows signed by the old key are not wrong; they are being checked against the wrong key.
+
+So the old log and the new key cannot share a database. The log must be archived and a new one started. The key is per user, not per project: every project's log under `$XDG_STATE_HOME/nocklock/` has adopted the old key's fingerprint, so repeat steps 3 and 6 for each project you still use.
+
+**Procedure**
+1. Record the old public key off-box, before changing anything: `nocklock verify --export-pubkey > old.pub`. It is a public key; keep it somewhere the agent cannot write. Without it you cannot check old rows once the old key file is gone.
+2. Stop running wrapped sessions.
+3. Archive each project's log. Use `umask 077` (NockLock refuses state directories that are group- or world-writable) and keep the `<root>/nocklock/<project-key>/` layout; `nocklock status` prints the `Event log:` path. Move `events.db`, any `events.db-wal` and `events.db-shm`, and `chain-anchor.json` by name into `<archive-root>/nocklock/<project-key>/`.
+4. Move the old key aside by name: `mv ~/.config/nocklock/signing-ed25519.key <somewhere-private>/old-signing-ed25519.key`. Once the exposure is dealt with, remove that file by its exact path; the old public key is enough to verify old rows.
+5. Create the new key and record its public half: `nocklock verify --export-pubkey > new.pub`.
+6. Run `nocklock wrap` as usual. It opens a new log and adopts the new key.
+
+**Checking later**
+- New rows: `nocklock verify --audit --ed25519-pub "$(cut -d' ' -f2 new.pub)"` prints `AUTHENTIC`.
+- Old rows: point `XDG_STATE_HOME` at the archive root (its `nocklock/` directory and the project directory must be mode 0700): `XDG_STATE_HOME=<archive-root> nocklock verify --audit --ed25519-pub "$(cut -d' ' -f2 old.pub)"` prints `AUTHENTIC`. The same command with the new key, or with no `--ed25519-pub`, prints `FORGED`. `verify --against-anchor <archive-root>/nocklock/<project-key>/chain-anchor.json --ed25519-pub <old>` prints `ANCHOR: OK`.
+
+**Limits**
+- Replacing the key does not repair history. Rows signed while the key was exposed no longer prove the agent did not write them (see the v0.9.1 CHANGELOG entry). `AUTHENTIC` against the old key only proves the rows were signed by whoever held it.
+- The new log is a fresh chain. Nothing binds it to the archived one, so deleting the archive is undetectable from the new log.
+- If you push anchors with `NOCKLOCK_ANCHOR_URL`, the receiving server was given the old public key with each anchor. How a server treats the new key was not tested.
+
 ## Forwarding to Command (opt-in)
 `[audit.forward]` sends committed decisions to Command's ops log from a bounded, non-durable queue (`internal/forward/forward.go`). Failures never change a decision or remove a local row. Both the URL and the key come from the operator environment.
 
