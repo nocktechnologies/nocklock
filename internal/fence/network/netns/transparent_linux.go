@@ -277,6 +277,8 @@ func dropProxyIdentity() error {
 	if os.Geteuid() == 0 || os.Getegid() == 0 {
 		return fmt.Errorf("transparent proxy credential did not drop to uid/gid %d", proxyUID)
 	}
+	// PR_SET_NO_NEW_PRIVS is per-thread. This is defense in depth for the
+	// calling thread; neither proxy forks or execs after dropping identity.
 	if err := unix.Prctl(unix.PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0); err != nil {
 		return fmt.Errorf("latch transparent proxy no_new_privs: %w", err)
 	}

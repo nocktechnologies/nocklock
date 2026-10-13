@@ -10,7 +10,7 @@ All notable changes to NockLock will be documented in this file.
 
 ### Security
 
-- Linux netns proxy sidecars now clear supplementary groups process-wide before dropping to uid/gid 65534. Previously, `__netns-proxy` and `__netns-host-proxy` could retain the root launcher's supplementary groups on other Go threads, preserving group-based file access in the proxy process. The affected source tags are v0.5.0 through v0.9.2.
+- Linux netns proxy sidecars now clear supplementary groups process-wide before dropping to uid/gid 65534. Previously, `__netns-proxy` and `__netns-host-proxy` could retain the root launcher's supplementary groups on other Go threads. The affected source tags are v0.5.0 through v0.9.2.
 
 ### Fixed
 

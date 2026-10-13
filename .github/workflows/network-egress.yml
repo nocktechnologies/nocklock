@@ -208,6 +208,11 @@ jobs:
           go-version-file: go.mod
           cache: true
 
+      - name: provision iproute2 for host-proxy test address
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y iproute2
+
       # Compile as the runner user so root never writes into the persisted Go
       # build/module cache. The test re-execs this binary as the real
       # __netns-proxy sidecar.
@@ -215,10 +220,10 @@ jobs:
         run: go test -c -o netns.test ./internal/fence/network/netns/
 
       # This is deliberately the only path that enables the root test. It seeds
-      # a nonempty group, starts the sidecar as root, then checks Groups for
-      # every /proc/<pid>/task/*/status after the uid/gid drop.
+      # a nonempty group, starts both sidecars as root, then checks Groups for
+      # every /proc/<pid>/task/*/status after the identity drop.
       - name: run proxy supplementary-groups proof as root (skips forbidden)
-        run: sudo env NOCKLOCK_PROXY_GROUPS_REQUIRE=1 ./netns.test -test.run '^TestTransparentProxyDropsSupplementaryGroupsEveryThread$' -test.v -test.count=1
+        run: sudo env NOCKLOCK_PROXY_GROUPS_REQUIRE=1 ./netns.test -test.run '^TestProxySidecarsDropSupplementaryGroupsEveryThread$' -test.v -test.count=1
 
   netns-egress-audit:
     name: netns egress decision audit · signed rows via `nocklock wrap` (root)

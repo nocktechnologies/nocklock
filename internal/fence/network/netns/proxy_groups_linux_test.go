@@ -20,11 +20,11 @@ import (
 
 const proxyGroupsRequireEnv = "NOCKLOCK_PROXY_GROUPS_REQUIRE"
 
-// TestTransparentProxyDropsSupplementaryGroupsEveryThread starts the real
-// transparent-proxy sidecar as root and checks every task after its identity
-// drop. It only runs in the dedicated root CI job so ordinary tests on a seat
-// host never start a privileged sidecar.
-func TestTransparentProxyDropsSupplementaryGroupsEveryThread(t *testing.T) {
+// TestProxySidecarsDropSupplementaryGroupsEveryThread starts both real proxy
+// sidecars as root and checks every task after their identity drops. It only
+// runs in the dedicated root CI job so ordinary tests on a seat host never
+// start a privileged sidecar.
+func TestProxySidecarsDropSupplementaryGroupsEveryThread(t *testing.T) {
 	if os.Getenv(proxyGroupsRequireEnv) != "1" {
 		t.Skipf("set %s=1 in the dedicated root CI job", proxyGroupsRequireEnv)
 	}
@@ -49,10 +49,28 @@ func TestTransparentProxyDropsSupplementaryGroupsEveryThread(t *testing.T) {
 		}
 	}
 
-	bridge, err := GenerateBridgeCandidate()
-	if err != nil {
-		t.Fatalf("generate sidecar bridge config: %v", err)
+	for _, sidecar := range []struct {
+		name       string
+		bindHostIP bool
+	}{
+		{name: "__netns-proxy"},
+		{name: "__netns-host-proxy", bindHostIP: true},
+	} {
+		t.Run(sidecar.name, func(t *testing.T) {
+			bridge, err := GenerateBridgeCandidate()
+			if err != nil {
+				t.Fatalf("generate sidecar bridge config: %v", err)
+			}
+			if sidecar.bindHostIP {
+				addProxyTestHostAddress(t, bridge.HostAddress)
+			}
+			startProxySidecarAndCheckGroups(t, sidecar.name, bridge)
+		})
 	}
+}
+
+func startProxySidecarAndCheckGroups(t *testing.T, name string, bridge BridgeSpec) {
+	t.Helper()
 	payload, err := json.Marshal(EgressConfig{Allow: []string{"example.com"}, Bridge: bridge})
 	if err != nil {
 		t.Fatalf("encode sidecar config: %v", err)
@@ -64,12 +82,12 @@ func TestTransparentProxyDropsSupplementaryGroupsEveryThread(t *testing.T) {
 	defer payloadReader.Close()
 	defer payloadWriter.Close()
 
-	cmd := exec.Command(os.Args[0], "__netns-proxy")
+	cmd := exec.Command(os.Args[0], name)
 	cmd.ExtraFiles = []*os.File{payloadReader}
 	var stderr bytes.Buffer
 	cmd.Stderr = &stderr
 	if err := cmd.Start(); err != nil {
-		t.Fatalf("start transparent-proxy sidecar as root: %v", err)
+		t.Fatalf("start %s sidecar as root: %v", name, err)
 	}
 	_ = payloadReader.Close()
 	if _, err := payloadWriter.Write(payload); err != nil {
@@ -90,7 +108,7 @@ func TestTransparentProxyDropsSupplementaryGroupsEveryThread(t *testing.T) {
 		<-waitDone
 	}()
 
-	if err := waitForProxyIdentityDrop(cmd.Process.Pid); err != nil {
+	if err := waitForProxyGroupDrop(cmd.Process.Pid); err != nil {
 		var waitErr error
 		select {
 		case waitErr = <-waitDone:
@@ -99,57 +117,68 @@ func TestTransparentProxyDropsSupplementaryGroupsEveryThread(t *testing.T) {
 			waitErr = <-waitDone
 		}
 		waited = true
-		if waitErr != nil {
-			t.Fatalf("sidecar did not drop supplementary groups: %v; sidecar exit: %v; stderr: %s", err, waitErr, strings.TrimSpace(stderr.String()))
-		}
-		t.Fatalf("sidecar did not drop supplementary groups: %v; stderr: %s", err, strings.TrimSpace(stderr.String()))
+		t.Fatalf("sidecar did not drop supplementary groups on every thread: %v; sidecar exit: %v; stderr: %s", err, waitErr, strings.TrimSpace(stderr.String()))
 	}
 
 	if err := cmd.Process.Signal(syscall.SIGTERM); err != nil {
-		t.Fatalf("stop transparent-proxy sidecar: %v", err)
+		t.Fatalf("stop %s sidecar: %v", name, err)
 	}
 	select {
 	case err := <-waitDone:
 		waited = true
 		if err != nil {
-			t.Fatalf("transparent-proxy sidecar exited after SIGTERM: %v; stderr: %s", err, strings.TrimSpace(stderr.String()))
+			t.Fatalf("%s sidecar exited after SIGTERM: %v; stderr: %s", name, err, strings.TrimSpace(stderr.String()))
 		}
 	case <-time.After(5 * time.Second):
 		_ = cmd.Process.Kill()
 		<-waitDone
 		waited = true
-		t.Fatal("transparent-proxy sidecar did not stop after SIGTERM")
+		t.Fatalf("%s sidecar did not stop after SIGTERM", name)
 	}
 }
 
-func waitForProxyIdentityDrop(pid int) error {
+func addProxyTestHostAddress(t *testing.T, address string) {
+	t.Helper()
+	args := []string{"address", "add", address + "/32", "dev", "lo"}
+	if output, err := exec.Command("ip", args...).CombinedOutput(); err != nil {
+		t.Fatalf("assign host-proxy test address with ip %s: %v: %s", strings.Join(args, " "), err, strings.TrimSpace(string(output)))
+	}
+	t.Cleanup(func() {
+		args := []string{"address", "del", address + "/32", "dev", "lo"}
+		if output, err := exec.Command("ip", args...).CombinedOutput(); err != nil {
+			t.Logf("remove host-proxy test address with ip %s: %v: %s", strings.Join(args, " "), err, strings.TrimSpace(string(output)))
+		}
+	})
+}
+
+func waitForProxyGroupDrop(pid int) error {
 	deadline := time.Now().Add(10 * time.Second)
 	cleanSamples := 0
 	for time.Now().Before(deadline) {
-		fields, err := readProcStatusFields(filepath.Join("/proc", strconv.Itoa(pid), "status"), "Uid")
+		uidFields, err := readProcStatusFields(filepath.Join("/proc", strconv.Itoa(pid), "status"), "Uid")
 		if err != nil {
 			if errors.Is(err, os.ErrNotExist) {
 				return fmt.Errorf("sidecar exited before identity drop")
 			}
 			return fmt.Errorf("read sidecar credentials: %w", err)
 		}
-		if len(fields) < 2 {
-			return fmt.Errorf("malformed sidecar Uid status: %v", fields)
+		if len(uidFields) < 2 {
+			return fmt.Errorf("malformed sidecar Uid status: %v", uidFields)
 		}
-		uid, err := strconv.Atoi(fields[1])
+		uid, err := strconv.Atoi(uidFields[1])
 		if err != nil {
-			return fmt.Errorf("parse sidecar effective uid %q: %w", fields[1], err)
+			return fmt.Errorf("parse sidecar effective uid %q: %w", uidFields[1], err)
 		}
-		gids, err := readProcStatusFields(filepath.Join("/proc", strconv.Itoa(pid), "status"), "Gid")
+		gidFields, err := readProcStatusFields(filepath.Join("/proc", strconv.Itoa(pid), "status"), "Gid")
 		if err != nil {
 			return fmt.Errorf("read sidecar gids: %w", err)
 		}
-		if len(gids) < 2 {
-			return fmt.Errorf("malformed sidecar Gid status: %v", gids)
+		if len(gidFields) < 2 {
+			return fmt.Errorf("malformed sidecar Gid status: %v", gidFields)
 		}
-		gid, err := strconv.Atoi(gids[1])
+		gid, err := strconv.Atoi(gidFields[1])
 		if err != nil {
-			return fmt.Errorf("parse sidecar effective gid %q: %w", gids[1], err)
+			return fmt.Errorf("parse sidecar effective gid %q: %w", gidFields[1], err)
 		}
 		if uid == proxyUID && gid == proxyUID {
 			tasks, err := readProcessTaskGroups(pid)
@@ -164,7 +193,7 @@ func waitForProxyIdentityDrop(pid int) error {
 					return nil
 				}
 			} else if err != nil && !errors.Is(err, os.ErrNotExist) {
-				return fmt.Errorf("read sidecar task groups: %w", err)
+				return fmt.Errorf("read sidecar task status: %w", err)
 			}
 		}
 		time.Sleep(25 * time.Millisecond)
@@ -178,22 +207,22 @@ func readProcessTaskGroups(pid int) (map[string][]string, error) {
 	if err != nil {
 		return nil, err
 	}
-	groups := make(map[string][]string, len(entries))
+	groupsByTask := make(map[string][]string, len(entries))
 	for _, entry := range entries {
 		if !entry.IsDir() {
 			continue
 		}
 		statusPath := filepath.Join(taskDir, entry.Name(), "status")
-		fields, err := readProcStatusFields(statusPath, "Groups")
+		groups, err := readProcStatusFields(statusPath, "Groups")
 		if errors.Is(err, os.ErrNotExist) {
 			continue
 		}
 		if err != nil {
 			return nil, err
 		}
-		groups[entry.Name()] = fields
+		groupsByTask[entry.Name()] = groups
 	}
-	return groups, nil
+	return groupsByTask, nil
 }
 
 func readProcStatusFields(path, field string) ([]string, error) {
