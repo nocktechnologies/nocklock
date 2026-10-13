@@ -120,7 +120,7 @@ Open an issue with:
 
 ## Security issues
 
-If you find a security vulnerability in NockLock, do not open a public issue. Follow [SECURITY.md](SECURITY.md) and email security@nocktechnologies.com instead.
+If you find a security vulnerability in NockLock, do not open a public issue. Follow [SECURITY.md](SECURITY.md) and email security@nocktechnologies.io instead.
 
 ## Feature requests
 
@@ -143,7 +143,7 @@ By contributing, you agree that your contributions will be licensed under the MI
 ## Questions
 
 - [GitHub Issues](https://github.com/nocktechnologies/nocklock/issues) for questions, bugs and feature requests
-- security@nocktechnologies.com for security issues
+- security@nocktechnologies.io for security issues
 
 Thanks for helping make AI agents safer for everyone.
 
