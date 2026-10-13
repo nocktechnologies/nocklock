@@ -16,6 +16,10 @@ All notable changes to NockLock will be documented in this file.
   signed Linux packet-drop observations in `docs/design/kernel-floor-denial-evidence.md`
   (N11634). Design only; no enforcement or audit behavior changed.
 
+### Security
+
+- The syscall fence now denies io_uring.
+
 ### Changed
 
 - `nocklock status` says "configured" instead of "active": it reads config and does not track running wrap sessions.
