@@ -23,7 +23,7 @@ nocklock init
 nocklock wrap -- claude
 ```
 
-Four commands and your agent is fenced. On macOS that is the whole install. On Linux the Homebrew formula builds only the `nocklock` binary, and the default config's `wrap` refuses to start without `libfence_fs.so`, so a source build also needs `libfence_fs.so` placed by hand (see `docs/setup.md`) until packaging lands (N11643).
+Four commands and your agent is fenced. On macOS that is the whole install. On Linux the Homebrew formula installs only the `nocklock` binary, and the default config's `wrap` refuses to start without `libfence_fs.so`. Until packaging lands (N11643, `docs/ROADMAP.md` bar 3), install from source: run `make build-all` as your user, then `sudo install -m 0755 nocklock /usr/local/bin/nocklock`, then copy `libfence_fs.so` to `/usr/local/lib/nocklock/` by hand (steps in `docs/setup.md`).
 
 **macOS and Claude Code:** Claude Code keeps a `claude.ai` login in the macOS login keychain, and the fence denies `~/Library/Keychains` (Seatbelt cannot scope to one keychain item, so NockLock does not open it). The login has to arrive through the environment, and the default secret fence blocks `*_TOKEN*`, so plain `nocklock init` strips an exported `CLAUDE_CODE_OAUTH_TOKEN`. Use the `claude-code` preset:
 
@@ -176,11 +176,13 @@ AUDIT: AUTHENTIC — 247 entries verified, 247 Ed25519-signed and valid, chain_h
 Head hash: fe48c7a11e02b9ebe9ba07eb7df01e1e3c5b18f3fcb31af8f0eb5d8b4f1e7a4c
 ```
 
-On the machine that signed the log, where the managed signing key is present, a clean run prints `AUTHENTIC`, as above. On a machine without that key (a copied log, or no `--ed25519-pub` supplied), or for a log that was never signed, the same intact chain prints the weaker verdict:
+Without `--ed25519-pub`, `verify --audit` uses the public half of the local managed key (`~/.config/nocklock/signing-ed25519.key`) when that file exists (`resolveVerifyPublicKey` in `internal/cli/verify.go`). A clean run on the signing machine therefore prints `AUTHENTIC` with no flag, as above, provided the log has signed rows and the signatures and `chain_head` signature check out against that key. The local key is not an independent anchor: it only shows the log was signed by the key on this host. On a machine without the key file (a copied log) and with no `--ed25519-pub`, or for a log that was never signed, the same intact chain prints the weaker verdict:
 
 ```
 AUDIT: CONSISTENT — 247 events verified, hash chain intact (not externally anchored)
 ```
+
+Supplying `--ed25519-pub` also declares that the log must be signed: a log with no signatures then prints `SUSPECT` and exits 1, where the local-key run would print `CONSISTENT`.
 
 This means the logged events have not been altered, deleted (except possibly the most recent), or reordered since they were recorded. An intentional compaction (`--prune`) re-anchors the chain and still verifies as consistent, but it is never silent: verify prints a `NOTE:` line that reports when the prune happened and how many events it removed. The chain is not externally anchored. An attacker with write access to the SQLite file can defeat this check by rewriting the chain and `chain_head` in the same transaction. A passing audit verification means the stored rows and their integrity metadata are internally consistent. It does not prove the history is authentic, or that NockLock itself recorded the entries.
 
@@ -487,7 +489,7 @@ Without the helper, the egress fence fails closed at runtime.
 Install the binary, then the helper:
 
 ```bash
-make install                                   # builds and installs the nocklock binary
+sudo install -m 0755 nocklock /usr/local/bin/nocklock   # after make build-all as your user
 sudo make install-egress-helper                # installs the root-owned helper + sudoers grant
 # or, to name the unprivileged wrap user explicitly:
 sudo NOCKLOCK_EGRESS_USER=<user> scripts/install-egress-helper.sh
