@@ -103,18 +103,23 @@ then   = "deny_egress"
 
 After the interposer reports a denied open, the proxy closes open tunnels and requests and denies new ones, each logged as a signed `network_blocked` row citing the rule and the trigger row. `wrap` refuses to start with a rule unless the egress level is `CONFINED`. Static binaries, raw syscalls and a cleared `LD_PRELOAD` bypass the interposer, so they never trip the rule. See `docs/design/look-back-rules.md`.
 
-Linux blocked accesses are logged to the event log (see "Event log" for where it lives). The macOS Seatbelt path records its fence state but does not yet emit one audit event per denied file; Seatbelt returns its native permission error. Blocked domains get a 403.
+On Linux, blocked file accesses the interposer sees are logged to the event log (see "Event log" for where it lives); the cases it misses are listed in [What the signed log proves](#what-the-signed-log-proves). On macOS, Seatbelt returns its native permission error and a best-effort tailer records file denials as `file_blocked` rows (see "Filesystem platform boundary"). Blocked domains get a 403.
 
-#### What is not logged
+### What the signed log proves
 
-The log is not a record of every allow or deny crossing. These produce no row:
+Kernel enforcement and event collection have different coverage. A signed, hash-chained log proves the integrity of the rows it holds. It does not prove that every attempt was observed. These produce no row:
 
 - Allowed file reads and writes.
-- File denials that bypass the interposer (static binaries, raw syscalls, a cleared `LD_PRELOAD`): the kernel denies them, but only interposed denials are logged, so file denials are logged only some of the time.
-- Packets dropped by the kernel floor (`KERNEL` egress): the nftables default-drop writes no per-attempt row.
-- `ADVISORY` egress: a client that ignores `HTTP_PROXY` never reaches the proxy, so the bypass is not seen.
-- Linux `CONFINED` AF_UNIX connects: the syscall fence does not restrict or observe them.
-- Secret use: secrets are logged once at startup as removed variable names, not when read.
+- File denials that bypass the Linux interposer (static binaries, raw syscalls, children that clear `LD_PRELOAD`). Where Landlock is engaged, the kernel still denies those opens but writes no row. Where Landlock is off or degraded, they are not denied either (see "Philosophy").
+- macOS file denials the unified log drops under load. Capture there is best effort.
+- Packets dropped by the kernel floor (the netns default-drop floor at `KERNEL` egress, and the Seatbelt network deny). No per-attempt row today (design card N11634).
+- Seccomp `socket()` denials. The filter returns a plain `EPERM` with no log action, so the child sees the error and no row is written (`internal/fence/syscallfence/seccomp_linux.go`).
+- The Seatbelt `mach-lookup` deny of `com.apple.mDNSResponder` and `com.apple.mDNSResponderHelper`. The denial tailer keeps only `file-*` operations (`internal/fence/fs/denylog.go`).
+- `ADVISORY` egress bypass. A client that ignores `HTTP_PROXY` never reaches the proxy, so the bypass is not seen.
+- Linux `CONFINED` AF_UNIX connects. The syscall fence does not restrict or observe them.
+- Secret use. Secrets are logged once at startup as removed variable names, not when read.
+
+A missing row is therefore not proof that nothing happened. Signed history proves what was recorded, not complete observation.
 
 ### Filesystem platform boundary
 
@@ -520,7 +525,7 @@ nocklock wrap -- your-custom-agent               # Anything
 
 ## Event log
 
-Fence decisions are recorded in an SQLite event log, but not all of them (see "What is not logged" below).
+Fence decisions are recorded in an SQLite event log, but not all of them (see [What the signed log proves](#what-the-signed-log-proves)).
 
 For a NEW project the log does **not** live in your project. It lives in
 NockLock's audit state directory,
@@ -610,7 +615,7 @@ A missing or unparseable `.nock/config.toml` also exits 2.
 
 Boundary postures: `enforced` (the fence is active), `advisory` (logs or warns but does not block), `disabled` (turned off in config), `enabled` (configured but its backend is missing), and `unavailable` (the fence cannot enforce on this host or config; it never counts toward PROTECTED). `unavailable` is how doctor reports the `UNREACHABLE` egress level: syscall enforcement restricts proxy traffic to Unix sockets while the interposer bridge is disabled, so the allowlist cannot be reached.
 
-A fence sits between the agent and the resource. How hard the boundary is depends on the fence. The secret fence is absolute: a blocked variable is gone from the environment before the agent starts. On Linux, the filesystem fence is kernel-enforced with Landlock by default and composes with LD_PRELOAD logging; where Landlock is engaged, static binaries and children that clear `LD_PRELOAD` are still denied by the kernel. Landlock is absent when `filesystem.linux_enforcement = "off"` and degraded or missing under `"preferred"` on a kernel without it (`"required"` refuses to start instead); in those cases an open that bypasses the interposer is not denied. On macOS, the filesystem fence is a kernel-enforced Seatbelt write confinement. Writes outside the configured root and its essential runtime exceptions are denied, and the built-in and configured sensitive paths are denied for reads and writes. It does not claim read confinement outside the root. The profile follows descendants even when they cross into protected system binaries. The network fence stops normal and prompt-injected attempts to reach unapproved domains; proxy denials are logged, but a bypass that never reaches the proxy is not (see "What is not logged"). On Linux with syscall fencing enabled, proxy-mode runs restrict kernel socket creation to Unix-domain sockets; the interposer remaps intended TCP stream sockets and the configured loopback proxy connect to the proxy's Unix socket. Direct AF_INET/AF_INET6 socket syscalls fail closed. The syscall fence does not restrict AF_UNIX `connect()`, so a child can also reach other path-based and abstract Unix sockets accessible to the same user; see [Linux CONFINED Unix-socket reachability](docs/design/unix-socket-reachability.md). With `--net-fence=netns` the child keeps IP sockets and the boundary is composed: the nftables default-drop floor and the network namespace prevent alternate transports and proxy bypass (direct DNS to other resolvers, non-DNS UDP, QUIC, SCTP and raw IP are dropped, and nothing but the transparent proxy and the in-namespace DNS stub is reachable), while the transparent HTTP(S) proxy and the DNS stub enforce the `network.allow` domain policy.
+A fence sits between the agent and the resource. How hard the boundary is depends on the fence. The secret fence is absolute: a blocked variable is gone from the environment before the agent starts. On Linux, the filesystem fence is kernel-enforced with Landlock by default and composes with LD_PRELOAD logging; where Landlock is engaged, static binaries and children that clear `LD_PRELOAD` are still denied by the kernel. Landlock is absent when `filesystem.linux_enforcement = "off"` and degraded or missing under `"preferred"` on a kernel without it (`"required"` refuses to start instead); in those cases an open that bypasses the interposer is not denied. On macOS, the filesystem fence is a kernel-enforced Seatbelt write confinement. Writes outside the configured root and its essential runtime exceptions are denied, and the built-in and configured sensitive paths are denied for reads and writes. It does not claim read confinement outside the root. The profile follows descendants even when they cross into protected system binaries. The network fence stops normal and prompt-injected attempts to reach unapproved domains; proxy denials are logged, but a bypass that never reaches the proxy is not (see [What the signed log proves](#what-the-signed-log-proves)). On Linux with syscall fencing enabled, proxy-mode runs restrict kernel socket creation to Unix-domain sockets; the interposer remaps intended TCP stream sockets and the configured loopback proxy connect to the proxy's Unix socket. Direct AF_INET/AF_INET6 socket syscalls fail closed. The syscall fence does not restrict AF_UNIX `connect()`, so a child can also reach other path-based and abstract Unix sockets accessible to the same user; see [Linux CONFINED Unix-socket reachability](docs/design/unix-socket-reachability.md). With `--net-fence=netns` the child keeps IP sockets and the boundary is composed: the nftables default-drop floor and the network namespace prevent alternate transports and proxy bypass (direct DNS to other resolvers, non-DNS UDP, QUIC, SCTP and raw IP are dropped, and nothing but the transparent proxy and the in-namespace DNS stub is reachable), while the transparent HTTP(S) proxy and the DNS stub enforce the `network.allow` domain policy.
 
 NockLock does not restrict how your agent works. It restricts what your agent can reach. Inside the fence, your agent still has full permissions.
 
