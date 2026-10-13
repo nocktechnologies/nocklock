@@ -2,7 +2,7 @@
 
 ## Report a vulnerability
 
-Use GitHub's private reporting for a suspected fence escape, secret exposure, privilege escalation, or other security vulnerability: **Security → Report a vulnerability** on this repository. Only maintainers can see the report. You can also email **security@nocktechnologies.com**. Do not open a public issue with exploit details or credentials.
+Use GitHub's private reporting for a suspected fence escape, secret exposure, privilege escalation, or other security vulnerability: **Security → Report a vulnerability** on this repository. Only maintainers can see the report. You can also email **security@nocktechnologies.io**. Do not open a public issue with exploit details or credentials.
 
 Include the NockLock version or commit, OS and kernel version, the relevant configuration with secrets removed, reproduction steps, and the expected and observed behavior. A minimal reproduction using throwaway files, sockets and credentials is most useful. Do not include real API keys, tokens, private keys or sensitive audit contents.
 
