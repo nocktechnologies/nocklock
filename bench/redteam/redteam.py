@@ -358,19 +358,17 @@ def bench(a):
 
     tool_faults = []
 
-    def tool(name, argv, tool_env=env):
+    def tool(name, argv, tool_env=env, must_succeed=False):
         rc, text = run(argv, root, tool_env, logfd, f"{name}.log", time.monotonic() + 60)
-        if rc is None or isinstance(rc, FaultExit):  # a verifier or cleanup fault: its exit cannot be trusted
+        # A launch or cleanup fault means the exit cannot be trusted; a failing version command is a broken binary.
+        if rc is None or isinstance(rc, FaultExit) or (must_succeed and rc != 0):
             tool_faults.append(name)
         return rc, text
 
     lock_rc, lock_out = tool("verify-nocklock", [a.nocklock, "verify", "--audit"])
     guard_rc, guard_out = tool("verify-nockguard", [a.nockguard, "verify", "--ed25519-pub-env", "NOCKGUARD_AGENT_BENCH_ED25519_PUB", "--audit", str(trail_path)], verify_env)
-    versions = {}
-    for name, binary in (("nocklock", a.nocklock), ("nockguard", a.nockguard)):
-        vrc, versions[name] = tool(f"version-{name}", [binary, "version"])
-        if vrc != 0 and f"version-{name}" not in tool_faults:
-            tool_faults.append(f"version-{name}")  # a version command that fails is a broken binary, not a pass
+    versions = {n: tool(f"version-{n}", [b, "version"], must_succeed=True)[1]
+                for n, b in (("nocklock", a.nocklock), ("nockguard", a.nockguard))}
 
     attack_rows = [r for r in results if r["atk"]["expect"] == "blocked"]
     controls = [r for r in results if r["atk"]["expect"] == "allowed"]
