@@ -4,8 +4,13 @@ All notable changes to NockLock will be documented in this file.
 
 ## [Unreleased]
 
+## [0.9.2] - 2026-10-13
+
+v0.9.2 makes `doctor` check the signing-key directory, which changes some `doctor` verdicts and exit codes for the same machine; it also documents signing-key replacement and fixes a proxy shutdown race.
+
 ### Changed
 
+- `nocklock doctor` verdicts change. `doctor` now checks the managed signing-key directory against the effective fence, so it can return `PARTIAL` (exit 3) or `GAPS FOUND` (exit 2) where v0.9.1 reported `PROTECTED` (exit 0). Exit codes are unchanged: 0 `PROTECTED`, 2 `GAPS FOUND`, 3 `PARTIAL`, 4 `UNPROTECTED` (`nocklock doctor --help`, `docs/reference/cli.md`). Automation that fails on any non-zero `doctor` exit may now fail where it passed. With Landlock disabled the signing-key boundary is advisory and the verdict cannot be `PROTECTED`.
 - Docs: propose a signed Linux release tarball, explicit egress-helper installation,
   and clean-machine Linux/macOS acceptance in `docs/design/linux-packaging.md`
   (N11643), baseline v0.9.1 (`89c1bb6e`). Design only; no installer or release assets added.
@@ -18,7 +23,7 @@ All notable changes to NockLock will be documented in this file.
 
 ### Fixed
 
-- Serialize concurrent `ProxyServer.Stop` calls so shutdown and its proxy-stop audit event run once. The unsynchronized production method could race when two callers stopped the same proxy; the Linux netns proxy-death test exposed it under `-race`. The proxy shutdown code was present in v0.1.0 through v0.9.1. Every `ProxyServer` method that reads or writes the fields `Stop` clears (`Start`, `StartOn`, `StartUnix`, `Addr`) now takes the same lock; `MarkDegraded` touches only an atomic flag and stays lock-free. No egress bypass was observed.
+- Serialize concurrent `ProxyServer.Stop` calls so shutdown and its proxy-stop audit event run once. The unsynchronized production method could race when two callers stopped the same proxy; the Linux netns proxy-death test exposed it under `-race`. The proxy shutdown code was present in v0.1.0 through v0.9.1. Every `ProxyServer` method that reads or writes the fields `Stop` clears (`Start`, `StartOn`, `StartUnix`, `Addr`) now takes the same lock; `MarkDegraded` touches only the atomic degraded flag and the never-reassigned transport (to close idle connections), none of the fields the stop lock guards, so it takes no lock and stays lock-free. No egress bypass was observed.
 - `doctor` now checks the resolved managed signing-key directory against the effective Seatbelt deny set or Landlock grants, reports its path and posture in `doctor --json`, and cannot return `PROTECTED` when the key boundary is readable or unenforceable. `doctor` and `wrap` build the key-directory deny from one shared helper, so doctor adds no deny of its own, and a deny list that omits the resolved key directory is reported as a gap (N11717).
 - `verify` works with a fresh macOS config: it no longer requires the Linux interposer, probes Seatbelt's outside-root write boundary, and explicitly skips the Linux-only syscall probe. Filesystem/network probe inputs now travel as private command arguments so the secret filter cannot strip them; the synthetic secret control is allowed without overriding block rules.
 
