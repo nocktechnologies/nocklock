@@ -19,6 +19,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"strings"
 )
 
 // signingKeyVersion is the encoding version of the key file. The file stores
@@ -358,8 +359,13 @@ func publicKeyFingerprint(pub ed25519.PublicKey) string {
 }
 
 // ParsePublicKey decodes a public key supplied out-of-band (--ed25519-pub / env)
-// in standard base64 or hex.
+// in standard base64 or hex, optionally prefixed with "ed25519 " as printed by
+// `verify --export-pubkey`.
 func ParsePublicKey(s string) (ed25519.PublicKey, error) {
+	s = strings.TrimSpace(s)
+	if rest, ok := strings.CutPrefix(s, "ed25519 "); ok {
+		s = strings.TrimSpace(rest)
+	}
 	if b, err := base64.StdEncoding.DecodeString(s); err == nil && len(b) == ed25519.PublicKeySize {
 		return ed25519.PublicKey(b), nil
 	}

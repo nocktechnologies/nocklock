@@ -264,8 +264,89 @@ func TestLookbackRaceStreamingPost(t *testing.T) {
 			if after := pt.received.Load(); after != settled {
 				t.Fatalf("target received %d more body bytes after teardown settled (%d -> %d)", after-settled, settled, after)
 			}
+			// A bodyless request is not this POST, however it got there: report it
+			// as its own failure, with the sender, rather than as a complete body.
+			if n := pt.bodyless.Load(); n != 0 {
+				t.Fatalf("target saw %d bodyless request(s) that are not the POST under test: %s", n, pt.observations())
+			}
 			if pt.finished.Load() != 0 || settled >= chunks*size {
-				t.Fatalf("target received a complete body (%d bytes)", settled)
+				t.Fatalf("target received a complete body (%d bytes): %s", settled, pt.observations())
+			}
+		})
+	}
+}
+
+// A trip cuts a body in flight so the target reads it as incomplete, never as
+// a whole one: a Content-Length body ends in io.ErrUnexpectedEOF, and a chunked
+// body ends without its terminating zero chunk. The target records how each
+// body ended. The control has no trip and the same two bodies arrive whole.
+func TestLookbackTripLeavesTargetBodyIncomplete(t *testing.T) {
+	const parts, size = 40, 1024
+	post := func(t *testing.T, e *lbEnv, host string, chunked bool, gate <-chan struct{}) net.Conn {
+		t.Helper()
+		conn, err := net.Dial("tcp", e.addr)
+		if err != nil {
+			t.Fatalf("dial proxy: %v", err)
+		}
+		t.Cleanup(func() { conn.Close() })
+		hdr := fmt.Sprintf("Content-Length: %d", parts*size)
+		if chunked {
+			hdr = "Transfer-Encoding: chunked"
+		}
+		go func() {
+			fmt.Fprintf(conn, "POST http://%s/ HTTP/1.1\r\nHost: %s\r\n%s\r\n\r\n", host, host, hdr)
+			body := strings.Repeat("x", size)
+			for i := 0; i < parts; i++ {
+				if i == 8 && gate != nil {
+					<-gate
+				}
+				var err error
+				if chunked {
+					_, err = fmt.Fprintf(conn, "%x\r\n%s\r\n", size, body)
+				} else {
+					_, err = io.WriteString(conn, body)
+				}
+				if err != nil {
+					return
+				}
+				time.Sleep(time.Millisecond)
+			}
+			if chunked {
+				io.WriteString(conn, "0\r\n\r\n")
+			}
+		}()
+		return conn
+	}
+
+	for _, c := range []struct {
+		name    string
+		chunked bool
+	}{{"content-length", false}, {"chunked", true}} {
+		name, chunked := c.name, c.chunked
+		t.Run(name, func(t *testing.T) {
+			e, tr := newTripEnv(t, denyRule("r", ""))
+			pt := newPostTarget(t)
+			gate := make(chan struct{})
+			defer close(gate) // released on every exit, including a failed wait below
+			post(t, e, pt.host, chunked, gate)
+			waitFor(t, 5*time.Second, "POST body to start arriving", func() bool { return pt.received.Load() > 0 && e.liveCount() == 1 })
+			if err := tr.report(); err != nil {
+				t.Fatalf("report: %v", err)
+			}
+			waitFor(t, 5*time.Second, "target to see the body end", func() bool { return pt.cut.Load() == 1 })
+			obs := pt.observations()
+			if pt.finished.Load() != 0 || !strings.Contains(obs, "unexpected EOF") {
+				t.Fatalf("target body was not cut as an unexpected EOF: %s", obs)
+			}
+		})
+
+		t.Run(name+" control: no trip", func(t *testing.T) {
+			e := newLBEnv(t, denyRule("r", ""))
+			pt := newPostTarget(t)
+			post(t, e, pt.host, chunked, nil)
+			waitFor(t, 5*time.Second, "control body to arrive whole", func() bool { return pt.finished.Load() == 1 })
+			if pt.received.Load() != parts*size {
+				t.Fatalf("control target read %d bytes: %s", pt.received.Load(), pt.observations())
 			}
 		})
 	}
