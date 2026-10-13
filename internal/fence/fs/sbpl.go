@@ -169,9 +169,10 @@ func generateProfile(sensitivePaths []string, hardened bool, writePaths []string
 	// writable ancestor would move a protected tree outside its deny rule.
 	// Keep those ancestor entries fixed without denying ordinary writes to
 	// their other children (notably the rest of the project).
+	// Stop at the root (Dir(p) == p), whatever its spelling (C:\ on Windows).
 	ancestors := make(map[string]bool)
 	for _, c := range canonical {
-		for p := filepath.Dir(c); p != string(os.PathSeparator); p = filepath.Dir(p) {
+		for p := filepath.Dir(c); filepath.Dir(p) != p; p = filepath.Dir(p) {
 			ancestors[p] = true
 		}
 	}
