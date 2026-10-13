@@ -10,7 +10,7 @@ NockLock is an AI agent security fence: a Go CLI that wraps coding agents with f
 
 ## Invariants (do not break)
 - **Fences fail closed.** If a fence cannot initialize, the agent does not start. Never fall back to passthrough. Lesson: `.claude/lessons/fail-closed-principle.md`.
-- **Config parsing is strict.** Unknown TOML keys are a hard error (`internal/config/config.go:480`). Config changes must be backwards compatible.
+- **Config parsing is strict.** Unknown TOML keys are a hard error (`internal/config/config.go`). Config changes must be backwards compatible.
 - **Tests carry negative controls.** A test that proves a block also proves the allowed case still passes.
 - **Audit rows are loud and signed.** Fence decisions are written to the hash-chained, Ed25519-signed event log. Do not add a decision path that skips it. See `docs/how-it-works/audit-log.md`.
 - **Say only what is enforced.** Docs, `doctor`, `wrap` banners and the README state the real boundary, including the limits (`docs/how-it-works/`). Egress levels are defined once, in `internal/cli/egress_level.go`.

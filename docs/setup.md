@@ -10,7 +10,9 @@ Everything here restates `README.md` (Quick start, Installation, Linux network-e
 brew install nocktechnologies/tap/nocklock
 ```
 
-**From source** (Go 1.26 or newer; `go.mod:3` pins 1.26.4):
+On Linux the formula builds only `nocklock`, and the default config's `wrap` refuses to start without `libfence_fs.so`. Build from source with `make build-all` until packaging lands.
+
+**From source** (Go 1.26 or newer; `go.mod` pins 1.26.4):
 
 ```bash
 git clone https://github.com/nocktechnologies/nocklock.git
@@ -18,7 +20,7 @@ cd nocklock
 make build-all     # ./nocklock; on Linux also builds libfence_fs.so
 ```
 
-`build-all` compiles the Linux `LD_PRELOAD` interposer and skips it on macOS (`Makefile:9-17`), where the filesystem fence uses `sandbox-exec`.
+`build-all` compiles the Linux `LD_PRELOAD` interposer and skips it on macOS (`Makefile`), where the filesystem fence uses `sandbox-exec`.
 
 **Linux, opt-in kernel egress fence** (`--net-fence=netns`) needs a root-owned helper and a constrained sudoers grant. Install the binary first, then the helper:
 
@@ -48,8 +50,8 @@ Pick a preset instead of the generic defaults with `nocklock init --runtime <nam
 | Check | Command | Good result |
 |---|---|---|
 | Binary | `nocklock version` | prints a version |
-| Host can enforce each fence | `nocklock doctor` | verdict `PROTECTED`, exit 0; `GAPS FOUND` exits 2, `PARTIAL` 3, `UNPROTECTED` 4 (`internal/cli/doctor.go:41-59`) |
-| Fence actually blocks | `nocklock verify` | adversarial self-test passes, exit 0 (`internal/cli/verify.go:106-107`) |
+| Host can enforce each fence | `nocklock doctor` | verdict `PROTECTED`, exit 0; `GAPS FOUND` exits 2, `PARTIAL` 3, `UNPROTECTED` 4 (`internal/cli/doctor.go`) |
+| Fence actually blocks | `nocklock verify` | adversarial self-test passes, exit 0 (`internal/cli/verify.go`) |
 | Egress helper (Linux netns) | `sudo -n /usr/libexec/nocklock-egress-helper check` | prints nothing, exit 0 |
 | Audit log intact | `nocklock verify --audit` | `AUTHENTIC` (signed) or `CONSISTENT` (unsigned chain); see `docs/how-it-works/audit-log.md` |
 | What was blocked | `nocklock log --blocked`, `nocklock status` | per-session blocked events |

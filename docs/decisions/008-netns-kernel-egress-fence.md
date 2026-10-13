@@ -1,6 +1,6 @@
 # 008: Opt-in network namespace fence for kernel-enforced egress
 
-**Status:** Accepted, shipped v0.5.0 (`CHANGELOG.md:512`). Source: `docs/superpowers/specs/2026-07-30-linux-network-egress-enforcement.md`.
+**Status:** Accepted, shipped v0.5.0 (`CHANGELOG.md`). Source: `docs/superpowers/specs/2026-07-30-linux-network-egress-enforcement.md`.
 
 **Context.** The default proxy is advisory: a client that ignores `HTTP_PROXY` bypasses the allowlist.
 

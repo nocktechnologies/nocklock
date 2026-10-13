@@ -3,9 +3,9 @@
 Citations are `file:line` at `origin/main` 89c02fa. Full detail and bounds: `README.md` "Secret preflight scanning"; design: `docs/superpowers/specs/2026-09-25-secret-preflight-design.md`.
 
 ## What it does
-`nocklock scan [path ...] [--env] [--json]` checks selected files, and with `--env` the invoking environment, for credential-shaped values before an agent sees them (`internal/cli/scan.go:23`, scanner `internal/fence/secrets/scan.go:74`). Exit 0 only when the scan completes with no findings; otherwise 1 (`scan.go:44`). Reports show detector IDs and locations, never values.
+`nocklock scan [path ...] [--env] [--json]` checks selected files, and with `--env` the invoking environment, for credential-shaped values before an agent sees them (`internal/cli/scan.go`, scanner `internal/fence/secrets/scan.go`). Exit 0 only when the scan completes with no findings; otherwise 1 (`scan.go`). Reports show detector IDs and locations, never values.
 
-To require it on every launch, set `secrets.scan_env`, `scan_paths` and optional `scan_env_allow` (`internal/config/config.go:358-362`). A required scan that finds something, or is incomplete, prevents the child from starting and is recorded in the audit log; failing to record also prevents launch. Profile overlays can add scan paths but cannot disable a base scan.
+To require it on every launch, set `secrets.scan_env`, `scan_paths` and optional `scan_env_allow` (`internal/config/config.go`). A required scan that finds something, or is incomplete, prevents the child from starting and is recorded in the audit log; failing to record also prevents launch. Profile overlays can add scan paths but cannot disable a base scan.
 
 ## Honest limits
 - Format checks only: AWS access-key IDs, GitHub token formats, PEM private-key headers. A match does not mean the credential is valid; encoded or compressed secrets go undetected.

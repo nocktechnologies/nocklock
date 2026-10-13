@@ -1,6 +1,6 @@
 # 012: macOS network floor in the Seatbelt profile, new level `SEATBELT`
 
-**Status:** Accepted, shipped v0.7.0 (`CHANGELOG.md:18`).
+**Status:** Accepted, shipped v0.7.0 (`CHANGELOG.md`).
 
 **Context.** On macOS the proxy was `ADVISORY`; a client that ignored `HTTP_PROXY` reached any host.
 

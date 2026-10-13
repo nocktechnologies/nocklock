@@ -1,6 +1,6 @@
 # 007: Audit log is a hash chain, then signed, then anchored
 
-**Status:** Accepted, shipped v0.5.0 (`CHANGELOG.md:563`, `:587`). Source: `docs/superpowers/specs/2026-09-14-tamper-evident-audit-log.md`.
+**Status:** Accepted, shipped v0.5.0 (`CHANGELOG.md`). Source: `docs/superpowers/specs/2026-09-14-tamper-evident-audit-log.md`.
 
 **Context.** The event log was a plain table; anyone with file access could flip a `blocked` row to `passed` or truncate the tail.
 

@@ -10,7 +10,7 @@ Go tests sit beside the code as `*_test.go`. Files ending `_linux_test.go` or `_
 |---|---|---|
 | `cmd/nocklock/` | Entry point; calls `cli.Execute()` | none (thin) |
 | `internal/` | All implementation packages (below) | beside each package |
-| `pkg/receipt/` | Public, read-only per-session audit-chain verifier (`VerifySession`, `pkg/receipt/receipt.go:136`), importable by other modules | `pkg/receipt/receipt_test.go`, `external_test.go` (imports it as an outside module would), `testdata/` |
+| `pkg/receipt/` | Public, read-only per-session audit-chain verifier (`VerifySession`, `pkg/receipt/receipt.go`), importable by other modules | `pkg/receipt/receipt_test.go`, `external_test.go` (imports it as an outside module would), `testdata/` |
 | `integration/` | End-to-end test of the built binary | `integration/integration_test.go`, run with `go test -tags=integration ./...` (`CONTRIBUTING.md`) |
 | `scripts/` | `install-egress-helper.sh` (root-owned helper plus sudoers grant) and `test-init-default-linux.sh` (fresh `init` then wrapped shell, run by CI) | helper: `internal/fence/network/netns/install_helper_script_linux_test.go` |
 | `docs/` | This documentation set; index at `docs/README.md` | none |
@@ -38,7 +38,7 @@ Go tests sit beside the code as `*_test.go`. Files ending `_linux_test.go` or `_
 | `internal/fence/network/` | Local HTTP/HTTPS CONNECT proxy and domain allowlist (`proxy.go`, `handler.go`, `connect.go`), DNS cache, watchdog, look-back rules (`lookback.go`) | `*_test.go` here, `lookback_race_linux_test.go` |
 | `internal/fence/network/netns/` | Linux `--net-fence=netns`: network namespace, nftables floor, transparent proxy, egress helper, subnet reservation | `*_linux_test.go` here (`netns_bypass`, `protocol_matrix`, `dns_escape`, `subnet_reservation`) |
 | `internal/logging/` | SQLite event log: hash chain, Ed25519 signing (`signing.go`), anchors (`anchor.go`), chain export | `logger_test.go`, `signing_test.go`, `anchor_test.go`, `logger_symlink_test.go` |
-| `internal/anchorclient/` | HTTP client that pushes a chain-head anchor off-box and fetches the latest (`client.go:114`, `:154`) | `client_test.go` |
+| `internal/anchorclient/` | HTTP client that pushes a chain-head anchor off-box and fetches the latest (`client.go`) | `client_test.go` |
 | `internal/forward/` | Opt-in `[audit.forward]` queue that sends decisions to Command's ops log (`forward.go`) | `forward_test.go` |
 | `internal/version/` | Version string, set by ldflags | `version_test.go` |
 

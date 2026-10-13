@@ -1,6 +1,6 @@
 # 010: Audit state lives outside the project
 
-**Status:** Accepted, breaking, shipped v0.6.0 (`CHANGELOG.md:92-109`). User-facing text: `README.md` "Event log".
+**Status:** Accepted, breaking, shipped v0.6.0 (`CHANGELOG.md`). User-facing text: `README.md` "Event log".
 
 **Context.** The fence grants the project root so the agent can work there, and Landlock cannot exclude a path beneath a granted directory. A log inside the project is editable by the agent it records.
 

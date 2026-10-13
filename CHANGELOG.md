@@ -8,6 +8,10 @@ All notable changes to NockLock will be documented in this file.
 
 - Clarify that Linux `CONFINED` currently does not restrict AF_UNIX destinations. A non-root probe confirmed that a wrapped child can connect to both a throwaway pathname socket and a throwaway abstract socket while a direct AF_INET datagram socket syscall is denied. The design and probe are in `docs/design/unix-socket-reachability.md` and `docs/probes/n11650/`.
 
+### Changed
+
+- Docs: `docs/` is now organized as a map for contributors and users: `docs/README.md`, `docs/REPO-MAP.md`, `docs/setup.md`, `docs/how-it-works/` (one page per fence or feature with its limits), `docs/reference/cli.md` (commands, exit codes and config schema as shipped, not yet a compatibility promise), `docs/runbooks/` (release, incident), `docs/decisions/` (records 006-014) and `docs/ROADMAP.md` (the path to 1.0). `CLAUDE.md` is rewritten as a short map and `AGENTS.md` points to it.
+
 ## [0.8.0] - 2026-10-13
 
 ### Breaking
@@ -33,9 +37,6 @@ All notable changes to NockLock will be documented in this file.
 - `--ed25519-pub` accepts the `ed25519 <base64>` line that `verify --export-pubkey` prints, as well as bare base64 or hex.
 - A legacy `[cloud]` section is reported as inert, naming `[audit.forward]`, the real delivery transport.
 - Look-back race test: the POST target records how each request body ended and counts a bodyless request apart from a finished body; new `TestLookbackTripLeavesTargetBodyIncomplete` pins that a trip cuts Content-Length and chunked bodies. Test-only.
-### Changed
-
-- Docs: `docs/` is now organized as a map for contributors and users: `docs/README.md`, `docs/REPO-MAP.md`, `docs/setup.md`, `docs/how-it-works/` (one page per fence or feature with its limits), `docs/reference/cli.md` (commands, exit codes and config schema as shipped, not yet a compatibility promise), `docs/runbooks/` (release, incident), `docs/decisions/` (records 006-014) and `docs/ROADMAP.md` (the path to 1.0). `CLAUDE.md` is rewritten as a short map and `AGENTS.md` points to it.
 
 ### Fixed
 

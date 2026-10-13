@@ -5,7 +5,7 @@ Citations are `file:line` at `origin/main` 89c02fa. Evidence first, then contain
 ## Triage: which kind?
 | Symptom | Likely cause | First move |
 |---|---|---|
-| `wrap` exits `2`, prints `NockLock: fatal:` or `fix:` | A requested fence cannot engage; it is refusing correctly (`internal/cli/wrap.go:587-610`) | `nocklock doctor`; follow the printed fix. This is the fence working, not an incident |
+| `wrap` exits `2`, prints `NockLock: fatal:` or `fix:` | A requested fence cannot engage; it is refusing correctly (`internal/cli/wrap.go`) | `nocklock doctor`; follow the printed fix. This is the fence working, not an incident |
 | Agent reached something it should not have | Egress level lower than assumed, a bypass, or a missing config rule | Step 1 below |
 | `verify --audit` says `FORGED`, `SUSPECT`, or `ANCHOR: TRUNCATION` / `TAMPERED` | Log was modified, rolled back, or a signing artifact is missing | Step 3 |
 | A secret appeared in the agent's context | Env name not blocked, or the secret was read from a file | `docs/how-it-works/secret-fence.md`, `secret-preflight.md` |
