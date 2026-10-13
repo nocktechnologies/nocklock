@@ -17,7 +17,7 @@ WRAP_TIMEOUT_SECONDS = 30
 
 
 def run_bounded(
-    args: list[str], cwd: pathlib.Path, timeout: int
+    args: list[str], cwd: pathlib.Path, timeout: float
 ) -> tuple[subprocess.CompletedProcess[str], bool]:
     process = subprocess.Popen(
         args,
@@ -110,7 +110,9 @@ def main() -> int:
             listeners.append(listener)
             listener.bind(address)
             listener.listen(4)
-            listener.settimeout(8)
+            # Outlasts the init (15 s) and wrap (30 s) budgets, so a slow but
+            # successful run is never reported as a failure to reproduce.
+            listener.settimeout(60)
             thread = threading.Thread(target=accept_one, args=(label, listener), daemon=True)
             thread.start()
             threads.append(thread)
