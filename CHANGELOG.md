@@ -4,13 +4,19 @@ All notable changes to NockLock will be documented in this file.
 
 ## [Unreleased]
 
-### Security
+### Changed
 
-- Linux `CONFINED` egress uses Landlock ABI v9 pathname resolution and abstract-socket scoping to block external Unix-socket connections while allowing NockLock's exact proxy and filesystem event sockets. On kernels without both controls, `wrap` refuses `CONFINED` unless `--allow-unix-sockets` is explicitly supplied; `doctor` reports the available posture.
+- Look-back race test: the POST target records how each request body ended and counts a bodyless request apart from a finished body; new `TestLookbackTripLeavesTargetBodyIncomplete` pins that a trip cuts Content-Length and chunked bodies. Test-only.
 
 ### Fixed
 
 - Linux netns: the concurrent subnet test now checks atomic reservation claims instead of random, unreserved bridge candidates; two processes also contend for one subnet in a regression test.
+
+### Added
+
+- Docs: compare NFLOG, seccomp and Seatbelt denial evidence and propose bounded,
+  signed Linux packet-drop observations in `docs/design/kernel-floor-denial-evidence.md`
+  (N11634). Design only; no enforcement or audit behavior changed.
 
 ## [0.7.0] - 2026-10-12
 
