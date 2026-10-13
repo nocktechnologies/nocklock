@@ -4,6 +4,10 @@ All notable changes to NockLock will be documented in this file.
 
 ## [Unreleased]
 
+### Fixed
+
+- `verify` works with a fresh macOS config: it no longer requires the Linux interposer, probes Seatbelt's outside-root write boundary, and explicitly skips the Linux-only syscall probe. Filesystem/network probe inputs now travel as private command arguments so the secret filter cannot strip them; the synthetic secret control is allowed without overriding block rules.
+
 ## [0.9.1] - 2026-10-13
 
 ### Security

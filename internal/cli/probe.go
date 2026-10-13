@@ -37,7 +37,7 @@ var probeCmd = &cobra.Command{
 	Hidden: true,
 	Args:   cobra.ExactArgs(1),
 	RunE: func(cmd *cobra.Command, args []string) error {
-		result := runProbe(args[0])
+		result := runProbe(args[0], cmd)
 		if err := renderProbeJSON(cmd.OutOrStdout(), result); err != nil {
 			return err
 		}
@@ -51,15 +51,25 @@ var probeCmd = &cobra.Command{
 }
 
 func init() {
+	probeCmd.Flags().String("canary-path", "", "private filesystem canary path")
+	probeCmd.Flags().String("canary-token", "", "non-secret canary content")
+	probeCmd.Flags().Bool("canary-known", false, "canary passed its unfenced control")
+	probeCmd.Flags().Bool("write-canary", false, "probe write access instead of read access")
+	probeCmd.Flags().String("network-url", "", "off-allowlist probe URL")
 	rootCmd.AddCommand(probeCmd)
 }
 
-func runProbe(fence string) probeResult {
+func runProbe(fence string, cmd *cobra.Command) probeResult {
 	switch fence {
 	case "filesystem":
-		return probeFilesystem()
+		path, _ := cmd.Flags().GetString("canary-path")
+		token, _ := cmd.Flags().GetString("canary-token")
+		known, _ := cmd.Flags().GetBool("canary-known")
+		write, _ := cmd.Flags().GetBool("write-canary")
+		return probeFilesystem(path, token, known, write)
 	case "network":
-		return probeNetwork()
+		target, _ := cmd.Flags().GetString("network-url")
+		return probeNetwork(target)
 	case "secret", "secrets":
 		return probeSecret()
 	case "syscall":
@@ -69,14 +79,26 @@ func runProbe(fence string) probeResult {
 	}
 }
 
-func probeFilesystem() probeResult {
-	path := os.Getenv(verifyCanaryPathEnv)
+func probeFilesystem(path, wantToken string, known, write bool) probeResult {
 	if path == "" {
 		return probeResult{Fence: "filesystem", Attempted: false, Blocked: false, Detail: "canary path not provided"}
 	}
-	wantToken := os.Getenv(verifyCanaryTokenEnv)
 	if wantToken == "" {
 		return probeResult{Fence: "filesystem", Attempted: false, Blocked: false, Detail: "canary token not provided"}
+	}
+	// Seatbelt promises outside-root write confinement, not general read
+	// confinement. Opening the private canary O_WRONLY tests that boundary
+	// without creating, truncating or changing any file.
+	if write {
+		f, err := os.OpenFile(path, os.O_WRONLY, 0)
+		if err == nil {
+			_ = f.Close()
+			return probeResult{Fence: "filesystem", Attempted: true, Detail: "opened outside-root canary for writing"}
+		}
+		if errors.Is(err, os.ErrPermission) {
+			return probeResult{Fence: "filesystem", Attempted: true, Blocked: true, Detail: fmt.Sprintf("outside-root canary write blocked: %v", err)}
+		}
+		return probeResult{Fence: "filesystem", Detail: fmt.Sprintf("outside-root write canary unavailable: %v", err)}
 	}
 	if data, err := os.ReadFile(path); err == nil {
 		if strings.TrimSpace(string(data)) != wantToken {
@@ -85,7 +107,7 @@ func probeFilesystem() probeResult {
 		return probeResult{Fence: "filesystem", Attempted: true, Blocked: false, Detail: "read outside-root canary"}
 	} else if isBlockedReadError(err) {
 		return probeResult{Fence: "filesystem", Attempted: true, Blocked: true, Detail: fmt.Sprintf("outside-root canary blocked: %v", err)}
-	} else if errors.Is(err, os.ErrNotExist) && os.Getenv(verifyCanaryKnownEnv) == "1" {
+	} else if errors.Is(err, os.ErrNotExist) && known {
 		return probeResult{Fence: "filesystem", Attempted: true, Blocked: true, Detail: fmt.Sprintf("outside-root canary hidden by fence: %v", err)}
 	} else if errors.Is(err, os.ErrNotExist) {
 		return probeResult{Fence: "filesystem", Attempted: false, Blocked: false, Detail: fmt.Sprintf("outside-root canary missing: %v", err)}
@@ -98,8 +120,7 @@ func isBlockedReadError(err error) bool {
 	return errors.Is(err, os.ErrPermission)
 }
 
-func probeNetwork() probeResult {
-	target := os.Getenv(verifyNetworkURLEnv)
+func probeNetwork(target string) probeResult {
 	if target == "" {
 		return probeResult{Fence: "network", Attempted: false, Blocked: false, Detail: "off-allowlist target not provided"}
 	}
