@@ -27,6 +27,7 @@ func TestWrapMacOSDeniesManagedSigningKey(t *testing.T) {
 			}
 			t.Setenv("HOME", home)
 			t.Setenv("LANG", "C")
+			t.Setenv("NOCKLOCK_ANCHOR_URL", "")
 			t.Setenv("XDG_STATE_HOME", filepath.Join(base, "state"))
 			t.Setenv("XDG_CONFIG_HOME", "")
 			switch placement {

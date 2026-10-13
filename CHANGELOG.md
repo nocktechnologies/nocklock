@@ -6,7 +6,7 @@ All notable changes to NockLock will be documented in this file.
 
 ### Security
 
-- Protect the managed Ed25519 signing-key directory from fenced children even when `XDG_CONFIG_HOME` relocates it outside `~/.config`. Linux refuses an overlapping filesystem grant; macOS denies the canonical key directory and prevents renaming sensitive-path ancestors to move protected files outside their deny rules. Parent signing and normal project reads/writes remain available.
+- Protect the managed Ed25519 signing-key directory from fenced children even when `XDG_CONFIG_HOME` relocates it outside `~/.config`. Linux Landlock refuses an overlapping filesystem grant; macOS denies the canonical key directory and prevents renaming sensitive-path ancestors to move protected files outside their deny rules. Parent signing and normal project reads/writes remain available.
 
 ## [0.9.0] - 2026-10-13
 
