@@ -305,7 +305,7 @@ func (cfg *Config) EffectivePolicy() string {
 
 	// Cloud
 	if cfg.Cloud.Enabled {
-		b.WriteString("  Cloud sync: enabled\n")
+		b.WriteString("  Cloud sync: inert ([cloud] is a legacy setting and sends nothing; configure [audit.forward] to deliver fence decisions to Command)\n")
 	} else {
 		b.WriteString("  Cloud sync: disabled\n")
 	}
