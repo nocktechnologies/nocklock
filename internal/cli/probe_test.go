@@ -43,7 +43,7 @@ func TestProbeFilesystemDetectsReadableCanaryAsEscape(t *testing.T) {
 	t.Setenv(verifyCanaryPathEnv, path)
 	t.Setenv(verifyCanaryTokenEnv, "canary")
 
-	got := probeFilesystem()
+	got := probeFilesystem(os.Getenv(verifyCanaryPathEnv), os.Getenv(verifyCanaryTokenEnv), os.Getenv(verifyCanaryKnownEnv) == "1", false)
 	if got.Blocked || !got.Attempted {
 		t.Fatalf("probeFilesystem readable canary = %+v, want attempted escape", got)
 	}
@@ -53,7 +53,7 @@ func TestProbeFilesystemTreatsMissingCanaryAsInconclusive(t *testing.T) {
 	t.Setenv(verifyCanaryPathEnv, filepath.Join(t.TempDir(), "missing"))
 	t.Setenv(verifyCanaryTokenEnv, "canary")
 
-	got := probeFilesystem()
+	got := probeFilesystem(os.Getenv(verifyCanaryPathEnv), os.Getenv(verifyCanaryTokenEnv), os.Getenv(verifyCanaryKnownEnv) == "1", false)
 	if got.Blocked || got.Attempted {
 		t.Fatalf("probeFilesystem missing canary = %+v, want inconclusive", got)
 	}
@@ -64,7 +64,7 @@ func TestProbeFilesystemTreatsKnownMissingCanaryAsHiddenByFence(t *testing.T) {
 	t.Setenv(verifyCanaryTokenEnv, "canary")
 	t.Setenv(verifyCanaryKnownEnv, "1")
 
-	got := probeFilesystem()
+	got := probeFilesystem(os.Getenv(verifyCanaryPathEnv), os.Getenv(verifyCanaryTokenEnv), os.Getenv(verifyCanaryKnownEnv) == "1", false)
 	if !got.Blocked || !got.Attempted {
 		t.Fatalf("probeFilesystem known missing canary = %+v, want attempted blocked", got)
 	}
@@ -78,7 +78,7 @@ func TestProbeNetworkRequiresProxyGeneratedBlock(t *testing.T) {
 	stubVerifyProxy(t, proxy.URL)
 	t.Setenv(verifyNetworkURLEnv, "http://verify.nocklock.invalid")
 
-	got := probeNetwork()
+	got := probeNetwork(os.Getenv(verifyNetworkURLEnv))
 	if !got.Attempted || !got.Blocked {
 		t.Fatalf("probeNetwork proxy block = %+v, want attempted blocked", got)
 	}
@@ -88,7 +88,7 @@ func TestProbeNetworkTransportErrorIsInconclusive(t *testing.T) {
 	stubVerifyProxy(t, "")
 	t.Setenv(verifyNetworkURLEnv, "http://127.0.0.1:1")
 
-	got := probeNetwork()
+	got := probeNetwork(os.Getenv(verifyNetworkURLEnv))
 	if got.Attempted || got.Blocked {
 		t.Fatalf("probeNetwork transport error = %+v, want inconclusive", got)
 	}
@@ -102,7 +102,7 @@ func TestProbeNetworkUnexpectedResponseIsEscape(t *testing.T) {
 	stubVerifyProxy(t, proxy.URL)
 	t.Setenv(verifyNetworkURLEnv, "http://verify.nocklock.invalid")
 
-	got := probeNetwork()
+	got := probeNetwork(os.Getenv(verifyNetworkURLEnv))
 	if !got.Attempted || got.Blocked || !strings.Contains(got.Detail, "status 200") {
 		t.Fatalf("probeNetwork unexpected response = %+v, want attempted escape", got)
 	}
@@ -118,4 +118,30 @@ func stubVerifyProxy(t *testing.T, rawURL string) {
 		return url.Parse(rawURL)
 	}
 	t.Cleanup(func() { verifyProxyFromEnvironment = orig })
+}
+
+func TestProbeFilesystemWriteControlDoesNotChangeCanary(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "canary")
+	if err := os.WriteFile(path, []byte("canary\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	got := probeFilesystem(path, "canary", false, true)
+	if !got.Attempted || got.Blocked {
+		t.Fatalf("write control: %+v", got)
+	}
+	data, err := os.ReadFile(path)
+	if err != nil || string(data) != "canary\n" {
+		t.Fatalf("canary changed: %q, %v", data, err)
+	}
+}
+
+func TestProbeFilesystemWriteMissingIsInconclusive(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "missing")
+	got := probeFilesystem(path, "canary", true, true)
+	if got.Attempted || got.Blocked {
+		t.Fatalf("missing write canary: %+v", got)
+	}
+	if _, err := os.Stat(path); !os.IsNotExist(err) {
+		t.Fatalf("write probe created a file: %v", err)
+	}
 }

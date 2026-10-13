@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/nocktechnologies/nocklock/internal/config"
+	"github.com/nocktechnologies/nocklock/internal/fence/secrets"
 	"github.com/nocktechnologies/nocklock/internal/logging"
 )
 
@@ -298,5 +299,41 @@ func TestPathWithinAnyResolvesNotYetCreatedPathUnderSymlinkedRoot(t *testing.T) 
 	}
 	if !pathWithinAny(filepath.Join(real, "sub", "canary.txt"), []string{link}) {
 		t.Fatalf("path under %q should be within symlinked root %q", real, link)
+	}
+}
+
+func TestPrepareSecretProbePreservesFilteringSemantics(t *testing.T) {
+	for _, tc := range []struct {
+		name           string
+		pass, block    []string
+		controlBlocked bool
+	}{
+		{"default allowlist", []string{"HOME"}, []string{"*_SECRET*"}, false},
+		{"empty pass list", nil, []string{"*_SECRET*"}, false},
+		{"explicitly blocked control", []string{"HOME"}, []string{"NOCKLOCK_VERIFY_*"}, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			cfg := config.DefaultConfig()
+			cfg.Secrets.Pass, cfg.Secrets.Block = tc.pass, tc.block
+			inputs, _, err := prepareProbeEnv("secret", &cfg, t.TempDir())
+			if err != nil {
+				t.Fatal(err)
+			}
+			fence, err := secrets.NewFence(cfg.Secrets.Pass, cfg.Secrets.Block)
+			if err != nil {
+				t.Fatal(err)
+			}
+			filtered, _ := fence.Filter(envWithOverrides([]string{"HOME=/example", "UNLISTED=normal"}, inputs))
+			have := strings.Join(filtered, "\n")
+			if strings.Contains(have, verifySecretName+"=") {
+				t.Fatalf("canary leaked: %s", have)
+			}
+			if strings.Contains(have, verifySecretControlName+"=") == tc.controlBlocked {
+				t.Fatalf("control filtering changed: %s", have)
+			}
+			if strings.Contains(have, "UNLISTED=") != (len(tc.pass) == 0) {
+				t.Fatalf("pass-list semantics changed: %s", have)
+			}
+		})
 	}
 }
