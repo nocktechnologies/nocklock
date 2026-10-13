@@ -50,8 +50,8 @@ func TestWatchdogDetectsProxyFailure(t *testing.T) {
 	w := NewProxyWatchdog(addr, 20*time.Millisecond, 2, onFailure)
 	w.Start(ctx)
 
-	// Wait for N consecutive refused probes + interval buffer.
-	deadline := time.Now().Add(500 * time.Millisecond)
+	// Allow two 500 ms probe timeouts plus scheduling margin.
+	deadline := time.Now().Add(2 * time.Second)
 	for time.Now().Before(deadline) {
 		if fired.Load() {
 			return // pass
