@@ -148,11 +148,12 @@ func canonicalPolicy(cfg *config.Config, configPath, dbPath, networkFenceMode st
 		},
 		"filesystem": filesystem,
 		"network": map[string]any{
-			"mode":                 networkFenceMode,
-			"allow":                canonicalStrings(cfg.Network.Allow),
-			"allow_all":            cfg.Network.AllowAll,
-			"allow_private_ranges": cfg.Network.AllowPrivateRanges,
-			"require_enforced":     cfg.Network.RequireEnforced,
+			"mode":                          networkFenceMode,
+			"allow":                         canonicalStrings(cfg.Network.Allow),
+			"allow_all":                     cfg.Network.AllowAll,
+			"allow_private_ranges":          cfg.Network.AllowPrivateRanges,
+			"require_enforced":              cfg.Network.RequireEnforced,
+			"require_unix_socket_isolation": cfg.Network.RequireUnixSocketIsolation,
 		},
 		"secrets": map[string]any{
 			"pass":           canonicalStrings(cfg.Secrets.Pass),

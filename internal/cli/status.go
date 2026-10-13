@@ -7,6 +7,7 @@ import (
 	"runtime"
 
 	"github.com/nocktechnologies/nocklock/internal/config"
+	"github.com/nocktechnologies/nocklock/internal/fence/fs/landlock"
 	"github.com/nocktechnologies/nocklock/internal/logging"
 	"github.com/nocktechnologies/nocklock/internal/version"
 	"github.com/spf13/cobra"
@@ -58,6 +59,15 @@ var statusCmd = &cobra.Command{
 		} else {
 			domainCount := len(cfg.Network.Allow)
 			fmt.Printf("Network fence: active (allowing %d domain(s))\n", domainCount)
+		}
+		if runtime.GOOS == "linux" {
+			if cfg.Network.AllowAll {
+				fmt.Fprintln(cmd.OutOrStdout(), "Unix-socket isolation: not applicable (network.allow_all = true)")
+			} else {
+				abi, abiErr := landlock.DetectABI()
+				status, _ := unixSocketBoundaryStatus(abi, abiErr)
+				fmt.Fprintf(cmd.OutOrStdout(), "Unix-socket isolation: %s (%s)\n", status, unixSocketBoundaryMessage(abi, abiErr))
+			}
 		}
 
 		// Event log summary

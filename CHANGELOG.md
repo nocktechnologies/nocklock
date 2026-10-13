@@ -4,6 +4,11 @@ All notable changes to NockLock will be documented in this file.
 
 ## [Unreleased]
 
+### Security
+
+- Linux: below Landlock ABI 9, `wrap` runs with reachable Unix sockets and records `unix_sockets=reachable reason=landlock_abi_<n>_below_9` in the signed session-start row; `doctor` and `status` report the boundary unavailable. ABI 9 enforcement has not run on a real kernel yet.
+- Strict opt-in: `network.require_unix_socket_isolation = true` makes `wrap` require Linux `CONFINED` egress with Landlock ABI 9+ and refuse when it cannot install that boundary.
+
 ### Changed
 
 - Look-back race test: the POST target records how each request body ended and counts a bodyless request apart from a finished body; new `TestLookbackTripLeavesTargetBodyIncomplete` pins that a trip cuts Content-Length and chunked bodies. Test-only.

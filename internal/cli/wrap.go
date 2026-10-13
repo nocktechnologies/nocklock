@@ -51,7 +51,7 @@ var wrapCmd = &cobra.Command{
 			return nil
 		}
 		if len(args) == 0 && !wrapFlags.DryRun {
-			return fmt.Errorf("no command specified. Usage: nocklock wrap [--profile <name>] [--dry-run] [--allow-private-ranges] [--allow-unix-sockets] -- <command> [args...]")
+			return fmt.Errorf("no command specified. Usage: nocklock wrap [--profile <name>] [--dry-run] [--allow-private-ranges] -- <command> [args...]")
 		}
 
 		cfg, configPath, err := loadWrapConfig(wrapFlags)
@@ -564,12 +564,9 @@ var wrapCmd = &cobra.Command{
 				childEnv = append(removeEnvVars(childEnv, syscallPolicyEnv), syscallPolicyEnv+"="+encoded)
 				// Ensure the child runs through the shim even when Landlock was
 				// unavailable or the filesystem fence is disabled.
-				if len(landlockPrefix) == 0 {
-					exe, err := os.Executable()
-					if err != nil {
-						return fmt.Errorf("cannot resolve nocklock executable for syscall fence shim: %w", err)
-					}
-					landlockPrefix = []string{exe, "__landlock-exec", "--"}
+				landlockPrefix, err = ensureLandlockExecPrefix(landlockPrefix)
+				if err != nil {
+					return err
 				}
 				fmt.Fprintf(os.Stderr, "NockLock: Linux syscall fence active — seccomp-BPF (%s)\n", policy.Mode)
 				logEvent(logging.EventFilePassed, "syscall", fmt.Sprintf("seccomp mode=%s socket_families=%d allow_namespaces=%t", policy.Mode, len(policy.AllowedSocketFamilies), policy.AllowNamespaces), false)
@@ -583,7 +580,16 @@ var wrapCmd = &cobra.Command{
 			fsFence != nil,
 			seatbeltProxyAddr != "",
 		)
+		if err := strictUnixSocketIsolationModeError(runtime.GOOS, egressLevel, cfg.Network.RequireUnixSocketIsolation); err != nil {
+			detail := err.Error() + "; refusing to start"
+			logEvent(logging.EventNetworkError, "network", detail, true)
+			fmt.Fprintf(cmd.ErrOrStderr(), "NockLock: fatal: %s\n", detail)
+			cmd.SilenceUsage = true
+			cmd.SilenceErrors = true
+			return &exitCodeError{code: 2}
+		}
 		unixSocketIsolation := false
+		unixSocketReason := ""
 		if egressLevel == egressLevelConfined {
 			var detectErr error
 			if landlockABI == 0 {
@@ -591,7 +597,7 @@ var wrapCmd = &cobra.Command{
 			}
 			var policyErr error
 			var warning string
-			unixSocketIsolation, warning, policyErr = confinedUnixSocketPolicy(landlockABI, detectErr, wrapFlags.AllowUnixSockets)
+			unixSocketIsolation, warning, policyErr = confinedUnixSocketPolicy(landlockABI, detectErr, cfg.Network.RequireUnixSocketIsolation)
 			if policyErr != nil {
 				detail := policyErr.Error() + "; refusing to start"
 				logEvent(logging.EventNetworkError, "network", detail, true)
@@ -601,11 +607,17 @@ var wrapCmd = &cobra.Command{
 				return &exitCodeError{code: 2}
 			}
 			if warning != "" {
-				fmt.Fprintf(cmd.ErrOrStderr(), "NockLock: WARNING: %s.\n", warning)
-				logEvent(logging.EventNetworkPassed, "network", warning, false)
+				_, unixSocketReason = unixSocketBoundaryStatus(landlockABI, detectErr)
+				fmt.Fprintf(cmd.ErrOrStderr(), "NockLock: WARNING: %s\n", warning)
 			}
-			if unixSocketIsolation && landlockSpec == nil {
-				landlockSpec = &landlock.Spec{ABI: landlockABI}
+			if unixSocketIsolation {
+				if landlockSpec == nil {
+					landlockSpec = &landlock.Spec{ABI: landlockABI}
+				}
+				landlockPrefix, err = ensureLandlockExecPrefix(landlockPrefix)
+				if err != nil {
+					return err
+				}
 			}
 		}
 		if egressLevel == egressLevelUnreachable {
@@ -793,8 +805,7 @@ var wrapCmd = &cobra.Command{
 						cmd.SilenceErrors = true
 						return &exitCodeError{code: 2}
 					}
-					fmt.Fprintln(cmd.ErrOrStderr(), "NockLock: Linux Unix-socket isolation active — external pathname and abstract sockets are blocked; only the proxy and filesystem event sockets are allowed")
-					logEvent(logging.EventNetworkPassed, "network", "Landlock Unix-socket isolation active; exact proxy and filesystem event sockets allow-listed", false)
+					logEvent(logging.EventNetworkPassed, "network", "Landlock Unix-socket isolation rules staged for the pre-exec shim", false)
 				}
 				defer proxy.Stop()
 
@@ -852,11 +863,15 @@ var wrapCmd = &cobra.Command{
 
 		// Record the effective egress level in the signed session-start row only
 		// after the configured bridge and network fence have initialized.
+		sessionDetail := args[0]
+		if unixSocketReason != "" {
+			sessionDetail += " unix_sockets=reachable reason=" + unixSocketReason
+		}
 		if err := logger.Log(logging.Event{
 			Timestamp:   time.Now(),
 			EventType:   logging.EventSessionStart,
 			Category:    "session",
-			Detail:      args[0],
+			Detail:      sessionDetail,
 			EgressLevel: string(egressLevel),
 			SessionID:   sessionID,
 		}); err != nil {

@@ -28,7 +28,7 @@ func TestLandlockSocketOnlyPreservesCrossDirectoryOperations(t *testing.T) {
 		t.Fatalf("detect Landlock ABI: %v", err)
 	}
 	if abi < MinUnixSocketABI {
-		t.Skipf("pathname Unix-socket isolation requires Landlock ABI v%d; detected v%d", MinUnixSocketABI, abi)
+		t.Skipf("not run: Landlock ABI %d < 9", abi)
 	}
 
 	root := t.TempDir()

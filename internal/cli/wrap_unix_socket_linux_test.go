@@ -117,11 +117,9 @@ func state(connected bool) string {
 }
 `
 
-// TestWrapConfinedUnixSocketReachability exercises the N11650 probe through
-// the real Linux wrapper using only throwaway pathname and abstract listeners.
-// ABI 9+ must deny both external listeners while preserving the proxy and
-// filesystem event sockets, including look-back enforcement. Older kernels
-// must refuse unless explicitly opted in; that run proves the listeners work.
+// TestWrapConfinedUnixSocketReachability exercises the real Linux wrapper with
+// throwaway pathname and abstract listeners. Below ABI 9, default wrap must run
+// with a signed reachable-socket boundary; ABI 9+ must block both listeners.
 func TestWrapConfinedUnixSocketReachability(t *testing.T) {
 	if !syscallfence.Supported() {
 		t.Skip("seccomp-BPF is unavailable for the CONFINED egress probe")
@@ -144,13 +142,22 @@ func TestWrapConfinedUnixSocketReachability(t *testing.T) {
 	}))
 	defer target.Close()
 	targetURL := strings.Replace(target.URL, "127.0.0.1:", "localhost:", 1)
+	configPath := filepath.Join(projectDir, ".nock", "config.toml")
+	baseConfig, err := os.ReadFile(configPath)
+	if err != nil {
+		t.Fatalf("read fixture config: %v", err)
+	}
 
-	runWrap := func(allowUnixSockets bool) ([]byte, error) {
-		args := []string{"wrap", "--allow-private-ranges"}
-		if allowUnixSockets {
-			args = append(args, "--allow-unix-sockets")
+	runWrap := func(linuxEnforcement string, requireUnixSocketIsolation bool) ([]byte, error) {
+		configText := strings.Replace(string(baseConfig), "linux_enforcement = \"preferred\"", fmt.Sprintf("linux_enforcement = %q", linuxEnforcement), 1)
+		configText = strings.Replace(configText, "require_unix_socket_isolation = false", fmt.Sprintf("require_unix_socket_isolation = %t", requireUnixSocketIsolation), 1)
+		if !strings.Contains(configText, "require_unix_socket_isolation = ") {
+			t.Fatal("fixture config is missing the strict Unix-socket setting")
 		}
-		args = append(args, "--", probePath, listeners.path, listeners.abstract, targetURL)
+		if err := os.WriteFile(configPath, []byte(configText), 0o600); err != nil {
+			t.Fatalf("write fixture config: %v", err)
+		}
+		args := []string{"wrap", "--allow-private-ranges", "--", probePath, listeners.path, listeners.abstract, targetURL}
 		cmd := exec.Command(bin, args...)
 		cmd.Dir = projectDir
 		for _, entry := range os.Environ() {
@@ -162,32 +169,59 @@ func TestWrapConfinedUnixSocketReachability(t *testing.T) {
 		return cmd.CombinedOutput()
 	}
 
-	if abi < landlock.MinUnixSocketABI {
-		output, err := runWrap(false)
-		if err == nil {
-			t.Fatalf("CONFINED wrap unexpectedly ran on Landlock ABI v%d without the Unix-socket opt-in:\n%s", abi, output)
+	t.Run("default below ABI 9 runs and records reachability", func(t *testing.T) {
+		if abi >= landlock.MinUnixSocketABI {
+			t.Skipf("not run: Landlock ABI %d >= 9", abi)
 		}
-		if !strings.Contains(string(output), "CONFINED egress cannot block pathname and abstract Unix sockets") {
-			t.Fatalf("refusal did not explain the missing Unix-socket enforcement:\n%s", output)
-		}
-		output, err = runWrap(true)
+		output, err := runWrap("preferred", false)
 		if err != nil {
-			t.Fatalf("explicit --allow-unix-sockets control failed on ABI v%d: %v\n%s", abi, err, output)
+			t.Fatalf("default CONFINED wrap failed on Landlock ABI v%d: %v\n%s", abi, err, output)
 		}
-		if !strings.Contains(string(output), "WARNING: --allow-unix-sockets explicitly permits access") {
-			t.Fatalf("explicit opt-in did not print its warning:\n%s", output)
+		if !strings.Contains(string(output), "WARNING: Landlock ABI v") || !strings.Contains(string(output), "reason=landlock_abi_") {
+			t.Fatalf("default reachable-socket warning is missing its ABI reason:\n%s", output)
+		}
+		if got := strings.Count(string(output), "NockLock: WARNING:"); got != 1 {
+			t.Fatalf("default reachable-socket posture printed %d warning lines, want exactly one:\n%s", got, output)
 		}
 		assertSocketProbeOutput(t, output, "path=CONNECTED", "abstract=CONNECTED", "event=CONNECTED", "proxy=CONNECTED", "lookback=403", "inet=DENIED")
-	} else {
-		output, err := runWrap(false)
+	})
+
+	t.Run("strict config refuses below ABI 9", func(t *testing.T) {
+		if abi >= landlock.MinUnixSocketABI {
+			t.Skipf("not run: Landlock ABI %d >= 9", abi)
+		}
+		output, err := runWrap("preferred", true)
+		if err == nil {
+			t.Fatalf("strict CONFINED wrap ran on Landlock ABI v%d:\n%s", abi, output)
+		}
+		if !strings.Contains(string(output), "CONFINED egress cannot block pathname and abstract Unix sockets") ||
+			!strings.Contains(string(output), "network.require_unix_socket_isolation is true") {
+			t.Fatalf("strict refusal did not explain the unavailable boundary:\n%s", output)
+		}
+	})
+
+	t.Run("Landlock ABI 9 enforcement with filesystem rules", func(t *testing.T) {
+		if abi < landlock.MinUnixSocketABI {
+			t.Skipf("not run: Landlock ABI %d < 9", abi)
+		}
+		output, err := runWrap("preferred", false)
 		if err != nil {
 			t.Fatalf("CONFINED wrap failed on Landlock ABI v%d: %v\n%s", abi, err, output)
 		}
-		assertSocketProbeOutput(t, output, "path=DENIED", "abstract=DENIED", "event=CONNECTED", "proxy=CONNECTED", "lookback=403", "inet=DENIED")
-		if !strings.Contains(string(output), "Unix-socket isolation active") {
-			t.Fatalf("wrap did not report Unix-socket isolation:\n%s", output)
+		assertSocketProbeOutput(t, output, "path=DENIED", "abstract=DENIED", "event=CONNECTED", "proxy=CONNECTED", "lookback=403", "inet=DENIED", "Unix-socket isolation active")
+	})
+
+	t.Run("Landlock ABI 9 synthesized socket-only spec is applied", func(t *testing.T) {
+		if abi < landlock.MinUnixSocketABI {
+			t.Skipf("not run: Landlock ABI %d < 9", abi)
 		}
-	}
+		output, err := runWrap("off", false)
+		if err != nil {
+			t.Fatalf("socket-only CONFINED wrap failed on Landlock ABI v%d: %v\n%s", abi, err, output)
+		}
+		assertSocketProbeOutput(t, output, "path=DENIED", "abstract=DENIED", "event=CONNECTED", "proxy=CONNECTED", "lookback=403", "inet=DENIED", "Unix-socket isolation active")
+	})
+
 	select {
 	case <-targetRequests:
 		t.Fatal("proxy forwarded a request to the throwaway target after a filesystem look-back trigger")
@@ -198,13 +232,13 @@ func TestWrapConfinedUnixSocketReachability(t *testing.T) {
 	if abi < landlock.MinUnixSocketABI {
 		for _, record := range []string{"path:probe-path", "abstract:probe-abstract"} {
 			if !accepted[record] {
-				t.Errorf("negative control listener did not receive %q: %v", record, accepted)
+				t.Errorf("below-ABI negative control listener did not receive %q: %v", record, accepted)
 			}
 		}
 	} else if accepted["path:probe-path"] || accepted["abstract:probe-abstract"] {
 		t.Fatalf("Landlock allowed an external socket payload: %v", accepted)
 	}
-	assertUnixSocketProbeAuditEvents(t, projectDir, abi < landlock.MinUnixSocketABI)
+	assertUnixSocketProbeAuditEvents(t, projectDir, abi)
 }
 
 type throwawaySocketListeners struct {
@@ -342,6 +376,7 @@ deny = []
 allow = ["localhost"]
 allow_all = false
 allow_private_ranges = true
+require_unix_socket_isolation = false
 
 [[network.lookback]]
 name = "socket-probe"
@@ -366,7 +401,7 @@ func assertSocketProbeOutput(t *testing.T, output []byte, expected ...string) {
 	}
 }
 
-func assertUnixSocketProbeAuditEvents(t *testing.T, projectDir string, expectFallback bool) {
+func assertUnixSocketProbeAuditEvents(t *testing.T, projectDir string, abi int) {
 	t.Helper()
 	configPath := filepath.Join(projectDir, ".nock", "config.toml")
 	cfg, err := config.Load(configPath)
@@ -386,28 +421,33 @@ func assertUnixSocketProbeAuditEvents(t *testing.T, projectDir string, expectFal
 	if err != nil {
 		t.Fatalf("query fixture audit log: %v", err)
 	}
-	refusalRecorded := false
-	optInRecorded := false
 	fileTriggerRecorded := false
 	lookbackDenied := false
+	reachableSessionRecorded := false
+	strictRefusalRecorded := false
+	reason := fmt.Sprintf("unix_sockets=reachable reason=landlock_abi_%d_below_9", abi)
 	for _, event := range events {
-		if event.EventType == logging.EventNetworkError && event.Blocked && strings.Contains(event.Detail, "CONFINED egress cannot block pathname and abstract Unix sockets") {
-			refusalRecorded = true
-		}
-		if event.EventType == logging.EventNetworkPassed && !event.Blocked && strings.Contains(event.Detail, "--allow-unix-sockets explicitly permits access") {
-			optInRecorded = true
-		}
 		if event.EventType == logging.EventFileBlocked && event.Blocked && strings.Contains(event.Detail, "/n11660-outside") {
 			fileTriggerRecorded = true
 		}
 		if event.EventType == logging.EventNetworkBlocked && event.Blocked && strings.Contains(event.Detail, "rule=lookback:socket-probe trigger=") {
 			lookbackDenied = true
 		}
+		if event.EventType == logging.EventSessionStart && event.EgressLevel == "CONFINED" && strings.Contains(event.Detail, reason) {
+			reachableSessionRecorded = true
+		}
+		if event.EventType == logging.EventNetworkError && event.Blocked && strings.Contains(event.Detail, "network.require_unix_socket_isolation is true") {
+			strictRefusalRecorded = true
+		}
 	}
 	if !fileTriggerRecorded || !lookbackDenied {
 		t.Fatalf("filesystem event socket did not trigger and audit look-back enforcement; file trigger=%t look-back denial=%t events=%+v", fileTriggerRecorded, lookbackDenied, events)
 	}
-	if expectFallback && (!refusalRecorded || !optInRecorded) {
-		t.Fatalf("unsupported-kernel refusal and explicit opt-in must both be audited; refusal=%t opt-in=%t events=%+v", refusalRecorded, optInRecorded, events)
+	if abi < landlock.MinUnixSocketABI && (!reachableSessionRecorded || !strictRefusalRecorded) {
+		t.Fatalf("below-ABI session-start reachability row and strict refusal must be audited; reachable=%t strict refusal=%t events=%+v", reachableSessionRecorded, strictRefusalRecorded, events)
+	}
+	verified, err := logger.VerifyChain()
+	if err != nil || !verified.Intact || verified.SignedEntries == 0 {
+		t.Fatalf("Unix-socket posture rows are not in an intact signed audit chain: result=%+v err=%v", verified, err)
 	}
 }

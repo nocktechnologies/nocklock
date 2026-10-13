@@ -22,7 +22,7 @@ func TestDoctorProtectedConfig(t *testing.T) {
 	restore := stubDoctorCapabilities(doctorCapabilities{
 		goos:           "linux",
 		fsBackend:      func() error { return nil },
-		landlockABI:    func() (int, error) { return 3, nil },
+		landlockABI:    func() (int, error) { return 9, nil },
 		syscallBackend: func() bool { return true },
 		networkBackend: func() error { return nil },
 		sandboxExec:    func() error { return nil },
@@ -49,27 +49,46 @@ func TestUnixSocketDoctorCheckReportsLandlockPosture(t *testing.T) {
 		name       string
 		goos       string
 		abi        int
+		allowAll   bool
 		wantSev    doctorSeverity
 		wantStatus string
 	}{
 		{name: "ABI 9 enforces both socket types", goos: "linux", abi: 9, wantSev: doctorOK, wantStatus: "enforceable"},
-		{name: "older ABI warns", goos: "linux", abi: 5, wantSev: doctorWarning, wantStatus: "unsupported"},
-		{name: "Landlock unavailable warns", goos: "linux", abi: 0, wantSev: doctorWarning, wantStatus: "landlock-unavailable"},
+		{name: "older ABI is unavailable", goos: "linux", abi: 8, wantSev: doctorCritical, wantStatus: "unavailable"},
+		{name: "Landlock unavailable is unavailable", goos: "linux", abi: 0, wantSev: doctorCritical, wantStatus: "unavailable"},
+		{name: "network allow-all makes boundary not applicable", goos: "linux", abi: 8, allowAll: true, wantSev: doctorInfo, wantStatus: "not-applicable"},
 		{name: "macOS is not applicable", goos: "darwin", wantSev: doctorInfo, wantStatus: "not-applicable"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			check := unixSocketDoctorCheck(doctorCapabilities{
+			cfg := config.DefaultConfig()
+			cfg.Network.AllowAll = tc.allowAll
+			check := unixSocketDoctorCheck(&cfg, doctorCapabilities{
 				goos:        tc.goos,
 				landlockABI: func() (int, error) { return tc.abi, nil },
 			})
 			if check.Severity != tc.wantSev || check.Status != tc.wantStatus {
 				t.Fatalf("unix-socket doctor check = %+v, want severity=%q status=%q", check, tc.wantSev, tc.wantStatus)
 			}
-			if tc.wantSev == doctorWarning && (check.Fix == "" || !strings.Contains(check.Message, "CONFINED")) {
-				t.Fatalf("unsupported posture must explain the CONFINED gap and remediation: %+v", check)
+			if tc.wantSev == doctorCritical && (!strings.Contains(check.Message, "reachable") || !strings.Contains(check.Fix, "require_unix_socket_isolation")) {
+				t.Fatalf("unavailable posture must explain reachability and strict opt-in: %+v", check)
 			}
 		})
+	}
+}
+
+func TestDoctorUnavailableUnixSocketBoundaryIsAGap(t *testing.T) {
+	cfg := config.DefaultConfig()
+	check := unixSocketDoctorCheck(&cfg, doctorCapabilities{
+		goos:        "linux",
+		landlockABI: func() (int, error) { return 8, nil },
+	})
+	report := finishDoctorReport([]doctorCheck{check}, doctorActivity{})
+	if report.Verdict != doctorVerdictGapsFound {
+		t.Fatalf("doctor verdict = %q, want %q for unavailable Unix-socket isolation", report.Verdict, doctorVerdictGapsFound)
+	}
+	if check.Status != "unavailable" || !strings.Contains(check.Message, "reason=landlock_abi_8_below_9") {
+		t.Fatalf("doctor boundary = %+v, want ABI 8 unavailable with reason", check)
 	}
 }
 
@@ -81,7 +100,7 @@ func TestDoctorNetworkAllowAllWarnsButDoesNotFail(t *testing.T) {
 	restore := stubDoctorCapabilities(doctorCapabilities{
 		goos:           "linux",
 		fsBackend:      func() error { return nil },
-		landlockABI:    func() (int, error) { return 3, nil },
+		landlockABI:    func() (int, error) { return 9, nil },
 		syscallBackend: func() bool { return true },
 		networkBackend: func() error { return nil },
 		sandboxExec:    func() error { return nil },
@@ -118,7 +137,7 @@ func TestDoctorNetworkAllowlistBridgeDoesNotWarnWithFilesystemInterposer(t *test
 	restore := stubDoctorCapabilities(doctorCapabilities{
 		goos:           "linux",
 		fsBackend:      func() error { return nil },
-		landlockABI:    func() (int, error) { return 3, nil },
+		landlockABI:    func() (int, error) { return 9, nil },
 		syscallBackend: func() bool { return true },
 		networkBackend: func() error { return nil },
 		sandboxExec:    func() error { return nil },
@@ -151,7 +170,7 @@ func TestDoctorNetworkAllowlistWarnsWhenBridgeInterposerDisabled(t *testing.T) {
 	restore := stubDoctorCapabilities(doctorCapabilities{
 		goos:           "linux",
 		fsBackend:      func() error { return nil },
-		landlockABI:    func() (int, error) { return 3, nil },
+		landlockABI:    func() (int, error) { return 9, nil },
 		syscallBackend: func() bool { return true },
 		networkBackend: func() error { return nil },
 		sandboxExec:    func() error { return nil },
@@ -188,7 +207,7 @@ func TestDoctorNetworkAllowlistNotInertWhenSyscallOff(t *testing.T) {
 	restore := stubDoctorCapabilities(doctorCapabilities{
 		goos:           "linux",
 		fsBackend:      func() error { return nil },
-		landlockABI:    func() (int, error) { return 3, nil },
+		landlockABI:    func() (int, error) { return 9, nil },
 		syscallBackend: func() bool { return true },
 		networkBackend: func() error { return nil },
 		sandboxExec:    func() error { return nil },
@@ -334,7 +353,7 @@ func TestDoctorJSONShape(t *testing.T) {
 	restore := stubDoctorCapabilities(doctorCapabilities{
 		goos:           "linux",
 		fsBackend:      func() error { return nil },
-		landlockABI:    func() (int, error) { return 3, nil },
+		landlockABI:    func() (int, error) { return 9, nil },
 		syscallBackend: func() bool { return true },
 		networkBackend: func() error { return nil },
 		sandboxExec:    func() error { return nil },
