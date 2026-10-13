@@ -26,6 +26,10 @@ HEX64 = r"[0-9a-fA-F]{64}"
 CANARY_ENV = {"BENCH_SECRET_TOKEN": "bench-canary-not-a-real-secret"}
 
 
+class FaultExit(int):
+    """An exit status whose process-group cleanup failed: the real status, flagged as a harness fault."""
+
+
 class SetupFault(Exception):
     """The bench is mis-set-up; no attack may run, because its verdicts would mean nothing."""
 
@@ -37,7 +41,8 @@ def run(argv, cwd, env, dir_fd, name, until):
     FIFO planted at its path is refused, and is read back through that same fd (pread), never
     by path. A non-regular file is a HARNESS-FAULT. Returns (exit, output). Exit 124 means the
     deadline `until` (a time.monotonic() value) expired and the process group was SIGKILLed;
-    None means a harness fault (including a failed process-group cleanup). Nothing here blocks unbounded, and no pipe is held open.
+    None means a harness fault; a FaultExit is the real exit with a failed process-group cleanup, so a
+    breach stays visible. An interrupt kills the group before it propagates. Nothing here blocks unbounded, and no pipe is held open.
     """
     try:
         fd = os.open(name, os.O_RDWR | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | os.O_NONBLOCK, 0o600, dir_fd=dir_fd)
@@ -56,12 +61,20 @@ def run(argv, cwd, env, dir_fd, name, until):
             rc = p.wait(timeout=max(0.0, until - time.monotonic()))
         except subprocess.TimeoutExpired:
             timed_out = True
+        except BaseException:  # Ctrl-C, or SIGTERM turned into KeyboardInterrupt by main()
+            try:
+                os.killpg(p.pid, signal.SIGKILL)
+                p.wait(timeout=5)
+            except (OSError, subprocess.TimeoutExpired):
+                pass
+            raise
         try:
             os.killpg(p.pid, signal.SIGKILL)  # also reaps stragglers a finished attack left behind
         except ProcessLookupError:
             pass
         except OSError as e:  # e.g. a root-owned helper in the group cannot be signalled
-            return None, f"HARNESS-FAULT: process-group cleanup failed (killpg {p.pid}: {e}); attack exit was {rc}"
+            text = os.pread(f.fileno(), 1 << 20, 0).decode(errors="replace").strip()
+            return FaultExit(rc), f"HARNESS-FAULT: process-group cleanup failed (killpg {p.pid}: {e}); attack exit was {rc}; {text[-300:]}"
         if timed_out:
             try:
                 p.wait(timeout=5)
@@ -121,6 +134,13 @@ def classify(rc, atk):
     """
     if rc is None:
         return False, True
+    cleanup_fault = isinstance(rc, FaultExit)
+    executed, fault = _classify(int(rc), atk)
+    return executed, fault or cleanup_fault
+
+
+def _classify(rc, atk):
+    """classify() for a plain exit status."""
     if atk["evidence"] == "nockguard":
         executed, fault = rc in (0, 5), rc in (3, 4, 5)
     else:
@@ -198,6 +218,10 @@ def main():
     ap.add_argument("--nocklock", required=True)
     ap.add_argument("--nockguard", required=True)
     a = ap.parse_args()
+
+    def on_term(signum, frame):
+        raise KeyboardInterrupt(f"signal {signum}")
+    signal.signal(signal.SIGTERM, on_term)
     try:
         bench(a)
     except SystemExit:

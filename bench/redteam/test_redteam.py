@@ -66,9 +66,27 @@ class RunFaultTest(unittest.TestCase):
     def test_failed_process_group_cleanup_is_a_harness_fault(self):
         with tempfile.TemporaryDirectory() as d, mock.patch("os.killpg", side_effect=PermissionError("root-owned")):
             rc, out = run_in(d, ["/bin/sh", "-c", "echo done"], os.environ.copy(), time.monotonic() + 5)
-        self.assertIsNone(rc)
-        self.assertIn("HARNESS-FAULT", out)
+        self.assertEqual(rc, 0)
+        self.assertIsInstance(rc, redteam.FaultExit)
         self.assertIn("killpg", out)
+
+    def test_breach_survives_a_failed_cleanup_as_allowed_plus_fault(self):
+        atk = {"evidence": "nocklock", "expect": "blocked", "blocked_exit": [1]}
+        executed, fault = redteam.classify(redteam.FaultExit(0), atk)
+        self.assertTrue(executed)
+        self.assertTrue(fault)
+
+    def test_interrupt_kills_the_attack_process_group(self):
+        with tempfile.TemporaryDirectory() as d:
+            pidfile = Path(d) / "pid"
+            with mock.patch("subprocess.Popen.wait", side_effect=[KeyboardInterrupt, 0]):
+                with self.assertRaises(KeyboardInterrupt):
+                    run_in(d, ["/bin/sh", "-c", f"echo $$ > {pidfile}; sleep 60"], os.environ.copy(), time.monotonic() + 30)
+            pid = int(pidfile.read_text()) if pidfile.exists() else None
+            if pid:
+                time.sleep(0.2)
+                with self.assertRaises(ProcessLookupError):
+                    os.kill(pid, 0)
 
 
 class SetupCheckTest(unittest.TestCase):

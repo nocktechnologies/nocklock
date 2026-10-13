@@ -17,8 +17,6 @@ reply does not matter.
 
 Known limits of this slice, written down rather than fixed:
 
-- An interrupt (Ctrl-C, SIGTERM to the driver) between `Popen` and `killpg` in `run()` leaves that
-  attack's process group running.
 - `check_setup` runs once, before the first attack. It does not re-check that evidence paths stay
   outside the fence grants while attacks run.
 - The NockGuard trail path (`<agent>.audit.jsonl` beside the policy audit path) is a naming
