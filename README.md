@@ -400,7 +400,7 @@ Two candidate runtimes are deliberately left without a preset:
 | Command | Description |
 |---------|-------------|
 | `nocklock init` | Create `.nock/config.toml` with safe defaults |
-| `nocklock init --runtime <name>` | Create `.nock/config.toml` from an embedded runtime preset |
+| `nocklock init --runtime <name>` | Create `.nock/config.toml` from an embedded runtime preset; fails if one exists. Add `--diff` to print the preset's policy changes against the existing config (no write) |
 | `nocklock wrap -- <cmd>` | Run a command inside the fence |
 | `nocklock wrap --net-fence=netns -- <cmd>` | Linux only: run inside the kernel-enforced netns egress fence (needs the privileged helper) |
 | `nocklock wrap --require-enforced-egress -- <cmd>` | Refuse to start unless egress is `KERNEL` or `CONFINED` |

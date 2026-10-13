@@ -48,3 +48,8 @@ nocklock.exe
 # .idea/
 # .vscode/
 .branch-lock
+
+# Red-team bench scratch dirs and generated reports
+bench/redteam/REPORT.md
+bench/redteam/report.json
+bench/redteam/__pycache__/

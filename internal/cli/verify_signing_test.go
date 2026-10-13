@@ -250,3 +250,25 @@ func asExitCodeError(err error, target **exitCodeError) bool {
 	}
 	return ok
 }
+
+// TestExportedPubkeyRoundTripsThroughParse feeds the exact exported line, with
+// its "ed25519 " prefix, back to ParsePublicKey; bare base64 must still parse.
+func TestExportedPubkeyRoundTripsThroughParse(t *testing.T) {
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+	var buf bytes.Buffer
+	if err := runExportPubkey(&buf); err != nil {
+		t.Fatalf("runExportPubkey: %v", err)
+	}
+	line := buf.String()
+	full, err := logging.ParsePublicKey(line)
+	if err != nil {
+		t.Fatalf("exported line %q rejected: %v", line, err)
+	}
+	bare, err := logging.ParsePublicKey(strings.TrimPrefix(strings.TrimSpace(line), "ed25519 "))
+	if err != nil || !full.Equal(bare) {
+		t.Fatalf("bare form mismatch: %v", err)
+	}
+	if _, err := logging.ParsePublicKey("rsa " + strings.TrimPrefix(line, "ed25519 ")); err == nil {
+		t.Fatal("unknown prefix must be rejected")
+	}
+}

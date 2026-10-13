@@ -4,6 +4,17 @@ All notable changes to NockLock will be documented in this file.
 
 ## [Unreleased]
 
+### Breaking
+
+- `init` now exits non-zero when a config exists; scripts that call init repeatedly should check for `.nock/config.toml` first; `nocklock init --runtime <name> --diff` shows what a preset would change in an existing config, printing array elements as `+ secrets.pass += "X"` and `- secrets.block -= "X"`.
+
+### Added
+
+- Red-team bench, slice 1 (`bench/redteam/`): `attacks.toml` lists scripted attacks (off-allowlist HTTPS and HTTP egress, raw sockets, direct DNS, secret file and env reads, a write outside the fence root, and an MCP `tools/call` denied by a NockGuard policy through `nockguard proxy`). `run.sh` runs each inside `nocklock wrap`, runs `nocklock verify --audit` and `nockguard verify`, and writes `REPORT.md` and `report.json` pairing every attempt with the signed row that stopped it (event id, rule, chain hash). Two allowed actions are negative controls. New `redteam-bench` CI job installs NockGuard v0.5.0 from its release (sha256 pinned in the workflow) and uploads the report. Nothing the verifiers read is reachable from inside the fence, and the bench proves that before it runs: scratch lives under `$RUNNER_TEMP` (or `~/.cache/nocklock-bench`), never `/tmp`, and the driver stops with `SETUP-FAULT` if the canary, outside directory, audit state, NockGuard key, trail or policy lies under any grant. The two MCP rows run on the host (`host = true`), the MCP client driving `nockguard proxy` directly; the proof is NockGuard's signed policy deny, the fence adds nothing to it, and REPORT.md labels them "NockGuard (host)". Two attacks inside the fence (read the key, append to the trail) must be blocked and `nockguard verify` must still pass; the private seed is read only by the proxy and `verify` receives only the public key. Harness logs open with `O_NOFOLLOW`. An MCP call that reached the upstream is recorded as `UPSTREAM-EXECUTED` the moment the reply arrives, and a shutdown timeout afterwards is a separate `HARNESS-FAULT`, never `BLOCKED`. The driver always writes `REPORT.md` and `report.json` (a wrap that fails to launch is a FAIL row; a failed process-group cleanup is a `HARNESS-FAULT` that fails the run). Each attack runs in its own session with output sent to a file (no pipe) under one deadline; on expiry the process group is SIGKILLed, and a process that is still not reaped is recorded as `HARNESS-FAULT`. Only the exit codes an attack declares as `blocked_exit` count as a block; any other exit is a `HARNESS-FAULT`. `nockguard verify` gets the trail and public key by explicit flags (`--ed25519-pub-env`, `--audit`) under an empty HOME. The direct-DNS attack is scored by receipt: a host receiver on UDP 53 that logs nothing means blocked, whether or not the client got a reply. Two attempts (a direct TCP connect to a literal public IP on 443, a direct resolver query) are stopped by the kernel floor, which writes no per-attempt row today, so the report pins the session's signed fence-state row for them and labels them `blocked by kernel floor`. Each is also run once outside `nocklock wrap`; if that control does not reach, the attack is `INCONCLUSIVE`, not a pass.
+- Docs: compare NFLOG, seccomp and Seatbelt denial evidence and propose bounded,
+  signed Linux packet-drop observations in `docs/design/kernel-floor-denial-evidence.md`
+  (N11634). Design only; no enforcement or audit behavior changed.
+
 ### Security
 
 - Linux: below Landlock ABI 9, `wrap` runs with reachable Unix sockets and records `unix_sockets=reachable reason=landlock_abi_<n>_below_9` in the signed session-start row; `doctor` and `status` report the boundary unavailable. ABI 9 enforcement has not run on a real kernel yet.
@@ -11,17 +22,14 @@ All notable changes to NockLock will be documented in this file.
 
 ### Changed
 
+- `nocklock init` exits non-zero when `.nock/config.toml` already exists instead of reporting success, and `nocklock init --runtime <name> --diff` prints the policy entries the preset would add or remove (no write; array elements print as `+ key += "v"` / `- key -= "v"`, other values as `key = value`), comparing the two configs key by key and `[[network.lookback]]` entries in order. The "config already exists" error no longer prints the Cobra usage. The macOS `claude` hint now points at `--diff`.
+- `--ed25519-pub` accepts the `ed25519 <base64>` line that `verify --export-pubkey` prints, as well as bare base64 or hex.
+- A legacy `[cloud]` section is reported as inert, naming `[audit.forward]`, the real delivery transport.
 - Look-back race test: the POST target records how each request body ended and counts a bodyless request apart from a finished body; new `TestLookbackTripLeavesTargetBodyIncomplete` pins that a trip cuts Content-Length and chunked bodies. Test-only.
 
 ### Fixed
 
 - Linux netns: the concurrent subnet test now checks atomic reservation claims instead of random, unreserved bridge candidates; two processes also contend for one subnet in a regression test.
-
-### Added
-
-- Docs: compare NFLOG, seccomp and Seatbelt denial evidence and propose bounded,
-  signed Linux packet-drop observations in `docs/design/kernel-floor-denial-evidence.md`
-  (N11634). Design only; no enforcement or audit behavior changed.
 
 ## [0.7.0] - 2026-10-12
 
