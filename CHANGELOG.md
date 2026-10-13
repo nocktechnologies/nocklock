@@ -10,9 +10,68 @@ All notable changes to NockLock will be documented in this file.
   and clean-machine Linux/macOS acceptance in `docs/design/linux-packaging.md`
   (N11643). Design only; no installer or release assets added.
 
+## [0.9.0] - 2026-10-13
+
+### Breaking
+
+- Linux `CONFINED` below Landlock ABI 9 (every kernel we have tested): `nocklock doctor` now reports the Unix-socket boundary as unavailable and returns `PARTIAL` (exit 3) where v0.8.0 returned `PROTECTED` (exit 0). Automation that fails on any non-zero `doctor` exit will fail on these kernels. That is intended: Unix sockets are reachable there. Set `network.require_unix_socket_isolation = true` to make `wrap` refuse instead.
+
+### Changed
+
+- Red-team bench hardening (N11676): a verifier, version or process-group cleanup fault after scoring now fails the run (`no_harness_fault_after_scoring`); a nonzero NockGuard proxy exit at shutdown is a HARNESS-FAULT; the raw-socket and DNS attacks exit 42 when refused, so Python's own exit 1 (an uncaught exception) is a fault, not a block; datagrams already queued at the sink when an attack's deadline passes are counted before scoring. Test fixes: the interrupt test now requires the attack to have started, and the symlink-plant test checks the victim file while it still exists.
+- Docs: `docs/` is now organized as a map for contributors and users: `docs/README.md`, `docs/REPO-MAP.md`, `docs/setup.md`, `docs/how-it-works/` (one page per fence or feature with its limits), `docs/reference/cli.md` (commands, exit codes and config schema as shipped, not yet a compatibility promise), `docs/runbooks/` (release, incident), `docs/decisions/` (records 006-014) and `docs/ROADMAP.md` (the path to 1.0). `CLAUDE.md` is rewritten as a short map and `AGENTS.md` points to it.
+
+### Security
+
+- Linux `CONFINED` egress below Landlock ABI 9: default non-strict `wrap` runs, warns once, and records a signed session-start row with `unix_sockets=reachable reason=landlock_abi_<n>_below_9`. `doctor` reports the Unix-socket boundary as unavailable and returns `PARTIAL` (exit 3); `status` includes the ABI reason. ABI 9 enforcement has not run on a real kernel yet.
+- `network.require_unix_socket_isolation = true` makes `wrap` refuse when the Unix-socket boundary cannot be enforced. The removed `--allow-unix-sockets` flag is not supported.
+- Record the pre-ABI-9 Linux `CONFINED` limitation: a non-root probe confirmed that a wrapped child can connect to both a throwaway pathname socket and a throwaway abstract socket while a direct AF_INET datagram socket syscall is denied. The design and probe are in `docs/design/unix-socket-reachability.md` and `docs/probes/n11650/`.
+- Linux CONFINED io_uring regression test: bound probe subprocesses, kill their process groups on timeout, skip runners missing `linux/io_uring.h`, and distinguish setup ENOSYS from `IORING_OP_SOCKET` failure.
+
+### Documentation
+
+- Linux source-install docs now say where `libfence_fs.so` must be placed (`findTrustedLibFenceFS`, `internal/cli/wrap.go`); `verify --audit` exit codes per verdict, secret-preflight platform build tags, and the CONFINED socket-family override are documented from code (N11689).
+- README: macOS denied-file logging now has one statement (best-effort `file_blocked` tailer); new "What the signed log proves" section on observation coverage (N11642).
+- Follow-ups to the docs split (N11692): setup now builds as the user and installs the CLI with `sudo install`, never `sudo make install`, states when a legacy in-project `.nock/events.db` is agent-writable on Linux, README and ROADMAP share one Linux install story, `verify --audit` documents the local-key `AUTHENTIC` path, and `docs/reference/cli.md` and `docs/runbooks/release.md` match the code.
+
+## [0.8.0] - 2026-10-13
+
+### Breaking
+
+- `nocklock doctor` no longer reports PROTECTED for a config with disabled or advisory boundaries. New verdicts PARTIAL (exit 3) and UNPROTECTED (exit 4); GAPS FOUND now exits 2 (was 1). Exit codes are now 0 PROTECTED, 2 GAPS FOUND, 3 PARTIAL, 4 UNPROTECTED. A project that used to read PROTECTED with fences off now exits non-zero (3 or 4); that is intended, and automation that fails on any non-zero exit will now fail for such configs. Scripts matching exit 1 must change to 2. A network fence whose egress is UNREACHABLE reports posture `unavailable` and the verdict is GAPS FOUND (exit 2), since wrap refuses to start. `doctor --json` gains `boundaries` and `egress_level`. A config with `filesystem.root = ""`, `network.allow_all = true`, empty secret patterns and `syscall.enforcement = "off"` is now UNPROTECTED instead of PROTECTED.
+- `nocklock init` now exits non-zero when `.nock/config.toml` already exists; scripts that call `init` repeatedly should check for that file first. See Changed for `--diff`.
+
+### Added
+
+- Red-team bench, slice 1 (`bench/redteam/`): `attacks.toml` lists scripted attacks (off-allowlist HTTPS and HTTP egress, raw sockets, direct DNS, secret file and env reads, a write outside the fence root, and an MCP `tools/call` denied by a NockGuard policy through `nockguard proxy`). `run.sh` runs each inside `nocklock wrap`, runs `nocklock verify --audit` and `nockguard verify`, and writes `REPORT.md` and `report.json` pairing every attempt with the signed row that stopped it (event id, rule, chain hash). Two allowed actions are negative controls. New `redteam-bench` CI job installs NockGuard v0.5.0 from its release (sha256 pinned in the workflow) and uploads the report. Nothing the verifiers read is reachable from inside the fence, and the bench proves that before it runs: scratch lives under `$RUNNER_TEMP` (or `~/.cache/nocklock-bench`), never `/tmp`, and the driver stops with `SETUP-FAULT` if the canary, outside directory, audit state, NockGuard key, trail or policy lies under any grant. The two MCP rows run on the host (`host = true`), the MCP client driving `nockguard proxy` directly; the proof is NockGuard's signed policy deny, the fence adds nothing to it, and REPORT.md labels them "NockGuard (host)". Two attacks inside the fence (read the key, append to the trail) must be blocked and `nockguard verify` must still pass; the private seed is read only by the proxy and `verify` receives only the public key. Harness logs open with `O_NOFOLLOW`. An MCP call that reached the upstream is recorded as `UPSTREAM-EXECUTED` the moment the reply arrives, and a shutdown timeout afterwards is a separate `HARNESS-FAULT`, never `BLOCKED`. The driver always writes `REPORT.md` and `report.json` (a wrap that fails to launch is a FAIL row; a failed process-group cleanup is a `HARNESS-FAULT` that fails the run). Each attack runs in its own session with output sent to a file (no pipe) under one deadline; on expiry the process group is SIGKILLed, and a process that is still not reaped is recorded as `HARNESS-FAULT`. Only the exit codes an attack declares as `blocked_exit` count as a block; any other exit is a `HARNESS-FAULT`. `nockguard verify` gets the trail and public key by explicit flags (`--ed25519-pub-env`, `--audit`) under an empty HOME. The direct-DNS attack is scored by receipt: a host receiver on UDP 53 that logs nothing means blocked, whether or not the client got a reply. Two attempts (a direct TCP connect to a literal public IP on 443, a direct resolver query) are stopped by the kernel floor, which writes no per-attempt row today, so the report pins the session's signed fence-state row for them and labels them `blocked by kernel floor`. Each is also run once outside `nocklock wrap`; if that control does not reach, the attack is `INCONCLUSIVE`, not a pass.
+- Docs: compare NFLOG, seccomp and Seatbelt denial evidence and propose bounded,
+  signed Linux packet-drop observations in `docs/design/kernel-floor-denial-evidence.md`
+  (N11634). Design only; no enforcement or audit behavior changed.
+
+### Security
+
+- Linux CONFINED: the syscall fence now denies `io_uring_setup`, `io_uring_enter` and `io_uring_register`. In v0.7.0 and earlier a fenced process could open and connect a socket through io_uring (`IORING_OP_SOCKET` / `IORING_OP_CONNECT`), which went around the socket-family filter. Upgrade. Regression test: `TestEnforce_IORingSocketConnectDenied`.
+
+### Changed
+
+- `nocklock status` says "configured" instead of "active": it reads config and does not track running wrap sessions.
+- `nocklock init` exits non-zero when `.nock/config.toml` already exists instead of reporting success, and `nocklock init --runtime <name> --diff` prints the policy entries the preset would add or remove (no write; array elements print as `+ key += "v"` / `- key -= "v"`, other values as `key = value`), comparing the two configs key by key and `[[network.lookback]]` entries in order. The "config already exists" error no longer prints the Cobra usage. The macOS `claude` hint now points at `--diff`.
+- `--ed25519-pub` accepts the `ed25519 <base64>` line that `verify --export-pubkey` prints, as well as bare base64 or hex.
+- A legacy `[cloud]` section is reported as inert, naming `[audit.forward]`, the real delivery transport.
+- Look-back race test: the POST target records how each request body ended and counts a bodyless request apart from a finished body; new `TestLookbackTripLeavesTargetBodyIncomplete` pins that a trip cuts Content-Length and chunked bodies. Test-only.
+
 ### Fixed
 
 - Linux netns: the concurrent subnet test now checks atomic reservation claims instead of random, unreserved bridge candidates; two processes also contend for one subnet in a regression test.
+
+### Known issues
+
+- Linux CONFINED does not yet stop a fenced process from connecting to Unix sockets (pathname or abstract), so a reachable socket such as `docker.sock` is a way out; a fix is in progress.
+- The Homebrew formula installs only the `nocklock` binary; on Linux the default config's `wrap` needs `libfence_fs.so` and refuses to start without it, and `make install` does not install it either, so build from source per the README until packaging lands.
+
+### Upgrading from 0.7.x
+
+Scripts that treat any non-zero `doctor` exit as failure now also see 3 (PARTIAL) and 4 (UNPROTECTED), and GAPS FOUND moves from exit 1 to 2. Scripts that call `init` repeatedly must check for `.nock/config.toml` first. `status` prints "configured" instead of "active".
 
 ## [0.7.0] - 2026-10-12
 

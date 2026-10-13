@@ -6,7 +6,7 @@ Status: **Proposed; design only, no installer or release assets added**
 
 Nock: N11643
 
-Baseline: `a793375` (v0.7.0)
+Baseline: `f2b0d04` (v0.9.0); refreshed after the v0.8/v0.9 doctor and Unix-socket changes.
 
 ## Decision
 
@@ -26,7 +26,7 @@ Coordinate its release against the separate onboarding and doctor work.
 
 ## Why this is needed
 
-The v0.7.0 release exists and the Homebrew formula points at it, but the release
+The v0.9.0 release exists and the Homebrew formula points at it, but the release
 has no attached binary assets at this baseline. `make build-all` builds the Linux
 CLI and C interposer; `make install` installs only the CLI. The egress helper has
 its own installation step. A successful CLI download alone therefore does not
@@ -104,7 +104,7 @@ and downloading the three assets into an empty operator-owned directory:
 ```bash
 set -euo pipefail
 # Proposed workflow identity: this workflow does not exist at the baseline.
-: "${RELEASE_TAG:?Set the reviewed release tag, for example v0.7.1}"
+: "${RELEASE_TAG:?Set the reviewed release tag, for example v0.9.1}"
 [[ "$RELEASE_TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]
 archive="nocklock_${RELEASE_TAG}_linux_amd64.tar.gz"
 identity="https://github.com/nocktechnologies/nocklock/.github/workflows/release.yml@refs/tags/${RELEASE_TAG}"
@@ -219,10 +219,33 @@ mkdir "$fixture/project" "$fixture/outside"
 cd "$fixture/project"
 "$NOCKLOCK_BIN" version | tee "$fixture/version.txt"
 "$NOCKLOCK_BIN" init
-"$NOCKLOCK_BIN" doctor --json > "$fixture/doctor.json"
-"$TEST_PYTHON" - "$fixture/doctor.json" <<'PY'
-import json, sys
-assert json.load(open(sys.argv[1]))["verdict"] == "PROTECTED"
+doctor_exit=0
+"$NOCKLOCK_BIN" doctor --json > "$fixture/doctor.json" || doctor_exit=$?
+"$TEST_PYTHON" - "$fixture/doctor.json" "$doctor_exit" <<'PY'
+import json, re, sys
+report = json.load(open(sys.argv[1]))
+code = int(sys.argv[2])
+boundaries = {b["name"]: b["posture"] for b in report["boundaries"]}
+for name in ("filesystem", "syscall", "network", "secrets"):
+    assert boundaries[name] == "enforced", boundaries
+if sys.platform == "darwin":
+    assert report["egress_level"] == "SEATBELT", report
+    assert code == 0 and report["verdict"] == "PROTECTED", report
+else:
+    assert sys.platform == "linux", sys.platform
+    assert report["egress_level"] == "CONFINED", report
+    if boundaries["unix-sockets"] == "enforced":
+        assert code == 0 and report["verdict"] == "PROTECTED", report
+    else:
+        # v0.9 deliberately reports PARTIAL on pre-ABI-9 kernels. Accept
+        # only that named limitation, never a generic degraded install.
+        assert boundaries["unix-sockets"] == "unavailable", boundaries
+        assert code == 3 and report["verdict"] == "PARTIAL", report
+        check = next(c for c in report["checks"] if c["name"] == "unix-sockets")
+        assert re.search(r"reason=landlock_abi_[1-8]_below_9\b", check["message"]), check
+assert all(b["posture"] == "enforced" or
+           (sys.platform == "linux" and b["name"] == "unix-sockets" and code == 3)
+           for b in report["boundaries"]), boundaries
 PY
 cat > probe.py <<'PY'
 import errno, pathlib, sys
@@ -241,13 +264,13 @@ PY
 import pathlib, sys
 pathlib.Path(sys.argv[1]).write_text("host positive control\n")
 PY
-"$NOCKLOCK_BIN" wrap "${mode_args[@]}" --require-enforced-egress -- \
+"$NOCKLOCK_BIN" wrap ${mode_args[@]+"${mode_args[@]}"} --require-enforced-egress -- \
   "$TEST_PYTHON" probe.py "$fixture/outside/forbidden.txt" \
   > "$fixture/wrap.txt" 2>&1
 grep -qx ALLOW_AND_DENY_PASS "$fixture/wrap.txt"
 test -f allowed.txt
 test ! -e "$fixture/outside/forbidden.txt"
-# v0.7.0 prefixes the exported key; accommodate the proposed raw-key output too.
+# Export includes an ed25519 prefix; v0.8+ accepts either form.
 pub=$("$NOCKLOCK_BIN" verify --export-pubkey)
 case "$pub" in 'ed25519 '*) pub=${pub#ed25519 } ;; esac
 test -n "$pub"
@@ -292,8 +315,12 @@ The test dependency list must be kept consistent with installer preflight;
 `su` and `visudo` must also be present. Before publishing, repeat the helper
 check without a cached interactive sudo grant. The common body asserts the
 effective signed session level is CONFINED for proxy mode and KERNEL for netns.
-Doctor is run
-before each test, but its config-based result alone cannot certify the later
+Doctor is run before each test. On Linux below Landlock ABI 9, v0.9 returns
+PARTIAL (exit 3); the script accepts only the Unix-socket unavailability with
+its explicit below-9 reason and requires every other boundary to be enforced.
+This is installation acceptance with a recorded limitation, not a claim of
+Unix-socket isolation. The ABI-9 branch still needs real-kernel validation.
+Doctor's config-based result alone cannot certify the later
 `--net-fence=netns` override. `log --json` decodes the signed session-start
 detail envelope; its egress-level assertion follows authenticity verification.
 

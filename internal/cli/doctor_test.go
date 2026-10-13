@@ -22,7 +22,7 @@ func TestDoctorProtectedConfig(t *testing.T) {
 	restore := stubDoctorCapabilities(doctorCapabilities{
 		goos:           "linux",
 		fsBackend:      func() error { return nil },
-		landlockABI:    func() (int, error) { return 3, nil },
+		landlockABI:    func() (int, error) { return 9, nil },
 		syscallBackend: func() bool { return true },
 		networkBackend: func() error { return nil },
 		sandboxExec:    func() error { return nil },
@@ -44,6 +44,91 @@ func TestDoctorProtectedConfig(t *testing.T) {
 	}
 }
 
+func TestUnixSocketDoctorCheckReportsLandlockPosture(t *testing.T) {
+	cases := []struct {
+		name       string
+		goos       string
+		abi        int
+		allowAll   bool
+		require    bool
+		noFSRoot   bool
+		syscall    string
+		wantSev    doctorSeverity
+		wantStatus string
+		wantFix    string
+	}{
+		{name: "ABI 9 enforces both socket types", goos: "linux", abi: 9, wantSev: doctorOK, wantStatus: "enforceable"},
+		{name: "older ABI is partial", goos: "linux", abi: 8, wantSev: doctorWarning, wantStatus: "unavailable", wantFix: "require_unix_socket_isolation = true"},
+		{name: "Landlock unavailable is partial", goos: "linux", abi: 0, wantSev: doctorWarning, wantStatus: "unavailable", wantFix: "require_unix_socket_isolation = true"},
+		{name: "strict config reports refusal", goos: "linux", abi: 8, require: true, wantSev: doctorCritical, wantStatus: "will-refuse", wantFix: "require_unix_socket_isolation = false"},
+		{name: "network allow-all makes boundary not applicable", goos: "linux", abi: 8, allowAll: true, wantSev: doctorInfo, wantStatus: "not-applicable"},
+		{name: "syscall off cannot reach CONFINED", goos: "linux", abi: 9, syscall: "off", wantSev: doctorInfo, wantStatus: "not-applicable"},
+		{name: "strict setting refuses non-CONFINED egress", goos: "linux", abi: 9, syscall: "off", require: true, wantSev: doctorCritical, wantStatus: "will-refuse", wantFix: "CONFINED"},
+		{name: "missing filesystem bridge cannot reach CONFINED", goos: "linux", abi: 9, noFSRoot: true, wantSev: doctorInfo, wantStatus: "not-applicable"},
+		{name: "macOS is not applicable", goos: "darwin", wantSev: doctorInfo, wantStatus: "not-applicable"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			cfg := config.DefaultConfig()
+			cfg.Network.AllowAll = tc.allowAll
+			cfg.Network.RequireUnixSocketIsolation = tc.require
+			if tc.noFSRoot {
+				cfg.Filesystem.Root = ""
+			}
+			if tc.syscall != "" {
+				cfg.Syscall.Enforcement = tc.syscall
+			}
+			check := unixSocketDoctorCheck(&cfg, doctorCapabilities{
+				goos:           tc.goos,
+				syscallBackend: func() bool { return true },
+				landlockABI:    func() (int, error) { return tc.abi, nil },
+			})
+			if check.Severity != tc.wantSev || check.Status != tc.wantStatus {
+				t.Fatalf("unix-socket doctor check = %+v, want severity=%q status=%q", check, tc.wantSev, tc.wantStatus)
+			}
+			if tc.wantFix != "" && !strings.Contains(check.Fix, tc.wantFix) {
+				t.Fatalf("unix-socket doctor fix = %q, want it to contain %q", check.Fix, tc.wantFix)
+			}
+			if tc.wantStatus == "unavailable" && (!strings.Contains(check.Message, "reachable") || !strings.Contains(check.Message, "reason=")) {
+				t.Fatalf("unavailable posture must explain reachable sockets and the reason: %+v", check)
+			}
+			if tc.wantStatus == "will-refuse" && !strings.Contains(check.Message, "Wrap will refuse") {
+				t.Fatalf("strict posture must say wrap will refuse: %+v", check)
+			}
+		})
+	}
+}
+
+func TestDoctorUnavailableUnixSocketBoundaryIsPartial(t *testing.T) {
+	cfg := config.DefaultConfig()
+	check := unixSocketDoctorCheck(&cfg, doctorCapabilities{
+		goos:           "linux",
+		syscallBackend: func() bool { return true },
+		landlockABI:    func() (int, error) { return 8, nil },
+	})
+	checks := []doctorCheck{
+		doctorOKCheck("Fences", "filesystem", "enforceable", ""),
+		check,
+		doctorOKCheck("Fences", "syscall", "enforceable", ""),
+		doctorOKCheck("Fences", "network", "enforceable", ""),
+		doctorOKCheck("Fences", "secrets", "enforceable", ""),
+	}
+	report := finishDoctorReport(checks, doctorBoundaries(&cfg, "linux", egressLevelConfined, checks), doctorActivity{})
+	if report.Verdict != doctorVerdictPartial {
+		t.Fatalf("doctor verdict = %q, want %q for unavailable Unix-socket isolation; gaps=%+v", report.Verdict, doctorVerdictPartial, report.Gaps)
+	}
+	if check.Severity != doctorWarning || check.Status != "unavailable" || !strings.Contains(check.Message, "reason=landlock_abi_8_below_9") {
+		t.Fatalf("doctor boundary = %+v, want ABI 8 unavailable with reason", check)
+	}
+	var out bytes.Buffer
+	renderDoctorHuman(&out, report)
+	if !strings.Contains(out.String(), "VERDICT: PARTIAL") ||
+		!strings.Contains(out.String(), "Landlock ABI v9 or later") ||
+		!strings.Contains(out.String(), "network.require_unix_socket_isolation = true") {
+		t.Fatalf("doctor must show PARTIAL and the two real options:\n%s", out.String())
+	}
+}
+
 func TestDoctorNetworkAllowAllWarnsButDoesNotFail(t *testing.T) {
 	dir := t.TempDir()
 	writeTestConfig(t, dir, doctorTestTOML(true))
@@ -52,7 +137,7 @@ func TestDoctorNetworkAllowAllWarnsButDoesNotFail(t *testing.T) {
 	restore := stubDoctorCapabilities(doctorCapabilities{
 		goos:           "linux",
 		fsBackend:      func() error { return nil },
-		landlockABI:    func() (int, error) { return 3, nil },
+		landlockABI:    func() (int, error) { return 9, nil },
 		syscallBackend: func() bool { return true },
 		networkBackend: func() error { return nil },
 		sandboxExec:    func() error { return nil },
@@ -65,15 +150,14 @@ func TestDoctorNetworkAllowAllWarnsButDoesNotFail(t *testing.T) {
 	cmd.SetOut(&out)
 	cmd.SetErr(&bytes.Buffer{})
 
-	err := doctorCmd.RunE(cmd, nil)
-	if err != nil {
-		t.Fatalf("allow_all warning should not fail doctor: %v", err)
+	if got := doctorExitFromErr(doctorCmd.RunE(cmd, nil)); got != doctorExitPartial {
+		t.Fatalf("allow_all must exit %d (PARTIAL), got %d", doctorExitPartial, got)
 	}
 	if !strings.Contains(out.String(), "Network fence is OFF") {
 		t.Fatalf("expected allow_all warning, got:\n%s", out.String())
 	}
-	if !strings.Contains(out.String(), "VERDICT: PROTECTED") {
-		t.Fatalf("warnings alone should keep protected verdict, got:\n%s", out.String())
+	if !strings.Contains(out.String(), "VERDICT: PARTIAL") || !strings.Contains(out.String(), "- network: disabled") {
+		t.Fatalf("allow_all must be PARTIAL and name network, got:\n%s", out.String())
 	}
 }
 
@@ -89,7 +173,7 @@ func TestDoctorNetworkAllowlistBridgeDoesNotWarnWithFilesystemInterposer(t *test
 	restore := stubDoctorCapabilities(doctorCapabilities{
 		goos:           "linux",
 		fsBackend:      func() error { return nil },
-		landlockABI:    func() (int, error) { return 3, nil },
+		landlockABI:    func() (int, error) { return 9, nil },
 		syscallBackend: func() bool { return true },
 		networkBackend: func() error { return nil },
 		sandboxExec:    func() error { return nil },
@@ -122,7 +206,7 @@ func TestDoctorNetworkAllowlistWarnsWhenBridgeInterposerDisabled(t *testing.T) {
 	restore := stubDoctorCapabilities(doctorCapabilities{
 		goos:           "linux",
 		fsBackend:      func() error { return nil },
-		landlockABI:    func() (int, error) { return 3, nil },
+		landlockABI:    func() (int, error) { return 9, nil },
 		syscallBackend: func() bool { return true },
 		networkBackend: func() error { return nil },
 		sandboxExec:    func() error { return nil },
@@ -135,14 +219,14 @@ func TestDoctorNetworkAllowlistWarnsWhenBridgeInterposerDisabled(t *testing.T) {
 	cmd.SetOut(&out)
 	cmd.SetErr(&bytes.Buffer{})
 
-	if err := doctorCmd.RunE(cmd, nil); err != nil {
-		t.Fatalf("bridge warning should not fail doctor: %v", err)
+	if got := doctorExitFromErr(doctorCmd.RunE(cmd, nil)); got != doctorExitGapsFound {
+		t.Fatalf("unreachable bridge must exit %d (GAPS FOUND), got %d", doctorExitGapsFound, got)
 	}
 	if !strings.Contains(out.String(), "Network allowlist cannot be reached") {
 		t.Fatalf("expected bridge warning, got:\n%s", out.String())
 	}
-	if !strings.Contains(out.String(), "VERDICT: PROTECTED") {
-		t.Fatalf("warning alone should keep protected verdict, got:\n%s", out.String())
+	if !strings.Contains(out.String(), "VERDICT: GAPS FOUND") {
+		t.Fatalf("warning alone must not read PROTECTED, got:\n%s", out.String())
 	}
 }
 
@@ -159,7 +243,7 @@ func TestDoctorNetworkAllowlistNotInertWhenSyscallOff(t *testing.T) {
 	restore := stubDoctorCapabilities(doctorCapabilities{
 		goos:           "linux",
 		fsBackend:      func() error { return nil },
-		landlockABI:    func() (int, error) { return 3, nil },
+		landlockABI:    func() (int, error) { return 9, nil },
 		syscallBackend: func() bool { return true },
 		networkBackend: func() error { return nil },
 		sandboxExec:    func() error { return nil },
@@ -172,8 +256,8 @@ func TestDoctorNetworkAllowlistNotInertWhenSyscallOff(t *testing.T) {
 	cmd.SetOut(&out)
 	cmd.SetErr(&bytes.Buffer{})
 
-	if err := doctorCmd.RunE(cmd, nil); err != nil {
-		t.Fatalf("doctor should pass with syscall off: %v", err)
+	if got := doctorExitFromErr(doctorCmd.RunE(cmd, nil)); got != doctorExitPartial {
+		t.Fatalf("syscall off must exit %d (PARTIAL), got %d", doctorExitPartial, got)
 	}
 	if strings.Contains(out.String(), "Network allowlist cannot be reached") {
 		t.Fatalf("did not expect bridge warning with syscall off, got:\n%s", out.String())
@@ -212,8 +296,8 @@ func TestDoctorConfiguredFenceUnavailableFails(t *testing.T) {
 		t.Fatal("doctor should fail when configured filesystem fence cannot be kernel-enforced")
 	}
 	var exitErr *exitCodeError
-	if !errors.As(err, &exitErr) || exitErr.code != 1 {
-		t.Fatalf("expected exit status 1, got %v", err)
+	if !errors.As(err, &exitErr) || exitErr.code != doctorExitGapsFound {
+		t.Fatalf("expected exit status 2, got %v", err)
 	}
 	if !strings.Contains(out.String(), "configured-but-backend-missing") ||
 		!strings.Contains(out.String(), "VERDICT: GAPS FOUND") {
@@ -305,7 +389,7 @@ func TestDoctorJSONShape(t *testing.T) {
 	restore := stubDoctorCapabilities(doctorCapabilities{
 		goos:           "linux",
 		fsBackend:      func() error { return nil },
-		landlockABI:    func() (int, error) { return 3, nil },
+		landlockABI:    func() (int, error) { return 9, nil },
 		syscallBackend: func() bool { return true },
 		networkBackend: func() error { return nil },
 		sandboxExec:    func() error { return nil },

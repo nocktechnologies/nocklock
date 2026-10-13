@@ -34,9 +34,52 @@ const (
 type doctorVerdict string
 
 const (
-	doctorVerdictProtected doctorVerdict = "PROTECTED"
-	doctorVerdictGapsFound doctorVerdict = "GAPS FOUND"
+	doctorVerdictProtected   doctorVerdict = "PROTECTED"
+	doctorVerdictPartial     doctorVerdict = "PARTIAL"
+	doctorVerdictUnprotected doctorVerdict = "UNPROTECTED"
+	doctorVerdictGapsFound   doctorVerdict = "GAPS FOUND"
 )
+
+// Doctor exit codes: the documented automation contract (README, --help).
+const (
+	doctorExitProtected   = 0
+	doctorExitGapsFound   = 2
+	doctorExitPartial     = 3
+	doctorExitUnprotected = 4
+)
+
+// doctorExitCode maps a verdict to its process exit code.
+func doctorExitCode(v doctorVerdict) int {
+	switch v {
+	case doctorVerdictProtected:
+		return doctorExitProtected
+	case doctorVerdictPartial:
+		return doctorExitPartial
+	case doctorVerdictUnprotected:
+		return doctorExitUnprotected
+	default:
+		return doctorExitGapsFound
+	}
+}
+
+// doctorPosture is how far one boundary is engaged. "enabled" means configured
+// but its backend is missing (a GAPS FOUND condition).
+type doctorPosture string
+
+const (
+	postureEnforced doctorPosture = "enforced"
+	postureAdvisory doctorPosture = "advisory"
+	postureDisabled doctorPosture = "disabled"
+	// postureUnavailable: the fence cannot enforce on this host or config
+	// (egress UNREACHABLE); never counts toward PROTECTED.
+	postureUnavailable doctorPosture = "unavailable"
+	postureEnabled     doctorPosture = "enabled"
+)
+
+type doctorBoundary struct {
+	Name    string        `json:"name"`
+	Posture doctorPosture `json:"posture"`
+}
 
 type doctorCheck struct {
 	Group    string         `json:"group"`
@@ -53,10 +96,14 @@ type doctorActivity struct {
 }
 
 type doctorReport struct {
-	Verdict  doctorVerdict  `json:"verdict"`
-	Checks   []doctorCheck  `json:"checks"`
-	Gaps     []doctorCheck  `json:"gaps,omitempty"`
-	Activity doctorActivity `json:"activity"`
+	Verdict doctorVerdict `json:"verdict"`
+	// Boundaries is the per-boundary posture behind the verdict; EgressLevel is
+	// the effective proxy-mode network egress level (omitted if config did not load).
+	Boundaries  []doctorBoundary `json:"boundaries,omitempty"`
+	EgressLevel egressLevel      `json:"egress_level,omitempty"`
+	Checks      []doctorCheck    `json:"checks"`
+	Gaps        []doctorCheck    `json:"gaps,omitempty"`
+	Activity    doctorActivity   `json:"activity"`
 }
 
 type doctorCapabilities struct {
@@ -83,7 +130,16 @@ var currentDoctorCapabilities = doctorCapabilities{
 
 var doctorCmd = &cobra.Command{
 	Use:   "doctor",
-	Short: "Check whether NockLock fences are enforceable",
+	Short: "Check whether NockLock fences are enforced",
+	Long: `Check whether each fence is enforced on this host.
+
+Exit codes:
+  0  PROTECTED    every boundary enforced
+  2  GAPS FOUND   a boundary is configured but its backend is missing,
+                  egress is UNREACHABLE (wrap
+                  refuses to start), or the config is missing or unparseable
+  3  PARTIAL      some boundary is disabled or advisory (listed by name)
+  4  UNPROTECTED  no boundary is enforced`,
 	RunE: func(cmd *cobra.Command, args []string) error {
 		asJSON, _ := cmd.Flags().GetBool("json")
 		report := runDoctor(currentDoctorCapabilities)
@@ -94,10 +150,10 @@ var doctorCmd = &cobra.Command{
 		} else {
 			renderDoctorHuman(cmd.OutOrStdout(), report)
 		}
-		if report.Verdict == doctorVerdictGapsFound {
+		if code := doctorExitCode(report.Verdict); code != doctorExitProtected {
 			cmd.SilenceUsage = true
 			cmd.SilenceErrors = true
-			return &exitCodeError{code: 1}
+			return &exitCodeError{code: code}
 		}
 		return nil
 	},
@@ -124,7 +180,7 @@ func runDoctor(caps doctorCapabilities) doctorReport {
 			Message:  msg,
 			Fix:      "run nocklock init",
 		})
-		return finishDoctorReport(checks, doctorActivity{})
+		return finishDoctorReport(checks, nil, doctorActivity{})
 	}
 
 	cfg, err := config.Load(configPath)
@@ -137,7 +193,7 @@ func runDoctor(caps doctorCapabilities) doctorReport {
 			Message:  fmt.Sprintf("Config failed to load: %v", err),
 			Fix:      "fix .nock/config.toml and rerun nocklock doctor",
 		})
-		return finishDoctorReport(checks, doctorActivity{})
+		return finishDoctorReport(checks, nil, doctorActivity{})
 	}
 
 	checks = append(checks, doctorCheck{
@@ -152,6 +208,7 @@ func runDoctor(caps doctorCapabilities) doctorReport {
 		checks = append(checks, check)
 	}
 	checks = append(checks, filesystemDoctorCheck(cfg, caps))
+	checks = append(checks, unixSocketDoctorCheck(cfg, caps))
 	checks = append(checks, syscallDoctorCheck(cfg, caps))
 	checks = append(checks, networkDoctorCheck(cfg, caps))
 	checks = append(checks, secretDoctorCheck(cfg))
@@ -167,7 +224,76 @@ func runDoctor(caps doctorCapabilities) doctorReport {
 		Message:  activityMessage(activity),
 	})
 
-	return finishDoctorReport(checks, activity)
+	level := doctorEgressLevel(cfg, caps)
+	report := finishDoctorReport(checks, doctorBoundaries(cfg, caps.goos, level, checks), activity)
+	report.EgressLevel = level
+	return report
+}
+
+func unixSocketDoctorCheck(cfg *config.Config, caps doctorCapabilities) doctorCheck {
+	level := doctorEgressLevel(cfg, caps)
+	if err := strictUnixSocketIsolationModeError(caps.goos, level, cfg.Network.RequireUnixSocketIsolation); err != nil {
+		return doctorCriticalCheck(
+			"Fences", "unix-sockets", "will-refuse",
+			fmt.Sprintf("Wrap will refuse: %v.", err),
+			"run on Linux with CONFINED egress and Landlock ABI v9 or later, or set network.require_unix_socket_isolation = false to allow reachable Unix sockets",
+		)
+	}
+	if caps.goos != "linux" {
+		return doctorCheck{
+			Group:    "Fences",
+			Name:     "unix-sockets",
+			Severity: doctorInfo,
+			Status:   "not-applicable",
+			Message:  "Landlock Unix-socket isolation is Linux-only.",
+		}
+	}
+	if level != egressLevelConfined {
+		if cfg.Network.AllowAll {
+			return doctorCheck{
+				Group:    "Fences",
+				Name:     "unix-sockets",
+				Severity: doctorInfo,
+				Status:   "not-applicable",
+				Message:  "Network egress is disabled as a fence by network.allow_all = true.",
+			}
+		}
+		return doctorCheck{
+			Group:    "Fences",
+			Name:     "unix-sockets",
+			Severity: doctorInfo,
+			Status:   "not-applicable",
+			Message:  fmt.Sprintf("Unix-socket isolation applies only to Linux CONFINED proxy egress; configured egress is %s.", level),
+		}
+	}
+	abi := 0
+	var detectErr error
+	if caps.landlockABI == nil {
+		detectErr = errors.New("Landlock ABI probe is unavailable")
+	} else {
+		abi, detectErr = caps.landlockABI()
+	}
+	status, _ := unixSocketBoundaryStatus(abi, detectErr)
+	if status == "unavailable" {
+		if cfg.Network.RequireUnixSocketIsolation {
+			_, _, refusalErr := confinedUnixSocketPolicy(abi, detectErr, true)
+			return doctorCriticalCheck(
+				"Fences", "unix-sockets", "will-refuse",
+				fmt.Sprintf("Wrap will refuse: %v.", refusalErr),
+				"run on Linux with Landlock ABI v9 or later, or set network.require_unix_socket_isolation = false to allow reachable Unix sockets",
+			)
+		}
+		return doctorCheck{
+			Group:    "Fences",
+			Name:     "unix-sockets",
+			Severity: doctorWarning,
+			Status:   "unavailable",
+			Message:  unixSocketBoundaryMessage(abi, detectErr),
+			Fix:      "use a Linux kernel with Landlock ABI v9 or later to enforce isolation, or set network.require_unix_socket_isolation = true to make wrap refuse below ABI 9",
+		}
+	}
+	return doctorOKCheck("Fences", "unix-sockets", "enforceable",
+		unixSocketBoundaryMessage(abi, detectErr)+" Wrap allows only its exact proxy and filesystem event sockets.")
 }
 
 // sandboxExecErr reports why sandbox-exec is unusable; a nil probe counts as
@@ -416,16 +542,7 @@ func sanityDoctorChecks(cfg *config.Config, configPath string, caps doctorCapabi
 		})
 	}
 	if len(cfg.Network.Allow) > 0 {
-		syscallActive := false
-		if caps.goos == "linux" &&
-			syscallEnforcementMode(cfg.Syscall.Enforcement) != syscallfence.ModeOff &&
-			caps.syscallBackend != nil {
-			syscallActive = caps.syscallBackend()
-		}
-		fsInterposer := caps.goos == "linux" && cfg.Filesystem.Root != ""
-		// wrap applies the floor only when sandbox-exec is usable.
-		seatbeltFloor := caps.goos == "darwin" && cfg.Filesystem.Root != "" && sandboxExecErr(caps) == nil
-		level := effectiveEgressLevel(caps.goos, "proxy", cfg.Network.AllowAll, syscallActive, fsInterposer, seatbeltFloor)
+		level := doctorEgressLevel(cfg, caps)
 		if level == egressLevelAdvisory {
 			fix := "use --net-fence=netns on Linux, or enable Linux syscall enforcement and the filesystem interposer for CONFINED proxy mode"
 			if caps.goos != "linux" {
@@ -488,6 +605,70 @@ func sanityDoctorChecks(cfg *config.Config, configPath string, caps doctorCapabi
 	return checks
 }
 
+// doctorEgressLevel is the effective egress level of proxy-mode wrap on this
+// host. Doctor cannot see a per-run --net-fence=netns, so KERNEL is not
+// reported here.
+func doctorEgressLevel(cfg *config.Config, caps doctorCapabilities) egressLevel {
+	syscallActive := caps.goos == "linux" &&
+		syscallEnforcementMode(cfg.Syscall.Enforcement) != syscallfence.ModeOff &&
+		caps.syscallBackend != nil && caps.syscallBackend()
+	fsInterposer := caps.goos == "linux" && cfg.Filesystem.Root != ""
+	// wrap applies the floor only when sandbox-exec is usable.
+	seatbeltFloor := caps.goos == "darwin" && cfg.Filesystem.Root != "" && sandboxExecErr(caps) == nil
+	return effectiveEgressLevel(caps.goos, "proxy", cfg.Network.AllowAll, syscallActive, fsInterposer, seatbeltFloor)
+}
+
+// doctorBoundaries derives each boundary's posture from the fence checks; a
+// network fence below the required egress level reads as advisory, or
+// unavailable when egress is UNREACHABLE.
+func doctorBoundaries(cfg *config.Config, goos string, level egressLevel, checks []doctorCheck) []doctorBoundary {
+	byName := map[string]doctorCheck{}
+	for _, c := range checks {
+		if c.Group == "Fences" {
+			byName[c.Name] = c
+		}
+	}
+	posture := func(name string) doctorPosture {
+		c := byName[name]
+		switch {
+		case c.Severity == doctorCritical:
+			return postureEnabled
+		case c.Severity == doctorOK:
+			return postureEnforced
+		case c.Status == "not-applied":
+			return postureAdvisory
+		default:
+			return postureDisabled
+		}
+	}
+	fs, net := posture("filesystem"), posture("network")
+	if fs == postureEnforced && goos == "linux" && linuxEnforcementMode(cfg.Filesystem.LinuxEnforcement) == linuxEnforcementOff {
+		fs = postureAdvisory // Landlock off by config: userspace interposer only
+	}
+	if net == postureEnforced && !egressLevelMeetsRequirement(level) {
+		net = postureAdvisory
+		if level == egressLevelUnreachable {
+			net = postureUnavailable
+		}
+	}
+	boundaries := []doctorBoundary{
+		{"filesystem", fs},
+		{"syscall", posture("syscall")},
+		{"network", net},
+		{"secrets", posture("secrets")},
+	}
+	if goos == "linux" {
+		unixSockets := posture("unix-sockets")
+		if byName["unix-sockets"].Status == "unavailable" {
+			// Wrap continues with reachable sockets in non-strict mode, so this is
+			// a partial posture rather than a blocking UNREACHABLE egress boundary.
+			unixSockets = postureAdvisory
+		}
+		boundaries = append(boundaries, doctorBoundary{"unix-sockets", unixSockets})
+	}
+	return boundaries
+}
+
 func doctorActivityCheck(cfg *config.Config, configPath string, now time.Time) doctorActivity {
 	dbPath, projectRoot, err := config.ResolveDBPath(cfg, configPath)
 	if err != nil {
@@ -516,22 +697,37 @@ func doctorActivityCheck(cfg *config.Config, configPath string, now time.Time) d
 	return doctorActivity{Last24hBlocked: len(recent), AllTimeBlocked: allTime}
 }
 
-func finishDoctorReport(checks []doctorCheck, activity doctorActivity) doctorReport {
+func finishDoctorReport(checks []doctorCheck, boundaries []doctorBoundary, activity doctorActivity) doctorReport {
 	gaps := make([]doctorCheck, 0)
 	for _, check := range checks {
 		if check.Severity == doctorCritical {
 			gaps = append(gaps, check)
 		}
 	}
+	enforced, unavailable := 0, false
+	for _, b := range boundaries {
+		switch b.Posture {
+		case postureEnforced:
+			enforced++
+		case postureUnavailable:
+			unavailable = true // wrap refuses to start: blocking
+		}
+	}
 	verdict := doctorVerdictProtected
-	if len(gaps) > 0 {
+	switch {
+	case len(gaps) > 0 || unavailable:
 		verdict = doctorVerdictGapsFound
+	case enforced == 0 && len(boundaries) > 0:
+		verdict = doctorVerdictUnprotected
+	case enforced < len(boundaries):
+		verdict = doctorVerdictPartial
 	}
 	return doctorReport{
-		Verdict:  verdict,
-		Checks:   checks,
-		Gaps:     gaps,
-		Activity: activity,
+		Verdict:    verdict,
+		Boundaries: boundaries,
+		Checks:     checks,
+		Gaps:       gaps,
+		Activity:   activity,
 	}
 }
 
@@ -554,6 +750,18 @@ func renderDoctorHuman(w io.Writer, report doctorReport) {
 		fmt.Fprintf(w, "%s %s [%s]: %s\n", doctorSymbol(check.Severity), check.Name, check.Status, check.Message)
 	}
 	fmt.Fprintf(w, "\nVERDICT: %s\n", report.Verdict)
+	if report.Verdict == doctorVerdictPartial || report.Verdict == doctorVerdictUnprotected {
+		for _, b := range report.Boundaries {
+			if b.Posture != postureEnforced {
+				fmt.Fprintf(w, "- %s: %s\n", b.Name, b.Posture)
+				for _, check := range report.Checks {
+					if check.Group == "Fences" && check.Name == b.Name && check.Fix != "" {
+						fmt.Fprintf(w, "  Option: %s.\n", strings.TrimSuffix(check.Fix, "."))
+					}
+				}
+			}
+		}
+	}
 	if len(report.Gaps) > 0 {
 		fmt.Fprintln(w, "Gaps:")
 		for _, gap := range report.Gaps {

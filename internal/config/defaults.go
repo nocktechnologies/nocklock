@@ -140,6 +140,8 @@ allow = [
 allow_all = false
 # Refuse wrap unless egress is kernel-enforced or Linux syscall-confined.
 require_enforced = false
+# Require Linux CONFINED egress with Landlock ABI 9+ for Unix-socket isolation.
+require_unix_socket_isolation = false
 
 [secrets]
 # Optional local preflight. A finding or incomplete scan prevents launch.

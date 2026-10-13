@@ -7,6 +7,8 @@ import (
 	"runtime"
 
 	"github.com/nocktechnologies/nocklock/internal/config"
+	"github.com/nocktechnologies/nocklock/internal/fence/fs/landlock"
+	"github.com/nocktechnologies/nocklock/internal/fence/syscallfence"
 	"github.com/nocktechnologies/nocklock/internal/logging"
 	"github.com/nocktechnologies/nocklock/internal/version"
 	"github.com/spf13/cobra"
@@ -14,7 +16,7 @@ import (
 
 var statusCmd = &cobra.Command{
 	Use:   "status",
-	Short: "Show active fenced sessions",
+	Short: "Show configured fences and the event log (does not track running sessions)",
 	RunE: func(cmd *cobra.Command, args []string) error {
 		configPath, err := config.FindConfig()
 		if err != nil {
@@ -29,14 +31,16 @@ var statusCmd = &cobra.Command{
 			return fmt.Errorf("failed to load config: %w", err)
 		}
 
-		fmt.Println(version.BuildInfo())
+		out := cmd.OutOrStdout()
+		fmt.Fprintln(out, version.BuildInfo())
+		fmt.Fprintln(out, "Fences below are configured, no active session tracked; run 'nocklock doctor' for enforcement.")
 
 		// Secret fence status
 		blockCount := len(cfg.Secrets.Block)
 		if len(cfg.Secrets.Pass) > 0 || blockCount > 0 {
-			fmt.Printf("Secret fence: active (blocking %d patterns)\n", blockCount)
+			fmt.Fprintf(out, "Secret fence: configured (blocking %d patterns)\n", blockCount)
 		} else {
-			fmt.Println("Secret fence: not configured")
+			fmt.Fprintln(out, "Secret fence: not configured")
 		}
 
 		// Filesystem fence status
@@ -44,20 +48,41 @@ var statusCmd = &cobra.Command{
 			allowCount := len(cfg.Filesystem.Allow)
 			allowRWCount := len(cfg.Filesystem.AllowRW)
 			denyCount := len(cfg.Filesystem.Deny)
-			fmt.Printf("Filesystem fence: active (allow %d read-only, %d read-write, deny %d)\n", allowCount, allowRWCount, denyCount)
+			fmt.Fprintf(out, "Filesystem fence: configured (allow %d read-only, %d read-write, deny %d)\n", allowCount, allowRWCount, denyCount)
 			if runtime.GOOS == "darwin" {
-				fmt.Println("Filesystem deny events: best-effort on macOS via the unified log")
+				fmt.Fprintln(out, "Filesystem deny events: best-effort on macOS via the unified log")
 			}
 		} else {
-			fmt.Println("Filesystem fence: not configured")
+			fmt.Fprintln(out, "Filesystem fence: not configured")
 		}
 
 		// Network fence status
 		if cfg.Network.AllowAll {
-			fmt.Println("Network fence: disabled (allow_all = true)")
+			fmt.Fprintln(out, "Network fence: disabled (allow_all = true)")
 		} else {
 			domainCount := len(cfg.Network.Allow)
-			fmt.Printf("Network fence: active (allowing %d domain(s))\n", domainCount)
+			fmt.Fprintf(out, "Network fence: configured (allowing %d domain(s))\n", domainCount)
+		}
+		if runtime.GOOS == "linux" {
+			syscallActive := syscallEnforcementMode(cfg.Syscall.Enforcement) != syscallfence.ModeOff && syscallfence.Supported()
+			level := effectiveEgressLevel("linux", "proxy", cfg.Network.AllowAll, syscallActive, cfg.Filesystem.Root != "", false)
+			if level != egressLevelConfined {
+				if cfg.Network.RequireUnixSocketIsolation {
+					fmt.Fprintf(cmd.OutOrStdout(), "Unix-socket isolation: unavailable (wrap will refuse: network.require_unix_socket_isolation requires Linux CONFINED egress, but configured egress level is %s)\n", level)
+				} else if cfg.Network.AllowAll {
+					fmt.Fprintln(cmd.OutOrStdout(), "Unix-socket isolation: not applicable (network.allow_all = true)")
+				} else {
+					fmt.Fprintf(cmd.OutOrStdout(), "Unix-socket isolation: not applicable (configured egress level is %s; isolation requires Linux CONFINED egress)\n", level)
+				}
+			} else {
+				abi, abiErr := landlock.DetectABI()
+				status, _ := unixSocketBoundaryStatus(abi, abiErr)
+				message := unixSocketBoundaryMessage(abi, abiErr)
+				if status == "unavailable" && cfg.Network.RequireUnixSocketIsolation {
+					message += " Wrap will refuse because network.require_unix_socket_isolation = true."
+				}
+				fmt.Fprintf(cmd.OutOrStdout(), "Unix-socket isolation: %s (%s)\n", status, message)
+			}
 		}
 
 		// Event log summary
@@ -74,25 +99,25 @@ var statusCmd = &cobra.Command{
 
 		if _, statErr := os.Stat(dbPath); statErr != nil {
 			if errors.Is(statErr, os.ErrNotExist) {
-				fmt.Printf("Event log: %s (no events recorded)\n", relDB)
+				fmt.Fprintf(out, "Event log: %s (no events recorded)\n", relDB)
 				return nil
 			}
-			fmt.Printf("Event log: error (%v)\n", statErr)
+			fmt.Fprintf(out, "Event log: error (%v)\n", statErr)
 			return nil
 		}
 
 		logger, logErr := logging.NewLogger(dbPath, projectRoot)
 		if logErr != nil {
-			fmt.Printf("Event log: unavailable (%v)\n", logErr)
+			fmt.Fprintf(out, "Event log: unavailable (%v)\n", logErr)
 		} else {
 			defer logger.Close()
 			stats, statsErr := logger.Stats("")
 			if statsErr != nil {
-				fmt.Printf("Event log: unavailable (%v)\n", statsErr)
+				fmt.Fprintf(out, "Event log: unavailable (%v)\n", statsErr)
 			} else {
-				fmt.Printf("Event log: %s (%d events, %d sessions)\n", relDB, stats.TotalEvents, stats.SessionCount)
+				fmt.Fprintf(out, "Event log: %s (%d events, %d sessions)\n", relDB, stats.TotalEvents, stats.SessionCount)
 				if stats.LastEvent != nil {
-					fmt.Printf("Last event: %s\n", stats.LastEvent.Local().Format("2006-01-02 15:04:05"))
+					fmt.Fprintf(out, "Last event: %s\n", stats.LastEvent.Local().Format("2006-01-02 15:04:05"))
 				}
 			}
 		}

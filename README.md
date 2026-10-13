@@ -23,7 +23,7 @@ nocklock init
 nocklock wrap -- claude
 ```
 
-Four commands and your agent is fenced.
+Four commands and your agent is fenced. On macOS that is the whole install. On Linux the Homebrew formula installs only the `nocklock` binary, and the default config's `wrap` refuses to start without `libfence_fs.so`. Until packaging lands (N11643, `docs/ROADMAP.md` bar 3), install from source: run `make build-all` as your user, then `sudo install -m 0755 nocklock /usr/local/bin/nocklock`, then copy `libfence_fs.so` to `/usr/local/lib/nocklock/` by hand (steps in `docs/setup.md`).
 
 **macOS and Claude Code:** Claude Code keeps a `claude.ai` login in the macOS login keychain, and the fence denies `~/Library/Keychains` (Seatbelt cannot scope to one keychain item, so NockLock does not open it). The login has to arrive through the environment, and the default secret fence blocks `*_TOKEN*`, so plain `nocklock init` strips an exported `CLAUDE_CODE_OAUTH_TOKEN`. Use the `claude-code` preset:
 
@@ -79,7 +79,7 @@ On Linux you can instead pass `--net-fence=netns`. The child then runs in its ow
 | Level | Boundary |
 |---|---|
 | `KERNEL` | Linux netns with a kernel default-drop floor and the configured HTTP(S)/DNS allowlist. |
-| `CONFINED` | Linux proxy with syscall enforcement and the filesystem interposer bridge; the child can connect only to the proxy's Unix socket. |
+| `CONFINED` | Linux proxy with syscall enforcement and the filesystem interposer bridge. The kernel rejects direct AF_INET/AF_INET6 socket creation; the interposer remaps proxy TCP streams to AF_UNIX. Below Landlock ABI 9, the default non-strict `wrap` warns once and records that pathname and abstract Unix sockets remain reachable; `network.require_unix_socket_isolation = true` makes it refuse. At ABI 9 or later, Landlock permits only the exact proxy and filesystem event sockets. |
 | `SEATBELT` | macOS proxy with a Seatbelt kernel floor (needs `filesystem.root`): the profile denies every outbound network connect except to the proxy's loopback port, and allows no Unix-socket connect, so a client that ignores `HTTP_PROXY` is denied by the kernel. It is not `CONFINED`, which is defined by the Linux syscall and interposer bridge, and look-back rules (Linux CONFINED only) are refused at `SEATBELT`. |
 | `ADVISORY` | Userspace proxy only. A client that ignores `HTTP_PROXY` can reach any host. The wrap warning names this limitation. |
 | `OFF` | `network.allow_all = true`; any host is reachable. |
@@ -103,7 +103,23 @@ then   = "deny_egress"
 
 After the interposer reports a denied open, the proxy closes open tunnels and requests and denies new ones, each logged as a signed `network_blocked` row citing the rule and the trigger row. `wrap` refuses to start with a rule unless the egress level is `CONFINED`. Static binaries, raw syscalls and a cleared `LD_PRELOAD` bypass the interposer, so they never trip the rule. See `docs/design/look-back-rules.md`.
 
-Linux blocked accesses are logged to the event log (see "Event log" for where it lives). The macOS Seatbelt path records its fence state but does not yet emit one audit event per denied file; Seatbelt returns its native permission error. Blocked domains get a 403.
+On Linux, blocked file accesses the interposer sees are logged to the event log (see "Event log" for where it lives); the cases it misses are listed in [What the signed log proves](#what-the-signed-log-proves). On macOS, Seatbelt returns its native permission error and a best-effort tailer records file denials as `file_blocked` rows (see "Filesystem platform boundary"). Blocked domains get a 403.
+
+### What the signed log proves
+
+Kernel enforcement and event collection have different coverage. A signed, hash-chained log proves the integrity of the rows it holds. It does not prove that every attempt was observed. These produce no row:
+
+- Allowed file reads and writes.
+- File denials that bypass the Linux interposer (static binaries, raw syscalls, children that clear `LD_PRELOAD`). Where Landlock is engaged, the kernel still denies those opens but writes no row. Where Landlock is off or degraded, they are not denied either (see "Philosophy").
+- macOS file denials the unified log drops under load. Capture there is best effort.
+- Packets dropped by the kernel floor (the netns default-drop floor at `KERNEL` egress, and the Seatbelt network deny). No per-attempt row today (design card N11634).
+- Seccomp `socket()` denials. The filter returns a plain `EPERM` with no log action, so the child sees the error and no row is written (`internal/fence/syscallfence/seccomp_linux.go`).
+- The Seatbelt `mach-lookup` deny of `com.apple.mDNSResponder` and `com.apple.mDNSResponderHelper`. The denial tailer keeps only `file-*` operations (`internal/fence/fs/denylog.go`).
+- `ADVISORY` egress bypass. A client that ignores `HTTP_PROXY` never reaches the proxy, so the bypass is not seen.
+- Linux `CONFINED` AF_UNIX connects. The syscall fence does not restrict or observe them.
+- Secret use. Secrets are logged once at startup as removed variable names, not when read.
+
+A missing row is therefore not proof that nothing happened. Signed history proves what was recorded, not complete observation.
 
 ### Filesystem platform boundary
 
@@ -152,13 +168,21 @@ Set `NOCKLOCK_FORWARD_URL` to the same approved Command origin and set the dedic
 
 Delivery uses a bounded background queue with short retries. Network failures do not change fence decisions or remove events from `events.db`; one teardown warning summarizes failed or dropped deliveries. The queue is not durable, so events that cannot be sent during the current session remain available only in the local audit log.
 
-`nocklock verify --audit` walks the SHA-256 hash chain in the event log and reports whether it is intact. Each row carries a SHA-256 hash of its contents, linked to the previous row's hash. A verification run looks like this:
+`nocklock verify --audit` walks the SHA-256 hash chain in the event log and reports whether it is intact. Each row carries a SHA-256 hash of its contents, linked to the previous row's hash. A verification run on the signing machine looks like this:
 
 ```
 $ nocklock verify --audit
-AUDIT: CONSISTENT — 247 events verified, hash chain intact (not externally anchored)
+AUDIT: AUTHENTIC — 247 entries verified, 247 Ed25519-signed and valid, chain_head signature valid
 Head hash: fe48c7a11e02b9ebe9ba07eb7df01e1e3c5b18f3fcb31af8f0eb5d8b4f1e7a4c
 ```
+
+Without `--ed25519-pub`, `verify --audit` uses the public half of the local managed key (`~/.config/nocklock/signing-ed25519.key`) when that file exists (`resolveVerifyPublicKey` in `internal/cli/verify.go`). A clean run on the signing machine therefore prints `AUTHENTIC` with no flag, as above, provided the log has signed rows and the signatures and `chain_head` signature check out against that key. The local key is not an independent anchor: it only shows the log was signed by the key on this host. On a machine without the key file (a copied log) and with no `--ed25519-pub`, or for a log that was never signed, the same intact chain prints the weaker verdict:
+
+```
+AUDIT: CONSISTENT — 247 events verified, hash chain intact (not externally anchored)
+```
+
+Supplying `--ed25519-pub` also declares that the log must be signed: a log with no signatures then prints `SUSPECT` and exits 1, where the local-key run would print `CONSISTENT`.
 
 This means the logged events have not been altered, deleted (except possibly the most recent), or reordered since they were recorded. An intentional compaction (`--prune`) re-anchors the chain and still verifies as consistent, but it is never silent: verify prints a `NOTE:` line that reports when the prune happened and how many events it removed. The chain is not externally anchored. An attacker with write access to the SQLite file can defeat this check by rewriting the chain and `chain_head` in the same transaction. A passing audit verification means the stored rows and their integrity metadata are internally consistent. It does not prove the history is authentic, or that NockLock itself recorded the entries.
 
@@ -398,15 +422,15 @@ Two candidate runtimes are deliberately left without a preset:
 | Command | Description |
 |---------|-------------|
 | `nocklock init` | Create `.nock/config.toml` with safe defaults |
-| `nocklock init --runtime <name>` | Create `.nock/config.toml` from an embedded runtime preset |
+| `nocklock init --runtime <name>` | Create `.nock/config.toml` from an embedded runtime preset; fails if one exists. Add `--diff` to print the preset's policy changes against the existing config (no write) |
 | `nocklock wrap -- <cmd>` | Run a command inside the fence |
 | `nocklock wrap --net-fence=netns -- <cmd>` | Linux only: run inside the kernel-enforced netns egress fence (needs the privileged helper) |
-| `nocklock wrap --require-enforced-egress -- <cmd>` | Refuse to start unless egress is `KERNEL` or `CONFINED` |
+| `nocklock wrap --require-enforced-egress -- <cmd>` | Refuse to start unless egress is `KERNEL`, `CONFINED` or `SEATBELT` |
 | `nocklock wrap --profile list` | List embedded runtime presets |
 | `nocklock wrap --dry-run` | Validate config without starting fences or a command |
 | `nocklock scan [path ...]` | Scan selected local files; `--env` adds environment values and `--json` prints structured results |
 | `nocklock validate [config-path]` | Validate a config file and print the effective policy |
-| `nocklock doctor` | Check whether each fence can be enforced on this host |
+| `nocklock doctor` | Check whether each fence is enforced on this host; exit 0 PROTECTED, 2 GAPS FOUND, 3 PARTIAL, 4 UNPROTECTED (see below) |
 | `nocklock verify` | Run the adversarial fence self-test (proof of block) |
 | `nocklock verify --audit` | Verify the audit log hash chain and signatures |
 | `nocklock verify --against-anchor <file>` | Verify the audit chain against an external chain-head anchor file |
@@ -415,7 +439,7 @@ Two candidate runtimes are deliberately left without a preset:
 | `nocklock anchor emit [--out <file>]` | Emit a signed chain-head anchor |
 | `nocklock anchor push [--file <file>]` | Push an anchor to the off-box store at `NOCKLOCK_ANCHOR_URL` |
 | `nocklock egress-probe` | Probe Linux network-egress enforcement feasibility on this host (structured `--json`) |
-| `nocklock status` | Show fence state and event log summary |
+| `nocklock status` | Show configured fences and event log summary (does not track running sessions) |
 | `nocklock log` | View fence event history |
 | `nocklock log --blocked` | Show only blocked events |
 | `nocklock log --stats` | Show aggregate statistics |
@@ -424,11 +448,13 @@ Two candidate runtimes are deliberately left without a preset:
 
 ## Installation
 
-### Homebrew (recommended)
+### Homebrew (macOS, recommended)
 
 ```bash
 brew install nocktechnologies/tap/nocklock
 ```
+
+On Linux the formula installs only the `nocklock` binary, not `libfence_fs.so`; build from source and place `libfence_fs.so` by hand (see `docs/setup.md`) until packaging lands (N11643).
 
 ### From source
 
@@ -463,7 +489,7 @@ Without the helper, the egress fence fails closed at runtime.
 Install the binary, then the helper:
 
 ```bash
-make install                                   # builds and installs the nocklock binary
+sudo install -m 0755 nocklock /usr/local/bin/nocklock   # after make build-all as your user
 sudo make install-egress-helper                # installs the root-owned helper + sudoers grant
 # or, to name the unprivileged wrap user explicitly:
 sudo NOCKLOCK_EGRESS_USER=<user> scripts/install-egress-helper.sh
@@ -501,7 +527,7 @@ nocklock wrap -- your-custom-agent               # Anything
 
 ## Event log
 
-Every fence decision is recorded in an SQLite event log.
+Fence decisions are recorded in an SQLite event log, but not all of them (see [What the signed log proves](#what-the-signed-log-proves)).
 
 For a NEW project the log does **not** live in your project. It lives in
 NockLock's audit state directory,
@@ -576,7 +602,22 @@ NockLock is a fence, not guardrails.
 
 Guardrails tell the agent what not to do. The agent can ignore them, work around them, or hallucinate past them. Guardrails are prompts.
 
-A fence sits between the agent and the resource. How hard the boundary is depends on the fence. The secret fence is absolute: a blocked variable is gone from the environment before the agent starts. On Linux, the filesystem fence is kernel-enforced with Landlock by default and composes with LD_PRELOAD logging; static binaries and children that clear `LD_PRELOAD` are still denied by the kernel. On macOS, the filesystem fence is a kernel-enforced Seatbelt write confinement. Writes outside the configured root and its essential runtime exceptions are denied, and the built-in and configured sensitive paths are denied for reads and writes. It does not claim read confinement outside the root. The profile follows descendants even when they cross into protected system binaries. The network fence stops normal and prompt-injected attempts to reach unapproved domains and logs every try. On Linux with syscall fencing enabled, proxy-mode runs allow only Unix-domain sockets in the child; the interposer rewrites only the configured loopback proxy connect to the proxy's Unix socket, and all other AF_INET/AF_INET6 connects fail closed. With `--net-fence=netns` the child keeps IP sockets and the boundary is composed: the nftables default-drop floor and the network namespace prevent alternate transports and proxy bypass (direct DNS to other resolvers, non-DNS UDP, QUIC, SCTP and raw IP are dropped, and nothing but the transparent proxy and the in-namespace DNS stub is reachable), while the transparent HTTP(S) proxy and the DNS stub enforce the `network.allow` domain policy.
+`nocklock doctor` verdicts and exit codes (`--json` adds per-boundary `boundaries` posture of `enforced`, `advisory`, `disabled`, `unavailable` or `enabled`, and the proxy-mode `egress_level`):
+
+| Exit | Verdict | Meaning |
+|---|---|---|
+| 0 | PROTECTED | filesystem, syscall, network and secrets are all enforced; the network is not `allow_all` and its egress level is CONFINED or SEATBELT |
+| 2 | GAPS FOUND | a boundary is configured but its backend is missing |
+| 3 | PARTIAL | some boundary is disabled or advisory; each is listed by name |
+| 4 | UNPROTECTED | no boundary is enforced |
+
+A missing or unparseable `.nock/config.toml` also exits 2.
+
+**Known gap until #174 lands:** doctor reports PROTECTED for a Linux `CONFINED` config even though `CONFINED` does not stop connects to Unix sockets (pathname or abstract), so a reachable socket such as `docker.sock` is a way out. Read PROTECTED at `CONFINED` as "every boundary is enforced as designed", not as "no escape"; use `--net-fence=netns` (`KERNEL`) for a kernel-enforced egress boundary. See [Linux CONFINED Unix-socket reachability](docs/design/unix-socket-reachability.md).
+
+Boundary postures: `enforced` (the fence is active), `advisory` (logs or warns but does not block), `disabled` (turned off in config), `enabled` (configured but its backend is missing), and `unavailable` (the fence cannot enforce on this host or config; it never counts toward PROTECTED). `unavailable` is how doctor reports the `UNREACHABLE` egress level: syscall enforcement restricts proxy traffic to Unix sockets while the interposer bridge is disabled, so the allowlist cannot be reached.
+
+A fence sits between the agent and the resource. How hard the boundary is depends on the fence. The secret fence is absolute: a blocked variable is gone from the environment before the agent starts. On Linux, the filesystem fence is kernel-enforced with Landlock by default and composes with LD_PRELOAD logging; where Landlock is engaged, static binaries and children that clear `LD_PRELOAD` are still denied by the kernel. Landlock is absent when `filesystem.linux_enforcement = "off"` and degraded or missing under `"preferred"` on a kernel without it (`"required"` refuses to start instead); in those cases an open that bypasses the interposer is not denied. On macOS, the filesystem fence is a kernel-enforced Seatbelt write confinement. Writes outside the configured root and its essential runtime exceptions are denied, and the built-in and configured sensitive paths are denied for reads and writes. It does not claim read confinement outside the root. The profile follows descendants even when they cross into protected system binaries. The network fence stops normal and prompt-injected attempts to reach unapproved domains; proxy denials are logged, but a bypass that never reaches the proxy is not (see [What the signed log proves](#what-the-signed-log-proves)). On Linux with syscall fencing enabled, proxy-mode runs restrict kernel socket creation to Unix-domain sockets; the interposer remaps intended TCP stream sockets and the configured loopback proxy connect to the proxy's Unix socket. Direct AF_INET/AF_INET6 socket syscalls fail closed. The syscall fence does not restrict AF_UNIX `connect()`, so a child can also reach other path-based and abstract Unix sockets accessible to the same user; see [Linux CONFINED Unix-socket reachability](docs/design/unix-socket-reachability.md). With `--net-fence=netns` the child keeps IP sockets and the boundary is composed: the nftables default-drop floor and the network namespace prevent alternate transports and proxy bypass (direct DNS to other resolvers, non-DNS UDP, QUIC, SCTP and raw IP are dropped, and nothing but the transparent proxy and the in-namespace DNS stub is reachable), while the transparent HTTP(S) proxy and the DNS stub enforce the `network.allow` domain policy.
 
 NockLock does not restrict how your agent works. It restricts what your agent can reach. Inside the fence, your agent still has full permissions.
 

@@ -1,6 +1,7 @@
 package cli
 
 import (
+	"strings"
 	"testing"
 )
 
@@ -27,6 +28,16 @@ func TestParseWrapFlagsAllowPrivateRanges(t *testing.T) {
 	}
 	if len(childArgs) != 1 || childArgs[0] != "mycommand" {
 		t.Errorf("unexpected child args: %v", childArgs)
+	}
+}
+
+func TestParseWrapFlagsRejectsRemovedUnixSocketFlag(t *testing.T) {
+	_, _, err := parseWrapFlags([]string{"--allow-unix-sockets", "--", "mycommand"})
+	if err == nil {
+		t.Fatal("removed --allow-unix-sockets flag was accepted")
+	}
+	if !strings.Contains(err.Error(), "unknown nocklock flag") {
+		t.Fatalf("removed Unix-socket flag error = %v, want unknown flag", err)
 	}
 }
 

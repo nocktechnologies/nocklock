@@ -325,10 +325,11 @@ type SyscallConfig struct {
 
 // NetworkConfig defines network egress boundaries.
 type NetworkConfig struct {
-	Allow              []string `toml:"allow"`
-	AllowAll           bool     `toml:"allow_all"`
-	AllowPrivateRanges bool     `toml:"allow_private_ranges"`
-	RequireEnforced    bool     `toml:"require_enforced"`
+	Allow                      []string `toml:"allow"`
+	AllowAll                   bool     `toml:"allow_all"`
+	AllowPrivateRanges         bool     `toml:"allow_private_ranges"`
+	RequireEnforced            bool     `toml:"require_enforced"`
+	RequireUnixSocketIsolation bool     `toml:"require_unix_socket_isolation"`
 	// Lookback rules narrow egress after a trigger event is recorded in the
 	// current session. They never add an allow.
 	Lookback []LookbackRule `toml:"lookback"`
