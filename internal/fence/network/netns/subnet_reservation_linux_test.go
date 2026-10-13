@@ -80,8 +80,11 @@ func TestSubnetReservation_CrossProcessClaim(t *testing.T) {
 	if dir := os.Getenv("NOCKLOCK_TEST_SUBNET_RESERVATION_DIR"); dir != "" {
 		subnetReservationDir = dir
 		var stat syscall.Stat_t
-		if err := syscall.Fstat(3, &stat); err != nil || stat.Mode&syscall.S_IFMT != syscall.S_IFIFO {
-			t.Fatalf("claim gate fd 3 is not a pipe: %v", err)
+		if err := syscall.Fstat(3, &stat); err != nil {
+			t.Fatalf("inspect claim gate fd 3: %v", err)
+		}
+		if stat.Mode&syscall.S_IFMT != syscall.S_IFIFO {
+			t.Fatalf("claim gate fd 3 is not a pipe (mode %#o)", stat.Mode&syscall.S_IFMT)
 		}
 		gate := os.NewFile(3, "claim gate")
 		defer gate.Close()
@@ -156,7 +159,7 @@ func TestSubnetReservation_CrossProcessClaim(t *testing.T) {
 		waited[i] = true
 		if err != nil {
 			_ = syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
-			t.Errorf("claimant %d failed: %v\n%s", i, err, outputs[i].String())
+			t.Errorf("claimant %d failed (deadline: %v): %v\n%s", i, ctx.Err(), err, outputs[i].String())
 			continue
 		}
 		output := outputs[i].String()
