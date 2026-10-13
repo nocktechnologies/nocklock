@@ -204,6 +204,22 @@ func cleanupFailedBridge(bridge BridgeSpec, bridgeCreated, cleanupTransferred bo
 // caller's credential, and execs the actual fenced command. It is a separate
 // process so the root supervisor can kill it when either proxy becomes unhealthy.
 func DropAndExecChild(req Request) error {
+	// Capability sets, the bounding set, the ambient set, NO_NEW_PRIVS and the
+	// supplementary group list are all per-thread, and Go may migrate a goroutine
+	// across OS threads at any preemption point. If the thread that drops and
+	// asserts the capabilities is not the thread that finally execve's, the agent
+	// would start on a thread that still holds CAP_NET_ADMIN in its bounding set,
+	// keeps the root supplementary groups and has no NO_NEW_PRIVS: a silent fence
+	// fail-OPEN. The uid/gid drop is process-wide in Go (unix.Setresuid and
+	// unix.Setresgid delegate to syscall, which uses all-threads semantics), but
+	// Capset, PR_CAPBSET_DROP, PR_CAP_AMBIENT, unix.Setgroups (a raw per-thread
+	// setgroups in x/sys) and PR_SET_NO_NEW_PRIVS are not, so the drop, the
+	// assert, NO_NEW_PRIVS and execve must share one thread. Lock this goroutine
+	// to its OS thread and NEVER unlock: the goroutine ends in execve, so the
+	// thread is never returned to the runtime. Mirrors SetupAndExec and the
+	// __landlock-exec shim.
+	runtime.LockOSThread()
+
 	if len(req.Argv) == 0 {
 		return errors.New("netns setup request has no argv to exec")
 	}
