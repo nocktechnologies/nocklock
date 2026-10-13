@@ -289,3 +289,19 @@ func TestValidateLookback(t *testing.T) {
 		})
 	}
 }
+
+func TestEffectivePolicyCloudSectionIsInert(t *testing.T) {
+	cfg := DefaultConfig()
+	cfg.Cloud.Enabled = true
+	out := cfg.EffectivePolicy()
+	if strings.Contains(out, "Cloud sync: enabled") {
+		t.Fatalf("legacy [cloud] must not read as enabled:\n%s", out)
+	}
+	if !strings.Contains(out, "Cloud sync: inert") || !strings.Contains(out, "[audit.forward]") {
+		t.Fatalf("want inert note naming [audit.forward]:\n%s", out)
+	}
+	cfg.Cloud.Enabled = false
+	if !strings.Contains(cfg.EffectivePolicy(), "Cloud sync: disabled") {
+		t.Fatal("disabled [cloud] should still print disabled")
+	}
+}

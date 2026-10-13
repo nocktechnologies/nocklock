@@ -19,6 +19,9 @@ func TestResolveNames_KnownSyscallsResolveToCanonicalNumbers(t *testing.T) {
 		{"amd64", "ptrace", 101},
 		{"amd64", "bpf", 321},
 		{"amd64", "socket", 41},
+		{"amd64", "io_uring_setup", 425},
+		{"amd64", "io_uring_enter", 426},
+		{"amd64", "io_uring_register", 427},
 		{"amd64", "unshare", 272},
 		{"arm64", "init_module", 105},
 		{"arm64", "ptrace", 117},
@@ -55,6 +58,7 @@ func TestSyscallTable_NumbersMatchSupportedABIs(t *testing.T) {
 			"reboot": 169, "kexec_load": 246, "kexec_file_load": 320,
 			"ioperm": 173, "iopl": 172,
 			"ptrace": 101, "process_vm_readv": 310, "process_vm_writev": 311,
+			"io_uring_setup": 425, "io_uring_enter": 426, "io_uring_register": 427,
 			"clone": 56, "clone3": 435, "socket": 41,
 		},
 		"arm64": {
@@ -68,6 +72,7 @@ func TestSyscallTable_NumbersMatchSupportedABIs(t *testing.T) {
 			"settimeofday": 170, "clock_settime": 112, "clock_adjtime": 266, "adjtimex": 171,
 			"reboot": 142, "kexec_load": 104, "kexec_file_load": 294,
 			"ptrace": 117, "process_vm_readv": 270, "process_vm_writev": 271,
+			"io_uring_setup": 425, "io_uring_enter": 426, "io_uring_register": 427,
 			"clone": 220, "clone3": 435, "socket": 198,
 		},
 		"386": {
@@ -82,6 +87,7 @@ func TestSyscallTable_NumbersMatchSupportedABIs(t *testing.T) {
 			"reboot": 88, "kexec_load": 283,
 			"ioperm": 101, "iopl": 110,
 			"ptrace": 26, "process_vm_readv": 347, "process_vm_writev": 348,
+			"io_uring_setup": 425, "io_uring_enter": 426, "io_uring_register": 427,
 			"clone": 120, "clone3": 435, "socket": 359, "socketcall": 102,
 		},
 		"arm": {
@@ -95,6 +101,7 @@ func TestSyscallTable_NumbersMatchSupportedABIs(t *testing.T) {
 			"settimeofday": 79, "clock_settime": 262, "clock_adjtime": 372, "adjtimex": 124,
 			"reboot": 88, "kexec_load": 347, "kexec_file_load": 401,
 			"ptrace": 26, "process_vm_readv": 376, "process_vm_writev": 377,
+			"io_uring_setup": 425, "io_uring_enter": 426, "io_uring_register": 427,
 			"clone": 120, "clone3": 435, "socket": 281,
 		},
 	}
@@ -203,6 +210,7 @@ func TestBaselineDenylist_CoversRequiredSubsystems(t *testing.T) {
 		"reboot", "kexec_load", "kexec_file_load",
 		"ioperm", "iopl",
 		"ptrace", "process_vm_readv", "process_vm_writev",
+		"io_uring_setup", "io_uring_enter", "io_uring_register",
 		"socketcall",
 	}
 	set := make(map[string]struct{}, len(BaselineDenylist))

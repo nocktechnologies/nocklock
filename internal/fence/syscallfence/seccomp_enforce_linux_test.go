@@ -3,10 +3,14 @@
 package syscallfence
 
 import (
+	"net"
 	"os"
 	"os/exec"
+	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
+	"time"
 
 	"golang.org/x/sys/unix"
 )
@@ -23,7 +27,11 @@ import (
 // These are the "Linux-gated bypass tests" the task requires. On the macOS dev
 // host they do not build (linux tag); they run on the Linux CI runner.
 
-const scenarioEnv = "NOCKLOCK_SCFENCE_SCENARIO"
+const (
+	scenarioEnv     = "NOCKLOCK_SCFENCE_SCENARIO"
+	ioUringProbeEnv = "NOCKLOCK_SCFENCE_IO_URING_PROBE"
+	ioUringPortEnv  = "NOCKLOCK_SCFENCE_IO_URING_PORT"
+)
 
 // TestMain intercepts helper-subprocess invocations before the test framework
 // runs, so the child does exactly one syscall under the fence and exits.
@@ -200,6 +208,37 @@ func runScenario(scenario string) int {
 		}
 		return exitOtherErrno
 
+	case "io_uring_confined":
+		policy := canaryPolicy
+		policy.AllowedSocketFamilies = []string{"unix"}
+		if err := Apply(policy); err != nil {
+			return exitApplyFailed
+		}
+		if !fenceInstalled() {
+			return exitFenceNotInstalled
+		}
+		probe, port := os.Getenv(ioUringProbeEnv), os.Getenv(ioUringPortEnv)
+		if probe == "" || port == "" {
+			return exitOtherErrno
+		}
+		cmd := exec.Command(probe, port)
+		output, err := cmd.CombinedOutput()
+		if len(output) > 0 {
+			_, _ = os.Stdout.Write(output)
+		}
+		if err == nil {
+			return exitAllowed
+		}
+		if exitErr, ok := err.(*exec.ExitError); ok {
+			switch exitErr.ExitCode() {
+			case 10:
+				return exitDeniedEPERM
+			case 11:
+				return exitDeniedENOSYS
+			}
+		}
+		return exitOtherErrno
+
 	default:
 		return 99
 	}
@@ -259,7 +298,7 @@ func spawnThreadsWorks() bool {
 
 // runHelper re-execs this test binary into the given scenario and returns its
 // exit code.
-func runHelper(t *testing.T, scenario string) int {
+func runHelper(t *testing.T, scenario string, extraEnv ...string) int {
 	t.Helper()
 	exe, err := os.Executable()
 	if err != nil {
@@ -267,6 +306,7 @@ func runHelper(t *testing.T, scenario string) int {
 	}
 	cmd := exec.Command(exe)
 	cmd.Env = append(os.Environ(), scenarioEnv+"="+scenario)
+	cmd.Env = append(cmd.Env, extraEnv...)
 	out, err := cmd.CombinedOutput()
 	if len(out) > 0 && testing.Verbose() {
 		t.Logf("scenario %q output: %s", scenario, strings.TrimSpace(string(out)))
@@ -382,6 +422,62 @@ func TestEnforce_InetSocketAllowed(t *testing.T) {
 	requireSupported(t, code)
 	if code != exitAllowed {
 		t.Errorf("socket(AF_INET): exit %d, want ALLOWED(%d)", code, exitAllowed)
+	}
+}
+
+func TestEnforce_IORingSocketConnectDenied(t *testing.T) {
+	cc, err := exec.LookPath("cc")
+	if err != nil {
+		t.Skipf("C compiler unavailable for raw io_uring probe: %v", err)
+	}
+	probe := filepath.Join(t.TempDir(), "io_uring_probe")
+	build := exec.Command(cc, "-O2", "-Wall", "-Wextra", "-Werror", "-o", probe, filepath.Join("testdata", "io_uring_probe.c"))
+	if output, err := build.CombinedOutput(); err != nil {
+		t.Fatalf("build raw io_uring probe: %v\n%s", err, output)
+	}
+
+	// Negative control: first prove the host can set up a ring, create an AF_INET
+	// socket through IORING_OP_SOCKET, and connect it to this local listener. If
+	// the ambient kernel/container policy already blocks the operation, this test
+	// cannot attribute a later EPERM to NockLock's filter.
+	controlListener, err := net.ListenTCP("tcp4", &net.TCPAddr{IP: net.IPv4(127, 0, 0, 1)})
+	if err != nil {
+		t.Skipf("cannot bind local io_uring control listener: %v", err)
+	}
+	_ = controlListener.SetDeadline(time.Now().Add(5 * time.Second))
+	controlCmd := exec.Command(probe, strconv.Itoa(controlListener.Addr().(*net.TCPAddr).Port))
+	controlOutput, controlErr := controlCmd.CombinedOutput()
+	if controlErr != nil {
+		controlListener.Close()
+		t.Skipf("ambient io_uring control is unavailable: %v\n%s", controlErr, controlOutput)
+	}
+	controlConn, err := controlListener.AcceptTCP()
+	controlListener.Close()
+	if err != nil {
+		t.Fatalf("unfenced io_uring probe connected but local listener did not accept: %v\n%s", err, controlOutput)
+	}
+	_ = controlConn.Close()
+
+	listener, err := net.ListenTCP("tcp4", &net.TCPAddr{IP: net.IPv4(127, 0, 0, 1)})
+	if err != nil {
+		t.Fatalf("bind fenced io_uring listener: %v", err)
+	}
+	_ = listener.SetDeadline(time.Now().Add(5 * time.Second))
+	port := strconv.Itoa(listener.Addr().(*net.TCPAddr).Port)
+	code := runHelper(t, "io_uring_confined", ioUringProbeEnv+"="+probe, ioUringPortEnv+"="+port)
+	if code == exitAllowed {
+		conn, acceptErr := listener.AcceptTCP()
+		if acceptErr == nil {
+			_ = conn.Close()
+			t.Errorf("io_uring_setup succeeded under the syscall fence and IORING_OP_CONNECT reached the local listener")
+		} else {
+			t.Errorf("io_uring probe was allowed (exit %d), wanted io_uring_setup EPERM; accept failed: %v", code, acceptErr)
+		}
+	}
+	_ = listener.Close()
+	requireSupported(t, code)
+	if code != exitDeniedEPERM {
+		t.Errorf("io_uring_setup under syscall fence: exit %d, want EPERM(%d)", code, exitDeniedEPERM)
 	}
 }
 
