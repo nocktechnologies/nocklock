@@ -134,13 +134,13 @@ func TestDoctorNetworkAllowlistWarnsWhenBridgeInterposerDisabled(t *testing.T) {
 	cmd.SetOut(&out)
 	cmd.SetErr(&bytes.Buffer{})
 
-	if got := doctorExitFromErr(doctorCmd.RunE(cmd, nil)); got != doctorExitPartial {
-		t.Fatalf("unreachable bridge must exit %d (PARTIAL), got %d", doctorExitPartial, got)
+	if got := doctorExitFromErr(doctorCmd.RunE(cmd, nil)); got != doctorExitGapsFound {
+		t.Fatalf("unreachable bridge must exit %d (GAPS FOUND), got %d", doctorExitGapsFound, got)
 	}
 	if !strings.Contains(out.String(), "Network allowlist cannot be reached") {
 		t.Fatalf("expected bridge warning, got:\n%s", out.String())
 	}
-	if !strings.Contains(out.String(), "VERDICT: PARTIAL") {
+	if !strings.Contains(out.String(), "VERDICT: GAPS FOUND") {
 		t.Fatalf("warning alone must not read PROTECTED, got:\n%s", out.String())
 	}
 }
