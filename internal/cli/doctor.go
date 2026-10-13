@@ -10,6 +10,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"slices"
 	"strings"
 	"syscall"
 	"time"
@@ -95,15 +96,21 @@ type doctorActivity struct {
 	AllTimeBlocked int `json:"all_time_blocked"`
 }
 
+type doctorSigningKey struct {
+	Directory string        `json:"directory"`
+	Posture   doctorPosture `json:"posture"`
+}
+
 type doctorReport struct {
 	Verdict doctorVerdict `json:"verdict"`
 	// Boundaries is the per-boundary posture behind the verdict; EgressLevel is
 	// the effective proxy-mode network egress level (omitted if config did not load).
-	Boundaries  []doctorBoundary `json:"boundaries,omitempty"`
-	EgressLevel egressLevel      `json:"egress_level,omitempty"`
-	Checks      []doctorCheck    `json:"checks"`
-	Gaps        []doctorCheck    `json:"gaps,omitempty"`
-	Activity    doctorActivity   `json:"activity"`
+	Boundaries  []doctorBoundary  `json:"boundaries,omitempty"`
+	EgressLevel egressLevel       `json:"egress_level,omitempty"`
+	Checks      []doctorCheck     `json:"checks"`
+	Gaps        []doctorCheck     `json:"gaps,omitempty"`
+	Activity    doctorActivity    `json:"activity"`
+	SigningKey  *doctorSigningKey `json:"signing_key,omitempty"`
 }
 
 type doctorCapabilities struct {
@@ -208,6 +215,8 @@ func runDoctor(caps doctorCapabilities) doctorReport {
 		checks = append(checks, check)
 	}
 	checks = append(checks, filesystemDoctorCheck(cfg, caps))
+	keyCheck, signingKey := signingKeyDoctorCheck(cfg, configPath, caps)
+	checks = append(checks, keyCheck)
 	checks = append(checks, unixSocketDoctorCheck(cfg, caps))
 	checks = append(checks, syscallDoctorCheck(cfg, caps))
 	checks = append(checks, networkDoctorCheck(cfg, caps))
@@ -227,7 +236,100 @@ func runDoctor(caps doctorCapabilities) doctorReport {
 	level := doctorEgressLevel(cfg, caps)
 	report := finishDoctorReport(checks, doctorBoundaries(cfg, caps.goos, level, checks), activity)
 	report.EgressLevel = level
+	report.SigningKey = signingKey
 	return report
+}
+
+// signingKeyDoctorCheck checks the effective child policy for the managed key.
+// The deny set comes from withManagedSigningKeyDeny, the same helper wrap uses,
+// so doctor adds nothing wrap does not.
+func signingKeyDoctorCheck(cfg *config.Config, configPath string, caps doctorCapabilities) (doctorCheck, *doctorSigningKey) {
+	deny, keyDir, err := withManagedSigningKeyDeny(cfg.Filesystem.Deny)
+	if err != nil {
+		return doctorCriticalCheck("Fences", "signing-key", "unresolved", fmt.Sprintf("Cannot resolve managed signing key: %v", err), "set HOME or XDG_CONFIG_HOME to a usable directory"), nil
+	}
+	if cfg.Filesystem.Root == "" {
+		check := doctorCheck{Group: "Fences", Name: "signing-key", Severity: doctorInfo, Status: "not-enforced", Message: fmt.Sprintf("Managed signing key directory %s has no filesystem fence.", keyDir)}
+		return check, &doctorSigningKey{Directory: keyDir, Posture: doctorCheckPosture(check)}
+	}
+	fsConfig := cfg.Filesystem
+	fsConfig.Deny = deny
+	resolved, err := fsfence.ProcessConfig(fsConfig)
+	if err != nil {
+		check := doctorCriticalCheck("Fences", "signing-key", "unresolved", fmt.Sprintf("Cannot resolve managed signing key directory %s: %v", keyDir, err), "fix the signing key path and filesystem config")
+		return check, &doctorSigningKey{Directory: keyDir, Posture: doctorCheckPosture(check)}
+	}
+	if dbPath, _, err := config.ResolveDBPath(cfg, configPath); err == nil {
+		if auditDir := filepath.Dir(dbPath); pathIsWithinDir(auditDir, resolved.Root) {
+			resolved.ProtectedRootSubdir = auditDir
+		}
+	}
+	check := signingKeyFenceCheck(keyDir, resolved, cfg.Filesystem.LinuxEnforcement, caps)
+	return check, &doctorSigningKey{Directory: keyDir, Posture: doctorCheckPosture(check)}
+}
+
+// signingKeyFenceCheck judges the policy actually passed to Seatbelt or Landlock.
+// keyDir is resolved independently of fsConfig; the key is protected only if
+// that directory appears among fsConfig.DenyPaths (compared by canonical path),
+// so an empty or foreign deny list is a gap, never a pass.
+func signingKeyFenceCheck(keyDir string, fsConfig *fsfence.FenceConfig, linuxEnforcement string, caps doctorCapabilities) doctorCheck {
+	gap := func(status, detail, fix string) doctorCheck {
+		return doctorCriticalCheck("Fences", "signing-key", status, fmt.Sprintf("Managed signing key directory %s: %s", keyDir, detail), fix)
+	}
+	if caps.goos == "linux" && linuxEnforcementMode(linuxEnforcement) == linuxEnforcementOff {
+		return doctorCheck{Group: "Fences", Name: "signing-key", Severity: doctorWarning, Status: "advisory", Message: fmt.Sprintf("Managed signing key directory %s has only the userspace filesystem fence.", keyDir)}
+	}
+	if fsConfig == nil || !denyPathsContain(fsConfig.DenyPaths, keyDir) {
+		return gap("readable", "outside the effective filesystem deny paths", "add the resolved signing key directory to the effective filesystem deny paths")
+	}
+	switch caps.goos {
+	case "darwin":
+		return doctorOKCheck("Fences", "signing-key", "denied", fmt.Sprintf("Managed signing key directory %s is denied by Seatbelt.", keyDir))
+	case "linux":
+		// Wrap refuses to start when Landlock is unavailable and enforcement is
+		// not "off" (wrap.go: linuxEnforcementMode maps "preferred" to
+		// "required"; the abi == 0 branch returns an error for required), so an
+		// unavailable probe is a critical will-refuse here for both "required"
+		// and "preferred".
+		if caps.landlockABI == nil {
+			return gap("unavailable", "Landlock is unavailable", "run on a Landlock-capable Linux kernel")
+		}
+		abi, detectErr := caps.landlockABI()
+		if detectErr != nil || abi == 0 {
+			return gap("unavailable", "Landlock is unavailable", "run on a Landlock-capable Linux kernel")
+		}
+		// Rules are built from the key directory's deny alone: other deny
+		// overlaps are the filesystem row's finding, not the key's.
+		keyPolicy := *fsConfig
+		keyPolicy.DenyPaths = []string{keyDir}
+		spec, err := landlock.RulesFromConfig(&keyPolicy, nil, abi)
+		if err != nil {
+			return gap("will-refuse", fmt.Sprintf("wrap cannot build its Landlock rules: %v", err), "resolve the reported Landlock rule error; move XDG_CONFIG_HOME outside filesystem grants if it overlaps one")
+		}
+		keyFile := filepath.Join(keyDir, logging.SigningKeyFileName)
+		for _, rule := range spec.Paths {
+			if rule.Rights&landlock.RightReadFile != 0 && (rule.Path == string(os.PathSeparator) || pathIsWithinDir(keyFile, rule.Path)) {
+				return gap("readable", fmt.Sprintf("Landlock grants read access through %s", rule.Path), "move XDG_CONFIG_HOME outside every Landlock grant")
+			}
+		}
+		return doctorOKCheck("Fences", "signing-key", "denied", fmt.Sprintf("Managed signing key directory %s is outside every Landlock read grant.", keyDir))
+	default:
+		return gap("unavailable", "no supported filesystem backend", "run NockLock on macOS or Linux")
+	}
+}
+
+// denyPathsContain reports whether dir is one of the deny paths, by canonical
+// path. Both sides resolve the way ProcessConfig and the signer do (nearest
+// existing ancestor), so a key directory that does not exist yet still matches.
+func denyPathsContain(denyPaths []string, dir string) bool {
+	canonical := func(p string) string {
+		if resolved, err := resolveAuditDirectory(p); err == nil {
+			return resolved
+		}
+		return filepath.Clean(p)
+	}
+	want := canonical(dir)
+	return slices.ContainsFunc(denyPaths, func(deny string) bool { return canonical(deny) == want })
 }
 
 func unixSocketDoctorCheck(cfg *config.Config, caps doctorCapabilities) doctorCheck {
@@ -629,17 +731,7 @@ func doctorBoundaries(cfg *config.Config, goos string, level egressLevel, checks
 		}
 	}
 	posture := func(name string) doctorPosture {
-		c := byName[name]
-		switch {
-		case c.Severity == doctorCritical:
-			return postureEnabled
-		case c.Severity == doctorOK:
-			return postureEnforced
-		case c.Status == "not-applied":
-			return postureAdvisory
-		default:
-			return postureDisabled
-		}
+		return doctorCheckPosture(byName[name])
 	}
 	fs, net := posture("filesystem"), posture("network")
 	if fs == postureEnforced && goos == "linux" && linuxEnforcementMode(cfg.Filesystem.LinuxEnforcement) == linuxEnforcementOff {
@@ -653,6 +745,7 @@ func doctorBoundaries(cfg *config.Config, goos string, level egressLevel, checks
 	}
 	boundaries := []doctorBoundary{
 		{"filesystem", fs},
+		{"signing-key", posture("signing-key")},
 		{"syscall", posture("syscall")},
 		{"network", net},
 		{"secrets", posture("secrets")},
@@ -667,6 +760,19 @@ func doctorBoundaries(cfg *config.Config, goos string, level egressLevel, checks
 		boundaries = append(boundaries, doctorBoundary{"unix-sockets", unixSockets})
 	}
 	return boundaries
+}
+
+func doctorCheckPosture(c doctorCheck) doctorPosture {
+	switch {
+	case c.Severity == doctorCritical:
+		return postureEnabled
+	case c.Severity == doctorOK:
+		return postureEnforced
+	case c.Status == "advisory" || c.Status == "not-applied":
+		return postureAdvisory
+	default:
+		return postureDisabled
+	}
 }
 
 func doctorActivityCheck(cfg *config.Config, configPath string, now time.Time) doctorActivity {

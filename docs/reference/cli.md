@@ -1,6 +1,6 @@
-# CLI, exit codes and config schema (current 0.9.0 behavior)
+# CLI, exit codes and config schema
 
-This page records what the code does at `v0.9.0` (`f2b0d04`). It is **not yet a compatibility promise**. Making it one is the fourth bar for 1.0 (`docs/ROADMAP.md`); until then, anything here can change in a minor release with a `CHANGELOG.md` "Breaking" entry.
+This page records current code behavior, starting from the `v0.9.0` baseline (`f2b0d04`) and including later changes listed in `CHANGELOG.md`. It is **not yet a compatibility promise**. Making it one is the fourth bar for 1.0 (`docs/ROADMAP.md`); until then, anything here can change in a minor release with a `CHANGELOG.md` "Breaking" entry.
 
 ## Commands
 Registered in `internal/cli/` (one file per command). `README.md` "Commands" has the user-facing table.
@@ -33,6 +33,8 @@ Exit codes travel as `exitCodeError` and `Execute()` calls `os.Exit` once (`root
 
 Caveat: a wrapped child exiting `1` or `2` can overlap CLI failure codes. The banner on stderr (`NockLock: fatal:`) and the `session_end` audit row (`exit_code=<n>`) disambiguate (`wrap.go`).
 
+`doctor` checks the managed Ed25519 signing-key directory resolved from `XDG_CONFIG_HOME` (or `~/.config`) against the effective filesystem fence. On macOS it must be inside a Seatbelt deny path. On Linux with Landlock it must be outside every read grant; if a deny overlaps a grant (for example, a key under the project or `/tmp`), `wrap` refuses to start and `doctor` reports `GAPS FOUND` (exit 2). With Landlock disabled, the userspace-only signing-key boundary is `advisory`, so the verdict cannot be `PROTECTED`. `doctor --json` includes `signing_key.directory` and `signing_key.posture`; the `signing-key` check and boundary explain any gap.
+
 ## Config schema (`.nock/config.toml`)
 Strict: unknown keys are a load error (`internal/config/config.go`). Structs at `internal/config/config.go`; defaults in `internal/config/defaults.go`; validation in `internal/config/validate.go`.
 
@@ -52,4 +54,4 @@ Strict: unknown keys are a load error (`internal/config/config.go`). Structs at 
 Runtime presets (`internal/config/presets/*.toml`) use the same schema. Profile overlays may only tighten a base profile (`wrap.go`).
 
 ## Environment variables read by NockLock
-`NOCKLOCK_ANCHOR_URL`, `NOCKLOCK_ANCHOR_TOKEN` (`internal/cli/anchor_push.go`), `NOCKLOCK_FORWARD_URL`, `NOCKLOCK_FORWARD_KEY` (`internal/cli/wrap.go`, `internal/config/config.go`), `NOCKLOCK_EGRESS_USER` (installer, `scripts/install-egress-helper.sh`), `XDG_STATE_HOME` (audit state, `internal/config/state.go`). All of the first four are stripped from the child.
+`NOCKLOCK_ANCHOR_URL`, `NOCKLOCK_ANCHOR_TOKEN` (`internal/cli/anchor_push.go`), `NOCKLOCK_FORWARD_URL`, `NOCKLOCK_FORWARD_KEY` (`internal/cli/wrap.go`, `internal/config/config.go`), `NOCKLOCK_EGRESS_USER` (installer, `scripts/install-egress-helper.sh`), `XDG_STATE_HOME` (audit state, `internal/config/state.go`), `XDG_CONFIG_HOME` (managed signing key, `internal/logging/signing.go`). The first four are stripped from the child.
