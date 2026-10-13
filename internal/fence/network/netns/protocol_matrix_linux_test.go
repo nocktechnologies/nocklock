@@ -33,8 +33,6 @@ import (
 	"testing"
 	"time"
 
-	"github.com/nocktechnologies/nocklock/internal/config"
-	"github.com/nocktechnologies/nocklock/internal/fence/network"
 	"golang.org/x/sys/unix"
 )
 
@@ -79,7 +77,7 @@ func TestNetnsProtocolMatrix(t *testing.T) {
 	if got := httpsHits.Load(); got == 0 {
 		t.Fatal("allowed HTTPS never reached the host-side upstream")
 	}
-	assertProxyDeathTerminatesChild(t)
+	assertDeadProxyTerminatesChild(t)
 }
 
 func protocolChildCredential(t *testing.T) (int, int, []int) {
@@ -459,25 +457,23 @@ func protocolDenyLog(t *testing.T) string {
 	return path
 }
 
-func TestProxyDeathTerminatesChild(t *testing.T) {
-	assertProxyDeathTerminatesChild(t)
+func TestDeadProxyTerminatesChild(t *testing.T) {
+	assertDeadProxyTerminatesChild(t)
 }
 
-func assertProxyDeathTerminatesChild(t *testing.T) {
+func assertDeadProxyTerminatesChild(t *testing.T) {
 	t.Helper()
-	p := network.NewProxyServer(config.NetworkConfig{Allow: []string{"localhost"}}, nil, "watchdog-test")
-	addr, err := p.Start()
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
-		t.Fatalf("start watchdog control proxy: %v", err)
+		t.Fatalf("reserve dead proxy port: %v", err)
 	}
-	defer p.Stop()
+	defer ln.Close() // A listener with no accept loop times out but keeps the port reserved.
 	child := exec.Command("/bin/sleep", "30")
 	child.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 	if err := child.Start(); err != nil {
 		t.Fatalf("start watchdog child: %v", err)
 	}
-	time.AfterFunc(100*time.Millisecond, func() { _ = p.Stop() })
-	err = superviseChild(child, []string{addr})
+	err = superviseChild(child, []string{ln.Addr().String()})
 	if err == nil || !strings.Contains(err.Error(), "proxy died") {
 		t.Fatalf("superviseChild() error = %v, want proxy-death child termination", err)
 	}

@@ -39,11 +39,7 @@ func TestWatchdogHealthyProxyDoesNotFire(t *testing.T) {
 }
 
 func TestWatchdogDetectsProxyFailure(t *testing.T) {
-	p := makeProxy(nil)
-	addr, err := p.Start()
-	if err != nil {
-		t.Fatalf("failed to start proxy: %v", err)
-	}
+	addr := boundUnlisteningTCP(t)
 
 	var fired atomic.Bool
 	onFailure := func() { fired.Store(true) }
@@ -54,11 +50,7 @@ func TestWatchdogDetectsProxyFailure(t *testing.T) {
 	w := NewProxyWatchdog(addr, 20*time.Millisecond, 2, onFailure)
 	w.Start(ctx)
 
-	// Give the watchdog a moment to start, then kill the proxy.
-	time.Sleep(10 * time.Millisecond)
-	_ = p.Stop()
-
-	// Wait for N consecutive failures + interval buffer.
+	// Wait for N consecutive refused probes + interval buffer.
 	deadline := time.Now().Add(500 * time.Millisecond)
 	for time.Now().Before(deadline) {
 		if fired.Load() {
