@@ -15,6 +15,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"time"
 
@@ -61,7 +62,8 @@ var verifyCmd = &cobra.Command{
 	Short: "Run adversarial self-tests against configured fences",
 	Long: "Run benign proof-of-block probes under the same fenced child path used by wrap.\n\n" +
 		"Probes never exfiltrate, never write outside a temp dir, and never touch real secrets: " +
-		"they read a self-created non-secret canary, dial invalid/example hosts, check a canary " +
+		"they read (Linux) or try opening for writing (macOS) a self-created non-secret canary, " +
+		"dial invalid/example hosts, check a canary " +
 		"environment variable is absent, and attempt one side-effect-free denied syscall.",
 	RunE: func(cmd *cobra.Command, args []string) error {
 		asJSON, _ := cmd.Flags().GetBool("json")
@@ -468,6 +470,9 @@ func verifySkipReason(fence string, cfg *config.Config, caps doctorCapabilities)
 	case "secret":
 		return false, ""
 	case "syscall":
+		if caps.goos != "linux" {
+			return true, "A syscall probe is only implemented on Linux; macOS Seatbelt hardening is not tested by verify."
+		}
 		check := syscallDoctorCheck(cfg, caps)
 		if syscallEnforcementMode(cfg.Syscall.Enforcement) == syscallfence.ModeOff {
 			return true, check.Message
@@ -541,10 +546,35 @@ func prepareProbeEnv(fence string, cfg *config.Config, projectRoot string) (map[
 		env[verifySecretName] = randomHex(16)
 		env[verifySecretControlName] = randomHex(16)
 		cfg.Secrets.Block = appendUnique(cfg.Secrets.Block, verifySecretName)
+		// The synthetic control must survive a non-empty pass list. Keep an empty
+		// pass list empty (it means all non-blocked variables pass), and never
+		// override block patterns: a blocked control makes the probe inconclusive.
+		if len(cfg.Secrets.Pass) > 0 {
+			cfg.Secrets.Pass = appendUnique(cfg.Secrets.Pass, verifySecretControlName)
+		}
 		return env, nil, nil
 	default:
 		return env, nil, nil
 	}
+}
+
+// probeCommandArgs keeps filesystem/network inputs out of the environment:
+// the real secret fence would correctly strip these synthetic variables.
+func probeCommandArgs(fence string, inputs map[string]string) []string {
+	args := []string{"__probe", fence}
+	switch fence {
+	case "filesystem":
+		args = append(args, "--canary-path", inputs[verifyCanaryPathEnv], "--canary-token", inputs[verifyCanaryTokenEnv])
+		if inputs[verifyCanaryKnownEnv] == "1" {
+			args = append(args, "--canary-known")
+		}
+		if runtime.GOOS == "darwin" {
+			args = append(args, "--write-canary")
+		}
+	case "network":
+		args = append(args, "--network-url", inputs[verifyNetworkURLEnv])
+	}
+	return args
 }
 
 func runProbePositiveControl(ctx context.Context, fence string, extraEnv map[string]string) error {
@@ -554,8 +584,11 @@ func runProbePositiveControl(ctx context.Context, fence string, extraEnv map[str
 	}
 	childCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
 	defer cancel()
-	cmd := exec.CommandContext(childCtx, exe, "__probe", fence)
-	cmd.Env = envWithOverrides(os.Environ(), extraEnv)
+	cmd := exec.CommandContext(childCtx, exe, probeCommandArgs(fence, extraEnv)...)
+	cmd.Env = os.Environ()
+	if fence == "secret" {
+		cmd.Env = envWithOverrides(cmd.Env, extraEnv)
+	}
 	var stdout, stderr bytes.Buffer
 	cmd.Stdout = &stdout
 	cmd.Stderr = &stderr
@@ -646,7 +679,7 @@ func runProbeUnderWrap(ctx context.Context, cfg *config.Config, configPath, fenc
 		return probeResult{Fence: fence}, fmt.Errorf("copy verification executable: %w", err)
 	}
 	cfgCopy.Filesystem.Allow = append(cfgCopy.Filesystem.Allow, probeBin)
-	if cfgCopy.Filesystem.Root != "" {
+	if runtime.GOOS == "linux" && cfgCopy.Filesystem.Root != "" {
 		libPath, err := verifyFilesystemBackend()
 		if err != nil {
 			return probeResult{Fence: fence}, err
@@ -665,9 +698,13 @@ func runProbeUnderWrap(ctx context.Context, cfg *config.Config, configPath, fenc
 	}
 	childCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
 	defer cancel()
-	cmd := exec.CommandContext(childCtx, probeExe, "wrap", "--", probeExe, "__probe", fence)
+	args := append([]string{"wrap", "--", probeExe}, probeCommandArgs(fence, extraEnv)...)
+	cmd := exec.CommandContext(childCtx, probeExe, args...)
 	cmd.Dir = tmpWork
-	cmd.Env = envWithOverrides(os.Environ(), extraEnv)
+	cmd.Env = os.Environ()
+	if fence == "secret" {
+		cmd.Env = envWithOverrides(cmd.Env, extraEnv)
+	}
 	cmd.Env = envWithOverrides(cmd.Env, map[string]string{"XDG_STATE_HOME": probeStateHome})
 	var stdout, stderr bytes.Buffer
 	cmd.Stdout = &stdout
