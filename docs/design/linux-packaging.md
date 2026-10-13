@@ -303,9 +303,16 @@ sudo apt-get update
 sudo apt-get install -y iproute2 nftables sudo python3
 : "${VERIFIED_PACKAGE_DIR:?Root-controlled verified extracted release directory}"
 : "${ACCEPT_SCRIPT:?Absolute path to the common acceptance body}"
-# Fail closed unless the directory and every parent up to / are owned by root
-# and not group- or other-writable; sudo then runs scripts from this tree.
-d=$(realpath -e -- "$VERIFIED_PACKAGE_DIR")
+# Resolve once; every later use takes ONLY the resolved path $pkg, never the
+# original $VERIFIED_PACKAGE_DIR. Fail closed unless the directory and every
+# parent up to / are owned by root and not group- or other-writable, and each
+# script sudo will run is a regular file (not a symlink) with the same
+# ownership and mode. The check-then-use is safe only because the whole path is
+# root-owned end to end: no non-root user can swap a component between the
+# check and the sudo run. Remaining limit: a root-writable parent (or a root
+# process) could still race it; the VM acceptance run has no such writer.
+pkg=$(realpath -e -- "$VERIFIED_PACKAGE_DIR")
+d=$pkg
 while :; do
   read -r owner mode < <(stat -c '%u %a' -- "$d")
   test "$owner" = 0 && test $((8#$mode & 8#022)) -eq 0 \
@@ -313,8 +320,14 @@ while :; do
   test "$d" = / && break
   d=$(dirname -- "$d")
 done
-sudo "$VERIFIED_PACKAGE_DIR/install.sh"
-sudo "$VERIFIED_PACKAGE_DIR/install-egress-helper.sh" --user "$(id -un)"
+for f in install.sh install-egress-helper.sh; do
+  test -f "$pkg/$f" && test ! -L "$pkg/$f" || { echo "not a regular file: $pkg/$f" >&2; exit 1; }
+  read -r owner mode < <(stat -c '%u %a' -- "$pkg/$f")
+  test "$owner" = 0 && test $((8#$mode & 8#022)) -eq 0 \
+    || { echo "untrusted script: $pkg/$f" >&2; exit 1; }
+done
+sudo "$pkg/install.sh"
+sudo "$pkg/install-egress-helper.sh" --user "$(id -un)"
 # Drop the cached sudo ticket first. With a cached admin credential, `sudo -n`
 # succeeds without the new rule; after `sudo -k` it passes only if the
 # NOPASSWD drop-in installed above grants this exact helper verb.

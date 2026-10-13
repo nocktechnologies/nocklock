@@ -8,7 +8,7 @@ All notable changes to NockLock will be documented in this file.
 
 - Docs: propose a signed Linux release tarball, explicit egress-helper installation,
   and clean-machine Linux/macOS acceptance in `docs/design/linux-packaging.md`
-  (N11643). Design only; no installer or release assets added.
+  (N11643), baseline v0.9.1 (`89c1bb6e`). Design only; no installer or release assets added.
 
 ### Fixed
 
