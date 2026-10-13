@@ -1,6 +1,6 @@
 # Roadmap to 1.0
 
-Status at `origin/main` 89c02fa (v0.8.0). Kevin approved the four 1.0 bars (Telegram 33132, Nock #11662). This page tracks the code and tests that must support each claim.
+Status at `v0.9.0` (`f2b0d04`). Kevin approved the four 1.0 bars (Telegram 33132, Nock #11662). This page tracks the code and tests that must support each claim.
 
 ## The 1.0 bar
 
@@ -15,8 +15,9 @@ A gap is closed only when its fix is on `main`, the red-team case runs in CI wit
 
 ## Release path
 
-- **0.7.1 (planned, skipped):** the original no-breaking-change step for honesty and Linux gaps. Those changes were split instead: doctor and `io_uring` shipped in v0.8.0; Unix-socket isolation is still open. There is no `v0.7.1` tag.
+- **0.7.1 (planned, skipped):** the original no-breaking-change step for honesty and Linux gaps. Those changes were split instead: doctor and `io_uring` shipped in v0.8.0; Unix-socket enforcement rules and strict refusal shipped in v0.9.0, but real ABI 9 validation is still open. There is no `v0.7.1` tag.
 - **0.8.0 (released):** the breaking doctor exit-code change is recorded under `### Breaking` in `CHANGELOG.md`; the first red-team bench slice and the `io_uring` deny landed. The complete Linux install and full CLI/config/exit-code contract did not land with this release. Further changes on the way to 1.0 need explicit changelog entries and upgrade instructions.
+- **0.9.0 (released):** `doctor` now returns `PARTIAL` (exit 3) for Linux `CONFINED` below Landlock ABI 9. Default `wrap` warns and signs the Unix-socket limitation; `network.require_unix_socket_isolation = true` refuses when it cannot enforce the boundary. ABI 9 rules are implemented but untested on a real kernel. The release also hardens the red-team harness and adds the documentation map and install corrections.
 - **1.0:** all four bars above are verified. `docs/reference/cli.md` becomes the compatibility contract for the public CLI, config schema, exit codes, egress levels and `verify --audit` states. Add contract tests and update `CONTRIBUTING.md` and `CLAUDE.md` when that promise takes effect.
 
 ## Outside this bar
