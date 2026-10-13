@@ -4,6 +4,11 @@ All notable changes to NockLock will be documented in this file.
 
 ## [Unreleased]
 
+### Documentation
+
+- Align the public onboarding, contributor guide, CLI reference and roadmap with v0.9.0: select an agent preset before first launch, explain existing-config migration with `init --diff`, and document the Linux Unix-socket `PARTIAL` verdict and strict option. Correct proxy, audit coverage and empty secret-pass-list claims, link the docs index, and add a discoverable security-reporting policy.
+- Document the current remote-anchor identity collision: projects sharing a signing key share one store identity, so off-box anchoring supports only one audit chain per identity until a versioned chain namespace exists.
+
 ## [0.9.0] - 2026-10-13
 
 ### Breaking

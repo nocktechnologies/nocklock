@@ -11,18 +11,20 @@ userspace domain-allowlist proxy on Linux and macOS, and, on Linux only, the
 opt-in `nocklock wrap --net-fence=netns` kernel egress fence (a fresh network
 namespace with an nftables default-drop floor and a transparent HTTP(S) and
 DNS allowlist, set up by a root-owned helper over a constrained sudo grant).
-All fence events are logged to a tamper-evident SQLite audit log: a SHA-256
+Recorded fence decisions are stored in a tamper-evident SQLite audit log: a SHA-256
 hash chain (v1), Ed25519 signatures over the rows and the chain head (v1.1),
 and an external chain-head anchor that can be pushed off-box (v1.2). macOS
 has a kernel-enforced Seatbelt write-confinement profile plus sensitive-path
 read and write denies (reads outside `filesystem.root` are not confined) and
 records its filesystem-fence state in SQLite. Per-file deny events on macOS
-are best-effort, read from the unified log; Endpoint Security is the follow-up
-for complete events.
+are best-effort, read from the unified log. An Endpoint Security backend is
+being considered for richer event coverage; it is not implemented.
 
 The target is to keep all three fence categories active while adding an
 Endpoint Security macOS backend for read confinement and native per-file
-events. Optional NockCC cloud dashboard sync stays separate.
+events. Optional Command ops-log forwarding stays separate.
+
+The default proxy composes with Linux syscall confinement or the macOS Seatbelt network floor. Below Landlock ABI 9, Linux `CONFINED` still leaves other Unix sockets reachable and `doctor` reports `PARTIAL`; the ABI 9 rules await real-kernel validation. Allowed file operations and several kernel denials produce no per-attempt audit row. See [egress levels](README.md#what-network-fence-active-means) and [audit coverage](README.md#what-the-signed-log-proves).
 
 ## Package structure
 
@@ -47,7 +49,7 @@ internal/
     status.go           Shows fence state and event log summary
     version.go          Prints version string
   config/               Configuration
-    config.go           Config structs (6 sections) + Load() with strict TOML parsing
+    config.go           Config structs + Load() with strict TOML parsing
     defaults.go         DefaultConfig() + DefaultTOML() — security-first defaults
     config_test.go      Parse, default, error, round-trip tests
   version/              Build info
@@ -64,9 +66,9 @@ internal/
     network/            Network fence: local proxy with domain allowlist (default mode)
       netns/            Linux netns egress fence: privileged helper, default-drop base, tproxy and DNS sidecars
   logging/              Event logging and audit chain
-  forward/              Optional asynchronous Command ops-log delivery
     logger.go           SQLite event store — Log, LogBatch, Query, Stats, Prune
                         plus the hash chain, Ed25519 signing, chain head and anchor primitives
+  forward/              Optional asynchronous Command ops-log delivery
 pkg/
   receipt/              Public read-only VerifySession(dbPath, pub, sessionID) for one session's chain
 ```
@@ -131,9 +133,8 @@ pkg/
 
 ### Future
 
-A macOS Endpoint Security backend can add read confinement and complete native
-per-file deny events (the Seatbelt fence's unified-log events are best-effort). Events could also be batched and synced to the NockCC cloud
-dashboard, as an option.
+A proposed macOS Endpoint Security backend would need to demonstrate read confinement and native
+per-file event coverage (the Seatbelt fence's unified-log events are best-effort). Optional `[audit.forward]` delivery already sends recorded decisions to Command through a bounded, non-durable queue; the legacy `[cloud]` section sends nothing.
 
 ## Network egress fence (Linux, opt-in)
 
