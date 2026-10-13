@@ -31,10 +31,13 @@ func TestParseWrapFlagsAllowPrivateRanges(t *testing.T) {
 	}
 }
 
-func TestParseWrapFlagsRemovedUnixSocketOptInIsRejected(t *testing.T) {
+func TestParseWrapFlagsRejectsRemovedUnixSocketFlag(t *testing.T) {
 	_, _, err := parseWrapFlags([]string{"--allow-unix-sockets", "--", "mycommand"})
-	if err == nil || !strings.Contains(err.Error(), "unknown nocklock flag") {
-		t.Fatalf("removed Unix-socket opt-in error = %v", err)
+	if err == nil {
+		t.Fatal("removed --allow-unix-sockets flag was accepted")
+	}
+	if !strings.Contains(err.Error(), "unknown nocklock flag") {
+		t.Fatalf("removed Unix-socket flag error = %v, want unknown flag", err)
 	}
 }
 

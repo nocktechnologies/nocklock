@@ -230,6 +230,14 @@ func runDoctor(caps doctorCapabilities) doctorReport {
 }
 
 func unixSocketDoctorCheck(cfg *config.Config, caps doctorCapabilities) doctorCheck {
+	level := doctorEgressLevel(cfg, caps)
+	if err := strictUnixSocketIsolationModeError(caps.goos, level, cfg.Network.RequireUnixSocketIsolation); err != nil {
+		return doctorCriticalCheck(
+			"Fences", "unix-sockets", "will-refuse",
+			fmt.Sprintf("Wrap will refuse: %v.", err),
+			"run on Linux with CONFINED egress and Landlock ABI v9 or later, or set network.require_unix_socket_isolation = false to allow reachable Unix sockets",
+		)
+	}
 	if caps.goos != "linux" {
 		return doctorCheck{
 			Group:    "Fences",
@@ -239,34 +247,52 @@ func unixSocketDoctorCheck(cfg *config.Config, caps doctorCapabilities) doctorCh
 			Message:  "Landlock Unix-socket isolation is Linux-only.",
 		}
 	}
-	if cfg.Network.AllowAll {
+	if level != egressLevelConfined {
+		if cfg.Network.AllowAll {
+			return doctorCheck{
+				Group:    "Fences",
+				Name:     "unix-sockets",
+				Severity: doctorInfo,
+				Status:   "not-applicable",
+				Message:  "Network egress is disabled as a fence by network.allow_all = true.",
+			}
+		}
 		return doctorCheck{
 			Group:    "Fences",
 			Name:     "unix-sockets",
 			Severity: doctorInfo,
 			Status:   "not-applicable",
-			Message:  "Network egress is disabled as a fence by network.allow_all = true.",
+			Message:  fmt.Sprintf("Unix-socket isolation applies only to Linux CONFINED proxy egress; configured egress is %s.", level),
 		}
 	}
-	check := doctorCheck{
-		Group:    "Fences",
-		Name:     "unix-sockets",
-		Severity: doctorCritical,
-		Status:   "unavailable",
-		Message:  "Landlock ABI detection is unavailable; pathname and abstract Unix sockets remain reachable.",
-		Fix:      "use Landlock ABI v9 or later, or set network.require_unix_socket_isolation = false to accept the signed reachable-socket posture",
-	}
+	abi := 0
+	var detectErr error
 	if caps.landlockABI == nil {
-		return check
+		detectErr = errors.New("Landlock ABI probe is unavailable")
+	} else {
+		abi, detectErr = caps.landlockABI()
 	}
-	abi, err := caps.landlockABI()
-	status, _ := unixSocketBoundaryStatus(abi, err)
-	check.Message = unixSocketBoundaryMessage(abi, err)
+	status, _ := unixSocketBoundaryStatus(abi, detectErr)
 	if status == "unavailable" {
-		return check
+		if cfg.Network.RequireUnixSocketIsolation {
+			_, _, refusalErr := confinedUnixSocketPolicy(abi, detectErr, true)
+			return doctorCriticalCheck(
+				"Fences", "unix-sockets", "will-refuse",
+				fmt.Sprintf("Wrap will refuse: %v.", refusalErr),
+				"run on Linux with Landlock ABI v9 or later, or set network.require_unix_socket_isolation = false to allow reachable Unix sockets",
+			)
+		}
+		return doctorCheck{
+			Group:    "Fences",
+			Name:     "unix-sockets",
+			Severity: doctorWarning,
+			Status:   "unavailable",
+			Message:  unixSocketBoundaryMessage(abi, detectErr),
+			Fix:      "use a Linux kernel with Landlock ABI v9 or later to enforce isolation, or set network.require_unix_socket_isolation = true to make wrap refuse below ABI 9",
+		}
 	}
 	return doctorOKCheck("Fences", "unix-sockets", "enforceable",
-		check.Message+" Wrap allows only its exact proxy and filesystem event sockets.")
+		unixSocketBoundaryMessage(abi, detectErr)+" Wrap allows only its exact proxy and filesystem event sockets.")
 }
 
 // sandboxExecErr reports why sandbox-exec is unusable; a nil probe counts as
@@ -624,12 +650,20 @@ func doctorBoundaries(cfg *config.Config, goos string, level egressLevel, checks
 			net = postureUnavailable
 		}
 	}
-	return []doctorBoundary{
+	boundaries := []doctorBoundary{
 		{"filesystem", fs},
 		{"syscall", posture("syscall")},
 		{"network", net},
 		{"secrets", posture("secrets")},
 	}
+	if goos == "linux" {
+		unixSockets := posture("unix-sockets")
+		if byName["unix-sockets"].Status == "unavailable" {
+			unixSockets = postureUnavailable
+		}
+		boundaries = append(boundaries, doctorBoundary{"unix-sockets", unixSockets})
+	}
+	return boundaries
 }
 
 func doctorActivityCheck(cfg *config.Config, configPath string, now time.Time) doctorActivity {
@@ -714,6 +748,11 @@ func renderDoctorHuman(w io.Writer, report doctorReport) {
 		for _, b := range report.Boundaries {
 			if b.Posture != postureEnforced {
 				fmt.Fprintf(w, "- %s: %s\n", b.Name, b.Posture)
+				for _, check := range report.Checks {
+					if check.Group == "Fences" && check.Name == b.Name && check.Fix != "" {
+						fmt.Fprintf(w, "  Option: %s.\n", strings.TrimSuffix(check.Fix, "."))
+					}
+				}
 			}
 		}
 	}

@@ -79,7 +79,7 @@ On Linux you can instead pass `--net-fence=netns`. The child then runs in its ow
 | Level | Boundary |
 |---|---|
 | `KERNEL` | Linux netns with a kernel default-drop floor and the configured HTTP(S)/DNS allowlist. |
-| `CONFINED` | Linux proxy with syscall enforcement and the filesystem interposer bridge. The kernel rejects direct AF_INET/AF_INET6 socket creation; the interposer remaps proxy TCP streams to AF_UNIX. AF_UNIX destinations are currently unrestricted: the child can connect to any pathname or abstract Unix socket its user can reach, which can bypass the network allowlist through local services. |
+| `CONFINED` | Linux proxy with syscall enforcement and the filesystem interposer bridge. The kernel rejects direct AF_INET/AF_INET6 socket creation; the interposer remaps proxy TCP streams to AF_UNIX. Below Landlock ABI 9, the default non-strict `wrap` warns once and records that pathname and abstract Unix sockets remain reachable; `network.require_unix_socket_isolation = true` makes it refuse. At ABI 9 or later, Landlock permits only the exact proxy and filesystem event sockets. |
 | `SEATBELT` | macOS proxy with a Seatbelt kernel floor (needs `filesystem.root`): the profile denies every outbound network connect except to the proxy's loopback port, and allows no Unix-socket connect, so a client that ignores `HTTP_PROXY` is denied by the kernel. It is not `CONFINED`, which is defined by the Linux syscall and interposer bridge, and look-back rules (Linux CONFINED only) are refused at `SEATBELT`. |
 | `ADVISORY` | Userspace proxy only. A client that ignores `HTTP_PROXY` can reach any host. The wrap warning names this limitation. |
 | `OFF` | `network.allow_all = true`; any host is reachable. |

@@ -124,6 +124,15 @@ func TestWrapConfinedUnixSocketReachability(t *testing.T) {
 	if !syscallfence.Supported() {
 		t.Skip("seccomp-BPF is unavailable for the CONFINED egress probe")
 	}
+	moduleCache, err := exec.Command("go", "env", "GOMODCACHE").Output()
+	if err != nil {
+		t.Fatalf("locate Go module cache before isolating HOME: %v", err)
+	}
+	t.Setenv("GOMODCACHE", strings.TrimSpace(string(moduleCache)))
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("XDG_CONFIG_HOME", filepath.Join(home, ".config"))
+	t.Setenv("XDG_STATE_HOME", trustedStateRoot(t))
 	if _, err := exec.LookPath("gcc"); err != nil {
 		t.Skipf("gcc unavailable for the filesystem interposer: %v", err)
 	}
@@ -148,7 +157,8 @@ func TestWrapConfinedUnixSocketReachability(t *testing.T) {
 		t.Fatalf("read fixture config: %v", err)
 	}
 
-	runWrap := func(linuxEnforcement string, requireUnixSocketIsolation bool) ([]byte, error) {
+	runWrap := func(t *testing.T, linuxEnforcement string, requireUnixSocketIsolation bool) ([]byte, error) {
+		t.Helper()
 		configText := strings.Replace(string(baseConfig), "linux_enforcement = \"preferred\"", fmt.Sprintf("linux_enforcement = %q", linuxEnforcement), 1)
 		configText = strings.Replace(configText, "require_unix_socket_isolation = false", fmt.Sprintf("require_unix_socket_isolation = %t", requireUnixSocketIsolation), 1)
 		if !strings.Contains(configText, "require_unix_socket_isolation = ") {
@@ -173,7 +183,7 @@ func TestWrapConfinedUnixSocketReachability(t *testing.T) {
 		if abi >= landlock.MinUnixSocketABI {
 			t.Skipf("not run: Landlock ABI %d >= 9", abi)
 		}
-		output, err := runWrap("preferred", false)
+		output, err := runWrap(t, "preferred", false)
 		if err != nil {
 			t.Fatalf("default CONFINED wrap failed on Landlock ABI v%d: %v\n%s", abi, err, output)
 		}
@@ -184,13 +194,14 @@ func TestWrapConfinedUnixSocketReachability(t *testing.T) {
 			t.Fatalf("default reachable-socket posture printed %d warning lines, want exactly one:\n%s", got, output)
 		}
 		assertSocketProbeOutput(t, output, "path=CONNECTED", "abstract=CONNECTED", "event=CONNECTED", "proxy=CONNECTED", "lookback=403", "inet=DENIED")
+		assertReachableUnixSocketAudit(t, bin, projectDir, abi)
 	})
 
 	t.Run("strict config refuses below ABI 9", func(t *testing.T) {
 		if abi >= landlock.MinUnixSocketABI {
 			t.Skipf("not run: Landlock ABI %d >= 9", abi)
 		}
-		output, err := runWrap("preferred", true)
+		output, err := runWrap(t, "preferred", true)
 		if err == nil {
 			t.Fatalf("strict CONFINED wrap ran on Landlock ABI v%d:\n%s", abi, output)
 		}
@@ -204,7 +215,7 @@ func TestWrapConfinedUnixSocketReachability(t *testing.T) {
 		if abi < landlock.MinUnixSocketABI {
 			t.Skipf("not run: Landlock ABI %d < 9", abi)
 		}
-		output, err := runWrap("preferred", false)
+		output, err := runWrap(t, "preferred", false)
 		if err != nil {
 			t.Fatalf("CONFINED wrap failed on Landlock ABI v%d: %v\n%s", abi, err, output)
 		}
@@ -215,7 +226,7 @@ func TestWrapConfinedUnixSocketReachability(t *testing.T) {
 		if abi < landlock.MinUnixSocketABI {
 			t.Skipf("not run: Landlock ABI %d < 9", abi)
 		}
-		output, err := runWrap("off", false)
+		output, err := runWrap(t, "off", false)
 		if err != nil {
 			t.Fatalf("socket-only CONFINED wrap failed on Landlock ABI v%d: %v\n%s", abi, err, output)
 		}
@@ -239,6 +250,53 @@ func TestWrapConfinedUnixSocketReachability(t *testing.T) {
 		t.Fatalf("Landlock allowed an external socket payload: %v", accepted)
 	}
 	assertUnixSocketProbeAuditEvents(t, projectDir, abi)
+}
+
+func assertReachableUnixSocketAudit(t *testing.T, bin, projectDir string, abi int) {
+	t.Helper()
+	configPath := filepath.Join(projectDir, ".nock", "config.toml")
+	cfg, err := config.Load(configPath)
+	if err != nil {
+		t.Fatalf("load fixture config for reachable-socket audit check: %v", err)
+	}
+	dbPath, root, err := config.ResolveDBPath(cfg, configPath)
+	if err != nil {
+		t.Fatalf("resolve fixture audit log: %v", err)
+	}
+	logger, err := logging.NewLogger(dbPath, root)
+	if err != nil {
+		t.Fatalf("open fixture audit log: %v", err)
+	}
+	eventType := logging.EventSessionStart
+	events, err := logger.Query(logging.QueryOptions{EventType: &eventType, Limit: 1000})
+	if err != nil {
+		logger.Close()
+		t.Fatalf("query session-start audit rows: %v", err)
+	}
+	if err := logger.Close(); err != nil {
+		t.Fatalf("close fixture audit log: %v", err)
+	}
+	reason := fmt.Sprintf("unix_sockets=reachable reason=landlock_abi_%d_below_9", abi)
+	found := false
+	for _, event := range events {
+		if event.EgressLevel == string(egressLevelConfined) && strings.Contains(event.Detail, reason) {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Fatalf("signed CONFINED session-start row missing %q; rows: %+v", reason, events)
+	}
+	verify := exec.Command(bin, "verify", "--audit")
+	verify.Dir = projectDir
+	verify.Env = os.Environ()
+	output, err := verify.CombinedOutput()
+	if err != nil {
+		t.Fatalf("nocklock verify --audit failed after reachable-socket wrap: %v\n%s", err, output)
+	}
+	if !strings.Contains(string(output), "AUDIT: AUTHENTIC") {
+		t.Fatalf("nocklock verify --audit did not authenticate the reachable-socket row:\n%s", output)
+	}
 }
 
 type throwawaySocketListeners struct {

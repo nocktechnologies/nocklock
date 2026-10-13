@@ -25,6 +25,10 @@ func doctorExitFromErr(err error) int {
 }
 
 func runDoctorJSON(t *testing.T, toml, goos string) (doctorReport, int) {
+	return runDoctorJSONWithABI(t, toml, goos, 9)
+}
+
+func runDoctorJSONWithABI(t *testing.T, toml, goos string, abi int) (doctorReport, int) {
 	t.Helper()
 	dir := t.TempDir()
 	writeTestConfig(t, dir, toml)
@@ -32,7 +36,7 @@ func runDoctorJSON(t *testing.T, toml, goos string) (doctorReport, int) {
 	defer stubDoctorCapabilities(doctorCapabilities{
 		goos:           goos,
 		fsBackend:      func() error { return nil },
-		landlockABI:    func() (int, error) { return 3, nil },
+		landlockABI:    func() (int, error) { return abi, nil },
 		syscallBackend: func() bool { return true },
 		networkBackend: func() error { return nil },
 		sandboxExec:    func() error { return nil },
@@ -125,4 +129,43 @@ func TestDoctorUnreachableEgressIsUnavailable(t *testing.T) {
 	if got.Verdict == doctorVerdictProtected || code == doctorExitProtected {
 		t.Fatalf("verdict=%q exit=%d, must not be PROTECTED", got.Verdict, code)
 	}
+}
+
+func TestDoctorUnixSocketBoundaryUnavailableIsPartial(t *testing.T) {
+	got, code := runDoctorJSONWithABI(t, config.DefaultTOML(), "linux", 8)
+	if got.Verdict != doctorVerdictPartial || code != doctorExitPartial {
+		t.Fatalf("verdict=%q exit=%d, want PARTIAL/%d", got.Verdict, code, doctorExitPartial)
+	}
+	if p := postures(got); p["unix-sockets"] != postureUnavailable {
+		t.Fatalf("Unix-socket posture = %q, want unavailable", p["unix-sockets"])
+	}
+	for _, check := range got.Checks {
+		if check.Group == "Fences" && check.Name == "unix-sockets" {
+			if check.Severity != doctorWarning || check.Status != "unavailable" || !strings.Contains(check.Message, "reason=landlock_abi_8_below_9") {
+				t.Fatalf("Unix-socket check = %+v, want warning/unavailable with ABI reason", check)
+			}
+			if !strings.Contains(check.Fix, "Landlock ABI v9") || !strings.Contains(check.Fix, "require_unix_socket_isolation = true") {
+				t.Fatalf("Unix-socket options = %q, want ABI 9 and strict refusal", check.Fix)
+			}
+			return
+		}
+	}
+	t.Fatal("doctor JSON omitted the Unix-socket check")
+}
+
+func TestDoctorStrictUnixSocketSettingReportsWrapRefusal(t *testing.T) {
+	toml := strings.Replace(config.DefaultTOML(), "require_unix_socket_isolation = false", "require_unix_socket_isolation = true", 1)
+	got, code := runDoctorJSONWithABI(t, toml, "linux", 8)
+	if got.Verdict != doctorVerdictGapsFound || code != doctorExitGapsFound {
+		t.Fatalf("verdict=%q exit=%d, want GAPS FOUND/%d", got.Verdict, code, doctorExitGapsFound)
+	}
+	for _, check := range got.Checks {
+		if check.Group == "Fences" && check.Name == "unix-sockets" {
+			if check.Severity != doctorCritical || check.Status != "will-refuse" || !strings.Contains(check.Message, "Wrap will refuse") {
+				t.Fatalf("strict Unix-socket check = %+v, want critical/will-refuse", check)
+			}
+			return
+		}
+	}
+	t.Fatal("doctor JSON omitted the strict Unix-socket check")
 }

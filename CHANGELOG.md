@@ -6,7 +6,9 @@ All notable changes to NockLock will be documented in this file.
 
 ### Security
 
-- Clarify that Linux `CONFINED` currently does not restrict AF_UNIX destinations. A non-root probe confirmed that a wrapped child can connect to both a throwaway pathname socket and a throwaway abstract socket while a direct AF_INET datagram socket syscall is denied. The design and probe are in `docs/design/unix-socket-reachability.md` and `docs/probes/n11650/`.
+- Linux `CONFINED` egress below Landlock ABI 9: default non-strict `wrap` runs, warns once, and records a signed session-start row with `unix_sockets=reachable reason=landlock_abi_<n>_below_9`. `doctor` reports the Unix-socket boundary as unavailable and returns `PARTIAL` (exit 3); `status` includes the ABI reason. ABI 9 enforcement has not run on a real kernel yet.
+- `network.require_unix_socket_isolation = true` makes `wrap` refuse when the Unix-socket boundary cannot be enforced. The removed `--allow-unix-sockets` flag is not supported.
+- Record the pre-ABI-9 Linux `CONFINED` limitation: a non-root probe confirmed that a wrapped child can connect to both a throwaway pathname socket and a throwaway abstract socket while a direct AF_INET datagram socket syscall is denied. The design and probe are in `docs/design/unix-socket-reachability.md` and `docs/probes/n11650/`.
 
 ## [0.8.0] - 2026-10-13
 

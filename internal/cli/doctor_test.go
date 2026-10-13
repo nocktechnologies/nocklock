@@ -50,45 +50,82 @@ func TestUnixSocketDoctorCheckReportsLandlockPosture(t *testing.T) {
 		goos       string
 		abi        int
 		allowAll   bool
+		require    bool
+		noFSRoot   bool
+		syscall    string
 		wantSev    doctorSeverity
 		wantStatus string
+		wantFix    string
 	}{
 		{name: "ABI 9 enforces both socket types", goos: "linux", abi: 9, wantSev: doctorOK, wantStatus: "enforceable"},
-		{name: "older ABI is unavailable", goos: "linux", abi: 8, wantSev: doctorCritical, wantStatus: "unavailable"},
-		{name: "Landlock unavailable is unavailable", goos: "linux", abi: 0, wantSev: doctorCritical, wantStatus: "unavailable"},
+		{name: "older ABI is partial", goos: "linux", abi: 8, wantSev: doctorWarning, wantStatus: "unavailable", wantFix: "require_unix_socket_isolation = true"},
+		{name: "Landlock unavailable is partial", goos: "linux", abi: 0, wantSev: doctorWarning, wantStatus: "unavailable", wantFix: "require_unix_socket_isolation = true"},
+		{name: "strict config reports refusal", goos: "linux", abi: 8, require: true, wantSev: doctorCritical, wantStatus: "will-refuse", wantFix: "require_unix_socket_isolation = false"},
 		{name: "network allow-all makes boundary not applicable", goos: "linux", abi: 8, allowAll: true, wantSev: doctorInfo, wantStatus: "not-applicable"},
+		{name: "syscall off cannot reach CONFINED", goos: "linux", abi: 9, syscall: "off", wantSev: doctorInfo, wantStatus: "not-applicable"},
+		{name: "strict setting refuses non-CONFINED egress", goos: "linux", abi: 9, syscall: "off", require: true, wantSev: doctorCritical, wantStatus: "will-refuse", wantFix: "CONFINED"},
+		{name: "missing filesystem bridge cannot reach CONFINED", goos: "linux", abi: 9, noFSRoot: true, wantSev: doctorInfo, wantStatus: "not-applicable"},
 		{name: "macOS is not applicable", goos: "darwin", wantSev: doctorInfo, wantStatus: "not-applicable"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			cfg := config.DefaultConfig()
 			cfg.Network.AllowAll = tc.allowAll
+			cfg.Network.RequireUnixSocketIsolation = tc.require
+			if tc.noFSRoot {
+				cfg.Filesystem.Root = ""
+			}
+			if tc.syscall != "" {
+				cfg.Syscall.Enforcement = tc.syscall
+			}
 			check := unixSocketDoctorCheck(&cfg, doctorCapabilities{
-				goos:        tc.goos,
-				landlockABI: func() (int, error) { return tc.abi, nil },
+				goos:           tc.goos,
+				syscallBackend: func() bool { return true },
+				landlockABI:    func() (int, error) { return tc.abi, nil },
 			})
 			if check.Severity != tc.wantSev || check.Status != tc.wantStatus {
 				t.Fatalf("unix-socket doctor check = %+v, want severity=%q status=%q", check, tc.wantSev, tc.wantStatus)
 			}
-			if tc.wantSev == doctorCritical && (!strings.Contains(check.Message, "reachable") || !strings.Contains(check.Fix, "require_unix_socket_isolation")) {
-				t.Fatalf("unavailable posture must explain reachability and strict opt-in: %+v", check)
+			if tc.wantFix != "" && !strings.Contains(check.Fix, tc.wantFix) {
+				t.Fatalf("unix-socket doctor fix = %q, want it to contain %q", check.Fix, tc.wantFix)
+			}
+			if tc.wantStatus == "unavailable" && (!strings.Contains(check.Message, "reachable") || !strings.Contains(check.Message, "reason=")) {
+				t.Fatalf("unavailable posture must explain reachable sockets and the reason: %+v", check)
+			}
+			if tc.wantStatus == "will-refuse" && !strings.Contains(check.Message, "Wrap will refuse") {
+				t.Fatalf("strict posture must say wrap will refuse: %+v", check)
 			}
 		})
 	}
 }
 
-func TestDoctorUnavailableUnixSocketBoundaryIsAGap(t *testing.T) {
+func TestDoctorUnavailableUnixSocketBoundaryIsPartial(t *testing.T) {
 	cfg := config.DefaultConfig()
 	check := unixSocketDoctorCheck(&cfg, doctorCapabilities{
-		goos:        "linux",
-		landlockABI: func() (int, error) { return 8, nil },
+		goos:           "linux",
+		syscallBackend: func() bool { return true },
+		landlockABI:    func() (int, error) { return 8, nil },
 	})
-	report := finishDoctorReport([]doctorCheck{check}, doctorActivity{})
-	if report.Verdict != doctorVerdictGapsFound {
-		t.Fatalf("doctor verdict = %q, want %q for unavailable Unix-socket isolation", report.Verdict, doctorVerdictGapsFound)
+	checks := []doctorCheck{
+		doctorOKCheck("Fences", "filesystem", "enforceable", ""),
+		check,
+		doctorOKCheck("Fences", "syscall", "enforceable", ""),
+		doctorOKCheck("Fences", "network", "enforceable", ""),
+		doctorOKCheck("Fences", "secrets", "enforceable", ""),
 	}
-	if check.Status != "unavailable" || !strings.Contains(check.Message, "reason=landlock_abi_8_below_9") {
+	report := finishDoctorReport(checks, doctorBoundaries(&cfg, "linux", egressLevelConfined, checks), doctorActivity{})
+	if report.Verdict != doctorVerdictPartial {
+		t.Fatalf("doctor verdict = %q, want %q for unavailable Unix-socket isolation", report.Verdict, doctorVerdictPartial)
+	}
+	if check.Severity != doctorWarning || check.Status != "unavailable" || !strings.Contains(check.Message, "reason=landlock_abi_8_below_9") {
 		t.Fatalf("doctor boundary = %+v, want ABI 8 unavailable with reason", check)
+	}
+	var out bytes.Buffer
+	renderDoctorHuman(&out, report)
+	if !strings.Contains(out.String(), "VERDICT: PARTIAL") ||
+		!strings.Contains(out.String(), "Landlock ABI v9 or later") ||
+		!strings.Contains(out.String(), "network.require_unix_socket_isolation = true") {
+		t.Fatalf("doctor must show PARTIAL and the two real options:\n%s", out.String())
 	}
 }
 
