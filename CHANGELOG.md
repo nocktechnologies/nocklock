@@ -19,6 +19,7 @@ All notable changes to NockLock will be documented in this file.
 ### Fixed
 
 - Serialize concurrent `ProxyServer.Stop` calls so shutdown and its proxy-stop audit event run once. The unsynchronized production method could race when two callers stopped the same proxy; the Linux netns proxy-death test exposed it under `-race`. The proxy shutdown code was present in v0.1.0 through v0.9.1. No egress bypass was observed.
+- `doctor` now checks the resolved managed signing-key directory against the effective Seatbelt deny set or Landlock grants, reports its path and posture in `doctor --json`, and cannot return `PROTECTED` when the key boundary is readable or unenforceable. `doctor` and `wrap` build the key-directory deny from one shared helper, so doctor adds no deny of its own, and a deny list that omits the resolved key directory is reported as a gap (N11717).
 - `verify` works with a fresh macOS config: it no longer requires the Linux interposer, probes Seatbelt's outside-root write boundary, and explicitly skips the Linux-only syscall probe. Filesystem/network probe inputs now travel as private command arguments so the secret filter cannot strip them; the synthetic secret control is allowed without overriding block rules.
 
 ## [0.9.1] - 2026-10-13

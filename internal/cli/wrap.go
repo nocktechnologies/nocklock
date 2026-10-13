@@ -375,11 +375,11 @@ var wrapCmd = &cobra.Command{
 			// just the file, so the child cannot replace or unlink the seed.
 			// Landlock rule generation refuses any overlapping allow grant.
 			if logger.SigningPublicKey() != nil {
-				keyDir, err := managedSigningKeyDirectory()
+				deny, _, err := withManagedSigningKeyDeny(cfg.Filesystem.Deny)
 				if err != nil {
 					return fmt.Errorf("cannot protect the managed signing key; refusing to start: %w", err)
 				}
-				cfg.Filesystem.Deny = append(cfg.Filesystem.Deny, keyDir)
+				cfg.Filesystem.Deny = deny
 			}
 
 			var err error
@@ -1393,19 +1393,27 @@ func egressChildDenyPaths(dbPath, decisionLogDir string) []string {
 	return paths
 }
 
-// managedSigningKeyDirectory resolves the directory of the key already opened
-// by the parent logger. Use its real path for both Seatbelt and Landlock, just
-// as the signer does, including when XDG_CONFIG_HOME is a symlink.
-func managedSigningKeyDirectory() (string, error) {
+// withManagedSigningKeyDeny is the one place the managed signing key directory
+// joins a filesystem deny list. Wrap builds the child's deny set with it and
+// doctor judges that same result, so doctor cannot report the key protected
+// when wrap's policy leaves it out. The directory is symlink-resolved the way
+// the signer resolves it (nearest existing ancestor, so doctor can run before
+// the first wrap creates the key), including when XDG_CONFIG_HOME is a symlink
+// or no filesystem fence is configured. deny is not modified.
+func withManagedSigningKeyDeny(deny []string) ([]string, string, error) {
 	keyPath, err := logging.DefaultSigningKeyPath()
 	if err != nil {
-		return "", err
+		return nil, "", err
 	}
-	dir, err := filepath.EvalSymlinks(filepath.Dir(keyPath))
+	dir, err := resolveAuditDirectory(filepath.Dir(keyPath))
 	if err != nil {
-		return "", fmt.Errorf("resolve signing key directory: %w", err)
+		return nil, "", fmt.Errorf("resolve signing key directory: %w", err)
 	}
-	return filepath.Abs(dir)
+	keyDir, err := filepath.Abs(dir)
+	if err != nil {
+		return nil, "", err
+	}
+	return append(append([]string(nil), deny...), keyDir), keyDir, nil
 }
 
 // egressDecisionDir returns the per-session directory that holds the egress

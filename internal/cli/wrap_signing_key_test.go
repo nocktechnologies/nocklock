@@ -27,7 +27,7 @@ func TestManagedSigningKeyDirectoryLandlockDeny(t *testing.T) {
 	if _, err := logging.EnsurePublicKeyFile(key); err != nil {
 		t.Fatal(err)
 	}
-	denied, err := managedSigningKeyDirectory()
+	_, denied, err := withManagedSigningKeyDeny(nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -65,9 +65,23 @@ func TestManagedSigningKeyDirectoryLandlockDeny(t *testing.T) {
 	}
 }
 
-func TestManagedSigningKeyDirectoryFailsOnUnresolvablePath(t *testing.T) {
-	t.Setenv("XDG_CONFIG_HOME", filepath.Join(t.TempDir(), "missing"))
-	if _, err := managedSigningKeyDirectory(); err == nil {
-		t.Fatal("missing signer directory must fail closed")
-	}
+func TestManagedSigningKeyDirectoryResolution(t *testing.T) {
+	base := resolvedTempDir(t)
+	t.Run("not yet created resolves under the existing ancestor", func(t *testing.T) {
+		t.Setenv("XDG_CONFIG_HOME", filepath.Join(base, "missing"))
+		_, dir, err := withManagedSigningKeyDeny(nil)
+		if want := filepath.Join(base, "missing", "nocklock"); err != nil || dir != want {
+			t.Fatalf("dir = %q, err = %v; want %q", dir, err, want)
+		}
+	})
+	t.Run("broken symlink fails closed", func(t *testing.T) {
+		link := filepath.Join(base, "dangling")
+		if err := os.Symlink(filepath.Join(base, "nowhere"), link); err != nil {
+			t.Fatal(err)
+		}
+		t.Setenv("XDG_CONFIG_HOME", link)
+		if _, _, err := withManagedSigningKeyDeny(nil); err == nil {
+			t.Fatal("unresolvable signer directory must fail closed")
+		}
+	})
 }
