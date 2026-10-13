@@ -4,13 +4,29 @@ All notable changes to NockLock will be documented in this file.
 
 ## [Unreleased]
 
+### Changed
+
+- Docs: propose a signed Linux release tarball, explicit egress-helper installation,
+  and clean-machine Linux/macOS acceptance in `docs/design/linux-packaging.md`
+  (N11643), baseline v0.9.1 (`89c1bb6e`). Design only; no installer or release assets added.
+
 ### Documentation
 
+- Align the public onboarding, contributor guide, CLI reference and roadmap with v0.9.0: select an agent preset before first launch, explain existing-config migration with `init --diff`, and document the Linux Unix-socket `PARTIAL` verdict and strict option. Correct proxy, audit coverage and empty secret-pass-list claims, link the docs index, and add a discoverable security-reporting policy.
+- Document the current remote-anchor identity collision: projects sharing a signing key share one store identity, so off-box anchoring supports only one audit chain per identity until a versioned chain namespace exists.
 - Add "Replacing the signing key" to `docs/how-it-works/audit-log.md`: what `wrap` and `verify` do after the managed key moves aside, how to archive the old log and public key so old rows still verify, and the limits (N11718).
+
+### Fixed
+
+- `verify` works with a fresh macOS config: it no longer requires the Linux interposer, probes Seatbelt's outside-root write boundary, and explicitly skips the Linux-only syscall probe. Filesystem/network probe inputs now travel as private command arguments so the secret filter cannot strip them; the synthetic secret control is allowed without overriding block rules.
+
+## [0.9.1] - 2026-10-13
 
 ### Security
 
 - Protect the managed Ed25519 signing-key directory from fenced children even when `XDG_CONFIG_HOME` relocates it outside `~/.config`. Linux Landlock refuses an overlapping filesystem grant; macOS denies the canonical key directory and prevents renaming sensitive-path ancestors to move protected files outside their deny rules. Parent signing and normal project reads/writes remain available.
+- Who is affected: anyone who sets `XDG_CONFIG_HOME` to a directory outside `~/.config`. On macOS v0.9.0, a fenced child could read the 32-byte signing seed while `doctor` reported `PROTECTED`. Every release since v0.5.0 (#90) carries the same key-path logic; only v0.9.0 was reproduced directly. On Linux, a relocated key was readable only when it sat under a granted tree, such as the project or `/tmp`. If a wrapped agent could have read the key, rows signed with that key no longer prove the agent did not write them. NockLock has no supported way to replace the signing key yet; a documented procedure is the next fix.
+- Linux `--net-fence=netns`: the `__netns-child` process now keeps the capability drop, the supplementary-group drop, the NO_NEW_PRIVS latch and the exec of the agent on one OS thread. Before, Go could run those steps on different threads. CI saw the fail-closed form: `wrap` refused to start with `capability 12 remains`. The fail-open form, where the agent starts on a thread that still has CAP_NET_ADMIN in its bounding set and no NO_NEW_PRIVS, was not observed. The bounding-set gap matters only when nothing later in the chain sets NO_NEW_PRIVS: Landlock is off (`filesystem.root = ""` or `filesystem.linux_enforcement = "off"`) and `syscall.enforcement` is `"off"`, or `"preferred"` on a kernel without seccomp. With the default `__landlock-exec` shim, a setuid binary still cannot regain the capability. In any configuration, that thread could also have kept the root helper's supplementary groups. Every release with the netns egress helper is affected, v0.5.0 through v0.9.0.
 
 ## [0.9.0] - 2026-10-13
 
