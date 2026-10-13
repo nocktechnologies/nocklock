@@ -8,8 +8,10 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
+	"syscall"
 	"testing"
 	"time"
 
@@ -19,6 +21,30 @@ import (
 
 func makeProxy(allowList []string) *ProxyServer {
 	return NewProxyServer(config.NetworkConfig{Allow: allowList}, nil, "test-session")
+}
+
+// boundUnlisteningTCP reserves a port that refuses connections without
+// releasing it while a health probe may still be running.
+func boundUnlisteningTCP(t *testing.T) string {
+	t.Helper()
+	syscall.ForkLock.RLock()
+	fd, err := syscall.Socket(syscall.AF_INET, syscall.SOCK_STREAM, 0)
+	if err == nil {
+		syscall.CloseOnExec(fd)
+	}
+	syscall.ForkLock.RUnlock()
+	if err != nil {
+		t.Fatalf("create dead proxy socket: %v", err)
+	}
+	t.Cleanup(func() { _ = syscall.Close(fd) })
+	if err := syscall.Bind(fd, &syscall.SockaddrInet4{Addr: [4]byte{127, 0, 0, 1}}); err != nil {
+		t.Fatalf("bind dead proxy socket: %v", err)
+	}
+	sa, err := syscall.Getsockname(fd)
+	if err != nil {
+		t.Fatalf("get dead proxy socket address: %v", err)
+	}
+	return net.JoinHostPort("127.0.0.1", strconv.Itoa(sa.(*syscall.SockaddrInet4).Port))
 }
 
 // TestProxyStartsAndBindsToLocalhost verifies the proxy binds to 127.0.0.1.
@@ -429,15 +455,26 @@ func TestProxyStartUnixRejectsLongSocketPath(t *testing.T) {
 }
 
 func TestWaitForProxyReadyFailsClosedPort(t *testing.T) {
+	addr := boundUnlisteningTCP(t)
+	if err := WaitForProxyReady(t.Context(), addr, 75*time.Millisecond); err == nil {
+		t.Fatal("WaitForProxyReady() should fail for a refused connection")
+	}
+}
+
+func TestWaitForProxyReadyFailsUnresponsiveProxy(t *testing.T) {
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
 		t.Fatalf("listen: %v", err)
 	}
-	addr := ln.Addr().String()
-	ln.Close()
+	defer ln.Close() // Keep the unanswered endpoint reserved through the probe.
 
-	if err := WaitForProxyReady(t.Context(), addr, 75*time.Millisecond); err == nil {
-		t.Fatal("WaitForProxyReady() should fail for a closed port")
+	const timeout = 150 * time.Millisecond
+	start := time.Now()
+	if err := WaitForProxyReady(t.Context(), ln.Addr().String(), timeout); err == nil {
+		t.Fatal("WaitForProxyReady() should time out when the proxy never answers")
+	}
+	if elapsed := time.Since(start); elapsed < timeout/2 || elapsed > time.Second {
+		t.Fatalf("WaitForProxyReady() elapsed = %s, want a timeout near %s", elapsed, timeout)
 	}
 }
 
