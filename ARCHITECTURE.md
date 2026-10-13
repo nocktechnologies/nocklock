@@ -20,9 +20,10 @@ records its filesystem-fence state in SQLite. Per-file deny events on macOS
 are best-effort, read from the unified log. An Endpoint Security backend is
 being considered for richer event coverage; it is not implemented.
 
-The target is to keep all three fence categories active while adding an
-Endpoint Security macOS backend for read confinement and native per-file
-events. Optional Command ops-log forwarding stays separate.
+The current target is to keep all three fence categories active. A macOS
+Endpoint Security backend for read confinement and native per-file events is
+a proposal only (see Future below). Optional Command ops-log forwarding stays
+separate.
 
 The default proxy composes with Linux syscall confinement or the macOS Seatbelt network floor. Below Landlock ABI 9, Linux `CONFINED` still leaves other Unix sockets reachable and `doctor` reports `PARTIAL`; the ABI 9 rules await real-kernel validation. Allowed file operations and several kernel denials produce no per-attempt audit row. See [egress levels](README.md#what-network-fence-active-means) and [audit coverage](README.md#what-the-signed-log-proves).
 
