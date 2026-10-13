@@ -4,6 +4,12 @@ All notable changes to NockLock will be documented in this file.
 
 ## [Unreleased]
 
+### Changed
+
+- Docs: propose a signed Linux release tarball, explicit egress-helper installation,
+  and clean-machine Linux/macOS acceptance in `docs/design/linux-packaging.md`
+  (N11643), baseline v0.9.1 (`89c1bb6e`). Design only; no installer or release assets added.
+
 ### Documentation
 
 - Align the public onboarding, contributor guide, CLI reference and roadmap with v0.9.0: select an agent preset before first launch, explain existing-config migration with `init --diff`, and document the Linux Unix-socket `PARTIAL` verdict and strict option. Correct proxy, audit coverage and empty secret-pass-list claims, link the docs index, and add a discoverable security-reporting policy.
