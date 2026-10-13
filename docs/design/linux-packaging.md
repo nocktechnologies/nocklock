@@ -1,12 +1,12 @@
 # Installable Linux release and OS acceptance contract
 
-Date: 2026-10-12
+Date: 2026-10-13
 
 Status: **Proposed; design only, no installer or release assets added**
 
 Nock: N11643
 
-Baseline: `f2b0d04` (v0.9.0); refreshed after the v0.8/v0.9 doctor and Unix-socket changes.
+Baseline: `89c1bb6e` (v0.9.1); refreshed after the v0.8/v0.9 doctor and Unix-socket changes and the v0.9.1 signing-key fence and netns child thread lock.
 
 ## Decision
 
@@ -26,8 +26,9 @@ Coordinate its release against the separate onboarding and doctor work.
 
 ## Why this is needed
 
-The v0.9.0 release exists and the Homebrew formula points at it, but the release
-has no attached binary assets at this baseline. `make build-all` builds the Linux
+The v0.9.1 release exists (the Homebrew formula may still point at v0.9.0; confirm
+before implementing), but the release has no attached binary assets at this
+baseline. `make build-all` builds the Linux
 CLI and C interposer; `make install` installs only the CLI. The egress helper has
 its own installation step. A successful CLI download alone therefore does not
 constitute a working Linux installation.
@@ -221,7 +222,7 @@ cd "$fixture/project"
 "$NOCKLOCK_BIN" init
 doctor_exit=0
 "$NOCKLOCK_BIN" doctor --json > "$fixture/doctor.json" || doctor_exit=$?
-"$TEST_PYTHON" - "$fixture/doctor.json" "$doctor_exit" <<'PY'
+"$TEST_PYTHON" -I - "$fixture/doctor.json" "$doctor_exit" <<'PY'
 import json, re, sys
 report = json.load(open(sys.argv[1]))
 code = int(sys.argv[2])
@@ -260,7 +261,7 @@ else:
     raise SystemExit("FAIL: outside write succeeded")
 print("ALLOW_AND_DENY_PASS")
 PY
-"$TEST_PYTHON" - "$fixture/outside/control.txt" <<'PY'
+"$TEST_PYTHON" -I - "$fixture/outside/control.txt" <<'PY'
 import pathlib, sys
 pathlib.Path(sys.argv[1]).write_text("host positive control\n")
 PY
@@ -278,7 +279,7 @@ test -n "$pub"
   > "$fixture/audit.txt"
 grep -q '^AUDIT: AUTHENTIC' "$fixture/audit.txt"
 "$NOCKLOCK_BIN" log --json > "$fixture/events.json"
-"$TEST_PYTHON" - "$fixture/events.json" "$EXPECTED_EGRESS" <<'PY'
+"$TEST_PYTHON" -I - "$fixture/events.json" "$EXPECTED_EGRESS" <<'PY'
 import json, sys
 events = json.load(open(sys.argv[1]))
 starts = [e for e in events if e["EventType"] == "session_start"]
@@ -302,8 +303,22 @@ sudo apt-get update
 sudo apt-get install -y iproute2 nftables sudo python3
 : "${VERIFIED_PACKAGE_DIR:?Root-controlled verified extracted release directory}"
 : "${ACCEPT_SCRIPT:?Absolute path to the common acceptance body}"
+# Fail closed unless the directory and every parent up to / are owned by root
+# and not group- or other-writable; sudo then runs scripts from this tree.
+d=$(realpath -e -- "$VERIFIED_PACKAGE_DIR")
+while :; do
+  read -r owner mode < <(stat -c '%u %a' -- "$d")
+  test "$owner" = 0 && test $((8#$mode & 8#022)) -eq 0 \
+    || { echo "untrusted package path component: $d" >&2; exit 1; }
+  test "$d" = / && break
+  d=$(dirname -- "$d")
+done
 sudo "$VERIFIED_PACKAGE_DIR/install.sh"
 sudo "$VERIFIED_PACKAGE_DIR/install-egress-helper.sh" --user "$(id -un)"
+# Drop the cached sudo ticket first. With a cached admin credential, `sudo -n`
+# succeeds without the new rule; after `sudo -k` it passes only if the
+# NOPASSWD drop-in installed above grants this exact helper verb.
+sudo -k
 sudo -n /usr/libexec/nocklock-egress-helper check
 NOCKLOCK_BIN=/usr/local/bin/nocklock TEST_PYTHON=/usr/bin/python3 \
   TEST_NET_MODE=proxy EXPECTED_EGRESS=CONFINED bash "$ACCEPT_SCRIPT"
@@ -312,10 +327,12 @@ NOCKLOCK_BIN=/usr/local/bin/nocklock TEST_PYTHON=/usr/bin/python3 \
 ```
 
 The test dependency list must be kept consistent with installer preflight;
-`su` and `visudo` must also be present. Before publishing, repeat the helper
-check without a cached interactive sudo grant. The common body asserts the
+`su` and `visudo` must also be present. The helper `check` verb is the one the sudoers rule names, and the
+installer preflight runs it as the target user for the same reason. Before
+publishing, also repeat the check from a fresh login session with no cached sudo
+ticket. The common body asserts the
 effective signed session level is CONFINED for proxy mode and KERNEL for netns.
-Doctor is run before each test. On Linux below Landlock ABI 9, v0.9 returns
+Doctor is run before each test. On Linux below Landlock ABI 9, v0.9.x returns
 PARTIAL (exit 3); the script accepts only the Unix-socket unavailability with
 its explicit below-9 reason and requires every other boundary to be enforced.
 This is installation acceptance with a recorded limitation, not a claim of
