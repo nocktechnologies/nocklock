@@ -79,15 +79,13 @@ On Linux you can instead pass `--net-fence=netns`. The child then runs in its ow
 | Level | Boundary |
 |---|---|
 | `KERNEL` | Linux netns with a kernel default-drop floor and the configured HTTP(S)/DNS allowlist. |
-| `CONFINED` | Linux proxy with syscall enforcement and the filesystem interposer bridge; Landlock blocks external pathname and abstract Unix sockets and permits only the exact proxy and filesystem event sockets. This requires Landlock ABI v9 or later. |
+| `CONFINED` | Linux proxy with syscall enforcement and the filesystem interposer bridge. The kernel rejects direct AF_INET/AF_INET6 socket creation; the interposer remaps proxy TCP streams to AF_UNIX. AF_UNIX destinations are currently unrestricted: the child can connect to any pathname or abstract Unix socket its user can reach, which can bypass the network allowlist through local services. |
 | `SEATBELT` | macOS proxy with a Seatbelt kernel floor (needs `filesystem.root`): the profile denies every outbound network connect except to the proxy's loopback port, and allows no Unix-socket connect, so a client that ignores `HTTP_PROXY` is denied by the kernel. It is not `CONFINED`, which is defined by the Linux syscall and interposer bridge, and look-back rules (Linux CONFINED only) are refused at `SEATBELT`. |
 | `ADVISORY` | Userspace proxy only. A client that ignores `HTTP_PROXY` can reach any host. The wrap warning names this limitation. |
 | `OFF` | `network.allow_all = true`; any host is reachable. |
 | `UNREACHABLE` | Syscall enforcement restricts proxy traffic to Unix sockets, but the filesystem interposer bridge is disabled, so the allowlist cannot be reached. Wrap refuses to start. |
 
 Set `network.require_enforced = true` in `.nock/config.toml` or pass `--require-enforced-egress` to refuse `ADVISORY`, `OFF`, and `UNREACHABLE` levels. Linux can use `--net-fence=netns`; macOS meets the requirement through the `SEATBELT` floor.
-
-On Linux, `CONFINED` blocks pathname and abstract Unix sockets outside NockLock's proxy and filesystem event channels when Landlock ABI v9 or later is available. Below ABI 9, `wrap` runs by default, prints one warning, and records `unix_sockets=reachable reason=landlock_abi_<n>_below_9` in the signed session-start row; `doctor` and `status` report the boundary as unavailable with the reason. The ABI 9 enforcement path has not run on a real kernel yet. Set `network.require_unix_socket_isolation = true` to require Linux `CONFINED` egress with ABI 9+; `wrap` refuses if it cannot install Unix-socket isolation.
 
 The macOS floor is the Seatbelt profile that `filesystem.root` already requires: `(deny network-outbound)` plus a TCP-only allow (`remote tcp`) for `localhost:<proxy port>`, and a deny of the resolver's Mach services (`com.apple.mDNSResponder`, `com.apple.mDNSResponderHelper`). `getaddrinfo` reaches mDNSResponder over Mach, not a socket, so without that deny a fenced agent could put data into DNS queries; with it, the agent cannot resolve names itself, and proxy-aware clients send the hostname to the proxy, which resolves it outside the profile. NockLock holds the proxy's port on `[::1]` too (wrap refuses to start if that port is taken), because `localhost` in the rule admits both loopback families. The proxy runs outside the profile, so its upstream connects are unaffected. If the profile is rejected or the proxy is unhealthy, wrap refuses to start, and the signed fence-state row records the floor. The honest limits: Apple deprecates `sandbox-exec`; reads outside `filesystem.root` are not confined; with `filesystem.root = ""` there is no profile and egress is `ADVISORY`; the proxy's loopback port is the only local destination; `/etc/hosts` lookups stay allowed (a local file read, no query leaves the host); a tool that must resolve a public name itself (not through the proxy) fails inside the fence; and the Mach deny covers the resolver services named above, so a resolver service not on that list is not claimed closed.
 
@@ -408,7 +406,7 @@ Two candidate runtimes are deliberately left without a preset:
 | `nocklock wrap --dry-run` | Validate config without starting fences or a command |
 | `nocklock scan [path ...]` | Scan selected local files; `--env` adds environment values and `--json` prints structured results |
 | `nocklock validate [config-path]` | Validate a config file and print the effective policy |
-| `nocklock doctor` | Check whether each fence can be enforced on this host |
+| `nocklock doctor` | Check whether each fence is enforced on this host; exit 0 PROTECTED, 2 GAPS FOUND, 3 PARTIAL, 4 UNPROTECTED (see below) |
 | `nocklock verify` | Run the adversarial fence self-test (proof of block) |
 | `nocklock verify --audit` | Verify the audit log hash chain and signatures |
 | `nocklock verify --against-anchor <file>` | Verify the audit chain against an external chain-head anchor file |
@@ -417,7 +415,7 @@ Two candidate runtimes are deliberately left without a preset:
 | `nocklock anchor emit [--out <file>]` | Emit a signed chain-head anchor |
 | `nocklock anchor push [--file <file>]` | Push an anchor to the off-box store at `NOCKLOCK_ANCHOR_URL` |
 | `nocklock egress-probe` | Probe Linux network-egress enforcement feasibility on this host (structured `--json`) |
-| `nocklock status` | Show fence state and event log summary |
+| `nocklock status` | Show configured fences and event log summary (does not track running sessions) |
 | `nocklock log` | View fence event history |
 | `nocklock log --blocked` | Show only blocked events |
 | `nocklock log --stats` | Show aggregate statistics |
@@ -578,7 +576,20 @@ NockLock is a fence, not guardrails.
 
 Guardrails tell the agent what not to do. The agent can ignore them, work around them, or hallucinate past them. Guardrails are prompts.
 
-A fence sits between the agent and the resource. How hard the boundary is depends on the fence. The secret fence is absolute: a blocked variable is gone from the environment before the agent starts. On Linux, the filesystem fence is kernel-enforced with Landlock by default and composes with LD_PRELOAD logging; static binaries and children that clear `LD_PRELOAD` are still denied by the kernel. On macOS, the filesystem fence is a kernel-enforced Seatbelt write confinement. Writes outside the configured root and its essential runtime exceptions are denied, and the built-in and configured sensitive paths are denied for reads and writes. It does not claim read confinement outside the root. The profile follows descendants even when they cross into protected system binaries. The network fence stops normal and prompt-injected attempts to reach unapproved domains and logs every try. On Linux with syscall fencing enabled, proxy-mode runs allow only Unix-domain sockets in the child; the interposer rewrites only the configured loopback proxy connect to the proxy's Unix socket, and all other AF_INET/AF_INET6 connects fail closed. With `--net-fence=netns` the child keeps IP sockets and the boundary is composed: the nftables default-drop floor and the network namespace prevent alternate transports and proxy bypass (direct DNS to other resolvers, non-DNS UDP, QUIC, SCTP and raw IP are dropped, and nothing but the transparent proxy and the in-namespace DNS stub is reachable), while the transparent HTTP(S) proxy and the DNS stub enforce the `network.allow` domain policy.
+`nocklock doctor` verdicts and exit codes (`--json` adds per-boundary `boundaries` posture of `enforced`, `advisory`, `disabled`, `unavailable` or `enabled`, and the proxy-mode `egress_level`):
+
+| Exit | Verdict | Meaning |
+|---|---|---|
+| 0 | PROTECTED | filesystem, syscall, network and secrets are all enforced; the network is not `allow_all` and its egress level is CONFINED or SEATBELT |
+| 2 | GAPS FOUND | a boundary is configured but its backend is missing |
+| 3 | PARTIAL | some boundary is disabled or advisory; each is listed by name |
+| 4 | UNPROTECTED | no boundary is enforced |
+
+A missing or unparseable `.nock/config.toml` also exits 2.
+
+Boundary postures: `enforced` (the fence is active), `advisory` (logs or warns but does not block), `disabled` (turned off in config), `enabled` (configured but its backend is missing), and `unavailable` (the fence cannot enforce on this host or config; it never counts toward PROTECTED). `unavailable` is how doctor reports the `UNREACHABLE` egress level: syscall enforcement restricts proxy traffic to Unix sockets while the interposer bridge is disabled, so the allowlist cannot be reached.
+
+A fence sits between the agent and the resource. How hard the boundary is depends on the fence. The secret fence is absolute: a blocked variable is gone from the environment before the agent starts. On Linux, the filesystem fence is kernel-enforced with Landlock by default and composes with LD_PRELOAD logging; static binaries and children that clear `LD_PRELOAD` are still denied by the kernel. On macOS, the filesystem fence is a kernel-enforced Seatbelt write confinement. Writes outside the configured root and its essential runtime exceptions are denied, and the built-in and configured sensitive paths are denied for reads and writes. It does not claim read confinement outside the root. The profile follows descendants even when they cross into protected system binaries. The network fence stops normal and prompt-injected attempts to reach unapproved domains and logs every try. On Linux with syscall fencing enabled, proxy-mode runs restrict kernel socket creation to Unix-domain sockets; the interposer remaps intended TCP stream sockets and the configured loopback proxy connect to the proxy's Unix socket. Direct AF_INET/AF_INET6 socket syscalls fail closed. The syscall fence does not restrict AF_UNIX `connect()`, so a child can also reach other path-based and abstract Unix sockets accessible to the same user; see [Linux CONFINED Unix-socket reachability](docs/design/unix-socket-reachability.md). With `--net-fence=netns` the child keeps IP sockets and the boundary is composed: the nftables default-drop floor and the network namespace prevent alternate transports and proxy bypass (direct DNS to other resolvers, non-DNS UDP, QUIC, SCTP and raw IP are dropped, and nothing but the transparent proxy and the in-namespace DNS stub is reachable), while the transparent HTTP(S) proxy and the DNS stub enforce the `network.allow` domain policy.
 
 NockLock does not restrict how your agent works. It restricts what your agent can reach. Inside the fence, your agent still has full permissions.
 
