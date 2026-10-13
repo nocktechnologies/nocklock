@@ -13,6 +13,7 @@ All notable changes to NockLock will be documented in this file.
 - `nocklock init` exits non-zero when `.nock/config.toml` already exists instead of reporting success, and `nocklock init --runtime <name> --diff` prints the policy entries the preset would add or remove (no write; array elements print as `+ key += "v"` / `- key -= "v"`, other values as `key = value`), comparing the two configs key by key and `[[network.lookback]]` entries in order. The "config already exists" error no longer prints the Cobra usage. The macOS `claude` hint now points at `--diff`.
 - `--ed25519-pub` accepts the `ed25519 <base64>` line that `verify --export-pubkey` prints, as well as bare base64 or hex.
 - A legacy `[cloud]` section is reported as inert, naming `[audit.forward]`, the real delivery transport.
+- Look-back race test: the POST target records how each request body ended and counts a bodyless request apart from a finished body; new `TestLookbackTripLeavesTargetBodyIncomplete` pins that a trip cuts Content-Length and chunked bodies. Test-only.
 
 ### Fixed
 
