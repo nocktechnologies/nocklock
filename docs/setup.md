@@ -17,15 +17,15 @@ On Linux the formula installs only the `nocklock` binary, not `libfence_fs.so`, 
 ```bash
 git clone https://github.com/nocktechnologies/nocklock.git
 cd nocklock
-make build-all     # ./nocklock; on Linux also builds libfence_fs.so
-sudo make install  # moves ./nocklock to /usr/local/bin/nocklock (rebuilds first)
+make build-all     # as your user: ./nocklock; on Linux also libfence_fs.so
+sudo install -m 0755 nocklock /usr/local/bin/nocklock   # copy only
 ```
 
-`make build-all` leaves the binary in the checkout; only `make install` puts `nocklock` on the `PATH` (`Makefile`), and it is needed by default proxy-mode users too. On macOS that is the whole install. On Linux continue with the next step.
+Build as your user, then copy with `sudo install`. Do not run `sudo make install`. Its `install` target depends on `build` (`Makefile`), so it runs `go build` as root. Root's `PATH` often has no Go, and a root build can leave root-owned files in the Go caches. `sudo install` only copies the binary, and the copy is root-owned. Every user needs this step, including default proxy-mode users. On macOS that is the whole install. On Linux continue with the next step.
 
 `build-all` compiles the Linux `LD_PRELOAD` interposer to `internal/fence/fs/interposer/libfence_fs.so` and skips it on macOS (`Makefile`), where the filesystem fence uses `sandbox-exec`.
 
-**Linux: place `libfence_fs.so`.** `make install` moves only `nocklock` to `/usr/local/bin` (`Makefile`) and runs `build`, not `build-all`, so it does not rebuild the library; there is no `make` target that installs the library, and packaging is the open card N11643. `wrap` looks for the library only in these places, in order: the directory of the `nocklock` executable, `/usr/local/lib/nocklock/`, then `/usr/lib/nocklock/` (`findTrustedLibFenceFS` in `internal/cli/wrap.go`). A copy inside the current working directory is skipped, so running `./nocklock` from the checkout does not find the library built beside it. There is no setting or environment variable that points at another path. Copying it by hand to one of those paths is the only way to satisfy the lookup today:
+**Linux: place `libfence_fs.so`.** The step above installs only `nocklock`. No `make` target installs the library, and packaging is the open card N11643. `wrap` looks for the library only in these places, in order: the directory of the `nocklock` executable, `/usr/local/lib/nocklock/`, then `/usr/lib/nocklock/` (`findTrustedLibFenceFS` in `internal/cli/wrap.go`). A copy inside the current working directory is skipped, so running `./nocklock` from the checkout does not find the library built beside it. There is no setting or environment variable that points at another path. Copying it by hand to one of those paths is the only way to satisfy the lookup today:
 
 ```bash
 sudo install -D -m 0644 internal/fence/fs/interposer/libfence_fs.so /usr/local/lib/nocklock/libfence_fs.so
@@ -33,10 +33,9 @@ sudo install -D -m 0644 internal/fence/fs/interposer/libfence_fs.so /usr/local/l
 
 If no candidate exists, `wrap` refuses to start with `trusted filesystem fence library not found. Install libfence_fs.so next to the nocklock binary, at /usr/local/lib/nocklock/libfence_fs.so, or at /usr/lib/nocklock/libfence_fs.so; refusing to launch with an untrusted LD_PRELOAD path`.
 
-**Linux, opt-in kernel egress fence** (`--net-fence=netns`) needs a root-owned helper and a constrained sudoers grant. Install the binary first, then the helper:
+**Linux, opt-in kernel egress fence** (`--net-fence=netns`) needs a root-owned helper and a constrained sudoers grant. Install the binary first (the source install above), then the helper:
 
 ```bash
-make install                      # nocklock to /usr/local/bin
 sudo make install-egress-helper   # /usr/libexec/nocklock-egress-helper + /etc/sudoers.d/nocklock-egress
 ```
 
@@ -75,7 +74,7 @@ The audit log lives in `$XDG_STATE_HOME/nocklock/<project-key>/` (or `~/.local/s
 - **Landlock engaged (the default, `filesystem.linux_enforcement = "required"`):** `wrap` withholds the grant on the `.nock` directory (`ProtectedRootSubdir`, `internal/fence/fs/landlock/rules.go`), so the agent cannot write the legacy log unless another rule covers it, such as a `filesystem.allow_rw` entry that contains `.nock`. The price is that the agent cannot create or remove entries directly in the fence root; `wrap` prints that on stderr. If `.nock` is not a direct child of `filesystem.root`, rule generation refuses instead.
 - **Landlock not engaged (`linux_enforcement` set to `preferred` or `off` and Landlock unavailable or off):** only the `LD_PRELOAD` interposer applies. It does not receive `ProtectedRootSubdir` (`internal/fence/fs/config.go`), so treat the legacy log as agent-writable.
 
-To get the fresh-project guarantee, move `events.db`, its `-wal`/`-shm` sidecars and `chain-anchor.json` outside the fence root while no session is running (`README.md` "Event log"). The Ed25519 signing key is `~/.config/nocklock/signing-ed25519.key`. See `docs/how-it-works/audit-log.md`.
+To get the fresh-project guarantee, move `events.db`, its `-wal`/`-shm` sidecars and `chain-anchor.json` into this project's audit state directory while no session is running. That is `$XDG_STATE_HOME/nocklock/<project-key>/`, or `~/.local/state/nocklock/<project-key>/`. To print `<project-key>`, run `printf %s "$(pwd -P)" | sha256sum | cut -c1-16` from the project root (on macOS use `shasum -a 256`). Create the directory with `mkdir -p -m 0700` if it does not exist. With the default `logging.db`, NockLock then uses the log there; setting `logging.db` to that absolute path also works. Any other place outside the project is rejected when the config loads. Run `nocklock status` and check that the `Event log:` line names the new path (`README.md` "Event log"). The Ed25519 signing key is `~/.config/nocklock/signing-ed25519.key`. See `docs/how-it-works/audit-log.md`.
 
 ## Trouble
 `wrap` exits `2` when it refuses to start (a requested fence cannot engage). Read the `NockLock: fatal:` or `fix:` line it prints, then run `nocklock doctor`. For anything that looks like a fence failure, see `docs/runbooks/incident.md`.

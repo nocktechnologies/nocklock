@@ -23,7 +23,7 @@ nocklock init
 nocklock wrap -- claude
 ```
 
-Four commands and your agent is fenced. On macOS that is the whole install. On Linux the Homebrew formula installs only the `nocklock` binary, and the default config's `wrap` refuses to start without `libfence_fs.so`. Until packaging lands (N11643, `docs/ROADMAP.md` bar 3), install from source with `make build-all`, `sudo make install`, then copy `libfence_fs.so` to `/usr/local/lib/nocklock/` by hand (steps in `docs/setup.md`).
+Four commands and your agent is fenced. On macOS that is the whole install. On Linux the Homebrew formula installs only the `nocklock` binary, and the default config's `wrap` refuses to start without `libfence_fs.so`. Until packaging lands (N11643, `docs/ROADMAP.md` bar 3), install from source: run `make build-all` as your user, then `sudo install -m 0755 nocklock /usr/local/bin/nocklock`, then copy `libfence_fs.so` to `/usr/local/lib/nocklock/` by hand (steps in `docs/setup.md`).
 
 **macOS and Claude Code:** Claude Code keeps a `claude.ai` login in the macOS login keychain, and the fence denies `~/Library/Keychains` (Seatbelt cannot scope to one keychain item, so NockLock does not open it). The login has to arrive through the environment, and the default secret fence blocks `*_TOKEN*`, so plain `nocklock init` strips an exported `CLAUDE_CODE_OAUTH_TOKEN`. Use the `claude-code` preset:
 
@@ -489,7 +489,7 @@ Without the helper, the egress fence fails closed at runtime.
 Install the binary, then the helper:
 
 ```bash
-make install                                   # builds and installs the nocklock binary
+sudo install -m 0755 nocklock /usr/local/bin/nocklock   # after make build-all as your user
 sudo make install-egress-helper                # installs the root-owned helper + sudoers grant
 # or, to name the unprivileged wrap user explicitly:
 sudo NOCKLOCK_EGRESS_USER=<user> scripts/install-egress-helper.sh
