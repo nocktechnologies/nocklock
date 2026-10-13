@@ -12,7 +12,13 @@ All notable changes to NockLock will be documented in this file.
 
 - Clarify that Linux `CONFINED` currently does not restrict AF_UNIX destinations. A non-root probe confirmed that a wrapped child can connect to both a throwaway pathname socket and a throwaway abstract socket while a direct AF_INET datagram socket syscall is denied. The design and probe are in `docs/design/unix-socket-reachability.md` and `docs/probes/n11650/`.
 
+### Changed
+
+- Docs: `docs/` is now organized as a map for contributors and users: `docs/README.md`, `docs/REPO-MAP.md`, `docs/setup.md`, `docs/how-it-works/` (one page per fence or feature with its limits), `docs/reference/cli.md` (commands, exit codes and config schema as shipped, not yet a compatibility promise), `docs/runbooks/` (release, incident), `docs/decisions/` (records 006-014) and `docs/ROADMAP.md` (the path to 1.0). `CLAUDE.md` is rewritten as a short map and `AGENTS.md` points to it.
+
 ### Documentation
+
+- Linux source-install docs now say where `libfence_fs.so` must be placed (`findTrustedLibFenceFS`, `internal/cli/wrap.go`); `verify --audit` exit codes per verdict, secret-preflight platform build tags, and the CONFINED socket-family override are documented from code (N11689).
 
 - README: macOS denied-file logging now has one statement (best-effort `file_blocked` tailer); new "What the signed log proves" section on observation coverage (N11642).
 
