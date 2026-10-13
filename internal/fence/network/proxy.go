@@ -10,6 +10,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"sync"
 	"sync/atomic"
 	"time"
 
@@ -130,6 +131,12 @@ type DialFunc func(ctx context.Context, network, addr string) (net.Conn, error)
 // ProxyServer is a local HTTP/HTTPS proxy that enforces the network allowlist.
 // It binds exclusively to 127.0.0.1 on a randomly assigned port.
 type ProxyServer struct {
+	// stopMu guards listener, server, unixSocketPath and advertisedAddr: every
+	// method that reads or writes them (Start, StartOn, StartUnix, Addr, Stop)
+	// takes it. Lock-held code must not call a locking method; serveLocked is
+	// the lock-free helper behind the Start variants. The Serve goroutine runs
+	// outside the lock.
+	stopMu             sync.Mutex
 	listener           net.Listener
 	listenAddr         string
 	advertisedAddr     string
@@ -209,6 +216,8 @@ func (p *ProxyServer) cachedSafeDial(ctx context.Context, network, addr string) 
 // Returns the bound address as "127.0.0.1:PORT".
 // Returns an error if called on an already-started proxy (idempotent guard).
 func (p *ProxyServer) Start() (string, error) {
+	p.stopMu.Lock()
+	defer p.stopMu.Unlock()
 	if p.listener != nil {
 		return "", fmt.Errorf("proxy already started at %s", p.listener.Addr())
 	}
@@ -221,7 +230,7 @@ func (p *ProxyServer) Start() (string, error) {
 		p.MarkDegraded("bind failure")
 		return "", fmt.Errorf("network fence: failed to bind proxy: %w", err)
 	}
-	return p.serve(ln)
+	return p.serveLocked(ln)
 }
 
 // StartOn begins serving on an already-bound listener and returns its address.
@@ -229,13 +238,16 @@ func (p *ProxyServer) Start() (string, error) {
 // it first and hands the open listener over; there is no close-and-rebind window
 // in which another process could take the port.
 func (p *ProxyServer) StartOn(ln net.Listener) (string, error) {
+	p.stopMu.Lock()
+	defer p.stopMu.Unlock()
 	if p.listener != nil {
 		return "", fmt.Errorf("proxy already started at %s", p.listener.Addr())
 	}
-	return p.serve(ln)
+	return p.serveLocked(ln)
 }
 
-func (p *ProxyServer) serve(ln net.Listener) (string, error) {
+// serveLocked installs ln and starts the Serve goroutine. Caller holds stopMu.
+func (p *ProxyServer) serveLocked(ln net.Listener) (string, error) {
 	p.listener = ln
 	p.advertisedAddr = ln.Addr().String()
 	p.degraded.Store(false)
@@ -276,6 +288,8 @@ func (p *ProxyServer) newHTTPServer() *http.Server {
 // the fenced child cannot open AF_INET sockets, and libfence_fs rewrites
 // connects to advertisedAddr onto unixSocketPath.
 func (p *ProxyServer) StartUnix(unixSocketPath, advertisedAddr string) (string, error) {
+	p.stopMu.Lock()
+	defer p.stopMu.Unlock()
 	if p.listener != nil {
 		return "", fmt.Errorf("proxy already started at %s", p.listener.Addr())
 	}
@@ -331,6 +345,9 @@ func (p *ProxyServer) StartUnix(unixSocketPath, advertisedAddr string) (string, 
 // Stop shuts down the proxy server gracefully.
 // After Stop returns, Addr() returns "" and the server will not accept new connections.
 func (p *ProxyServer) Stop() error {
+	p.stopMu.Lock()
+	defer p.stopMu.Unlock()
+
 	if p.server == nil {
 		p.degraded.Store(true)
 		if p.transport != nil {
@@ -381,7 +398,9 @@ func (p *ProxyServer) dial(ctx context.Context, network, addr string) (net.Conn,
 }
 
 // MarkDegraded marks the proxy as unsafe to use after a startup or watchdog
-// failure. Once degraded, the proxy refuses new upstream dials.
+// failure. It touches only the atomic degraded flag and the never-reassigned
+// transport, none of the fields stopMu guards, so it takes no lock and the
+// locked Start paths can call it. Once degraded, the proxy refuses new upstream dials.
 func (p *ProxyServer) MarkDegraded(reason string) {
 	p.degraded.Store(true)
 	if p.transport != nil {
@@ -405,6 +424,8 @@ func (p *ProxyServer) MarkDegraded(reason string) {
 
 // Addr returns the bound address, or empty string if not started.
 func (p *ProxyServer) Addr() string {
+	p.stopMu.Lock()
+	defer p.stopMu.Unlock()
 	if p.listener == nil {
 		return ""
 	}

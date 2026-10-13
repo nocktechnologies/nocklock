@@ -2,12 +2,14 @@ package network
 
 import (
 	"context"
+	"errors"
 	"net"
 	"net/http"
 	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -72,6 +74,75 @@ func TestProxyStopIdempotent(t *testing.T) {
 	_ = p.Stop()
 	if err := p.Stop(); err != nil {
 		t.Errorf("second Stop() error: %v", err)
+	}
+}
+
+func TestProxyStopConcurrent(t *testing.T) {
+	p := makeProxy(nil)
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+	addr, err := p.StartOn(ln)
+	if err != nil {
+		t.Fatalf("StartOn() error: %v", err)
+	}
+	if err := WaitForProxyReady(t.Context(), addr, time.Second); err != nil {
+		t.Fatalf("running proxy should be reachable: %v", err)
+	}
+
+	const callers = 16
+	start := make(chan struct{})
+	errs := make(chan error, callers)
+	var wg sync.WaitGroup
+	for range callers {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			<-start
+			errs <- p.Stop()
+		}()
+	}
+	close(start)
+	wg.Wait()
+	close(errs)
+	for err := range errs {
+		if err != nil {
+			t.Errorf("concurrent Stop() error: %v", err)
+		}
+	}
+	if got := p.Addr(); got != "" {
+		t.Errorf("Addr() after Stop() = %q, want empty", got)
+	}
+	// Deterministic: a dial could reach an unrelated process that reused the
+	// freed port, so check the proxy's own listener is closed instead.
+	if conn, err := ln.Accept(); err == nil {
+		conn.Close()
+		t.Error("stopped proxy listener still accepts connections")
+	} else if !errors.Is(err, net.ErrClosed) {
+		t.Errorf("Accept() after Stop() = %v, want net.ErrClosed", err)
+	}
+}
+
+// TestProxyStartAddrStopConcurrent runs Start, Addr and Stop together; it is
+// meaningful under -race, where an unlocked field access fails the run.
+func TestProxyStartAddrStopConcurrent(t *testing.T) {
+	for range 20 {
+		p := makeProxy(nil)
+		var wg sync.WaitGroup
+		for range 4 {
+			wg.Add(3)
+			go func() { defer wg.Done(); _, _ = p.Start() }()
+			go func() { defer wg.Done(); _ = p.Addr() }()
+			go func() { defer wg.Done(); _ = p.Stop() }()
+		}
+		wg.Wait()
+		if err := p.Stop(); err != nil {
+			t.Fatalf("final Stop() error: %v", err)
+		}
+		if got := p.Addr(); got != "" {
+			t.Fatalf("Addr() after final Stop() = %q, want empty", got)
+		}
 	}
 }
 
