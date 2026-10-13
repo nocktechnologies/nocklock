@@ -18,11 +18,14 @@ On Linux the formula installs only the `nocklock` binary, not `libfence_fs.so`, 
 git clone https://github.com/nocktechnologies/nocklock.git
 cd nocklock
 make build-all     # ./nocklock; on Linux also builds libfence_fs.so
+sudo make install  # moves ./nocklock to /usr/local/bin/nocklock (rebuilds first)
 ```
+
+`make build-all` leaves the binary in the checkout; only `make install` puts `nocklock` on the `PATH` (`Makefile`), and it is needed by default proxy-mode users too. On macOS that is the whole install. On Linux continue with the next step.
 
 `build-all` compiles the Linux `LD_PRELOAD` interposer to `internal/fence/fs/interposer/libfence_fs.so` and skips it on macOS (`Makefile`), where the filesystem fence uses `sandbox-exec`.
 
-**Linux: place `libfence_fs.so`.** `make install` moves only `nocklock` to `/usr/local/bin` (`Makefile`); there is no `make` target that installs the library, and packaging is the open card N11643. `wrap` looks for the library only in these places, in order: the directory of the `nocklock` executable, `/usr/local/lib/nocklock/`, then `/usr/lib/nocklock/` (`findTrustedLibFenceFS` in `internal/cli/wrap.go`). A copy inside the current working directory is skipped, so running `./nocklock` from the checkout does not find the library built beside it. There is no setting or environment variable that points at another path. Copying it by hand to one of those paths is the only way to satisfy the lookup today:
+**Linux: place `libfence_fs.so`.** `make install` moves only `nocklock` to `/usr/local/bin` (`Makefile`) and runs `build`, not `build-all`, so it does not rebuild the library; there is no `make` target that installs the library, and packaging is the open card N11643. `wrap` looks for the library only in these places, in order: the directory of the `nocklock` executable, `/usr/local/lib/nocklock/`, then `/usr/lib/nocklock/` (`findTrustedLibFenceFS` in `internal/cli/wrap.go`). A copy inside the current working directory is skipped, so running `./nocklock` from the checkout does not find the library built beside it. There is no setting or environment variable that points at another path. Copying it by hand to one of those paths is the only way to satisfy the lookup today:
 
 ```bash
 sudo install -D -m 0644 internal/fence/fs/interposer/libfence_fs.so /usr/local/lib/nocklock/libfence_fs.so
@@ -61,13 +64,18 @@ Pick a preset instead of the generic defaults with `nocklock init --runtime <nam
 | Host can enforce each fence | `nocklock doctor` | verdict `PROTECTED`, exit 0; `GAPS FOUND` exits 2, `PARTIAL` 3, `UNPROTECTED` 4 (`internal/cli/doctor.go`) |
 | Fence actually blocks | `nocklock verify` | adversarial self-test passes, exit 0 (`internal/cli/verify.go`) |
 | Egress helper (Linux netns) | `sudo -n /usr/libexec/nocklock-egress-helper check` | prints nothing, exit 0 |
-| Audit log intact | `nocklock verify --audit` | `AUTHENTIC` (signed), or `CONSISTENT` (chain intact; unsigned, or signed with no key supplied to check it); see `docs/how-it-works/audit-log.md` |
+| Audit log intact | `nocklock verify --audit` | `AUTHENTIC` (signed and checked against the local managed key or `--ed25519-pub`), or `CONSISTENT` (chain intact; unsigned, or signed with no key available to check it); see `docs/how-it-works/audit-log.md` |
 | What was blocked | `nocklock log --blocked`, `nocklock status` | per-session blocked events |
 
 `wrap` prints and signs the effective egress level each session (`KERNEL`, `CONFINED`, `SEATBELT`, `ADVISORY`, `OFF`, `UNREACHABLE`). Read it: `ADVISORY` means a client that ignores `HTTP_PROXY` can reach any host. Set `network.require_enforced = true` or pass `--require-enforced-egress` to refuse such levels (`docs/how-it-works/network-fence.md`).
 
 ## 4. Where state goes
-The audit log lives in `$XDG_STATE_HOME/nocklock/<project-key>/` (or `~/.local/state/nocklock/<project-key>/`), not in the project, so for a fresh project the agent cannot edit it. An existing `.nock/events.db` is kept in place, inside the project, where the agent can edit it (`docs/decisions/010-audit-state-outside-project.md`, `internal/config/state.go`). The Ed25519 signing key is `~/.config/nocklock/signing-ed25519.key`. See `docs/how-it-works/audit-log.md`.
+The audit log lives in `$XDG_STATE_HOME/nocklock/<project-key>/` (or `~/.local/state/nocklock/<project-key>/`), not in the project, so for a fresh project the agent cannot edit it. An existing `.nock/events.db` is kept in place, inside the project (`docs/decisions/010-audit-state-outside-project.md`, `ResolveDBPath` in `internal/config/config.go`). Whether the agent can write it on Linux depends on the filesystem fence:
+
+- **Landlock engaged (the default, `filesystem.linux_enforcement = "required"`):** `wrap` withholds the grant on the `.nock` directory (`ProtectedRootSubdir`, `internal/fence/fs/landlock/rules.go`), so the agent cannot write the legacy log unless another rule covers it, such as a `filesystem.allow_rw` entry that contains `.nock`. The price is that the agent cannot create or remove entries directly in the fence root; `wrap` prints that on stderr. If `.nock` is not a direct child of `filesystem.root`, rule generation refuses instead.
+- **Landlock not engaged (`linux_enforcement` set to `preferred` or `off` and Landlock unavailable or off):** only the `LD_PRELOAD` interposer applies. It does not receive `ProtectedRootSubdir` (`internal/fence/fs/config.go`), so treat the legacy log as agent-writable.
+
+To get the fresh-project guarantee, move `events.db`, its `-wal`/`-shm` sidecars and `chain-anchor.json` outside the fence root while no session is running (`README.md` "Event log"). The Ed25519 signing key is `~/.config/nocklock/signing-ed25519.key`. See `docs/how-it-works/audit-log.md`.
 
 ## Trouble
 `wrap` exits `2` when it refuses to start (a requested fence cannot engage). Read the `NockLock: fatal:` or `fix:` line it prints, then run `nocklock doctor`. For anything that looks like a fence failure, see `docs/runbooks/incident.md`.

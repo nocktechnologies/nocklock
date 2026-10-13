@@ -27,7 +27,7 @@ Exit codes travel as `exitCodeError` and `Execute()` calls `os.Exit` once (`root
 |---|---|---|
 | `0` | Success; for `wrap`, the child exited 0 | |
 | `1` | A verification or validation failure: `verify` not blocked / not consistent (`verify.go`), `scan` finding or incomplete (`scan.go`), `validate` errors (`validate.go`), config-digest mismatch (`config_digest.go`), `__probe` escape (`probe.go`); any unhandled error | |
-| `2` | `doctor` `GAPS FOUND` (`doctor.go`); `wrap` refused to start or lost its proxy: egress `UNREACHABLE`, look-back rule at the wrong level, `require_enforced` not met, a required fence unavailable, an unwritable audit decision, proxy failure (`wrap.go`) | |
+| `2` | `doctor` `GAPS FOUND`, including a missing or unparseable `.nock/config.toml` (`doctor.go`); `wrap` refused to start or lost its proxy: egress `UNREACHABLE`, look-back rule at the wrong level, `require_enforced` not met, a required fence unavailable, an unwritable audit decision, proxy failure (`wrap.go`) | |
 | `3` / `4` | `doctor` `PARTIAL` / `UNPROTECTED` (`doctor.go`) | |
 | child's code | `wrap` returns the child's exit code (`wrap.go`); a negative code (signal or abnormal exit) becomes `1` (`internal/cli/wrap.go`) | |
 

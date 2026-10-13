@@ -24,6 +24,7 @@ All notable changes to NockLock will be documented in this file.
 
 - Linux source-install docs now say where `libfence_fs.so` must be placed (`findTrustedLibFenceFS`, `internal/cli/wrap.go`); `verify --audit` exit codes per verdict, secret-preflight platform build tags, and the CONFINED socket-family override are documented from code (N11689).
 - README: macOS denied-file logging now has one statement (best-effort `file_blocked` tailer); new "What the signed log proves" section on observation coverage (N11642).
+- Follow-ups to the docs split (N11692): setup now installs the CLI with `sudo make install`, states when a legacy in-project `.nock/events.db` is agent-writable on Linux, README and ROADMAP share one Linux install story, `verify --audit` documents the local-key `AUTHENTIC` path, and `docs/reference/cli.md` and `docs/runbooks/release.md` match the code.
 
 ## [0.8.0] - 2026-10-13
 
