@@ -1,72 +1,39 @@
 # CLAUDE.md: NockLock
 
-## Project
-NockLock is an AI agent security fence. Go CLI that wraps coding agents with filesystem, network, and secret isolation.
-
-## Stack
-- Go 1.26+ (single binary, cross-platform)
-- cobra (CLI framework)
-- BurntSushi/toml (config parser)
-- SQLite (event logging via modernc.org/sqlite)
+NockLock is an AI agent security fence: a Go CLI that wraps coding agents with filesystem, network, and secret isolation. This file is a map. Detail lives in `docs/` (start at `docs/README.md`; every package is listed in `docs/REPO-MAP.md`).
 
 ## Commands
-- `go build ./cmd/nocklock`: build
-- `make build`: build with version ldflags
-- `go test ./... -v`: run all tests
-- `go fmt ./...`: format
-- `go vet ./...`: lint
-- `make lint`: fmt + vet
+- `go build ./cmd/nocklock`: build; `make build`: build with version ldflags; `make build-all`: also builds the Linux interposer
+- `go test ./... -v`: all tests (CI runs `go test ./... -count=1`)
+- `go fmt ./...` / `go vet ./...`: format and lint; `make lint` runs both
+- Stack: Go 1.26+, cobra, BurntSushi/toml, SQLite via modernc.org/sqlite. No new dependencies without discussion.
 
-## Structure
-- `cmd/nocklock/`: entry point (main.go)
-- `internal/cli/`: cobra command tree (wrap, init, config, log, status, version)
-- `internal/config/`: TOML config parsing, defaults, validation
-- `internal/version/`: build version info
-- `internal/fence/`: fence implementations: filesystem, network, secrets
-- `internal/fence/fs/`: filesystem fence: config processing, Go wrapper, event listener, SBPL profile, macOS denial-log tailer
-- `internal/fence/fs/interposer/`: C shared library for LD_PRELOAD interception (Linux only)
-- `internal/fence/network/`: network fence: local HTTP/HTTPS proxy, domain allowlist, CONNECT tunnel, look-back rules (`lookback.go`)
-- `internal/logging/`: SQLite event logging
-- `bench/redteam/`: red-team bench (attacks.toml, run.sh, redteam.py): scripted attacks vs NockLock + NockGuard, signed receipt report
-- `pkg/receipt/`: public read-only per-session audit-chain verifier (importable by other modules)
+## Invariants (do not break)
+- **Fences fail closed.** If a fence cannot initialize, the agent does not start. Never fall back to passthrough. Lesson: `.claude/lessons/fail-closed-principle.md`.
+- **Config parsing is strict.** Unknown TOML keys are a hard error (`internal/config/config.go`). Config changes must be backwards compatible.
+- **Tests carry negative controls.** A test that proves a block also proves the allowed case still passes.
+- **Audit rows are loud and signed.** Fence decisions are written to the hash-chained, Ed25519-signed event log. Do not add a decision path that skips it. See `docs/how-it-works/audit-log.md`.
+- **Say only what is enforced.** Docs, `doctor`, `wrap` banners and the README state the real boundary, including the limits (`docs/how-it-works/`). Egress levels are defined once, in `internal/cli/egress_level.go`.
+- **Exit codes**: `doctor` uses 0/2/3/4 for PROTECTED/GAPS FOUND/PARTIAL/UNPROTECTED; `wrap` returns 2 when startup fails or the child's exit code (`docs/reference/cli.md`). Use `exec.ExitError.ExitCode()`, never `syscall.WaitStatus` (`.claude/lessons/cross-platform-exit-codes.md`).
+- **Exported functions need doc comments; error messages must be actionable.**
+- **Do not weaken `.claude/hooks/branch-lock.sh`.** It runs as a PreToolUse hook on every Bash call (5s timeout, `.claude/settings.json`) and blocks `git checkout` / `git switch` away from the branch first touched in the session, recorded in the gitignored `.branch-lock`; delete that file to unlock. `git merge` and `git rebase` are out of scope.
 
-## Detailed Context
-All detailed documentation lives in the .claude/ directory:
-- `.claude/diagrams/`: Mermaid architecture diagrams
-- `.claude/design/`: DESIGN.md with brand tokens and UI spec
-- `.claude/lessons/`: Lessons learned, anti-patterns, incident notes
-- `.claude/decisions/`: Architecture Decision Records (ADRs)
-- `.claude/review/`: Review pipeline instructions, pre-push checklist
-
-## Branch-Lock Hook
-`.claude/hooks/branch-lock.sh` runs as a PreToolUse hook on every Bash
-invocation (5s timeout, registered in `.claude/settings.json`). It inspects
-`git checkout` / `git switch` commands and blocks any attempt to leave the
-branch first touched in the session. The locked branch is recorded in
-`.branch-lock` at the repo root (gitignored); remove that file to unlock.
-`git merge` and `git rebase` are intentionally out of scope.
-
-## Code Standards
-- All exported functions need doc comments
-- Error messages must be actionable
-- Fences fail closed (if fence can't initialize, block everything)
-- No external dependencies without discussion
-- Config changes must be backwards compatible
+## Where things are
+- `docs/REPO-MAP.md`: every directory and key package, with where its tests are
+- `docs/setup.md`: install, first run, verify
+- `docs/how-it-works/`: one page per fence or feature, with honest limits
+- `docs/reference/cli.md`: commands, exit codes, config schema as they exist today
+- `docs/runbooks/`: release, incident
+- `docs/decisions/`: decision records (the first five stay in `.claude/decisions/`)
+- `docs/ROADMAP.md`: the path to 1.0
+- `docs/design/`, `docs/superpowers/specs/`: design notes and specs; `ARCHITECTURE.md`: deep package tree
+- `.claude/diagrams/`, `.claude/design/`, `.claude/lessons/`, `.claude/review/PIPELINE.md`: diagrams, UI tokens, lessons, review pipeline
 
 ## Session Closeout
-
-File a Session Report for every build/session before final response, even
-docs-only work. Use `nockcc_session_report_create` or
-`POST /api/sessions/reports/` with `session_id`, `agent_name`, `duration`,
-task/PR/message/decision counts, `handoff_written`, standing-order pass/total
-counts, concise notes, and 2-5 highlights. Include `nocklock` in the session
-id or notes so NockCC can trace the report back to this repo.
+File a Session Report for every build/session before the final response, even docs-only work. Use `nockcc_session_report_create` or `POST /api/sessions/reports/` with `session_id`, `agent_name`, `duration`, task/PR/message/decision counts, `handoff_written`, standing-order pass/total counts, concise notes, and 2-5 highlights. Include `nocklock` in the session id or notes.
 
 ## Pre-Push Checklist
-1. `go test ./... -v`: all tests pass
-2. `go vet ./...`: no warnings
-3. `go fmt ./...`: code formatted
-4. Self-review for: hardcoded secrets, path traversal, race conditions, subprocess injection
-5. Review pipeline complete (see `.claude/review/PIPELINE.md`)
-6. CHANGELOG.md updated
-7. CLAUDE.md updated if structure changed
+1. `go test ./... -v`, `go vet ./...`, `go fmt ./...` clean
+2. Self-review for hardcoded secrets, path traversal, race conditions, subprocess injection
+3. Review pipeline complete (`.claude/review/PIPELINE.md`)
+4. `CHANGELOG.md` updated; this file and `docs/REPO-MAP.md` updated if structure changed

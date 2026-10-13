@@ -4,7 +4,7 @@
 usage: mcp_client.py <tool> <shutdown timeout seconds> -- <proxy argv...>
 Exit 0 only when the call reached the upstream (the upstream's executed marker
 came back); a call the firewall stopped exits 1. A breach is decided and printed
-the moment the reply arrives; trouble while shutting down afterwards cannot
+the moment the reply arrives; trouble while shutting down afterwards (a hang or a nonzero proxy exit) cannot
 change it. Exit 3 (no reply), 4 (shutdown failed on a stopped call) and 5
 (shutdown failed after the call executed: still a breach) are HARNESS-FAULTs,
 never a block. Blocking reads are bounded by the caller's single deadline
@@ -45,7 +45,8 @@ executed = "UPSTREAM-EXECUTED" in json.dumps(reply)
 print("tools/call %s -> %s" % (tool, "EXECUTED" if executed else "STOPPED"), flush=True)
 try:
     p.stdin.close()  # EOF lets the proxy write its last signed trail entry and exit
-    p.wait(timeout=timeout)
+    if p.wait(timeout=timeout) != 0:
+        raise OSError("proxy exited %d" % p.returncode)
 except (OSError, subprocess.TimeoutExpired) as e:
     p.kill()
     p.wait()
