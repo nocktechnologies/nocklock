@@ -58,6 +58,9 @@ jobs:
       - name: test
         run: go test ./... -count=1
 
+      - name: concurrent proxy stop race regression
+        run: go test -race -run '^TestProxyStopConcurrent$' -count=20 ./internal/fence/network
+
       - name: netns proxy shutdown race regression
         run: go test -race -count=20 ./internal/fence/network/netns/...
 
