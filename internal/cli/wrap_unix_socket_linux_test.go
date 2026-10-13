@@ -14,6 +14,7 @@ import (
 	"runtime"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -117,10 +118,10 @@ func state(connected bool) string {
 }
 `
 
-// TestWrapConfinedUnixSocketReachability exercises the real Linux wrapper with
+// TestWrapUnixSocketReachability exercises the real Linux wrapper with
 // throwaway pathname and abstract listeners. Below ABI 9, default wrap must run
 // with a signed reachable-socket boundary; ABI 9+ must block both listeners.
-func TestWrapConfinedUnixSocketReachability(t *testing.T) {
+func TestWrapUnixSocketReachability(t *testing.T) {
 	if !syscallfence.Supported() {
 		t.Skip("seccomp-BPF is unavailable for the CONFINED egress probe")
 	}
@@ -136,17 +137,15 @@ func TestWrapConfinedUnixSocketReachability(t *testing.T) {
 	if _, err := exec.LookPath("gcc"); err != nil {
 		t.Skipf("gcc unavailable for the filesystem interposer: %v", err)
 	}
-	abi, err := landlock.DetectABI()
-	if err != nil {
-		t.Fatalf("detect Landlock ABI: %v", err)
-	}
+	abi, abiErr := landlock.DetectABI()
+	_, boundaryReason := unixSocketBoundaryStatus(abi, abiErr)
 	bin, projectDir, probePath := buildUnixSocketWrapFixture(t)
 	listeners, stopServers := startThrowawayUnixSocketServers(t)
 	defer stopServers()
 	proveThrowawaySocketControls(t, listeners)
-	targetRequests := make(chan struct{}, 1)
+	var targetRequests atomic.Int32
 	target := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		targetRequests <- struct{}{}
+		targetRequests.Add(1)
 		_, _ = io.WriteString(w, "unexpectedly reached test target")
 	}))
 	defer target.Close()
@@ -156,6 +155,7 @@ func TestWrapConfinedUnixSocketReachability(t *testing.T) {
 	if err != nil {
 		t.Fatalf("read fixture config: %v", err)
 	}
+	var probeRan, reachableSubtestRan, strictRefusalSubtestRan bool
 
 	runWrap := func(t *testing.T, linuxEnforcement string, requireUnixSocketIsolation bool) ([]byte, error) {
 		t.Helper()
@@ -183,24 +183,27 @@ func TestWrapConfinedUnixSocketReachability(t *testing.T) {
 		if abi >= landlock.MinUnixSocketABI {
 			t.Skipf("not run: Landlock ABI %d >= 9", abi)
 		}
+		probeRan = true
+		reachableSubtestRan = true
 		output, err := runWrap(t, "preferred", false)
 		if err != nil {
 			t.Fatalf("default CONFINED wrap failed on Landlock ABI v%d: %v\n%s", abi, err, output)
 		}
-		if !strings.Contains(string(output), "WARNING: Landlock ABI v") || !strings.Contains(string(output), "reason=landlock_abi_") {
+		if !strings.Contains(string(output), "NockLock: WARNING:") || !strings.Contains(string(output), "reason="+boundaryReason) {
 			t.Fatalf("default reachable-socket warning is missing its ABI reason:\n%s", output)
 		}
 		if got := strings.Count(string(output), "NockLock: WARNING:"); got != 1 {
 			t.Fatalf("default reachable-socket posture printed %d warning lines, want exactly one:\n%s", got, output)
 		}
 		assertSocketProbeOutput(t, output, "path=CONNECTED", "abstract=CONNECTED", "event=CONNECTED", "proxy=CONNECTED", "lookback=403", "inet=DENIED")
-		assertReachableUnixSocketAudit(t, bin, projectDir, abi)
+		assertReachableUnixSocketAudit(t, bin, projectDir, boundaryReason)
 	})
 
 	t.Run("strict config refuses below ABI 9", func(t *testing.T) {
 		if abi >= landlock.MinUnixSocketABI {
 			t.Skipf("not run: Landlock ABI %d >= 9", abi)
 		}
+		strictRefusalSubtestRan = true
 		output, err := runWrap(t, "preferred", true)
 		if err == nil {
 			t.Fatalf("strict CONFINED wrap ran on Landlock ABI v%d:\n%s", abi, output)
@@ -215,6 +218,7 @@ func TestWrapConfinedUnixSocketReachability(t *testing.T) {
 		if abi < landlock.MinUnixSocketABI {
 			t.Skipf("not run: Landlock ABI %d < 9", abi)
 		}
+		probeRan = true
 		output, err := runWrap(t, "preferred", false)
 		if err != nil {
 			t.Fatalf("CONFINED wrap failed on Landlock ABI v%d: %v\n%s", abi, err, output)
@@ -226,6 +230,7 @@ func TestWrapConfinedUnixSocketReachability(t *testing.T) {
 		if abi < landlock.MinUnixSocketABI {
 			t.Skipf("not run: Landlock ABI %d < 9", abi)
 		}
+		probeRan = true
 		output, err := runWrap(t, "off", false)
 		if err != nil {
 			t.Fatalf("socket-only CONFINED wrap failed on Landlock ABI v%d: %v\n%s", abi, err, output)
@@ -233,26 +238,26 @@ func TestWrapConfinedUnixSocketReachability(t *testing.T) {
 		assertSocketProbeOutput(t, output, "path=DENIED", "abstract=DENIED", "event=CONNECTED", "proxy=CONNECTED", "lookback=403", "inet=DENIED", "Unix-socket isolation active")
 	})
 
-	select {
-	case <-targetRequests:
-		t.Fatal("proxy forwarded a request to the throwaway target after a filesystem look-back trigger")
-	default:
+	if got := targetRequests.Load(); got != 0 {
+		t.Fatalf("proxy forwarded %d request(s) to the throwaway target after a filesystem look-back trigger", got)
 	}
 
 	accepted := stopServers()
-	if abi < landlock.MinUnixSocketABI {
+	if probeRan && abi < landlock.MinUnixSocketABI {
 		for _, record := range []string{"path:probe-path", "abstract:probe-abstract"} {
 			if !accepted[record] {
 				t.Errorf("below-ABI negative control listener did not receive %q: %v", record, accepted)
 			}
 		}
-	} else if accepted["path:probe-path"] || accepted["abstract:probe-abstract"] {
+	} else if probeRan && (accepted["path:probe-path"] || accepted["abstract:probe-abstract"]) {
 		t.Fatalf("Landlock allowed an external socket payload: %v", accepted)
 	}
-	assertUnixSocketProbeAuditEvents(t, projectDir, abi)
+	if probeRan || strictRefusalSubtestRan {
+		assertUnixSocketProbeAuditEvents(t, projectDir, boundaryReason, probeRan, reachableSubtestRan, strictRefusalSubtestRan)
+	}
 }
 
-func assertReachableUnixSocketAudit(t *testing.T, bin, projectDir string, abi int) {
+func assertReachableUnixSocketAudit(t *testing.T, bin, projectDir, boundaryReason string) {
 	t.Helper()
 	configPath := filepath.Join(projectDir, ".nock", "config.toml")
 	cfg, err := config.Load(configPath)
@@ -276,7 +281,7 @@ func assertReachableUnixSocketAudit(t *testing.T, bin, projectDir string, abi in
 	if err := logger.Close(); err != nil {
 		t.Fatalf("close fixture audit log: %v", err)
 	}
-	reason := fmt.Sprintf("unix_sockets=reachable reason=landlock_abi_%d_below_9", abi)
+	reason := fmt.Sprintf("unix_sockets=reachable reason=%s", boundaryReason)
 	found := false
 	for _, event := range events {
 		if event.EgressLevel == string(egressLevelConfined) && strings.Contains(event.Detail, reason) {
@@ -459,7 +464,7 @@ func assertSocketProbeOutput(t *testing.T, output []byte, expected ...string) {
 	}
 }
 
-func assertUnixSocketProbeAuditEvents(t *testing.T, projectDir string, abi int) {
+func assertUnixSocketProbeAuditEvents(t *testing.T, projectDir, boundaryReason string, probeRan, reachableSubtestRan, strictRefusalSubtestRan bool) {
 	t.Helper()
 	configPath := filepath.Join(projectDir, ".nock", "config.toml")
 	cfg, err := config.Load(configPath)
@@ -483,7 +488,7 @@ func assertUnixSocketProbeAuditEvents(t *testing.T, projectDir string, abi int) 
 	lookbackDenied := false
 	reachableSessionRecorded := false
 	strictRefusalRecorded := false
-	reason := fmt.Sprintf("unix_sockets=reachable reason=landlock_abi_%d_below_9", abi)
+	reason := fmt.Sprintf("unix_sockets=reachable reason=%s", boundaryReason)
 	for _, event := range events {
 		if event.EventType == logging.EventFileBlocked && event.Blocked && strings.Contains(event.Detail, "/n11660-outside") {
 			fileTriggerRecorded = true
@@ -498,11 +503,14 @@ func assertUnixSocketProbeAuditEvents(t *testing.T, projectDir string, abi int) 
 			strictRefusalRecorded = true
 		}
 	}
-	if !fileTriggerRecorded || !lookbackDenied {
+	if probeRan && (!fileTriggerRecorded || !lookbackDenied) {
 		t.Fatalf("filesystem event socket did not trigger and audit look-back enforcement; file trigger=%t look-back denial=%t events=%+v", fileTriggerRecorded, lookbackDenied, events)
 	}
-	if abi < landlock.MinUnixSocketABI && (!reachableSessionRecorded || !strictRefusalRecorded) {
-		t.Fatalf("below-ABI session-start reachability row and strict refusal must be audited; reachable=%t strict refusal=%t events=%+v", reachableSessionRecorded, strictRefusalRecorded, events)
+	if reachableSubtestRan && !reachableSessionRecorded {
+		t.Fatalf("below-ABI session-start reachability row must be audited; reachable=%t events=%+v", reachableSessionRecorded, events)
+	}
+	if strictRefusalSubtestRan && !strictRefusalRecorded {
+		t.Fatalf("strict below-ABI refusal must be audited; strict refusal=%t events=%+v", strictRefusalRecorded, events)
 	}
 	verified, err := logger.VerifyChain()
 	if err != nil || !verified.Intact || verified.SignedEntries == 0 {
