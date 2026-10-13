@@ -14,6 +14,8 @@ All notable changes to NockLock will be documented in this file.
 
 ### Documentation
 
+- Linux source-install docs now say where `libfence_fs.so` must be placed (`findTrustedLibFenceFS`, `internal/cli/wrap.go`); `verify --audit` exit codes per verdict, secret-preflight platform build tags, and the CONFINED socket-family override are documented from code (N11689).
+
 - README: macOS denied-file logging now has one statement (best-effort `file_blocked` tailer); new "What the signed log proves" section on observation coverage (N11642).
 
 ## [0.8.0] - 2026-10-13

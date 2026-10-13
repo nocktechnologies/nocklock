@@ -12,7 +12,7 @@ To require it on every launch, set `secrets.scan_env`, `scan_paths` and optional
 - Point-in-time. It does not redact reads, watch agent context, or stop files changing after the scan.
 - Bounded (1 MiB per file or value, 32 MiB total, 10,000 entries, 64 levels). Exceeding a bound, a symlink, an unreadable path or a detected concurrent change makes the scan *incomplete*, which is a failure, not a skip.
 - No implicit exclusions: hidden and binary files are scanned and ignore files are not read.
-- Safe opens are Linux and macOS (`scan_open_unix.go`, `scan_open_other.go`).
+- Safe opens are built for Linux and macOS only (`//go:build linux || darwin` in `scan_open_unix.go`). Every other platform builds `scan_open_other.go` (`//go:build !linux && !darwin`), which does not get them.
 
 ## Tests
 `internal/fence/secrets/scan_test.go`, `scan_unix_test.go`, `internal/cli/scan_test.go`, `internal/config/scan_test.go`.

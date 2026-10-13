@@ -23,7 +23,7 @@ nocklock init
 nocklock wrap -- claude
 ```
 
-Four commands and your agent is fenced. On macOS that is the whole install. On Linux the Homebrew formula builds only the `nocklock` binary, and the default config's `wrap` refuses to start without `libfence_fs.so`, so build from source with `make build-all` (see Installation) until packaging lands.
+Four commands and your agent is fenced. On macOS that is the whole install. On Linux the Homebrew formula builds only the `nocklock` binary, and the default config's `wrap` refuses to start without `libfence_fs.so`, so a source build also needs `libfence_fs.so` placed by hand (see `docs/setup.md`) until packaging lands (N11643).
 
 **macOS and Claude Code:** Claude Code keeps a `claude.ai` login in the macOS login keychain, and the fence denies `~/Library/Keychains` (Seatbelt cannot scope to one keychain item, so NockLock does not open it). The login has to arrive through the environment, and the default secret fence blocks `*_TOKEN*`, so plain `nocklock init` strips an exported `CLAUDE_CODE_OAUTH_TOKEN`. Use the `claude-code` preset:
 
@@ -452,7 +452,7 @@ Two candidate runtimes are deliberately left without a preset:
 brew install nocktechnologies/tap/nocklock
 ```
 
-On Linux the formula installs only the `nocklock` binary, not `libfence_fs.so`; build from source with `make build-all` until packaging lands.
+On Linux the formula installs only the `nocklock` binary, not `libfence_fs.so`; build from source and place `libfence_fs.so` by hand (see `docs/setup.md`) until packaging lands (N11643).
 
 ### From source
 

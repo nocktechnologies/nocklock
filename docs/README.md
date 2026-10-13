@@ -15,6 +15,6 @@
 | Platform probe records | `probes/` |
 
 ## Rules for these pages
-- Cite code as `path:line` at a stated commit, or match `README.md` / `CHANGELOG.md`. Do not describe a feature the code does not have.
+- Cite code by file path at a stated commit, no line numbers (they go stale), or match `README.md` / `CHANGELOG.md`. Do not describe a feature the code does not have.
 - State limits next to the claim, not in a footnote.
 - Update the page in the same change that alters the behavior; note it in `CHANGELOG.md`.
