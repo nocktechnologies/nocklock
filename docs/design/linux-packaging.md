@@ -289,28 +289,34 @@ PY
 printf 'ACCEPTED; evidence: %s\n' "$fixture"
 ```
 
-Linux driver, after signature/checksum/archive validation above and extraction
-into a fresh staging directory (the two install scripts below are proposed):
+Linux acceptance has two separate roles. The provision step runs once on the
+clean Ubuntu 24.04 VM as root (`sudo bash provision.sh`, from an admin account).
+It is the only place with privileged installs. The acceptance driver then runs
+as the dedicated test user and makes no privileged installs at all. Both are
+proposed, as are the two install scripts they call, and both follow
+signature/checksum/archive validation above and extraction into a fresh
+staging directory.
+
+Provision step (root, admin account):
 
 ```bash
 #!/usr/bin/env bash
 set -euo pipefail
 test "$(uname -s)" = Linux
 test "$(uname -m)" = x86_64
-test "$(id -u)" -ne 0
-# Prerequisites on the clean Ubuntu 24.04 VM; use its signed package repository.
-sudo apt-get update
-sudo apt-get install -y iproute2 nftables sudo python3
+test "$(id -u)" -eq 0
 : "${VERIFIED_PACKAGE_DIR:?Root-controlled verified extracted release directory}"
-: "${ACCEPT_SCRIPT:?Absolute path to the common acceptance body}"
-# Resolve once; every later use takes ONLY the resolved path $pkg, never the
-# original $VERIFIED_PACKAGE_DIR. Fail closed unless the directory and every
-# parent up to / are owned by root and not group- or other-writable, and each
-# script sudo will run is a regular file (not a symlink) with the same
-# ownership and mode. The check-then-use is safe only because the whole path is
-# root-owned end to end: no non-root user can swap a component between the
-# check and the sudo run. Remaining limit: a root-writable parent (or a root
-# process) could still race it; the VM acceptance run has no such writer.
+: "${TEST_USER:?Name of the new dedicated unprivileged test user}"
+# Prerequisites on the clean VM; use its signed package repository.
+apt-get update
+apt-get install -y iproute2 nftables sudo python3
+# Resolve once; every later use takes ONLY the resolved path $pkg. Fail closed
+# unless the directory and every parent up to / are owned by root and not
+# group- or other-writable, and each script run below is a regular file (not a
+# symlink) with the same ownership and mode. Check-then-use is safe only because
+# the whole path is root-owned end to end, so no non-root user can swap a
+# component between the check and the run. Remaining limit: a root-writable
+# parent (or a root process) could still race it; the VM has no such writer.
 pkg=$(realpath -e -- "$VERIFIED_PACKAGE_DIR")
 d=$pkg
 while :; do
@@ -321,44 +327,62 @@ while :; do
   d=$(dirname -- "$d")
 done
 for f in install.sh install-egress-helper.sh; do
-  test -f "$pkg/$f" && test ! -L "$pkg/$f" || { echo "not a regular file: $pkg/$f" >&2; exit 1; }
+  test -f "$pkg/$f" && test ! -L "$pkg/$f" \
+    || { echo "not a regular file: $pkg/$f" >&2; exit 1; }
   read -r owner mode < <(stat -c '%u %a' -- "$pkg/$f")
   test "$owner" = 0 && test $((8#$mode & 8#022)) -eq 0 \
     || { echo "untrusted script: $pkg/$f" >&2; exit 1; }
 done
-sudo "$pkg/install.sh"
-sudo "$pkg/install-egress-helper.sh" --user "$(id -un)"
-# Narrow-rule proof. Precondition: this user has NO sudo grant except the
-# nocklock egress-helper drop-in. Stock cloud images ship a blanket NOPASSWD
-# rule that would make every check below pass without proving ours, so the
-# install steps above must run from a separate admin account (or the broad
-# grant must be removed before this point). Remove any cached ticket first.
-sudo -k
-listing=$(sudo -n -l) || { echo "sudo -l failed" >&2; exit 1; }
-printf '%s\n' "$listing" > "${EVIDENCE_DIR:?Evidence directory}/sudo-l.txt"
-# Fail on any blanket or foreign grant.
-if printf '%s\n' "$listing" | grep -Eq '\(ALL( : ALL)?\) +(NOPASSWD: *)?ALL([[:space:]]|$)'; then
-  echo "blanket sudo grant present; test user is not narrow" >&2; exit 1
+# The test user must be new, so it cannot inherit a blanket grant from a stock
+# cloud-image rule or from the sudo or admin groups. Refuse an existing name.
+if id -u -- "$TEST_USER" >/dev/null 2>&1; then
+  echo "test user already exists: $TEST_USER" >&2; exit 1
 fi
-# sudo -l joins commands with commas, so split them one per line. Every
-# command entry must be the egress helper; the helper entries must exist.
-entries=$(printf '%s\n' "$listing" | sed -n '/may run the following commands/,$p' | tail -n +2 \
+useradd --create-home --shell /bin/bash -- "$TEST_USER"
+"$pkg/install.sh"
+"$pkg/install-egress-helper.sh" --user "$TEST_USER"
+# Fail closed unless the helper drop-in is the user's only sudo grant.
+listing=$(sudo -l -U "$TEST_USER")
+if printf '%s\n' "$listing" | grep -Eq '\(ALL( : ALL)?\) +(NOPASSWD: *)?ALL([[:space:]]|$)'; then
+  echo "blanket sudo grant for $TEST_USER" >&2; exit 1
+fi
+printf 'Provisioned %s; run the acceptance driver as that user.\n' "$TEST_USER"
+```
+
+Acceptance driver (run as the test user, no privileged installs):
+
+```bash
+#!/usr/bin/env bash
+set -euo pipefail
+test "$(uname -s)" = Linux
+test "$(uname -m)" = x86_64
+test "$(id -u)" -ne 0
+# Evidence directory comes first, before anything else runs.
+: "${EVIDENCE_DIR:?Absolute path for the evidence directory}"
+: "${ACCEPT_SCRIPT:?Absolute path to the common acceptance body}"
+mkdir -p -- "$EVIDENCE_DIR"
+# Drop any cached sudo ticket, then record what this user may run.
+sudo -k
+sudo -n -l > "$EVIDENCE_DIR/sudo-l.txt"
+# sudo -l joins commands with commas. Split them one per line, then fail closed
+# unless every listed command is under the egress helper and both helper
+# entries exist.
+entries=$(sed -n '/may run the following commands/,$p' "$EVIDENCE_DIR/sudo-l.txt" \
+  | tail -n +2 \
   | sed -E 's/^[[:space:]]*(\([^)]*\)[[:space:]]*)?(NOPASSWD:[[:space:]]*)?//' \
   | sed -E 's|, (/)|\n\1|g' | grep -v '^$')
-printf '%s\n' "$entries" | grep -qx '/usr/libexec/nocklock-egress-helper check'
-printf '%s\n' "$entries" | grep -q '^/usr/libexec/nocklock-egress-helper setup --request-file '
-if printf '%s\n' "$entries" | grep -v '^/usr/libexec/nocklock-egress-helper ' | grep -q .; then
+printf '%s\n' "$entries" > "$EVIDENCE_DIR/sudo-entries.txt"
+grep -qx '/usr/libexec/nocklock-egress-helper check' "$EVIDENCE_DIR/sudo-entries.txt"
+grep -q '^/usr/libexec/nocklock-egress-helper setup --request-file ' \
+  "$EVIDENCE_DIR/sudo-entries.txt"
+if grep -v '^/usr/libexec/nocklock-egress-helper ' "$EVIDENCE_DIR/sudo-entries.txt" | grep -q .; then
   echo "foreign sudo entry present" >&2; exit 1
 fi
 # Negative control: an unrelated command must be refused without a password.
 if sudo -n /usr/bin/true 2>/dev/null; then
   echo "negative control failed: sudo -n /usr/bin/true succeeded" >&2; exit 1
 fi
-# Functional check after the proof.
- With a cached admin credential, `sudo -n`
-# succeeds without the new rule; after `sudo -k` it passes only if the
-# NOPASSWD drop-in installed above grants this exact helper verb.
-sudo -k
+# Functional check, after the proof, with no cached ticket.
 sudo -n /usr/libexec/nocklock-egress-helper check
 NOCKLOCK_BIN=/usr/local/bin/nocklock TEST_PYTHON=/usr/bin/python3 \
   TEST_NET_MODE=proxy EXPECTED_EGRESS=CONFINED bash "$ACCEPT_SCRIPT"
@@ -367,10 +391,10 @@ NOCKLOCK_BIN=/usr/local/bin/nocklock TEST_PYTHON=/usr/bin/python3 \
 ```
 
 The test dependency list must be kept consistent with installer preflight;
-`su` and `visudo` must also be present. The helper `check` verb is the one the sudoers rule names, and the
-installer preflight runs it as the target user for the same reason. Before
-publishing, also repeat the check from a fresh login session with no cached sudo
-ticket. The common body asserts the
+`su` and `visudo` must also be present. The helper `check` verb is the one the
+sudoers rule names, and the installer preflight runs it as the target user for
+the same reason. The `sudo -l` listing plus the failed `/usr/bin/true` control
+prove the rule is narrow; a blanket grant would pass `check` alone. The common body asserts the
 effective signed session level is CONFINED for proxy mode and KERNEL for netns.
 Doctor is run before each test. On Linux below Landlock ABI 9, v0.9.x returns
 PARTIAL (exit 3); the script accepts only the Unix-socket unavailability with
