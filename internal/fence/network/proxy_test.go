@@ -27,7 +27,12 @@ func makeProxy(allowList []string) *ProxyServer {
 // releasing it while a health probe may still be running.
 func boundUnlisteningTCP(t *testing.T) string {
 	t.Helper()
+	syscall.ForkLock.RLock()
 	fd, err := syscall.Socket(syscall.AF_INET, syscall.SOCK_STREAM, 0)
+	if err == nil {
+		syscall.CloseOnExec(fd)
+	}
+	syscall.ForkLock.RUnlock()
 	if err != nil {
 		t.Fatalf("create dead proxy socket: %v", err)
 	}
@@ -453,6 +458,23 @@ func TestWaitForProxyReadyFailsClosedPort(t *testing.T) {
 	addr := boundUnlisteningTCP(t)
 	if err := WaitForProxyReady(t.Context(), addr, 75*time.Millisecond); err == nil {
 		t.Fatal("WaitForProxyReady() should fail for a refused connection")
+	}
+}
+
+func TestWaitForProxyReadyFailsUnresponsiveProxy(t *testing.T) {
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+	defer ln.Close() // Keep the unanswered endpoint reserved through the probe.
+
+	const timeout = 150 * time.Millisecond
+	start := time.Now()
+	if err := WaitForProxyReady(t.Context(), ln.Addr().String(), timeout); err == nil {
+		t.Fatal("WaitForProxyReady() should time out when the proxy never answers")
+	}
+	if elapsed := time.Since(start); elapsed < timeout/2 || elapsed > time.Second {
+		t.Fatalf("WaitForProxyReady() elapsed = %s, want a timeout near %s", elapsed, timeout)
 	}
 }
 
