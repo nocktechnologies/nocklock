@@ -46,15 +46,16 @@ Without the helper the netns fence fails closed. Skip this step if you only use 
 
 ```bash
 cd your-project
-nocklock init                 # writes .nock/config.toml with safe defaults
-nocklock wrap -- claude       # or any agent CLI
+nocklock init --runtime claude-code   # choose your agent
+# Configure the agent credential below, then:
+nocklock wrap -- claude
 ```
 
-Pick a preset instead of the generic defaults with `nocklock init --runtime <name>` (`claude-code`, `codex`, `aider`, `gemini-cli`, `opencode`, `goose`; list them with `nocklock wrap --profile list`). `init` never overwrites an existing `.nock/config.toml`.
+Choose a runtime preset with `nocklock init --runtime <name>` (`claude-code`, `codex`, `aider`, `gemini-cli`, `opencode`, `goose`; list them with `nocklock wrap --profile list`). `init` never overwrites an existing `.nock/config.toml`. For an existing project, run `nocklock init --runtime <name> --diff`, review the changes, and edit the config. Use plain `nocklock init` for a generic command that needs no provider credentials.
 
 `nocklock wrap --dry-run` validates the config without starting any fence or command. `nocklock validate [path]` prints the effective policy.
 
-**Claude Code on macOS**: the fence denies `~/Library/Keychains`, so the login must arrive through the environment. Run `claude setup-token`, export `CLAUDE_CODE_OAUTH_TOKEN` (or `ANTHROPIC_API_KEY`), and use `nocklock init --runtime claude-code`. See the README note under Quick start.
+**Claude Code on macOS**: the fence denies `~/Library/Keychains`, so the login must arrive through the environment. Run `claude setup-token`, export `CLAUDE_CODE_OAUTH_TOKEN` (or `ANTHROPIC_API_KEY`), and initialize with the `claude-code` preset as above. For an existing config, use `--diff` and apply the reviewed changes before launching. See the README note under Quick start.
 
 ## 3. Verify
 
@@ -66,6 +67,8 @@ Pick a preset instead of the generic defaults with `nocklock init --runtime <nam
 | Egress helper (Linux netns) | `sudo -n /usr/libexec/nocklock-egress-helper check` | prints nothing, exit 0 |
 | Audit log intact | `nocklock verify --audit` | `AUTHENTIC` (signed and checked against the local managed key or `--ed25519-pub`), or `CONSISTENT` (chain intact; unsigned, or signed with no key available to check it); see `docs/how-it-works/audit-log.md` |
 | What was blocked | `nocklock log --blocked`, `nocklock status` | per-session blocked events |
+
+On Linux `CONFINED` below Landlock ABI 9, `doctor` returns `PARTIAL` (exit 3) because other Unix sockets remain reachable. Default `wrap` warns and runs; set `network.require_unix_socket_isolation = true` to refuse instead. The ABI 9 enforcement branch still needs real-kernel validation.
 
 `wrap` prints and signs the effective egress level each session (`KERNEL`, `CONFINED`, `SEATBELT`, `ADVISORY`, `OFF`, `UNREACHABLE`). Read it: `ADVISORY` means a client that ignores `HTTP_PROXY` can reach any host. Set `network.require_enforced = true` or pass `--require-enforced-egress` to refuse such levels (`docs/how-it-works/network-fence.md`).
 

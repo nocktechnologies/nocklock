@@ -1,6 +1,6 @@
-# CLI, exit codes and config schema (current 0.8.0 behavior)
+# CLI, exit codes and config schema (current 0.9.0 behavior)
 
-This page records what the code does at `origin/main` 89c02fa. It is **not yet a compatibility promise**. Making it one is the fourth bar for 1.0 (`docs/ROADMAP.md`); until then, anything here can change in a minor release with a `CHANGELOG.md` "Breaking" entry.
+This page records what the code does at `v0.9.0` (`f2b0d04`). It is **not yet a compatibility promise**. Making it one is the fourth bar for 1.0 (`docs/ROADMAP.md`); until then, anything here can change in a minor release with a `CHANGELOG.md` "Breaking" entry.
 
 ## Commands
 Registered in `internal/cli/` (one file per command). `README.md` "Commands" has the user-facing table.
@@ -40,12 +40,14 @@ Strict: unknown keys are a load error (`internal/config/config.go`). Structs at 
 |---|---|
 | `[project]` | `name`, `root` |
 | `[filesystem]` | `root`, `mode` (`read-write`, `read-only`), `linux_enforcement` (`required`, `preferred`, `off`), `allow`, `allow_rw`, `deny`, `hardened`; `macos_allow_unfenced` (only `false` loads) |
-| `[network]` | `allow`, `allow_all`, `allow_private_ranges`, `require_enforced`, `[[network.lookback]]` (`name`, `on`, `within`, `then`) |
+| `[network]` | `allow`, `allow_all`, `allow_private_ranges`, `require_enforced`, `require_unix_socket_isolation`, `[[network.lookback]]` (`name`, `on`, `within`, `then`) |
 | `[syscall]` | `enforcement` (`required`, `preferred`, `off`), `allow_namespaces`, `socket_families`, `extra_deny` |
 | `[secrets]` | `pass`, `block`, `scan_env`, `scan_paths`, `scan_env_allow` |
 | `[logging]` | `db`, `level` |
 | `[audit.forward]` | `enabled`, `url`, `api_key_env` (the operator environment must supply the matching URL and key; README "Forward fence decisions") |
-| `[cloud]` | `enabled`, `api_key`, `endpoint` |
+| `[cloud]` | Legacy settings: `enabled`, `api_key`, `endpoint`. An enabled section without a key fails validation; with a key it is accepted but sends nothing. Use `[audit.forward]` for delivery |
+
+`network.require_unix_socket_isolation = true` requires Linux `CONFINED` egress with Landlock ABI 9 or later; `wrap` refuses other modes or unavailable enforcement. Without it, `CONFINED` below ABI 9 warns, records Unix sockets as reachable, and `doctor` returns `PARTIAL` (exit 3). The ABI 9 enforcement branch has not yet run on a real kernel.
 
 Runtime presets (`internal/config/presets/*.toml`) use the same schema. Profile overlays may only tighten a base profile (`wrap.go`).
 

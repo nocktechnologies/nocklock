@@ -1,6 +1,6 @@
 # Network fence
 
-Citations name source files at `origin/main` 89c02fa (no line numbers, so they do not go stale). The boundary table and limits follow `README.md` ("What network fence active means").
+Citations name source files at `v0.9.0` (`f2b0d04`) (no line numbers, so they do not go stale). The boundary table and limits follow `README.md` ("What network fence active means").
 
 ## Default: local proxy with a domain allowlist
 `wrap` starts a local HTTP/HTTPS proxy (`internal/cli/wrap.go`, `internal/fence/network/proxy.go`) and routes the child through it. Hostnames are checked against `network.allow`; blocked requests get a 403 and a `network_blocked` row. For HTTPS only the hostname is inspected (CONNECT, `internal/fence/network/connect.go`): no certificate injection and no decryption. Private ranges are blocked unless `--allow-private-ranges` (`proxy.go`). If the proxy is not healthy, the agent does not start.
@@ -11,7 +11,7 @@ The level is computed once by `effectiveEgressLevel` (`internal/cli/egress_level
 | Level | Boundary |
 |---|---|
 | `KERNEL` | Linux `--net-fence=netns`: network namespace, nftables default-drop floor, transparent HTTP(S) and DNS allowlist |
-| `CONFINED` | Linux proxy mode with syscall enforcement and the interposer bridge: direct AF_INET/AF_INET6 socket creation is denied and the proxy bridge uses a Unix socket; other pathname and abstract Unix sockets accessible to the user remain reachable |
+| `CONFINED` | Linux proxy mode with syscall enforcement and the interposer bridge: direct AF_INET/AF_INET6 socket creation is denied and the proxy bridge uses a Unix socket; below Landlock ABI 9, other pathname and abstract Unix sockets accessible to the user remain reachable. ABI 9 rules restrict them, but have not yet run on a real kernel |
 | `SEATBELT` | macOS proxy with a Seatbelt kernel floor (needs `filesystem.root`) |
 | `ADVISORY` | Proxy only; a client that ignores `HTTP_PROXY` reaches any host |
 | `OFF` | `network.allow_all = true` |
@@ -31,7 +31,7 @@ With the network fence active the profile denies `network-outbound` except TCP t
 ## Honest limits
 - `ADVISORY` is advisory. Read the banner.
 - Hostname checks only: a permitted host can still receive anything the agent sends it.
-- `CONFINED` blocks direct IP socket creation, but does not restrict AF_UNIX destinations. The child can connect to other pathname and abstract Unix sockets accessible to its user, which may reach local services outside the domain allowlist (`docs/design/unix-socket-reachability.md`). The `io_uring` syscall path is denied as of v0.8.0 (`internal/fence/syscallfence/denylist.go`). The Unix-socket gap remains tracked in N11660 and `docs/ROADMAP.md`.
+- Below Landlock ABI 9, `CONFINED` blocks direct IP socket creation but leaves other pathname and abstract Unix sockets reachable. Default `wrap` warns and signs that limitation; `doctor` returns `PARTIAL` (exit 3). `network.require_unix_socket_isolation = true` refuses launch unless Linux `CONFINED` can enforce the ABI 9 rules. Those rules allow only the exact proxy and filesystem event sockets and scope abstract sockets; they have not yet run on a real kernel. See [the Unix-socket design](../design/unix-socket-reachability.md), `internal/cli/unix_socket_policy.go`, and `internal/fence/fs/landlock/`. The `io_uring` syscall path is denied as of v0.8.0 (`internal/fence/syscallfence/denylist.go`).
 - macOS: `sandbox-exec` is deprecated; reads outside the root are unconfined; with `filesystem.root = ""` there is no profile and egress is `ADVISORY`; `/etc/hosts` lookups stay allowed; resolver services not on the Mach deny list are not claimed closed. Windows has no network fence.
 - Look-back rules never see static binaries, raw syscalls, or a cleared `LD_PRELOAD`.
 
