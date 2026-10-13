@@ -10,6 +10,7 @@ All notable changes to NockLock will be documented in this file.
 
 ### Security
 
+- Linux CONFINED io_uring regression test: bound probe subprocesses, kill their process groups on timeout, skip runners missing `linux/io_uring.h`, and distinguish setup ENOSYS from `IORING_OP_SOCKET` failure.
 - Clarify that Linux `CONFINED` currently does not restrict AF_UNIX destinations. A non-root probe confirmed that a wrapped child can connect to both a throwaway pathname socket and a throwaway abstract socket while a direct AF_INET datagram socket syscall is denied. The design and probe are in `docs/design/unix-socket-reachability.md` and `docs/probes/n11650/`.
 
 ### Changed

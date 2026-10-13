@@ -119,7 +119,7 @@ int main(int argc, char **argv) {
     int socket_result = submit_one(&ring, &sqe);
     if (socket_result < 0) {
         printf("socket=-1 errno=%d (%s)\n", -socket_result, strerror(-socket_result));
-        return 11;
+        return 14; /* Distinct from setup ENOSYS (11). */
     }
     printf("socket=%d errno=0\n", socket_result);
 
