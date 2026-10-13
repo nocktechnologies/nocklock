@@ -4,6 +4,10 @@ All notable changes to NockLock will be documented in this file.
 
 ## [Unreleased]
 
+### Changed
+
+- Look-back race test: the POST target records how each request body ended and counts a bodyless request apart from a finished body; new `TestLookbackTripLeavesTargetBodyIncomplete` pins that a trip cuts Content-Length and chunked bodies. Test-only.
+
 ### Fixed
 
 - Linux netns: the concurrent subnet test now checks atomic reservation claims instead of random, unreserved bridge candidates; two processes also contend for one subnet in a regression test.
