@@ -165,6 +165,33 @@ func generateProfile(sensitivePaths []string, hardened bool, writePaths []string
 		b.WriteString("   " + msg + "\n")
 	}
 	b.WriteString(")\n")
+	// Seatbelt subpath rules follow path names, not inodes. Renaming a
+	// writable ancestor would move a protected tree outside its deny rule.
+	// Keep those ancestor entries fixed without denying ordinary writes to
+	// their other children (notably the rest of the project).
+	// Stop at the root (Dir(p) == p), whatever its spelling (C:\ on Windows).
+	ancestors := make(map[string]bool)
+	for _, c := range canonical {
+		for p := filepath.Dir(c); filepath.Dir(p) != p; p = filepath.Dir(p) {
+			ancestors[p] = true
+		}
+	}
+	if len(ancestors) > 0 {
+		paths := make([]string, 0, len(ancestors))
+		for p := range ancestors {
+			paths = append(paths, p)
+		}
+		sort.Strings(paths)
+		b.WriteString(";; Prevent renaming ancestors to bypass a sensitive subpath deny.\n")
+		b.WriteString("(deny file-write-unlink\n")
+		for _, p := range paths {
+			b.WriteString("    (literal " + sbplString(p) + ")\n")
+		}
+		if msg != "" {
+			b.WriteString("   " + msg + "\n")
+		}
+		b.WriteString(")\n")
+	}
 
 	if hardened {
 		b.WriteString(";; hardened = true: additive syscall-surface denials. This is\n")
