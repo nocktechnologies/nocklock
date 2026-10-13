@@ -8,6 +8,10 @@ All notable changes to NockLock will be documented in this file.
 
 - Document the current one-remote-anchor-identity-per-signing-key limit, its cross-project collision and workaround; specify a versioned per-chain identity and explicit legacy migration for the later protocol change (N11707).
 
+### Security
+
+- Linux netns proxy sidecars now clear supplementary groups process-wide before dropping to uid/gid 65534. Previously, `__netns-proxy` and `__netns-host-proxy` could retain the root launcher's supplementary groups on other Go threads. The affected source tags are v0.5.0 through v0.9.2.
+
 ### Fixed
 
 - Tests: hold dead proxy ports open until health probes finish, preventing parallel tests from reusing those ports and receiving stray `/healthz` requests (N11729).
