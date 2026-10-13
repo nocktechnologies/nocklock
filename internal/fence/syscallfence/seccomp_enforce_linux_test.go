@@ -523,13 +523,16 @@ func TestRunProbeCommandKillsProcessGroupOnTimeout(t *testing.T) {
 
 func TestMissingIoUringHeaderDiagnostic(t *testing.T) {
 	for name, diagnostic := range map[string]string{
-		"gcc":             "test.c:1:10: fatal error: linux/io_uring.h: No such file or directory",
-		"clang":           "test.c:1:10: fatal error: 'linux/io_uring.h' file not found",
+		"gcc":   "test.c:1:10: fatal error: linux/io_uring.h: No such file or directory",
+		"clang": "test.c:1:10: fatal error: 'linux/io_uring.h' file not found",
+		"included header missing": "In file included from test.c:4:\n" +
+			"/usr/include/linux/io_uring.h:15:10: fatal error: linux/time_types.h: No such file or directory",
 		"other header":    "test.c:1:10: fatal error: linux/types.h: No such file or directory",
 		"unrelated error": "test.c:1: expected expression",
 	} {
 		t.Run(name, func(t *testing.T) {
-			if got := missingIoUringHeader([]byte(diagnostic)); got != (name == "gcc" || name == "clang") {
+			want := name == "gcc" || name == "clang"
+			if got := missingIoUringHeader([]byte(diagnostic)); got != want {
 				t.Fatalf("missingIoUringHeader(%q) = %t", diagnostic, got)
 			}
 		})
@@ -537,9 +540,16 @@ func TestMissingIoUringHeaderDiagnostic(t *testing.T) {
 }
 
 func missingIoUringHeader(output []byte) bool {
-	diagnostic := string(output)
-	return strings.Contains(diagnostic, "linux/io_uring.h") &&
-		(strings.Contains(diagnostic, "No such file or directory") || strings.Contains(diagnostic, "file not found"))
+	for _, line := range strings.Split(string(output), "\n") {
+		if !strings.Contains(line, "fatal error:") {
+			continue
+		}
+		if strings.Contains(line, "linux/io_uring.h: No such file or directory") ||
+			strings.Contains(line, "'linux/io_uring.h' file not found") {
+			return true
+		}
+	}
+	return false
 }
 
 func runProbeCommand(ctx context.Context, executable string, args ...string) ([]byte, error) {
