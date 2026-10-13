@@ -328,7 +328,34 @@ for f in install.sh install-egress-helper.sh; do
 done
 sudo "$pkg/install.sh"
 sudo "$pkg/install-egress-helper.sh" --user "$(id -un)"
-# Drop the cached sudo ticket first. With a cached admin credential, `sudo -n`
+# Narrow-rule proof. Precondition: this user has NO sudo grant except the
+# nocklock egress-helper drop-in. Stock cloud images ship a blanket NOPASSWD
+# rule that would make every check below pass without proving ours, so the
+# install steps above must run from a separate admin account (or the broad
+# grant must be removed before this point). Remove any cached ticket first.
+sudo -k
+listing=$(sudo -n -l) || { echo "sudo -l failed" >&2; exit 1; }
+printf '%s\n' "$listing" > "${EVIDENCE_DIR:?Evidence directory}/sudo-l.txt"
+# Fail on any blanket or foreign grant.
+if printf '%s\n' "$listing" | grep -Eq '\(ALL( : ALL)?\) +(NOPASSWD: *)?ALL([[:space:]]|$)'; then
+  echo "blanket sudo grant present; test user is not narrow" >&2; exit 1
+fi
+# sudo -l joins commands with commas, so split them one per line. Every
+# command entry must be the egress helper; the helper entries must exist.
+entries=$(printf '%s\n' "$listing" | sed -n '/may run the following commands/,$p' | tail -n +2 \
+  | sed -E 's/^[[:space:]]*(\([^)]*\)[[:space:]]*)?(NOPASSWD:[[:space:]]*)?//' \
+  | sed -E 's|, (/)|\n\1|g' | grep -v '^$')
+printf '%s\n' "$entries" | grep -qx '/usr/libexec/nocklock-egress-helper check'
+printf '%s\n' "$entries" | grep -q '^/usr/libexec/nocklock-egress-helper setup --request-file '
+if printf '%s\n' "$entries" | grep -v '^/usr/libexec/nocklock-egress-helper ' | grep -q .; then
+  echo "foreign sudo entry present" >&2; exit 1
+fi
+# Negative control: an unrelated command must be refused without a password.
+if sudo -n /usr/bin/true 2>/dev/null; then
+  echo "negative control failed: sudo -n /usr/bin/true succeeded" >&2; exit 1
+fi
+# Functional check after the proof.
+ With a cached admin credential, `sudo -n`
 # succeeds without the new rule; after `sudo -k` it passes only if the
 # NOPASSWD drop-in installed above grants this exact helper verb.
 sudo -k
