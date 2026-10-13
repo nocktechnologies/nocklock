@@ -4,6 +4,10 @@ All notable changes to NockLock will be documented in this file.
 
 ## [Unreleased]
 
+### Changed
+
+- Red-team bench hardening (N11676): a verifier, version or process-group cleanup fault after scoring now fails the run (`no_harness_fault_after_scoring`); a nonzero NockGuard proxy exit at shutdown is a HARNESS-FAULT; the raw-socket and DNS attacks exit 42 when refused, so Python's own exit 1 (an uncaught exception) is a fault, not a block; datagrams already queued at the sink when an attack's deadline passes are counted before scoring. Test fixes: the interrupt test now requires the attack to have started, and the symlink-plant test checks the victim file while it still exists.
+
 ### Security
 
 - Clarify that Linux `CONFINED` currently does not restrict AF_UNIX destinations. A non-root probe confirmed that a wrapped child can connect to both a throwaway pathname socket and a throwaway abstract socket while a direct AF_INET datagram socket syscall is denied. The design and probe are in `docs/design/unix-socket-reachability.md` and `docs/probes/n11650/`.
