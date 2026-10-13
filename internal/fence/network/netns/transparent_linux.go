@@ -262,7 +262,10 @@ func dropProxyIdentity() error {
 	if os.Geteuid() != 0 {
 		return fmt.Errorf("transparent proxy must start as root to bind DNS and transparent sockets")
 	}
-	if err := unix.Setgroups(nil); err != nil {
+	// The sidecar keeps serving on multiple Go threads after this drop. Use the
+	// standard library's process-wide Setgroups; unix.Setgroups changes only the
+	// calling thread on Linux.
+	if err := syscall.Setgroups(nil); err != nil {
 		return fmt.Errorf("clear transparent proxy groups: %w", err)
 	}
 	if err := unix.Setresgid(proxyUID, proxyUID, proxyUID); err != nil {

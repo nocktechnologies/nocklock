@@ -195,6 +195,31 @@ jobs:
       - name: run Phase-1b protocol matrix as root (skips forbidden)
         run: sudo env "PATH=/usr/local/bin:$PATH" NOCKLOCK_PROTOCOL_REQUIRE=1 ./netns.test -test.run '^TestNetnsProtocolMatrix$' -test.v -test.count=1
 
+  proxy-supplementary-groups:
+    name: netns proxy supplementary groups · all threads (root)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      # Compile as the runner user so root never writes into the persisted Go
+      # build/module cache. The test re-execs this binary as the real
+      # __netns-proxy sidecar.
+      - name: compile proxy supplementary-groups acceptance test
+        run: go test -c -o netns.test ./internal/fence/network/netns/
+
+      # This is deliberately the only path that enables the root test. It seeds
+      # a nonempty group, starts the sidecar as root, then checks Groups for
+      # every /proc/<pid>/task/*/status after the uid/gid drop.
+      - name: run proxy supplementary-groups proof as root (skips forbidden)
+        run: sudo env NOCKLOCK_PROXY_GROUPS_REQUIRE=1 ./netns.test -test.run '^TestTransparentProxyDropsSupplementaryGroupsEveryThread$' -test.v -test.count=1
+
   netns-egress-audit:
     name: netns egress decision audit · signed rows via `nocklock wrap` (root)
     runs-on: ubuntu-latest
