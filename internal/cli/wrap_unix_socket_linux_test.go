@@ -187,6 +187,26 @@ func TestWrapConfinedUnixSocketReachability(t *testing.T) {
 		if !strings.Contains(string(output), "Unix-socket isolation active") {
 			t.Fatalf("wrap did not report Unix-socket isolation:\n%s", output)
 		}
+		configPath := filepath.Join(projectDir, ".nock", "config.toml")
+		configBytes, err := os.ReadFile(configPath)
+		if err != nil {
+			t.Fatalf("read fixture config: %v", err)
+		}
+		configOff := strings.Replace(string(configBytes), `linux_enforcement = "preferred"`, `linux_enforcement = "off"`, 1)
+		if configOff == string(configBytes) {
+			t.Fatal("fixture config did not set preferred Linux enforcement")
+		}
+		if err := os.WriteFile(configPath, []byte(configOff), 0o600); err != nil {
+			t.Fatalf("disable filesystem Landlock in fixture: %v", err)
+		}
+		output, err = runWrap(false)
+		if err != nil {
+			t.Fatalf("socket-only CONFINED wrap failed on Landlock ABI v%d: %v\n%s", abi, err, output)
+		}
+		assertSocketProbeOutput(t, output, "path=DENIED", "abstract=DENIED", "event=CONNECTED", "proxy=CONNECTED", "lookback=403", "inet=DENIED")
+		if !strings.Contains(string(output), "Unix-socket isolation active") {
+			t.Fatalf("socket-only wrap did not report Unix-socket isolation:\n%s", output)
+		}
 	}
 	select {
 	case <-targetRequests:

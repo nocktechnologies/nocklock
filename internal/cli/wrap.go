@@ -605,6 +605,11 @@ var wrapCmd = &cobra.Command{
 				logEvent(logging.EventNetworkPassed, "network", warning, false)
 			}
 			if unixSocketIsolation && landlockSpec == nil {
+				if len(landlockPrefix) == 0 {
+					detail := "cannot enforce Unix-socket isolation without the Landlock exec shim; refusing to start"
+					logEvent(logging.EventNetworkError, "network", detail, true)
+					return errors.New(detail)
+				}
 				landlockSpec = &landlock.Spec{ABI: landlockABI}
 			}
 		}
