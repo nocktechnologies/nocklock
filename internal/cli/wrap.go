@@ -370,6 +370,17 @@ var wrapCmd = &cobra.Command{
 			// requires the fs fence ON; with no fs fence the child can already
 			// tamper events.db directly, so this is consistent, not a new gap.
 			cfg.Filesystem.Deny = append(cfg.Filesystem.Deny, egressChildDenyPaths(dbPath, decisionLogDir)...)
+			// The signer belongs to this parent, even when XDG_CONFIG_HOME puts
+			// it outside the usual ~/.config deny. Protect the directory, not
+			// just the file, so the child cannot replace or unlink the seed.
+			// Landlock rule generation refuses any overlapping allow grant.
+			if logger.SigningPublicKey() != nil {
+				keyDir, err := managedSigningKeyDirectory()
+				if err != nil {
+					return fmt.Errorf("cannot protect the managed signing key; refusing to start: %w", err)
+				}
+				cfg.Filesystem.Deny = append(cfg.Filesystem.Deny, keyDir)
+			}
 
 			var err error
 			fsCfg, err = fsfence.ProcessConfig(cfg.Filesystem)
@@ -1380,6 +1391,21 @@ func egressChildDenyPaths(dbPath, decisionLogDir string) []string {
 		paths = append(paths, decisionLogDir)
 	}
 	return paths
+}
+
+// managedSigningKeyDirectory resolves the directory of the key already opened
+// by the parent logger. Use its real path for both Seatbelt and Landlock, just
+// as the signer does, including when XDG_CONFIG_HOME is a symlink.
+func managedSigningKeyDirectory() (string, error) {
+	keyPath, err := logging.DefaultSigningKeyPath()
+	if err != nil {
+		return "", err
+	}
+	dir, err := filepath.EvalSymlinks(filepath.Dir(keyPath))
+	if err != nil {
+		return "", fmt.Errorf("resolve signing key directory: %w", err)
+	}
+	return filepath.Abs(dir)
 }
 
 // egressDecisionDir returns the per-session directory that holds the egress

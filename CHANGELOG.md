@@ -9,6 +9,13 @@ All notable changes to NockLock will be documented in this file.
 - Align the public onboarding, contributor guide, CLI reference and roadmap with v0.9.0: select an agent preset before first launch, explain existing-config migration with `init --diff`, and document the Linux Unix-socket `PARTIAL` verdict and strict option. Correct proxy, audit coverage and empty secret-pass-list claims, link the docs index, and add a discoverable security-reporting policy.
 - Document the current remote-anchor identity collision: projects sharing a signing key share one store identity, so off-box anchoring supports only one audit chain per identity until a versioned chain namespace exists.
 
+## [0.9.1] - 2026-10-13
+
+### Security
+
+- Protect the managed Ed25519 signing-key directory from fenced children even when `XDG_CONFIG_HOME` relocates it outside `~/.config`. Linux Landlock refuses an overlapping filesystem grant; macOS denies the canonical key directory and prevents renaming sensitive-path ancestors to move protected files outside their deny rules. Parent signing and normal project reads/writes remain available.
+- Who is affected: anyone who sets `XDG_CONFIG_HOME` to a directory outside `~/.config`. On macOS v0.9.0, a fenced child could read the 32-byte signing seed while `doctor` reported `PROTECTED`. Every release since v0.5.0 (#90) carries the same key-path logic; only v0.9.0 was reproduced directly. On Linux, a relocated key was readable only when it sat under a granted tree, such as the project or `/tmp`. If a wrapped agent could have read the key, rows signed with that key no longer prove the agent did not write them. NockLock has no supported way to replace the signing key yet; a documented procedure is the next fix.
+
 ## [0.9.0] - 2026-10-13
 
 ### Breaking
