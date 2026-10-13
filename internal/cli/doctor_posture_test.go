@@ -151,10 +151,10 @@ func TestDoctorUnreachableEgressIsUnavailable(t *testing.T) {
 func TestDoctorUnixSocketBoundaryUnavailableIsPartial(t *testing.T) {
 	got, code := runDoctorJSONWithABI(t, config.DefaultTOML(), "linux", 8)
 	if got.Verdict != doctorVerdictPartial || code != doctorExitPartial {
-		t.Fatalf("verdict=%q exit=%d, want PARTIAL/%d", got.Verdict, code, doctorExitPartial)
+		t.Fatalf("verdict=%q exit=%d, want PARTIAL/%d; gaps=%+v checks=%+v", got.Verdict, code, doctorExitPartial, got.Gaps, got.Checks)
 	}
-	if p := postures(got); p["unix-sockets"] != postureUnavailable {
-		t.Fatalf("Unix-socket posture = %q, want unavailable", p["unix-sockets"])
+	if p := postures(got); p["unix-sockets"] != postureAdvisory {
+		t.Fatalf("Unix-socket posture = %q, want advisory for the running fallback", p["unix-sockets"])
 	}
 	for _, check := range got.Checks {
 		if check.Group == "Fences" && check.Name == "unix-sockets" {

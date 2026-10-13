@@ -115,7 +115,7 @@ func TestDoctorUnavailableUnixSocketBoundaryIsPartial(t *testing.T) {
 	}
 	report := finishDoctorReport(checks, doctorBoundaries(&cfg, "linux", egressLevelConfined, checks), doctorActivity{})
 	if report.Verdict != doctorVerdictPartial {
-		t.Fatalf("doctor verdict = %q, want %q for unavailable Unix-socket isolation", report.Verdict, doctorVerdictPartial)
+		t.Fatalf("doctor verdict = %q, want %q for unavailable Unix-socket isolation; gaps=%+v", report.Verdict, doctorVerdictPartial, report.Gaps)
 	}
 	if check.Severity != doctorWarning || check.Status != "unavailable" || !strings.Contains(check.Message, "reason=landlock_abi_8_below_9") {
 		t.Fatalf("doctor boundary = %+v, want ABI 8 unavailable with reason", check)

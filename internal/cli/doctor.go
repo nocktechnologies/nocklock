@@ -660,7 +660,9 @@ func doctorBoundaries(cfg *config.Config, goos string, level egressLevel, checks
 	if goos == "linux" {
 		unixSockets := posture("unix-sockets")
 		if byName["unix-sockets"].Status == "unavailable" {
-			unixSockets = postureUnavailable
+			// Wrap continues with reachable sockets in non-strict mode, so this is
+			// a partial posture rather than a blocking UNREACHABLE egress boundary.
+			unixSockets = postureAdvisory
 		}
 		boundaries = append(boundaries, doctorBoundary{"unix-sockets", unixSockets})
 	}
