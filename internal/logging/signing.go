@@ -54,17 +54,20 @@ type headSignatureMetadata struct {
 	publicKeyFingerprintHex string
 }
 
+// SigningKeyFileName is the file name of the managed signing key.
+const SigningKeyFileName = "signing-ed25519.key"
+
 // DefaultSigningKeyPath returns the NockLock-managed signing key path,
 // $XDG_CONFIG_HOME/nocklock/signing-ed25519.key or ~/.config/nocklock/signing-ed25519.key.
 func DefaultSigningKeyPath() (string, error) {
 	if x := os.Getenv("XDG_CONFIG_HOME"); x != "" {
-		return filepath.Join(x, "nocklock", "signing-ed25519.key"), nil
+		return filepath.Join(x, "nocklock", SigningKeyFileName), nil
 	}
 	home, err := os.UserHomeDir()
 	if err != nil {
 		return "", fmt.Errorf("cannot resolve home directory for signing key: %w", err)
 	}
-	return filepath.Join(home, ".config", "nocklock", "signing-ed25519.key"), nil
+	return filepath.Join(home, ".config", "nocklock", SigningKeyFileName), nil
 }
 
 // loadOrCreateSigner loads the Ed25519 key at path, generating it on first use

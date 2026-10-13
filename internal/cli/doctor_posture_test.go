@@ -38,7 +38,14 @@ func runDoctorJSONWithABI(t *testing.T, toml, goos string, abi int) (doctorRepor
 		t.Fatal(err)
 	}
 	t.Setenv("HOME", home)
-	t.Setenv("XDG_STATE_HOME", filepath.Join(home, "state"))
+	// Keep the managed key outside the temporary project and the default /tmp
+	// grant, without creating or reading a real signing key.
+	t.Setenv("XDG_CONFIG_HOME", filepath.Join(string(os.PathSeparator), "nocklock-doctor-test", filepath.Base(dir)))
+	stateHome := t.TempDir()
+	if err := os.Chmod(stateHome, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("XDG_STATE_HOME", stateHome)
 	t.Setenv("XDG_DATA_HOME", filepath.Join(home, "data"))
 	writeTestConfig(t, dir, toml)
 	withWorkingDir(t, dir)

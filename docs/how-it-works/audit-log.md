@@ -1,6 +1,6 @@
 # Audit log
 
-Citations name source files at `v0.9.0` (`f2b0d04`) (no line numbers, so they do not go stale). Wording of limits follows `README.md` ("Tamper-evident audit log", "Signed audit log", "External chain-head anchor", "Event log").
+Citations name source files at the `v0.9.0` baseline (`f2b0d04`) and later changes listed in `CHANGELOG.md` (no line numbers, so they do not go stale). Wording of limits follows `README.md` ("Tamper-evident audit log", "Signed audit log", "External chain-head anchor", "Event log").
 
 ## What is recorded
 Most fence decisions are a row in a SQLite `events` table (`internal/logging/logger.go`): secret, file, network, proxy, session, config and filesystem-fence-state events (`logger.go`). Each row carries a SHA-256 hash linked to the previous row (v1). Query with `nocklock log`, `log --blocked`, `log --stats`, `status`. `log --prune <age>` compacts and re-anchors the chain (`internal/cli/log.go`, `logger.go`).
@@ -13,6 +13,8 @@ Not every crossing is logged. No row is written for: allowed file access; file d
 | v1 hash chain | Detects altered, reordered or deleted rows | Protection from a writer who recomputes the whole chain and `chain_head` |
 | v1.1 Ed25519 | Each row and the chain head are signed with a key outside the database, `~/.config/nocklock/signing-ed25519.key` (mode 0600) | Detection of rollback to an earlier, legitimately signed whole-database snapshot |
 | v1.2 anchor | A signed `{version, agent_id, head_hash, row_count, created_at, sig}` stored elsewhere; shorter chain is `TRUNCATION` | Anything if the anchor sits next to `events.db` and the attacker swaps both |
+
+The managed signing key lives in `$XDG_CONFIG_HOME/nocklock/signing-ed25519.key` when `XDG_CONFIG_HOME` is set, otherwise under `~/.config/nocklock/`. `wrap` denies the resolved key directory to its child. `doctor` checks that directory against the effective Seatbelt deny set or Landlock read grants and reports its path and posture in `doctor --json`. A key under a Landlock grant, such as the project or `/tmp`, makes `wrap` refuse and `doctor` report a gap; a missing Seatbelt deny also prevents a `PROTECTED` verdict (`internal/cli/wrap.go`, `doctor.go`).
 
 `nocklock verify --audit` reports `AUTHENTIC` (signed, valid; printed on the machine that holds the signing key, or when `--ed25519-pub` is supplied), `CONSISTENT` (chain intact, unsigned or no key to check), `FORGED`, or `SUSPECT` (a signed check was required with `--ed25519-pub` but no signing artifacts exist) (`internal/cli/verify.go`). A chain that is not intact prints `TAMPERED`. Exit codes (`writeAuditVerifyResult` in `internal/cli/verify.go`): `AUTHENTIC` and `CONSISTENT` exit `0`; `TAMPERED`, `FORGED` and `SUSPECT` exit `1`. `CONSISTENT` is a pass with no authenticity claim. A passing check means the stored rows are internally consistent; it does not prove NockLock recorded them unless signed and checked with the public key (`verify --export-pubkey`).
 
