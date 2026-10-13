@@ -4,9 +4,12 @@ All notable changes to NockLock will be documented in this file.
 
 ## [Unreleased]
 
+## [0.9.1] - 2026-10-13
+
 ### Security
 
 - Protect the managed Ed25519 signing-key directory from fenced children even when `XDG_CONFIG_HOME` relocates it outside `~/.config`. Linux Landlock refuses an overlapping filesystem grant; macOS denies the canonical key directory and prevents renaming sensitive-path ancestors to move protected files outside their deny rules. Parent signing and normal project reads/writes remain available.
+- Who is affected: anyone who sets `XDG_CONFIG_HOME` to a directory outside `~/.config`. On macOS v0.9.0, a fenced child could read the 32-byte signing seed while `doctor` reported `PROTECTED`. Every release since v0.5.0 (#90) carries the same key-path logic; only v0.9.0 was reproduced directly. On Linux, a relocated key was readable only when it sat under a granted tree, such as the project or `/tmp`. If a wrapped agent could have read the key, rows signed with that key no longer prove the agent did not write them.
 
 ## [0.9.0] - 2026-10-13
 
