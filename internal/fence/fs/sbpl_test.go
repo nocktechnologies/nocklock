@@ -428,7 +428,7 @@ func TestSbplString_Escaping(t *testing.T) {
 
 // TestGenerateTaggedWriteConfinementProfile_TagsEveryFileDeny proves the session
 // tag rides on every file-deny rule (the sensitive read/write deny, the base
-// write deny, and the hardened /dev deny) and that an empty tag leaves the
+// write deny, ancestor unlink deny, and hardened /dev deny) and that an empty tag leaves the
 // profile byte-identical to the untagged generator.
 func TestGenerateTaggedWriteConfinementProfile_TagsEveryFileDeny(t *testing.T) {
 	root := t.TempDir()
@@ -440,8 +440,8 @@ func TestGenerateTaggedWriteConfinementProfile_TagsEveryFileDeny(t *testing.T) {
 		t.Fatalf("GenerateTaggedWriteConfinementProfile: %v", err)
 	}
 	modifier := `(with message "nocklock:sess\"1")`
-	if got := strings.Count(profile, modifier); got != 3 {
-		t.Errorf("expected the tag on 3 file-deny rules, got %d:\n%s", got, profile)
+	if got := strings.Count(profile, modifier); got != 4 {
+		t.Errorf("expected the tag on 4 file-deny rules, got %d:\n%s", got, profile)
 	}
 	if !strings.Contains(profile, "(deny file-write* "+modifier+")") {
 		t.Errorf("base write deny is untagged:\n%s", profile)
