@@ -46,14 +46,29 @@ class RunTest(unittest.TestCase):
         self.assertIn("started", out)
         self.assertLess(took, 6)
 
-    def test_sink_drain_stops_at_the_deadline(self):
+    def sink(self):
         s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
         s.bind(("127.0.0.1", 0))
         s.settimeout(0.2)
+        self.addCleanup(s.close)
+        return s
+
+    def send(self, s, n):
+        c = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        for _ in range(n):
+            c.sendto(b"x", s.getsockname())
+        c.close()
+
+    def test_sink_drain_waits_for_nothing_after_the_deadline(self):
+        s = self.sink()
         start = time.monotonic()
-        self.assertEqual(redteam.sink_hits(s, start - 1), 0)  # already expired: drains nothing
+        self.assertEqual(redteam.sink_hits(s, start - 1), 0)  # expired and empty: returns at once
         self.assertLess(time.monotonic() - start, 0.1)
-        s.close()
+
+    def test_datagrams_queued_at_the_deadline_still_count(self):
+        s = self.sink()
+        self.send(s, 3)
+        self.assertEqual(redteam.sink_hits(s, time.monotonic() - 1), 3)
 
 
 class RunFaultTest(unittest.TestCase):
@@ -77,16 +92,27 @@ class RunFaultTest(unittest.TestCase):
         self.assertTrue(fault)
 
     def test_interrupt_kills_the_attack_process_group(self):
+        orig, calls = subprocess.Popen.wait, []
         with tempfile.TemporaryDirectory() as d:
             pidfile = Path(d) / "pid"
-            with mock.patch("subprocess.Popen.wait", side_effect=[KeyboardInterrupt, 0]):
+
+            def wait(proc, *args, **kw):
+                if not calls:  # first wait is the interrupt, raised once the attack has really started
+                    calls.append(1)
+                    deadline = time.monotonic() + 5
+                    while time.monotonic() < deadline and not pidfile.exists():
+                        time.sleep(0.01)
+                    raise KeyboardInterrupt
+                return orig(proc, *args, **kw)
+
+            with mock.patch.object(subprocess.Popen, "wait", autospec=True, side_effect=wait):
                 with self.assertRaises(KeyboardInterrupt):
-                    run_in(d, ["/bin/sh", "-c", f"echo $$ > {pidfile}; sleep 60"], os.environ.copy(), time.monotonic() + 30)
-            pid = int(pidfile.read_text()) if pidfile.exists() else None
-            if pid:
-                time.sleep(0.2)
-                with self.assertRaises(ProcessLookupError):
-                    os.kill(pid, 0)
+                    run_in(d, ["/bin/sh", "-c", f"echo $$ > {pidfile}.tmp; mv {pidfile}.tmp {pidfile}; sleep 60"],
+                           os.environ.copy(), time.monotonic() + 30)
+            pid = int(pidfile.read_text())  # fails loudly if the attack never started
+            time.sleep(0.2)
+            with self.assertRaises(ProcessLookupError):
+                os.kill(pid, 0)
 
 
 class SetupCheckTest(unittest.TestCase):
@@ -136,7 +162,7 @@ class ClassifyTest(unittest.TestCase):
 
 class McpClientTest(unittest.TestCase):
     """The client decides the verdict when the reply arrives; a hung shutdown cannot undo it."""
-    def run_client(self, reply_text, hang=False):
+    def run_client(self, reply_text, hang=False, exit_code=0):
         with tempfile.TemporaryDirectory() as d:
             fake = Path(d) / "proxy.py"
             fake.write_text(
@@ -145,7 +171,8 @@ class McpClientTest(unittest.TestCase):
                 "    mid = json.loads(line)['id']\n"
                 "    print(json.dumps({'jsonrpc': '2.0', 'id': mid, 'result': {'content': %r}}), flush=True)\n"
                 "    if mid == 2 and %r:\n"
-                "        time.sleep(30)  # ignores stdin EOF: the client's shutdown must time out\n" % (reply_text, hang))
+                "        time.sleep(30)  # ignores stdin EOF: the client's shutdown must time out\n"
+                "sys.exit(%d)\n" % (reply_text, hang, exit_code))
             p = subprocess.run([sys.executable, str(Path(redteam.__file__).parent / "mcp_client.py"), "t", "1",
                                 "--", sys.executable, str(fake)], capture_output=True, text=True, timeout=30)
             return p.returncode, p.stdout
@@ -164,6 +191,12 @@ class McpClientTest(unittest.TestCase):
         self.assertIn("EXECUTED", out)
         self.assertIn("HARNESS-FAULT", out)
 
+    def test_nonzero_proxy_exit_is_a_fault_whatever_the_reply(self):
+        rc, out = self.run_client("denied", exit_code=3)
+        self.assertEqual(rc, 4)
+        self.assertIn("HARNESS-FAULT", out)
+        self.assertEqual(self.run_client("UPSTREAM-EXECUTED:t", exit_code=3)[0], 5)
+
     def test_stopped_reply_with_hung_shutdown_is_a_fault_not_a_block(self):
         rc, out = self.run_client("denied", hang=True)
         self.assertEqual(rc, 4)
@@ -172,21 +205,21 @@ class McpClientTest(unittest.TestCase):
 
 class LogPlantTest(unittest.TestCase):
     """The harness writes only regular files it created itself; a planted path is a fault, within the deadline."""
-    def check(self, plant):
+    def check(self, plant, after=None):
         with tempfile.TemporaryDirectory() as d:
             start = time.monotonic()
             rc, out = run_in(d, ["/bin/true"], {}, start + 5, plant=plant)
             self.assertLess(time.monotonic() - start, 3)
             self.assertIsNone(rc)
             self.assertIn("HARNESS-FAULT", out)
-            return Path(d)
+            if after:
+                after(Path(d))
 
     def test_a_symlinked_log_path_is_refused_and_its_target_untouched(self):
         def plant(log):
             (log.parent / "victim").write_text("keep")
             log.symlink_to(log.parent / "victim")
-        d = self.check(plant)
-        self.assertEqual((d / "victim").read_text() if (d / "victim").exists() else "keep", "keep")
+        self.check(plant, lambda d: self.assertEqual((d / "victim").read_text(), "keep"))
 
     def test_a_fifo_at_the_log_path_is_refused_without_blocking(self):
         self.check(lambda log: os.mkfifo(log))

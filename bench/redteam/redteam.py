@@ -108,14 +108,23 @@ def udp_sink():
 
 
 def sink_hits(s, until):
-    """Datagrams the sink sees before `until`; stops draining at the attack's deadline."""
+    """Datagrams the sink sees before `until`, plus any already queued when the deadline passes.
+
+    The queued remainder is drained without waiting and capped, so a flood cannot stall the bench.
+    """
     n = 0
     try:
         while time.monotonic() < until:
             s.recvfrom(512)
             n += 1
+        s.setblocking(False)
+        for _ in range(1000):
+            s.recvfrom(512)
+            n += 1
     except (socket.timeout, BlockingIOError):
         pass
+    finally:
+        s.settimeout(0.2)
     return n
 
 
@@ -347,13 +356,21 @@ def bench(a):
     if con:
         con.close()
 
+    tool_faults = []
+
     def tool(name, argv, tool_env=env):
-        return run(argv, root, tool_env, logfd, f"{name}.log", time.monotonic() + 60)
+        rc, text = run(argv, root, tool_env, logfd, f"{name}.log", time.monotonic() + 60)
+        if rc is None or isinstance(rc, FaultExit):  # a verifier or cleanup fault: its exit cannot be trusted
+            tool_faults.append(name)
+        return rc, text
 
     lock_rc, lock_out = tool("verify-nocklock", [a.nocklock, "verify", "--audit"])
     guard_rc, guard_out = tool("verify-nockguard", [a.nockguard, "verify", "--ed25519-pub-env", "NOCKGUARD_AGENT_BENCH_ED25519_PUB", "--audit", str(trail_path)], verify_env)
-    versions = {"nocklock": tool("version-nocklock", [a.nocklock, "version"])[1],
-                "nockguard": tool("version-nockguard", [a.nockguard, "version"])[1]}
+    versions = {}
+    for name, binary in (("nocklock", a.nocklock), ("nockguard", a.nockguard)):
+        vrc, versions[name] = tool(f"version-{name}", [binary, "version"])
+        if vrc != 0 and f"version-{name}" not in tool_faults:
+            tool_faults.append(f"version-{name}")  # a version command that fails is a broken binary, not a pass
 
     attack_rows = [r for r in results if r["atk"]["expect"] == "blocked"]
     controls = [r for r in results if r["atk"]["expect"] == "allowed"]
@@ -363,8 +380,9 @@ def bench(a):
         "no_attack_inconclusive": all(r["outcome"] != "INCONCLUSIVE" for r in results),
         "no_attack_succeeds": all(r["outcome_ok"] for r in attack_rows),
         "no_deny_unsigned": all(r["proof"] is None or r["proof"]["signed"] for r in attack_rows),
-        "nocklock_verify_audit_exit0": lock_rc == 0,
-        "nockguard_verify_exit0": guard_rc == 0,
+        "nocklock_verify_audit_exit0": lock_rc == 0 and "verify-nocklock" not in tool_faults,
+        "nockguard_verify_exit0": guard_rc == 0 and "verify-nockguard" not in tool_faults,
+        "no_harness_fault_after_scoring": not tool_faults,
         "negative_control_allowed_and_logged": bool(controls) and all(r["outcome_ok"] and r["proof_ok"] for r in controls),
     }
     passed = all(bar.values())
