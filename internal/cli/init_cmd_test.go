@@ -1,6 +1,7 @@
 package cli
 
 import (
+	"io"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -70,5 +71,169 @@ func TestInitRuntimeRoundTripsThroughConfigLoad(t *testing.T) {
 				t.Fatalf("config mode = %v, want 0600", got)
 			}
 		})
+	}
+}
+
+func TestInitRuntimeOnExistingConfigFailsAndDiffReports(t *testing.T) {
+	dir := t.TempDir()
+	withWorkingDir(t, dir)
+	t.Cleanup(func() { initRuntime, initDiff = "", false })
+	if err := initCmd.RunE(&cobra.Command{}, nil); err != nil {
+		t.Fatalf("plain init: %v", err)
+	}
+	configPath := filepath.Join(dir, config.Dir, config.File)
+	before, _ := os.ReadFile(configPath)
+
+	initRuntime = "claude-code"
+	err := initCmd.RunE(&cobra.Command{}, nil)
+	if err == nil || !strings.Contains(err.Error(), "--diff") {
+		t.Fatalf("want non-zero error pointing at --diff, got %v", err)
+	}
+
+	var out strings.Builder
+	cmd := &cobra.Command{}
+	cmd.SetOut(&out)
+	initDiff = true
+	if err := initCmd.RunE(cmd, nil); err != nil {
+		t.Fatalf("init --diff: %v", err)
+	}
+	if !strings.Contains(out.String(), "+ ") || !strings.Contains(out.String(), "CLAUDE_CODE_OAUTH_TOKEN") {
+		t.Fatalf("diff missing preset additions:\n%s", out.String())
+	}
+	if !strings.Contains(out.String(), "- ") || !strings.Contains(out.String(), "*_TOKEN*") {
+		t.Fatalf("diff missing removed *_TOKEN* block:\n%s", out.String())
+	}
+	after, _ := os.ReadFile(configPath)
+	if string(before) != string(after) {
+		t.Fatal("--diff modified the config")
+	}
+
+	// Matching config reports no difference; --diff without --runtime errors.
+	if err := os.WriteFile(configPath, []byte(mustProfileTOML(t, "claude-code")), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	out.Reset()
+	if err := initCmd.RunE(cmd, nil); err != nil || !strings.Contains(out.String(), "already matches") {
+		t.Fatalf("identical config: err=%v out=%q", err, out.String())
+	}
+	initRuntime = ""
+	if err := initCmd.RunE(cmd, nil); err == nil {
+		t.Fatal("--diff without --runtime must fail")
+	}
+}
+
+func mustProfileTOML(t *testing.T, name string) string {
+	t.Helper()
+	s, err := config.ProfileTOML(name)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return s
+}
+
+func TestInitExistingConfigErrorOmitsUsage(t *testing.T) {
+	dir := t.TempDir()
+	withWorkingDir(t, dir)
+	t.Cleanup(func() {
+		rootCmd.SetArgs(nil)
+		rootCmd.SetErr(nil)
+		rootCmd.SetOut(nil)
+		initCmd.SilenceUsage = false
+		initRuntime, initDiff = "", false
+	})
+	configPath := filepath.Join(config.Dir, config.File)
+	if err := os.MkdirAll(config.Dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(configPath, []byte(config.DefaultTOML()), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	var stderr strings.Builder
+	rootCmd.SetErr(&stderr)
+	rootCmd.SetOut(io.Discard)
+	rootCmd.SetArgs([]string{"init", "--runtime", "claude-code"})
+	if err := rootCmd.Execute(); err == nil {
+		t.Fatal("init on an existing config must fail")
+	}
+	want := "Error: config already exists at " + configPath + " and was left unchanged; run 'nocklock init --runtime claude-code --diff' to see what the preset would change, then edit the file\n"
+	if stderr.String() != want {
+		t.Fatalf("stderr mismatch\n got: %q\nwant: %q", stderr.String(), want)
+	}
+}
+
+func TestInitDiffComparesLookbackEntriesStructurally(t *testing.T) {
+	rule := func(name, within string) config.LookbackRule {
+		return config.LookbackRule{Name: name, On: config.LookbackTriggerFileBlocked, Within: within, Then: config.LookbackActionDenyEgress}
+	}
+	have := config.DefaultConfig()
+	have.Network.Lookback = []config.LookbackRule{rule("keep", ""), rule("drop", "30s")}
+	want := config.DefaultConfig()
+	want.Network.Lookback = []config.LookbackRule{rule("keep", "")}
+
+	diff := func(have, want config.Config) (removed, added []string) {
+		h, err := configTree(&have)
+		if err != nil {
+			t.Fatal(err)
+		}
+		w, err := configTree(&want)
+		if err != nil {
+			t.Fatal(err)
+		}
+		diffValue("", h, w, &removed, &added)
+		return removed, added
+	}
+
+	removed, added := diff(have, want)
+	wantRemoved := []string{`network.lookback[1] = {"name":"drop","on":"file_blocked","then":"deny_egress","within":"30s"}`}
+	if !reflect.DeepEqual(removed, wantRemoved) || len(added) != 0 {
+		t.Fatalf("removed=%q added=%q, want only removed %q", removed, added, wantRemoved)
+	}
+
+	// Entries compare in order: a changed rule is reported field by field,
+	// and an identical rule list reports nothing.
+	want.Network.Lookback = []config.LookbackRule{rule("keep", "5s")}
+	have.Network.Lookback = []config.LookbackRule{rule("keep", "")}
+	removed, added = diff(have, want)
+	if !reflect.DeepEqual(removed, []string{`network.lookback[0].within = ""`}) || !reflect.DeepEqual(added, []string{`network.lookback[0].within = "5s"`}) {
+		t.Fatalf("field change: removed=%q added=%q", removed, added)
+	}
+	removed, added = diff(have, have)
+	if len(removed)+len(added) != 0 {
+		t.Fatalf("identical configs differ: removed=%q added=%q", removed, added)
+	}
+}
+
+func TestInitDiffPrintsArrayElementsAsAppendAndRemove(t *testing.T) {
+	have := config.DefaultConfig()
+	have.Secrets.Block = []string{"*_TOKEN*", "*_SECRET*"}
+	have.Secrets.Pass = []string{"PATH"}
+	want := config.DefaultConfig()
+	want.Secrets.Block = []string{"*_SECRET*"}
+	want.Secrets.Pass = []string{"PATH", "CLAUDE_CODE_OAUTH_TOKEN"}
+	h, err := configTree(&have)
+	if err != nil {
+		t.Fatal(err)
+	}
+	w, err := configTree(&want)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var removed, added []string
+	diffValue("", h, w, &removed, &added)
+	if got, wantLines := removed, []string{`secrets.block -= "*_TOKEN*"`}; !reflect.DeepEqual(got, wantLines) {
+		t.Fatalf("removed = %q, want %q", got, wantLines)
+	}
+	if got, wantLines := added, []string{`secrets.pass += "CLAUDE_CODE_OAUTH_TOKEN"`}; !reflect.DeepEqual(got, wantLines) {
+		t.Fatalf("added = %q, want %q", got, wantLines)
+	}
+}
+
+func TestInitDiffMissingConfigSeesThroughWrappedNotExist(t *testing.T) {
+	missing := filepath.Join(t.TempDir(), "nope", "config.toml")
+	var out strings.Builder
+	err := runInitDiff(&out, missing, "claude-code")
+	if err == nil || !strings.Contains(err.Error(), "no config at") {
+		t.Fatalf("want 'no config at' error for a wrapped not-exist, got %v", err)
 	}
 }
