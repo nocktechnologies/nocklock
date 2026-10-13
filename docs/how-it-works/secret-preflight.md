@@ -1,6 +1,6 @@
 # Secret preflight scan
 
-Citations are `file:line` at `origin/main` 8a65777. Full detail and bounds: `README.md` "Secret preflight scanning"; design: `docs/superpowers/specs/2026-09-25-secret-preflight-design.md`.
+Citations are `file:line` at `origin/main` 89c02fa. Full detail and bounds: `README.md` "Secret preflight scanning"; design: `docs/superpowers/specs/2026-09-25-secret-preflight-design.md`.
 
 ## What it does
 `nocklock scan [path ...] [--env] [--json]` checks selected files, and with `--env` the invoking environment, for credential-shaped values before an agent sees them (`internal/cli/scan.go:23`, scanner `internal/fence/secrets/scan.go:74`). Exit 0 only when the scan completes with no findings; otherwise 1 (`scan.go:44`). Reports show detector IDs and locations, never values.

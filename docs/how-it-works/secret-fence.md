@@ -1,6 +1,6 @@
 # Secret fence
 
-Citations are `file:line` at `origin/main` 8a65777.
+Citations are `file:line` at `origin/main` 89c02fa.
 
 ## What it does
 `wrap` filters the child's environment against `secrets.pass` and `secrets.block`, both glob lists, before the child starts (`internal/cli/wrap.go:242-247`; matcher `internal/fence/secrets/secrets.go:19,42,76`). A blocked variable is gone from the child's environment, so the secret fence is absolute for what it covers. Each filtered name is recorded as `secret_blocked` or `secret_passed` (`internal/logging/logger.go:28-29`). Linux and macOS.

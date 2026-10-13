@@ -1,6 +1,6 @@
 # Filesystem fence
 
-Citations are `file:line` at `origin/main` 8a65777. Wording of limits follows `README.md` ("Filesystem platform boundary").
+Citations are `file:line` at `origin/main` 89c02fa. Wording of limits follows `README.md` ("Filesystem platform boundary").
 
 ## Linux: Landlock root allowlist
 - `wrap` re-execs the child through the hidden `__landlock-exec` shim (`internal/cli/wrap.go:446,573`), which builds a Landlock ruleset (`internal/fence/fs/landlock/landlock_linux.go:30`) and `execve`s the child in place. Every descendant inherits it.

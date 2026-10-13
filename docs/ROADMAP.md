@@ -1,44 +1,26 @@
 # Roadmap to 1.0
 
-Status at `origin/main` 8a65777 (v0.7.0 released, one unreleased test fix). The 1.0 bar below is the one Kevin approved (Telegram 33132, Nock #11662). The release split is a proposal for the release owner to confirm; the four bar items are not.
+Status at `origin/main` 89c02fa (v0.8.0). Kevin approved the four 1.0 bars (Telegram 33132, Nock #11662). This page tracks the code and tests that must support each claim.
 
 ## The 1.0 bar
-1.0 ships when all four hold.
 
-| # | Bar | State at 8a65777 | Tracking |
-|---|---|---|---|
-| 1 | The Linux `CONFINED` gaps are closed and covered by the red-team bench | Open. Unix-socket reach and `io_uring` are the named gaps. The syscall denylist has no `io_uring` entry (no reference in `internal/`, `internal/fence/syscallfence/denylist.go:25`). No red-team bench is in this repo | N11660 (Unix-socket reach), N11655 (`io_uring`); doc PR #171 (Unix-socket) |
-| 2 | Honest `doctor` verdicts | Open on `main`. `doctor` has two verdicts, `PROTECTED` and `GAPS FOUND` (`internal/cli/doctor.go:36-39`) | #168 |
-| 3 | A complete Linux install | Open. Today `make install` plus a separate `sudo make install-egress-helper` (`Makefile:28-38`; `docs/setup.md`); no packaged install | design #172 |
-| 4 | The CLI, config schema and exit codes written down as the contract we keep | Drafted as "what exists today" in `docs/reference/cli.md`; not yet a promise | this PR (draft); contract text is 0.8 work |
+| # | Bar | Current evidence and remaining work |
+|---|---|---|
+| 1 | Close the Linux `CONFINED` Unix-socket and `io_uring` gaps, with red-team coverage | `io_uring_setup`, `io_uring_enter` and `io_uring_register` are denied in `internal/fence/syscallfence/denylist.go:93-96` (N11655, v0.8.0); `TestEnforce_IORingSocketConnectDenied` covers the path. Unix-socket reach remains open: `docs/design/unix-socket-reachability.md` and `docs/probes/n11650/` show accessible pathname and abstract sockets can be reached. N11660 / PR #174 is open. `bench/redteam/attacks.toml` and `.github/workflows/network-egress.yml` provide the first CI bench slice, but it has no Unix-socket or `io_uring` attack yet. Add both with allowed-action negative controls before closing this bar. |
+| 2 | Ship honest `doctor` verdicts | Shipped in v0.8.0 (#168). `internal/cli/doctor.go:36-59` maps `PROTECTED`/`GAPS FOUND`/`PARTIAL`/`UNPROTECTED` to exits 0/2/3/4; tests are beside it in `internal/cli/doctor_test.go`. Keep `docs/how-it-works/doctor-and-verify.md` and the README aligned with that contract. |
+| 3 | Complete the Linux install | Open. Source installation still needs `make install` and a separate privileged `make install-egress-helper` (`Makefile:28-38`, `docs/setup.md`). The signed packaging and OS acceptance design is PR #172; implementation and clean-host verification have not landed. |
+| 4 | Write down the CLI, config schema and exit codes as the contract to keep | `docs/reference/cli.md` records current behavior, including the v0.8.0 doctor exits. Before 1.0, audit every public command, flag and config key against `internal/cli/` and `internal/config/`, resolve the child-exit overlap with CLI errors, and pin the chosen contract in tests. The page is a snapshot until that review is complete. |
 
-"Closed" for item 1 means a failing red-team case existed, the fix landed, and the case now runs in CI with a negative control. Until then `docs/how-it-works/network-fence.md` must keep naming the gap and must not describe `CONFINED` as complete.
+A gap is closed only when its fix is on `main`, the red-team case runs in CI with an allowed-action negative control, and the documentation describes the tested boundary. In particular, `CONFINED` must not claim Unix-socket isolation while N11660 remains open.
 
-## Path
+## Release path
 
-### 0.7.1: honesty and gaps, no breaking change
-- Item 2: ship #168.
-- Item 1: land the Unix-socket reach fix (N11660) and the `io_uring` handling (N11655), each with a red-team case; merge #171.
-- README claims fix (#166) is held; merge when it is reconciled with `docs/how-it-works/` and `docs/reference/cli.md`.
-- Record each fix in `CHANGELOG.md` under `### Security`.
+- **0.7.1 (planned, skipped):** the original no-breaking-change step for honesty and Linux gaps. Those changes were split instead: doctor and `io_uring` shipped in v0.8.0; Unix-socket isolation is still open. There is no `v0.7.1` tag.
+- **0.8.0 (released):** the breaking doctor exit-code change is recorded under `### Breaking` in `CHANGELOG.md`; the first red-team bench slice and the `io_uring` deny landed. The complete Linux install and full CLI/config/exit-code contract did not land with this release. Further changes on the way to 1.0 need explicit changelog entries and upgrade instructions.
+- **1.0:** all four bars above are verified. `docs/reference/cli.md` becomes the compatibility contract for the public CLI, config schema, exit codes, egress levels and `verify --audit` states. Add contract tests and update `CONTRIBUTING.md` and `CLAUDE.md` when that promise takes effect.
 
-### 0.8: the one release allowed to break
-Everything that must change before it is frozen changes here, once, with `### Breaking` entries and upgrade steps (the v0.6.0 pattern: `CHANGELOG.md:82-109`).
-- Item 3: the complete Linux install (design #172) lands.
-- Item 4: audit `docs/reference/cli.md` line by line; decide for each command, flag, config key and exit code whether it is public, internal (`__*` commands) or to be removed. Resolve the exit-code ambiguity noted there (child `1` / `2` versus `nocklock` `1` / `2`) and decide the fate of two legacy keys: `macos_allow_unfenced` (decoded only so v0.5 configs keep loading, `internal/config/config.go:297-301`) and `filesystem.hardened` (a macOS opt-in that `wrap` now applies under syscall enforcement anyway, `internal/config/config.go:301-304`, `CHANGELOG.md:56-60`).
-- Red-team bench runs in CI for every platform that claims a level.
+## Outside this bar
 
-### 1.0: the contract
-- Items 1 to 4 hold, verified against the table above.
-- `docs/reference/cli.md` becomes the compatibility contract: the CLI surface, the config schema, the exit codes, the egress level names and the `verify --audit` states. After 1.0 a change to any of them is a breaking change, announced under `### Breaking`.
-- `CONTRIBUTING.md` and `CLAUDE.md` state the rule; a test pins the exit codes and the schema so the promise is checked, not remembered.
+macOS read confinement outside `filesystem.root` (`ARCHITECTURE.md`), a Windows fence (`docs/design/windows-feasibility.md`), look-back rules beyond slice 1 (`docs/design/look-back-rules.md`), and default off-box audit anchoring (`docs/how-it-works/audit-log.md`) are separate work.
 
-## Not on the 1.0 bar
-These are real but do not gate 1.0. They are stated so nobody assumes otherwise.
-- macOS read confinement outside `filesystem.root` and complete per-file events (Endpoint Security follow-up, `ARCHITECTURE.md`).
-- A Windows fence (`docs/design/windows-feasibility.md`).
-- Look-back rules beyond slice 1 (`docs/design/look-back-rules.md`).
-- An externally anchored audit log by default (anchors are opt-in; `docs/how-it-works/audit-log.md`).
-
-## Keeping this page honest
-When an item closes, change the state column to the commit or release that closed it and link the test. When scope changes, say who approved it and where.
+When a bar closes, replace its remaining-work text with the merge commit and the test that proves it. Record any scope change with its approval source.

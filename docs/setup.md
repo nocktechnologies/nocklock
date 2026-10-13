@@ -48,7 +48,7 @@ Pick a preset instead of the generic defaults with `nocklock init --runtime <nam
 | Check | Command | Good result |
 |---|---|---|
 | Binary | `nocklock version` | prints a version |
-| Host can enforce each fence | `nocklock doctor` | verdict `PROTECTED`, exit 0; `GAPS FOUND` exits 1 (`internal/cli/doctor.go:99-100`) |
+| Host can enforce each fence | `nocklock doctor` | verdict `PROTECTED`, exit 0; `GAPS FOUND` exits 2, `PARTIAL` 3, `UNPROTECTED` 4 (`internal/cli/doctor.go:41-59`) |
 | Fence actually blocks | `nocklock verify` | adversarial self-test passes, exit 0 (`internal/cli/verify.go:106-107`) |
 | Egress helper (Linux netns) | `sudo -n /usr/libexec/nocklock-egress-helper check` | prints nothing, exit 0 |
 | Audit log intact | `nocklock verify --audit` | `AUTHENTIC` (signed) or `CONSISTENT` (unsigned chain); see `docs/how-it-works/audit-log.md` |

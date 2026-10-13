@@ -1,6 +1,6 @@
 # Repo map
 
-One line per directory or key package: what lives there and where its tests are. Paths verified at `origin/main` 8a65777. For the file-level tree see `ARCHITECTURE.md`; if this page and the code disagree, the code wins.
+One line per directory or key package: what lives there and where its tests are. Paths verified at `origin/main` 89c02fa. For the file-level tree see `ARCHITECTURE.md`; if this page and the code disagree, the code wins.
 
 Go tests sit beside the code as `*_test.go`. Files ending `_linux_test.go` or `_darwin_test.go` run on that OS only.
 
@@ -14,8 +14,10 @@ Go tests sit beside the code as `*_test.go`. Files ending `_linux_test.go` or `_
 | `integration/` | End-to-end test of the built binary | `integration/integration_test.go`, run with `go test -tags=integration ./...` (`CONTRIBUTING.md`) |
 | `scripts/` | `install-egress-helper.sh` (root-owned helper plus sudoers grant) and `test-init-default-linux.sh` (fresh `init` then wrapped shell, run by CI) | helper: `internal/fence/network/netns/install_helper_script_linux_test.go` |
 | `docs/` | This documentation set; index at `docs/README.md` | none |
+| `bench/redteam/` | NockLock + NockGuard scripted attack bench (`attacks.toml`, `run.sh`, `redteam.py`) and signed receipt report | bench cases in `attacks.toml`, CI `redteam-bench` job in `.github/workflows/network-egress.yml` |
 | `.claude/` | Agent config: branch-lock hook, `decisions/` (ADR-001..005), `design/`, `diagrams/`, `lessons/`, `review/PIPELINE.md` | none |
 | `.github/workflows/` | CI: `test.yml`, `network-egress.yml`, `gitleaks.yml`, `claude.yml`, `claude-code-review.yml` | n/a |
+| `.githooks/` | Local pre-commit hook (`pre-commit`) | no direct tests |
 | `.nock/` | Example project config (`config.toml.example`) | none |
 | `Makefile` | `build`, `build-all`, `install`, `install-egress-helper`, `fmt`, `vet`, `lint`, `test` | n/a |
 | `ARCHITECTURE.md`, `CONTRIBUTING.md`, `CHANGELOG.md`, `README.md` | Package tree, contribution rules, release notes, user-facing guide | n/a |

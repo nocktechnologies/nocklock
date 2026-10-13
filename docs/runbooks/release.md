@@ -1,9 +1,9 @@
 # Runbook: release
 
-Reconstructed from repo history at `origin/main` 8a65777. This repo has no release workflow and no release script (`.github/workflows/` holds `test.yml`, `network-egress.yml`, `gitleaks.yml`, `claude.yml`, `claude-code-review.yml`). Steps marked **confirm** are not recorded in this repo; get them from the release owner before relying on them, and then edit this page.
+Reconstructed from repo history at `origin/main` 89c02fa. This repo has no release workflow and no release script (`.github/workflows/` holds `test.yml`, `network-egress.yml`, `gitleaks.yml`, `claude.yml`, `claude-code-review.yml`). Steps marked **confirm** are not recorded in this repo; get them from the release owner before relying on them, and then edit this page.
 
 ## What past releases did
-Each release is a lightweight git tag `vX.Y.Z` on the merge commit of a PR titled `CHANGELOG: vX.Y.Z release section`: v0.6.1 on the merge of #153, v0.7.0 on a793375 (#164). In each, `CHANGELOG.md` moves `[Unreleased]` entries under a new `## [X.Y.Z] - YYYY-MM-DD` heading with a short summary paragraph (`CHANGELOG.md:11-13` for 0.7.0). `make build` stamps the version from `git describe --tags --always --dirty` through ldflags (`Makefile:3-4`), so the tag is the version.
+Each release is a lightweight git tag `vX.Y.Z` on the merge commit of a PR titled `CHANGELOG: vX.Y.Z release section`: v0.6.1 on the merge of #153, v0.7.0 on a793375 (#164), and v0.8.0 on db1a273 (#176). In each, `CHANGELOG.md` moves `[Unreleased]` entries under a new `## [X.Y.Z] - YYYY-MM-DD` heading with a short summary paragraph (`CHANGELOG.md:10-13` for 0.8.0). `make build` stamps the version from `git describe --tags --always --dirty` through ldflags (`Makefile:3-4`), so the tag is the version.
 
 ## Steps
 1. **Freeze.** All intended PRs merged to `main`, each with its `CHANGELOG.md` entry under `[Unreleased]`. Anything user-visible that changes a documented boundary also updates `README.md` and the matching `docs/how-it-works/` page.

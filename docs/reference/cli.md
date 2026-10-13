@@ -1,6 +1,6 @@
-# CLI, exit codes and config schema (as shipped at 0.7.0)
+# CLI, exit codes and config schema (current 0.8.0 behavior)
 
-This page records what the code does at `origin/main` 8a65777. It is **not yet a compatibility promise**. Making it one is the fourth bar for 1.0 (`docs/ROADMAP.md`); until then, anything here can change in a minor release with a `CHANGELOG.md` "Breaking" entry.
+This page records what the code does at `origin/main` 89c02fa. It is **not yet a compatibility promise**. Making it one is the fourth bar for 1.0 (`docs/ROADMAP.md`); until then, anything here can change in a minor release with a `CHANGELOG.md` "Breaking" entry.
 
 ## Commands
 Registered in `internal/cli/` (one file per command). `README.md` "Commands" has the user-facing table.
@@ -8,10 +8,10 @@ Registered in `internal/cli/` (one file per command). `README.md` "Commands" has
 | Command | Flags | Source |
 |---|---|---|
 | `wrap [flags] -- <cmd> [args]` | `--profile <name>` (`list` lists presets), `--dry-run`, `--net-fence=netns`, `--require-enforced-egress`, `--allow-private-ranges`; `--allow-unfenced` is removed and errors | `wrap.go:36`, `flagparse.go:64-94` |
-| `init [--runtime <name>]` | | `init_cmd.go:16,75` |
+| `init [--runtime <name>]` | `--diff` with `--runtime` prints policy changes without writing; an existing config makes plain `init` fail | `init_cmd.go:16,233` |
 | `validate [config-path]` | | `validate.go:12` |
 | `config` | | `config.go:12` |
-| `doctor [--json]` | | `doctor.go:85,107` |
+| `doctor [--json]` | | `doctor.go:36-59` |
 | `verify [--json]` | `--audit`, `--export-pubkey`, `--ed25519-pub <key>`, `--against-anchor <file>`, `--against-remote-anchor` (the last two are mutually exclusive) | `verify.go:60,77,114-119` |
 | `scan [path ...]` | `--env`, `--json` | `scan.go:23,49-50` |
 | `anchor emit [--out <file>]`, `anchor push [--file <file>]` | | `anchor.go:22,36,55-57` |
@@ -26,11 +26,12 @@ Exit codes travel as `exitCodeError` and `Execute()` calls `os.Exit` once (`root
 | Code | Meaning | Where |
 |---|---|---|
 | `0` | Success; for `wrap`, the child exited 0 | |
-| `1` | A verdict or validation failure: `doctor` `GAPS FOUND` (`doctor.go:99-100`), `verify` not blocked / not consistent (`verify.go:106-107`, `:197`), `scan` finding or incomplete (`scan.go:44`), `validate` errors (`validate.go:34`), config-digest mismatch (`config_digest.go:347`), `__probe` escape (`probe.go:49`); any unhandled error | |
-| `2` | `wrap` refused to start or lost its proxy: egress `UNREACHABLE`, look-back rule at the wrong level, `require_enforced` not met, a required fence unavailable, an unwritable audit decision (`:1029`), proxy failure (`wrap.go:587-610`, `:1037`) | |
+| `1` | A verification or validation failure: `verify` not blocked / not consistent (`verify.go:106-107`, `:197`), `scan` finding or incomplete (`scan.go:44`), `validate` errors (`validate.go:34`), config-digest mismatch (`config_digest.go:347`), `__probe` escape (`probe.go:49`); any unhandled error | |
+| `2` | `doctor` `GAPS FOUND` (`doctor.go:41-59`); `wrap` refused to start or lost its proxy: egress `UNREACHABLE`, look-back rule at the wrong level, `require_enforced` not met, a required fence unavailable, an unwritable audit decision (`:1029`), proxy failure (`wrap.go:587-610`, `:1037`) | |
+| `3` / `4` | `doctor` `PARTIAL` / `UNPROTECTED` (`doctor.go:41-59`) | |
 | child's code | `wrap` returns the child's exit code (`wrap.go:1039-1048`); a negative code (signal or abnormal exit) becomes `1` (`.claude/lessons/cross-platform-exit-codes.md`) | |
 
-Caveat: a child that exits `1` or `2` is indistinguishable from `nocklock` exit `1` or `2`. The banner on stderr (`NockLock: fatal:`) and the `session_end` audit row (`exit_code=<n>`) disambiguate (`wrap.go:1028-1046`).
+Caveat: a wrapped child exiting `1` or `2` can overlap CLI failure codes. The banner on stderr (`NockLock: fatal:`) and the `session_end` audit row (`exit_code=<n>`) disambiguate (`wrap.go:1028-1046`).
 
 ## Config schema (`.nock/config.toml`)
 Strict: unknown keys are a load error (`internal/config/config.go:480-481`). Structs at `internal/config/config.go:271-396`; defaults in `internal/config/defaults.go`; validation in `internal/config/validate.go:29`.

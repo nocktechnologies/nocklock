@@ -6,4 +6,4 @@
 
 **Decision.** Deny a curated set of dangerous subsystems with `EPERM` (module loading, mount family, handle-based opens, keyring, `bpf`, `perf_event_open`, `userfaultfd`, namespace creation unless allowed, socket families outside the allowlist) and allow the rest.
 
-**Consequences.** Maintainable and forward-compatible, but any syscall not listed is reachable. Known gap: `io_uring` (N11655, `docs/ROADMAP.md`).
+**Consequences.** Maintainable and forward-compatible, but any syscall not listed is reachable. The `io_uring` syscalls were added to the denylist in v0.8.0 (`internal/fence/syscallfence/denylist.go:93-96`); newly exposed syscall paths still require review.
