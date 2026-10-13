@@ -7,16 +7,13 @@ All notable changes to NockLock will be documented in this file.
 ### Security
 
 - Clarify that Linux `CONFINED` currently does not restrict AF_UNIX destinations. A non-root probe confirmed that a wrapped child can connect to both a throwaway pathname socket and a throwaway abstract socket while a direct AF_INET datagram socket syscall is denied. The design and probe are in `docs/design/unix-socket-reachability.md` and `docs/probes/n11650/`.
-- The syscall fence now denies io_uring.
 
-### Fixed
-
-- Linux netns: the concurrent subnet test now checks atomic reservation claims instead of random, unreserved bridge candidates; two processes also contend for one subnet in a regression test.
+## [0.8.0] - 2026-10-13
 
 ### Breaking
 
 - `nocklock doctor` no longer reports PROTECTED for a config with disabled or advisory boundaries. New verdicts PARTIAL (exit 3) and UNPROTECTED (exit 4); GAPS FOUND now exits 2 (was 1). Exit codes are now 0 PROTECTED, 2 GAPS FOUND, 3 PARTIAL, 4 UNPROTECTED. A project that used to read PROTECTED with fences off now exits non-zero (3 or 4); that is intended, and automation that fails on any non-zero exit will now fail for such configs. Scripts matching exit 1 must change to 2. A network fence whose egress is UNREACHABLE reports posture `unavailable` and never counts toward PROTECTED. `doctor --json` gains `boundaries` and `egress_level`. A config with `filesystem.root = ""`, `network.allow_all = true`, empty secret patterns and `syscall.enforcement = "off"` is now UNPROTECTED instead of PROTECTED.
-- `init` now exits non-zero when a config exists; scripts that call init repeatedly should check for `.nock/config.toml` first; `nocklock init --runtime <name> --diff` shows what a preset would change in an existing config, printing array elements as `+ secrets.pass += "X"` and `- secrets.block -= "X"`.
+- `nocklock init` now exits non-zero when `.nock/config.toml` already exists; scripts that call `init` repeatedly should check for that file first. See Changed for `--diff`.
 
 ### Added
 
@@ -25,6 +22,10 @@ All notable changes to NockLock will be documented in this file.
   signed Linux packet-drop observations in `docs/design/kernel-floor-denial-evidence.md`
   (N11634). Design only; no enforcement or audit behavior changed.
 
+### Security
+
+- Linux CONFINED: the syscall fence now denies `io_uring_setup`, `io_uring_enter` and `io_uring_register`. In v0.7.0 and earlier a fenced process could open and connect a socket through io_uring (`IORING_OP_SOCKET` / `IORING_OP_CONNECT`), which went around the socket-family filter. Upgrade. Regression test: `TestEnforce_IORingSocketConnectDenied`.
+
 ### Changed
 
 - `nocklock status` says "configured" instead of "active": it reads config and does not track running wrap sessions.
@@ -32,6 +33,19 @@ All notable changes to NockLock will be documented in this file.
 - `--ed25519-pub` accepts the `ed25519 <base64>` line that `verify --export-pubkey` prints, as well as bare base64 or hex.
 - A legacy `[cloud]` section is reported as inert, naming `[audit.forward]`, the real delivery transport.
 - Look-back race test: the POST target records how each request body ended and counts a bodyless request apart from a finished body; new `TestLookbackTripLeavesTargetBodyIncomplete` pins that a trip cuts Content-Length and chunked bodies. Test-only.
+
+### Fixed
+
+- Linux netns: the concurrent subnet test now checks atomic reservation claims instead of random, unreserved bridge candidates; two processes also contend for one subnet in a regression test.
+
+### Known issues
+
+- Linux CONFINED does not yet stop a fenced process from connecting to Unix sockets (pathname or abstract), so a reachable socket such as `docker.sock` is a way out; a fix is in progress.
+- The Homebrew formula installs only the `nocklock` binary; on Linux the default config's `wrap` needs `libfence_fs.so` and refuses to start without it, and `make install` does not install it either, so build from source per the README until packaging lands.
+
+### Upgrading from 0.7.x
+
+Scripts that treat any non-zero `doctor` exit as failure now also see 3 (PARTIAL) and 4 (UNPROTECTED), and GAPS FOUND moves from exit 1 to 2. Scripts that call `init` repeatedly must check for `.nock/config.toml` first. `status` prints "configured" instead of "active".
 
 ## [0.7.0] - 2026-10-12
 
