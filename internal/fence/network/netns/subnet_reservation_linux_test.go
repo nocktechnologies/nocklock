@@ -4,6 +4,7 @@ package netns
 
 import (
 	"bytes"
+	"context"
 	"errors"
 	"fmt"
 	"os"
@@ -11,6 +12,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"syscall"
 	"testing"
 	"time"
 )
@@ -77,10 +79,14 @@ func TestSubnetReservation_CrossProcessClaim(t *testing.T) {
 	const subnet = "169.254.65.29"
 	if dir := os.Getenv("NOCKLOCK_TEST_SUBNET_RESERVATION_DIR"); dir != "" {
 		subnetReservationDir = dir
-		gate := os.NewFile(3, "claim gate")
-		if gate == nil {
-			t.Fatal("second process has no claim gate")
+		var stat syscall.Stat_t
+		if err := syscall.Fstat(3, &stat); err != nil {
+			t.Fatalf("inspect claim gate fd 3: %v", err)
 		}
+		if stat.Mode&syscall.S_IFMT != syscall.S_IFIFO {
+			t.Fatalf("claim gate fd 3 is not a pipe (mode %#o)", stat.Mode&syscall.S_IFMT)
+		}
+		gate := os.NewFile(3, "claim gate")
 		defer gate.Close()
 		var signal [1]byte
 		if _, err := gate.Read(signal[:]); err != nil {
@@ -112,12 +118,29 @@ func TestSubnetReservation_CrossProcessClaim(t *testing.T) {
 	}
 	var commands [2]*exec.Cmd
 	var outputs [2]bytes.Buffer
+	var waited [2]bool
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer func() {
+		cancel()
+		for i, cmd := range commands {
+			if cmd == nil || waited[i] {
+				continue
+			}
+			_ = syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
+			if err := cmd.Wait(); err != nil {
+				t.Logf("reap claimant %d: %v", i, err)
+			}
+		}
+	}()
 	for i := range commands {
-		cmd := exec.Command(exe, "-test.run=^TestSubnetReservation_CrossProcessClaim$")
+		cmd := exec.CommandContext(ctx, exe, "-test.run=^TestSubnetReservation_CrossProcessClaim$")
 		cmd.Env = append(os.Environ(), "NOCKLOCK_TEST_SUBNET_RESERVATION_DIR="+subnetReservationDir)
 		cmd.ExtraFiles = []*os.File{gateRead}
 		cmd.Stdout = &outputs[i]
 		cmd.Stderr = &outputs[i]
+		cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+		cmd.Cancel = func() error { return syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL) }
+		cmd.WaitDelay = time.Second
 		if err := cmd.Start(); err != nil {
 			t.Fatalf("start claimant %d: %v", i, err)
 		}
@@ -132,8 +155,11 @@ func TestSubnetReservation_CrossProcessClaim(t *testing.T) {
 	winners := 0
 	var winningTokens []string
 	for i, cmd := range commands {
-		if err := cmd.Wait(); err != nil {
-			t.Errorf("claimant %d failed: %v\n%s", i, err, outputs[i].String())
+		err := cmd.Wait()
+		waited[i] = true
+		if err != nil {
+			_ = syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
+			t.Errorf("claimant %d failed (deadline: %v): %v\n%s", i, ctx.Err(), err, outputs[i].String())
 			continue
 		}
 		output := outputs[i].String()
@@ -156,54 +182,24 @@ func TestSubnetReservation_CrossProcessClaim(t *testing.T) {
 }
 
 // TestSubnetReservation_ReservationRelease verifies that a released subnet
-// can be reallocated by a subsequent call.
+// can be claimed again.
 func TestSubnetReservation_ReservationRelease(t *testing.T) {
 	useTempSubnetReservationDir(t)
-	// Allocate a subnet.
-	bridge1, err := NewBridgeSpec()
+	const subnet = "169.254.65.29"
+	token1, err := reserveSubnet(subnet)
 	if err != nil {
-		t.Fatalf("first allocation: %v", err)
+		t.Fatalf("first claim: %v", err)
 	}
-	addr1 := bridge1.HostAddress
-	resID1 := bridge1.ReservationID
-
-	// Release it.
-	if err := ReleaseSubnetReservation(resID1, bridge1.ReservationToken); err != nil {
+	if err := ReleaseSubnetReservation(subnet, token1); err != nil {
 		t.Fatalf("release reservation: %v", err)
 	}
-
-	// Allocate again; should eventually get a bridge with the same or different address.
-	// We'll try up to 10 times to see if we can reuse the address.
-	var addr2 string
-	var resID2 string
-	var bridge2 BridgeSpec
-	reused := false
-	for attempt := 0; attempt < 10; attempt++ {
-		bridge2, err := NewBridgeSpec()
-		if err != nil {
-			t.Fatalf("second allocation attempt %d: %v", attempt, err)
-		}
-		addr2 = bridge2.HostAddress
-		resID2 = bridge2.ReservationID
-
-		if addr2 == addr1 {
-			reused = true
-			break
-		}
-
-		// Release this one and try again.
-		_ = ReleaseSubnetReservation(resID2, bridge2.ReservationToken)
-		time.Sleep(10 * time.Millisecond)
+	token2, err := reserveSubnet(subnet)
+	if err != nil {
+		t.Fatalf("claim after release: %v", err)
 	}
-
-	if reused {
-		t.Logf("address %s was successfully reused after release", addr1)
-	} else {
-		// Not strictly a failure; just indicates randomness made reuse unlikely.
-		t.Logf("could not reuse %s in 10 attempts (acceptable due to randomness)", addr1)
+	if err := ReleaseSubnetReservation(subnet, token2); err != nil {
+		t.Fatalf("release second claim: %v", err)
 	}
-
-	_ = ReleaseSubnetReservation(resID2, bridge2.ReservationToken)
 }
 
 // TestSubnetReservation_DirectFileCreation verifies that the reservation
@@ -234,8 +230,9 @@ func TestSubnetReservation_DirectFileCreation(t *testing.T) {
 
 	// Verify reserveSubnet fails on this subnet (collision).
 	_, err = reserveSubnet(testSubnet)
-	if err == nil {
-		t.Errorf("reserveSubnet should fail with collision on %s", testSubnet)
+	var collision *SubnetCollisionError
+	if !errors.As(err, &collision) {
+		t.Errorf("reserveSubnet(%s): got %v, want subnet collision", testSubnet, err)
 	}
 
 	// Clean up the manual file.
@@ -253,46 +250,30 @@ func TestSubnetReservation_DirectFileCreation(t *testing.T) {
 	}
 }
 
-// TestSubnetReservation_AllocationRetryOnCollision verifies that NewBridgeSpec
-// retries and eventually succeeds even when encountering collisions.
-func TestSubnetReservation_AllocationRetryOnCollision(t *testing.T) {
+// TestSubnetReservation_BridgeCandidateDoesNotClaim verifies that NewBridgeSpec
+// returns a candidate without creating its reservation file.
+func TestSubnetReservation_BridgeCandidateDoesNotClaim(t *testing.T) {
 	useTempSubnetReservationDir(t)
-	// Pre-create a reservation for a subnet we'll force a collision on.
-	testSubnet := "169.254.5.1"
-	reservationFile := filepath.Join(subnetReservationDir, testSubnet)
-
-	// Ensure directory and file exist (create reservation).
-	if err := os.MkdirAll(subnetReservationDir, 0700); err != nil {
-		t.Fatalf("create reservation directory: %v", err)
-	}
-	if err := os.WriteFile(reservationFile, []byte(fmt.Sprintf("%d\n", os.Getpid())), 0600); err != nil {
-		t.Fatalf("write collision subnet reservation: %v", err)
-	}
-	defer os.Remove(reservationFile)
-
-	// Allocate a bridge; should retry and succeed despite the collision.
 	bridge, err := NewBridgeSpec()
 	if err != nil {
-		t.Fatalf("allocation with collision: %v", err)
+		t.Fatalf("generate bridge candidate: %v", err)
 	}
-
-	// Verify it allocated a different subnet.
-	if bridge.HostAddress == testSubnet {
-		t.Errorf("NewBridgeSpec should have retried and avoided collision with %s", testSubnet)
+	if bridge.ReservationToken != "" {
+		t.Errorf("candidate unexpectedly has reservation token %q", bridge.ReservationToken)
 	}
-
-	_ = ReleaseSubnetReservation(bridge.ReservationID, bridge.ReservationToken)
+	if _, err := os.Stat(filepath.Join(subnetReservationDir, bridge.ReservationID)); !errors.Is(err, os.ErrNotExist) {
+		t.Errorf("candidate created a reservation file: %v", err)
+	}
 }
 
-// TestSubnetReservation_BridgeSpec_ValidateAfterReservation verifies that
-// a reserved bridge spec passes validation.
-func TestSubnetReservation_BridgeSpec_ValidateAfterReservation(t *testing.T) {
+// TestSubnetReservation_BridgeSpec_ValidateCandidate verifies that a bridge
+// candidate passes configuration validation without claiming a subnet.
+func TestSubnetReservation_BridgeSpec_ValidateCandidate(t *testing.T) {
 	useTempSubnetReservationDir(t)
 	bridge, err := NewBridgeSpec()
 	if err != nil {
-		t.Fatalf("allocate bridge: %v", err)
+		t.Fatalf("generate bridge candidate: %v", err)
 	}
-	defer ReleaseSubnetReservation(bridge.ReservationID, bridge.ReservationToken)
 
 	cfg := &EgressConfig{
 		Allow:              []string{"example.com"},
@@ -301,7 +282,7 @@ func TestSubnetReservation_BridgeSpec_ValidateAfterReservation(t *testing.T) {
 	}
 
 	if err := validateEgressConfig(cfg, 1000); err != nil {
-		t.Errorf("validate allocated bridge config: %v", err)
+		t.Errorf("validate bridge candidate config: %v", err)
 	}
 }
 
@@ -310,13 +291,12 @@ func TestSubnetReservation_BridgeSpec_ValidateAfterReservation(t *testing.T) {
 // preventing TOCTOU deletion of another run's subnet.
 func TestSubnetReservation_StaleTOCTOURelease(t *testing.T) {
 	useTempSubnetReservationDir(t)
-	// Allocate a subnet (run A).
-	bridge1, err := NewBridgeSpec()
+	const resID1 = "169.254.65.29"
+	// Claim a subnet (run A).
+	token1, err := reserveSubnet(resID1)
 	if err != nil {
-		t.Fatalf("first allocation (run A): %v", err)
+		t.Fatalf("first claim (run A): %v", err)
 	}
-	token1 := bridge1.ReservationToken
-	resID1 := bridge1.ReservationID
 
 	// Release run A's reservation (clean exit).
 	if err := ReleaseSubnetReservation(resID1, token1); err != nil {

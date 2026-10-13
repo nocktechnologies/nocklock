@@ -130,13 +130,14 @@ var currentDoctorCapabilities = doctorCapabilities{
 
 var doctorCmd = &cobra.Command{
 	Use:   "doctor",
-	Short: "Check whether NockLock fences are enforceable",
-	Long: `Check whether each fence is enforceable on this host.
+	Short: "Check whether NockLock fences are enforced",
+	Long: `Check whether each fence is enforced on this host.
 
 Exit codes:
   0  PROTECTED    every boundary enforced
   2  GAPS FOUND   a boundary is configured but its backend is missing,
-                  or the config is missing or unparseable
+                  egress is UNREACHABLE (wrap
+                  refuses to start), or the config is missing or unparseable
   3  PARTIAL      some boundary is disabled or advisory (listed by name)
   4  UNPROTECTED  no boundary is enforced`,
 	RunE: func(cmd *cobra.Command, args []string) error {
@@ -701,15 +702,18 @@ func finishDoctorReport(checks []doctorCheck, boundaries []doctorBoundary, activ
 			gaps = append(gaps, check)
 		}
 	}
-	enforced := 0
+	enforced, unavailable := 0, false
 	for _, b := range boundaries {
-		if b.Posture == postureEnforced {
+		switch b.Posture {
+		case postureEnforced:
 			enforced++
+		case postureUnavailable:
+			unavailable = true // wrap refuses to start: blocking
 		}
 	}
 	verdict := doctorVerdictProtected
 	switch {
-	case len(gaps) > 0:
+	case len(gaps) > 0 || unavailable:
 		verdict = doctorVerdictGapsFound
 	case enforced == 0 && len(boundaries) > 0:
 		verdict = doctorVerdictUnprotected

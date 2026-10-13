@@ -4,6 +4,8 @@ import (
 	"bytes"
 	"encoding/json"
 	"errors"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -31,6 +33,13 @@ func runDoctorJSON(t *testing.T, toml, goos string) (doctorReport, int) {
 func runDoctorJSONWithABI(t *testing.T, toml, goos string, abi int) (doctorReport, int) {
 	t.Helper()
 	dir := t.TempDir()
+	home := filepath.Join(dir, "home")
+	if err := os.Mkdir(home, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("HOME", home)
+	t.Setenv("XDG_STATE_HOME", filepath.Join(home, "state"))
+	t.Setenv("XDG_DATA_HOME", filepath.Join(home, "data"))
 	writeTestConfig(t, dir, toml)
 	withWorkingDir(t, dir)
 	defer stubDoctorCapabilities(doctorCapabilities{
@@ -64,6 +73,13 @@ func postures(r doctorReport) map[string]doctorPosture {
 	return m
 }
 
+func requireBoundaries(t *testing.T, r doctorReport) {
+	t.Helper()
+	if len(r.Boundaries) == 0 {
+		t.Fatal("report has no boundaries")
+	}
+}
+
 // TestDoctorAllDisabledIsUnprotected is the N11640 repro: every boundary off
 // must not read PROTECTED or exit 0.
 func TestDoctorAllDisabledIsUnprotected(t *testing.T) {
@@ -90,11 +106,12 @@ func TestDoctorDefaultInitConfigPosture(t *testing.T) {
 	for goos, wantLevel := range map[string]egressLevel{"linux": egressLevelConfined, "darwin": egressLevelSeatbelt} {
 		got, code := runDoctorJSON(t, config.DefaultTOML(), goos)
 		if got.Verdict != doctorVerdictProtected || code != 0 {
-			t.Fatalf("%s: verdict=%q exit=%d, want PROTECTED/0", goos, got.Verdict, code)
+			t.Fatalf("%s: verdict=%q exit=%d gaps=%+v, want PROTECTED/0", goos, got.Verdict, code, got.Gaps)
 		}
 		if got.EgressLevel != wantLevel {
 			t.Fatalf("%s: egress = %q, want %q", goos, got.EgressLevel, wantLevel)
 		}
+		requireBoundaries(t, got)
 		for name, p := range postures(got) {
 			if p != postureEnforced {
 				t.Fatalf("%s: %s posture = %q, want enforced", goos, name, p)
@@ -126,8 +143,8 @@ func TestDoctorUnreachableEgressIsUnavailable(t *testing.T) {
 	if p := postures(got); p["network"] != postureUnavailable {
 		t.Fatalf("network posture = %q, want unavailable", p["network"])
 	}
-	if got.Verdict == doctorVerdictProtected || code == doctorExitProtected {
-		t.Fatalf("verdict=%q exit=%d, must not be PROTECTED", got.Verdict, code)
+	if got.Verdict != doctorVerdictGapsFound || code != doctorExitGapsFound {
+		t.Fatalf("verdict=%q exit=%d, want GAPS FOUND/%d", got.Verdict, code, doctorExitGapsFound)
 	}
 }
 

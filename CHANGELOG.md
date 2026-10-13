@@ -4,17 +4,25 @@ All notable changes to NockLock will be documented in this file.
 
 ## [Unreleased]
 
+### Changed
+
+- Red-team bench hardening (N11676): a verifier, version or process-group cleanup fault after scoring now fails the run (`no_harness_fault_after_scoring`); a nonzero NockGuard proxy exit at shutdown is a HARNESS-FAULT; the raw-socket and DNS attacks exit 42 when refused, so Python's own exit 1 (an uncaught exception) is a fault, not a block; datagrams already queued at the sink when an attack's deadline passes are counted before scoring. Test fixes: the interrupt test now requires the attack to have started, and the symlink-plant test checks the victim file while it still exists.
+
 ### Security
 
 - Linux `CONFINED` egress below Landlock ABI 9: default non-strict `wrap` runs, warns once, and records a signed session-start row with `unix_sockets=reachable reason=landlock_abi_<n>_below_9`. `doctor` reports the Unix-socket boundary as unavailable and returns `PARTIAL` (exit 3); `status` includes the ABI reason. ABI 9 enforcement has not run on a real kernel yet.
 - `network.require_unix_socket_isolation = true` makes `wrap` refuse when the Unix-socket boundary cannot be enforced. The removed `--allow-unix-sockets` flag is not supported.
 - Record the pre-ABI-9 Linux `CONFINED` limitation: a non-root probe confirmed that a wrapped child can connect to both a throwaway pathname socket and a throwaway abstract socket while a direct AF_INET datagram socket syscall is denied. The design and probe are in `docs/design/unix-socket-reachability.md` and `docs/probes/n11650/`.
 
+### Documentation
+
+- README: macOS denied-file logging now has one statement (best-effort `file_blocked` tailer); new "What the signed log proves" section on observation coverage (N11642).
+
 ## [0.8.0] - 2026-10-13
 
 ### Breaking
 
-- `nocklock doctor` no longer reports PROTECTED for a config with disabled or advisory boundaries. New verdicts PARTIAL (exit 3) and UNPROTECTED (exit 4); GAPS FOUND now exits 2 (was 1). Exit codes are now 0 PROTECTED, 2 GAPS FOUND, 3 PARTIAL, 4 UNPROTECTED. A project that used to read PROTECTED with fences off now exits non-zero (3 or 4); that is intended, and automation that fails on any non-zero exit will now fail for such configs. Scripts matching exit 1 must change to 2. A network fence whose egress is UNREACHABLE reports posture `unavailable` and never counts toward PROTECTED. `doctor --json` gains `boundaries` and `egress_level`. A config with `filesystem.root = ""`, `network.allow_all = true`, empty secret patterns and `syscall.enforcement = "off"` is now UNPROTECTED instead of PROTECTED.
+- `nocklock doctor` no longer reports PROTECTED for a config with disabled or advisory boundaries. New verdicts PARTIAL (exit 3) and UNPROTECTED (exit 4); GAPS FOUND now exits 2 (was 1). Exit codes are now 0 PROTECTED, 2 GAPS FOUND, 3 PARTIAL, 4 UNPROTECTED. A project that used to read PROTECTED with fences off now exits non-zero (3 or 4); that is intended, and automation that fails on any non-zero exit will now fail for such configs. Scripts matching exit 1 must change to 2. A network fence whose egress is UNREACHABLE reports posture `unavailable` and the verdict is GAPS FOUND (exit 2), since wrap refuses to start. `doctor --json` gains `boundaries` and `egress_level`. A config with `filesystem.root = ""`, `network.allow_all = true`, empty secret patterns and `syscall.enforcement = "off"` is now UNPROTECTED instead of PROTECTED.
 - `nocklock init` now exits non-zero when `.nock/config.toml` already exists; scripts that call `init` repeatedly should check for that file first. See Changed for `--diff`.
 
 ### Added
