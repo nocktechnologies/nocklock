@@ -8,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -72,6 +73,45 @@ func TestProxyStopIdempotent(t *testing.T) {
 	_ = p.Stop()
 	if err := p.Stop(); err != nil {
 		t.Errorf("second Stop() error: %v", err)
+	}
+}
+
+func TestProxyStopConcurrent(t *testing.T) {
+	p := makeProxy(nil)
+	addr, err := p.Start()
+	if err != nil {
+		t.Fatalf("Start() error: %v", err)
+	}
+	if err := WaitForProxyReady(t.Context(), addr, time.Second); err != nil {
+		t.Fatalf("running proxy should be reachable: %v", err)
+	}
+
+	const callers = 16
+	start := make(chan struct{})
+	errs := make(chan error, callers)
+	var wg sync.WaitGroup
+	for range callers {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			<-start
+			errs <- p.Stop()
+		}()
+	}
+	close(start)
+	wg.Wait()
+	close(errs)
+	for err := range errs {
+		if err != nil {
+			t.Errorf("concurrent Stop() error: %v", err)
+		}
+	}
+	if got := p.Addr(); got != "" {
+		t.Errorf("Addr() after Stop() = %q, want empty", got)
+	}
+	if conn, err := net.DialTimeout("tcp", addr, 100*time.Millisecond); err == nil {
+		conn.Close()
+		t.Error("stopped proxy still accepts connections")
 	}
 }
 

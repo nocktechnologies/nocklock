@@ -10,6 +10,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"sync"
 	"sync/atomic"
 	"time"
 
@@ -130,6 +131,7 @@ type DialFunc func(ctx context.Context, network, addr string) (net.Conn, error)
 // ProxyServer is a local HTTP/HTTPS proxy that enforces the network allowlist.
 // It binds exclusively to 127.0.0.1 on a randomly assigned port.
 type ProxyServer struct {
+	stopMu             sync.Mutex
 	listener           net.Listener
 	listenAddr         string
 	advertisedAddr     string
@@ -331,6 +333,9 @@ func (p *ProxyServer) StartUnix(unixSocketPath, advertisedAddr string) (string, 
 // Stop shuts down the proxy server gracefully.
 // After Stop returns, Addr() returns "" and the server will not accept new connections.
 func (p *ProxyServer) Stop() error {
+	p.stopMu.Lock()
+	defer p.stopMu.Unlock()
+
 	if p.server == nil {
 		p.degraded.Store(true)
 		if p.transport != nil {
