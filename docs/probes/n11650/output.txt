@@ -1,0 +1,25 @@
+date_utc=2026-10-12T23:17:55.741906+00:00
+repo_head=a793375
+kernel=7.0.0-30-generic
+uid=1000
+probe_dir=/tmp/nocklock-n11650-3k_i_dw_
+build_exit=0
+init_exit=0
+init_stderr=NockLock initialized. Config at .nock/config.toml
+path_socket=/tmp/nocklock-n11650-3k_i_dw_/outside.sock
+abstract_socket=@nocklock-n11650-3k_i_dw_
+wrap_exit=0
+child_stdout_begin
+path=CONNECTED
+abstract=CONNECTED
+inet_datagram=DENIED errno=1 Operation not permitted
+child_stdout_end
+wrap_stderr_begin
+NockLock: secret fence active — blocked 156 environment variable(s)
+NockLock: Linux Landlock filesystem fence active — ABI v5
+NockLock: filesystem fence active — root /tmp/nocklock-n11650-3k_i_dw_/project (read-write)
+NockLock: Linux syscall fence active — seccomp-BPF (required)
+NockLock: network fence active — 7 domain(s), CONFINED (syscall fence; proxy bridge only)
+wrap_stderr_end
+server_accepts=[('abstract', 'probe'), ('path', 'probe')]
+probe_artifacts_retained=yes
