@@ -4,6 +4,10 @@ All notable changes to NockLock will be documented in this file.
 
 ## [Unreleased]
 
+### Documentation
+
+- Document the current one-remote-anchor-identity-per-signing-key limit, its cross-project collision and workaround; specify a versioned per-chain identity and explicit legacy migration for the later protocol change (N11707).
+
 ### Fixed
 
 - Tests: hold dead proxy ports open until health probes finish, preventing parallel tests from reusing those ports and receiving stray `/healthz` requests (N11729).
