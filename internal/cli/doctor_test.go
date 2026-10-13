@@ -65,15 +65,14 @@ func TestDoctorNetworkAllowAllWarnsButDoesNotFail(t *testing.T) {
 	cmd.SetOut(&out)
 	cmd.SetErr(&bytes.Buffer{})
 
-	err := doctorCmd.RunE(cmd, nil)
-	if err != nil {
-		t.Fatalf("allow_all warning should not fail doctor: %v", err)
+	if got := doctorExitFromErr(doctorCmd.RunE(cmd, nil)); got != doctorExitPartial {
+		t.Fatalf("allow_all must exit %d (PARTIAL), got %d", doctorExitPartial, got)
 	}
 	if !strings.Contains(out.String(), "Network fence is OFF") {
 		t.Fatalf("expected allow_all warning, got:\n%s", out.String())
 	}
-	if !strings.Contains(out.String(), "VERDICT: PROTECTED") {
-		t.Fatalf("warnings alone should keep protected verdict, got:\n%s", out.String())
+	if !strings.Contains(out.String(), "VERDICT: PARTIAL") || !strings.Contains(out.String(), "- network: disabled") {
+		t.Fatalf("allow_all must be PARTIAL and name network, got:\n%s", out.String())
 	}
 }
 
@@ -135,14 +134,14 @@ func TestDoctorNetworkAllowlistWarnsWhenBridgeInterposerDisabled(t *testing.T) {
 	cmd.SetOut(&out)
 	cmd.SetErr(&bytes.Buffer{})
 
-	if err := doctorCmd.RunE(cmd, nil); err != nil {
-		t.Fatalf("bridge warning should not fail doctor: %v", err)
+	if got := doctorExitFromErr(doctorCmd.RunE(cmd, nil)); got != doctorExitPartial {
+		t.Fatalf("unreachable bridge must exit %d (PARTIAL), got %d", doctorExitPartial, got)
 	}
 	if !strings.Contains(out.String(), "Network allowlist cannot be reached") {
 		t.Fatalf("expected bridge warning, got:\n%s", out.String())
 	}
-	if !strings.Contains(out.String(), "VERDICT: PROTECTED") {
-		t.Fatalf("warning alone should keep protected verdict, got:\n%s", out.String())
+	if !strings.Contains(out.String(), "VERDICT: PARTIAL") {
+		t.Fatalf("warning alone must not read PROTECTED, got:\n%s", out.String())
 	}
 }
 
@@ -172,8 +171,8 @@ func TestDoctorNetworkAllowlistNotInertWhenSyscallOff(t *testing.T) {
 	cmd.SetOut(&out)
 	cmd.SetErr(&bytes.Buffer{})
 
-	if err := doctorCmd.RunE(cmd, nil); err != nil {
-		t.Fatalf("doctor should pass with syscall off: %v", err)
+	if got := doctorExitFromErr(doctorCmd.RunE(cmd, nil)); got != doctorExitPartial {
+		t.Fatalf("syscall off must exit %d (PARTIAL), got %d", doctorExitPartial, got)
 	}
 	if strings.Contains(out.String(), "Network allowlist cannot be reached") {
 		t.Fatalf("did not expect bridge warning with syscall off, got:\n%s", out.String())
@@ -212,8 +211,8 @@ func TestDoctorConfiguredFenceUnavailableFails(t *testing.T) {
 		t.Fatal("doctor should fail when configured filesystem fence cannot be kernel-enforced")
 	}
 	var exitErr *exitCodeError
-	if !errors.As(err, &exitErr) || exitErr.code != 1 {
-		t.Fatalf("expected exit status 1, got %v", err)
+	if !errors.As(err, &exitErr) || exitErr.code != doctorExitGapsFound {
+		t.Fatalf("expected exit status 2, got %v", err)
 	}
 	if !strings.Contains(out.String(), "configured-but-backend-missing") ||
 		!strings.Contains(out.String(), "VERDICT: GAPS FOUND") {

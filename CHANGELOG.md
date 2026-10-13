@@ -6,6 +6,7 @@ All notable changes to NockLock will be documented in this file.
 
 ### Breaking
 
+- `nocklock doctor` no longer reports PROTECTED for a config with disabled or advisory boundaries. New verdicts PARTIAL (exit 3) and UNPROTECTED (exit 4); GAPS FOUND now exits 2 (was 1). Exit codes are now 0 PROTECTED, 2 GAPS FOUND, 3 PARTIAL, 4 UNPROTECTED. A project that used to read PROTECTED with fences off now exits non-zero (3 or 4); that is intended, and automation that fails on any non-zero exit will now fail for such configs. Scripts matching exit 1 must change to 2. A network fence whose egress is UNREACHABLE reports posture `unavailable` and never counts toward PROTECTED. `doctor --json` gains `boundaries` and `egress_level`. A config with `filesystem.root = ""`, `network.allow_all = true`, empty secret patterns and `syscall.enforcement = "off"` is now UNPROTECTED instead of PROTECTED.
 - `init` now exits non-zero when a config exists; scripts that call init repeatedly should check for `.nock/config.toml` first; `nocklock init --runtime <name> --diff` shows what a preset would change in an existing config, printing array elements as `+ secrets.pass += "X"` and `- secrets.block -= "X"`.
 
 ### Added
@@ -17,6 +18,7 @@ All notable changes to NockLock will be documented in this file.
 
 ### Changed
 
+- `nocklock status` says "configured" instead of "active": it reads config and does not track running wrap sessions.
 - `nocklock init` exits non-zero when `.nock/config.toml` already exists instead of reporting success, and `nocklock init --runtime <name> --diff` prints the policy entries the preset would add or remove (no write; array elements print as `+ key += "v"` / `- key -= "v"`, other values as `key = value`), comparing the two configs key by key and `[[network.lookback]]` entries in order. The "config already exists" error no longer prints the Cobra usage. The macOS `claude` hint now points at `--diff`.
 - `--ed25519-pub` accepts the `ed25519 <base64>` line that `verify --export-pubkey` prints, as well as bare base64 or hex.
 - A legacy `[cloud]` section is reported as inert, naming `[audit.forward]`, the real delivery transport.
