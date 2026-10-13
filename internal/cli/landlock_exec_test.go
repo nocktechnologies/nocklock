@@ -60,3 +60,32 @@ func TestAllowSelfProcFS_NoopWithoutFSAllowedEnv(t *testing.T) {
 		}
 	}
 }
+
+func TestEnsureLandlockExecPrefixAddsShimForSyntheticRules(t *testing.T) {
+	prefix, err := ensureLandlockExecPrefix(nil)
+	if err != nil {
+		t.Fatalf("ensure shim prefix: %v", err)
+	}
+	exe, err := os.Executable()
+	if err != nil {
+		t.Fatalf("resolve test executable: %v", err)
+	}
+	want := []string{exe, "__landlock-exec", "--"}
+	if !slices.Equal(prefix, want) {
+		t.Fatalf("shim prefix = %v, want %v", prefix, want)
+	}
+	if got := composeChildArgv([]string{"probe"}, prefix); !slices.Equal(got, []string{exe, "__landlock-exec", "--", "probe"}) {
+		t.Fatalf("child argv = %v, want Landlock shim before command", got)
+	}
+}
+
+func TestEnsureLandlockExecPrefixPreservesExistingShim(t *testing.T) {
+	want := []string{"/nocklock", "__landlock-exec", "--"}
+	got, err := ensureLandlockExecPrefix(want)
+	if err != nil {
+		t.Fatalf("ensure existing shim prefix: %v", err)
+	}
+	if !slices.Equal(got, want) {
+		t.Fatalf("shim prefix = %v, want existing prefix %v", got, want)
+	}
+}

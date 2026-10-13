@@ -7,6 +7,8 @@ import (
 	"runtime"
 
 	"github.com/nocktechnologies/nocklock/internal/config"
+	"github.com/nocktechnologies/nocklock/internal/fence/fs/landlock"
+	"github.com/nocktechnologies/nocklock/internal/fence/syscallfence"
 	"github.com/nocktechnologies/nocklock/internal/logging"
 	"github.com/nocktechnologies/nocklock/internal/version"
 	"github.com/spf13/cobra"
@@ -60,6 +62,27 @@ var statusCmd = &cobra.Command{
 		} else {
 			domainCount := len(cfg.Network.Allow)
 			fmt.Fprintf(out, "Network fence: configured (allowing %d domain(s))\n", domainCount)
+		}
+		if runtime.GOOS == "linux" {
+			syscallActive := syscallEnforcementMode(cfg.Syscall.Enforcement) != syscallfence.ModeOff && syscallfence.Supported()
+			level := effectiveEgressLevel("linux", "proxy", cfg.Network.AllowAll, syscallActive, cfg.Filesystem.Root != "", false)
+			if level != egressLevelConfined {
+				if cfg.Network.RequireUnixSocketIsolation {
+					fmt.Fprintf(cmd.OutOrStdout(), "Unix-socket isolation: unavailable (wrap will refuse: network.require_unix_socket_isolation requires Linux CONFINED egress, but configured egress level is %s)\n", level)
+				} else if cfg.Network.AllowAll {
+					fmt.Fprintln(cmd.OutOrStdout(), "Unix-socket isolation: not applicable (network.allow_all = true)")
+				} else {
+					fmt.Fprintf(cmd.OutOrStdout(), "Unix-socket isolation: not applicable (configured egress level is %s; isolation requires Linux CONFINED egress)\n", level)
+				}
+			} else {
+				abi, abiErr := landlock.DetectABI()
+				status, _ := unixSocketBoundaryStatus(abi, abiErr)
+				message := unixSocketBoundaryMessage(abi, abiErr)
+				if status == "unavailable" && cfg.Network.RequireUnixSocketIsolation {
+					message += " Wrap will refuse because network.require_unix_socket_isolation = true."
+				}
+				fmt.Fprintf(cmd.OutOrStdout(), "Unix-socket isolation: %s (%s)\n", status, message)
+			}
 		}
 
 		// Event log summary

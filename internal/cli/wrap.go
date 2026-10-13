@@ -356,6 +356,8 @@ var wrapCmd = &cobra.Command{
 		var seatbeltListener net.Listener
 		macOSDenialLog := false
 		var landlockPrefix []string
+		var landlockSpec *landlock.Spec
+		landlockABI := 0
 		var fsCfg *fsfence.FenceConfig
 		if cfg.Filesystem.Root != "" {
 			// Fence the audit log from the CHILD so the fenced agent can't delete
@@ -429,6 +431,7 @@ var wrapCmd = &cobra.Command{
 							fmt.Fprintln(os.Stderr, msg)
 							logEvent(logging.EventFilePassed, "filesystem", "kernel fence unavailable, userspace-only", false)
 						} else {
+							landlockABI = abi
 							exe, err := os.Executable()
 							if err != nil {
 								return fmt.Errorf("cannot resolve nocklock executable for Landlock shim: %w", err)
@@ -438,11 +441,7 @@ var wrapCmd = &cobra.Command{
 							if err != nil {
 								return fmt.Errorf("failed to build Landlock rules: %w", err)
 							}
-							encoded, err := landlock.MarshalSpec(spec)
-							if err != nil {
-								return fmt.Errorf("failed to serialize Landlock rules: %w", err)
-							}
-							childEnv = append(removeEnvVars(childEnv, landlockRulesEnv), landlockRulesEnv+"="+encoded)
+							landlockSpec = &spec
 							landlockPrefix = []string{exe, "__landlock-exec", "--"}
 							fmt.Fprintf(os.Stderr, "NockLock: Linux Landlock filesystem fence active — ABI v%d\n", spec.ABI)
 							logEvent(logging.EventFilePassed, "filesystem", fmt.Sprintf("landlock abi=%d paths=%d", spec.ABI, len(spec.Paths)), false)
@@ -565,12 +564,9 @@ var wrapCmd = &cobra.Command{
 				childEnv = append(removeEnvVars(childEnv, syscallPolicyEnv), syscallPolicyEnv+"="+encoded)
 				// Ensure the child runs through the shim even when Landlock was
 				// unavailable or the filesystem fence is disabled.
-				if len(landlockPrefix) == 0 {
-					exe, err := os.Executable()
-					if err != nil {
-						return fmt.Errorf("cannot resolve nocklock executable for syscall fence shim: %w", err)
-					}
-					landlockPrefix = []string{exe, "__landlock-exec", "--"}
+				landlockPrefix, err = ensureLandlockExecPrefix(landlockPrefix)
+				if err != nil {
+					return err
 				}
 				fmt.Fprintf(os.Stderr, "NockLock: Linux syscall fence active — seccomp-BPF (%s)\n", policy.Mode)
 				logEvent(logging.EventFilePassed, "syscall", fmt.Sprintf("seccomp mode=%s socket_families=%d allow_namespaces=%t", policy.Mode, len(policy.AllowedSocketFamilies), policy.AllowNamespaces), false)
@@ -584,6 +580,46 @@ var wrapCmd = &cobra.Command{
 			fsFence != nil,
 			seatbeltProxyAddr != "",
 		)
+		if err := strictUnixSocketIsolationModeError(runtime.GOOS, egressLevel, cfg.Network.RequireUnixSocketIsolation); err != nil {
+			detail := err.Error() + "; refusing to start"
+			logEvent(logging.EventNetworkError, "network", detail, true)
+			fmt.Fprintf(cmd.ErrOrStderr(), "NockLock: fatal: %s\n", detail)
+			cmd.SilenceUsage = true
+			cmd.SilenceErrors = true
+			return &exitCodeError{code: 2}
+		}
+		unixSocketIsolation := false
+		unixSocketReason := ""
+		if egressLevel == egressLevelConfined {
+			var detectErr error
+			if landlockABI == 0 {
+				landlockABI, detectErr = landlock.DetectABI()
+			}
+			var policyErr error
+			var warning string
+			unixSocketIsolation, warning, policyErr = confinedUnixSocketPolicy(landlockABI, detectErr, cfg.Network.RequireUnixSocketIsolation)
+			if policyErr != nil {
+				detail := policyErr.Error() + "; refusing to start"
+				logEvent(logging.EventNetworkError, "network", detail, true)
+				fmt.Fprintf(cmd.ErrOrStderr(), "NockLock: fatal: %s\n", detail)
+				cmd.SilenceUsage = true
+				cmd.SilenceErrors = true
+				return &exitCodeError{code: 2}
+			}
+			if warning != "" {
+				_, unixSocketReason = unixSocketBoundaryStatus(landlockABI, detectErr)
+				fmt.Fprintf(cmd.ErrOrStderr(), "NockLock: WARNING: %s\n", warning)
+			}
+			if unixSocketIsolation {
+				if landlockSpec == nil {
+					landlockSpec = &landlock.Spec{ABI: landlockABI}
+				}
+				landlockPrefix, err = ensureLandlockExecPrefix(landlockPrefix)
+				if err != nil {
+					return err
+				}
+			}
+		}
 		if egressLevel == egressLevelUnreachable {
 			detail := egressRequirementMessage(egressLevel, runtime.GOOS)
 			logEvent(logging.EventNetworkError, "network", detail, true)
@@ -760,6 +796,17 @@ var wrapCmd = &cobra.Command{
 					cmd.SilenceErrors = true
 					return &exitCodeError{code: 2}
 				}
+				if unixSocketIsolation {
+					if err := landlock.AddUnixSocketIsolation(landlockSpec, proxyUnixSocket, fsFence.SocketPath); err != nil {
+						detail := fmt.Sprintf("failed to configure Landlock Unix-socket isolation: %v", err)
+						logEvent(logging.EventNetworkError, "network", detail, true)
+						fmt.Fprintf(cmd.ErrOrStderr(), "NockLock: fatal: %s — refusing to start\n", detail)
+						cmd.SilenceUsage = true
+						cmd.SilenceErrors = true
+						return &exitCodeError{code: 2}
+					}
+					logEvent(logging.EventNetworkPassed, "network", "Landlock Unix-socket isolation rules staged for the pre-exec shim", false)
+				}
 				defer proxy.Stop()
 
 				// Launch watchdog: if proxy crashes mid-session, cancel childCtx to kill the child.
@@ -806,14 +853,25 @@ var wrapCmd = &cobra.Command{
 			fmt.Fprintln(os.Stderr, egressBanner(egressLevel, 0))
 			logEvent(logging.EventNetworkPassed, "network", "egress level=OFF allow_all=true", false)
 		}
+		if landlockSpec != nil {
+			encoded, err := landlock.MarshalSpec(*landlockSpec)
+			if err != nil {
+				return fmt.Errorf("failed to serialize Landlock rules: %w", err)
+			}
+			childEnv = append(removeEnvVars(childEnv, landlockRulesEnv), landlockRulesEnv+"="+encoded)
+		}
 
 		// Record the effective egress level in the signed session-start row only
 		// after the configured bridge and network fence have initialized.
+		sessionDetail := args[0]
+		if unixSocketReason != "" {
+			sessionDetail += " unix_sockets=reachable reason=" + unixSocketReason
+		}
 		if err := logger.Log(logging.Event{
 			Timestamp:   time.Now(),
 			EventType:   logging.EventSessionStart,
 			Category:    "session",
-			Detail:      args[0],
+			Detail:      sessionDetail,
 			EgressLevel: string(egressLevel),
 			SessionID:   sessionID,
 		}); err != nil {

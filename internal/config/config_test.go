@@ -338,6 +338,34 @@ socket_families = ["unix", "netlink"]
 	}
 }
 
+func TestRequireUnixSocketIsolationLoadsAndTightensOverlay(t *testing.T) {
+	loaded, err := Load(writeLookbackConfig(t, "[network]\nrequire_unix_socket_isolation = true\n"))
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if !loaded.Network.RequireUnixSocketIsolation {
+		t.Fatal("network.require_unix_socket_isolation = false, want true")
+	}
+
+	base := DefaultConfig()
+	base.Network.RequireUnixSocketIsolation = true
+	overlay, err := LoadOverlay(base, writeLookbackConfig(t, "[network]\nrequire_unix_socket_isolation = false\n"))
+	if err != nil {
+		t.Fatalf("LoadOverlay: %v", err)
+	}
+	if !overlay.Network.RequireUnixSocketIsolation {
+		t.Fatal("overlay disabled network.require_unix_socket_isolation from the base")
+	}
+
+	overlay, err = LoadOverlay(DefaultConfig(), writeLookbackConfig(t, "[network]\nrequire_unix_socket_isolation = true\n"))
+	if err != nil {
+		t.Fatalf("LoadOverlay strict opt-in: %v", err)
+	}
+	if !overlay.Network.RequireUnixSocketIsolation {
+		t.Fatal("overlay did not enable network.require_unix_socket_isolation")
+	}
+}
+
 func TestOverlayCannotTurnOffRequireEnforced(t *testing.T) {
 	base := DefaultConfig()
 	base.Network.RequireEnforced = true

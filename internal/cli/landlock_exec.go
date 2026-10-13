@@ -70,6 +70,9 @@ var landlockExecCmd = &cobra.Command{
 			if err := landlock.Apply(spec); err != nil {
 				return fmt.Errorf("failed to apply Landlock rules: %w", err)
 			}
+			if spec.HandledAccessFS&landlock.RightResolveUnix != 0 && spec.Scoped&landlock.ScopeAbstractUnixSocket != 0 {
+				fmt.Fprintln(os.Stderr, "NockLock: Linux Unix-socket isolation active — external pathname and abstract sockets are blocked; only the proxy and filesystem event sockets are allowed")
+			}
 		}
 
 		// Stage 2: syscall fence (seccomp-BPF). Also optional. Apply itself sets
@@ -91,6 +94,17 @@ var landlockExecCmd = &cobra.Command{
 		childEnv = allowSelfProcFS(childEnv)
 		return landlock.Exec(args, childEnv)
 	},
+}
+
+func ensureLandlockExecPrefix(prefix []string) ([]string, error) {
+	if len(prefix) > 0 {
+		return prefix, nil
+	}
+	exe, err := os.Executable()
+	if err != nil {
+		return nil, fmt.Errorf("cannot resolve nocklock executable for Landlock shim: %w", err)
+	}
+	return []string{exe, "__landlock-exec", "--"}, nil
 }
 
 // applySyscallFence installs the syscall fence, honouring the policy Mode for

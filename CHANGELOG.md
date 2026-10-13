@@ -4,23 +4,25 @@ All notable changes to NockLock will be documented in this file.
 
 ## [Unreleased]
 
+### Breaking
+
+- Linux `CONFINED` below Landlock ABI 9 (every kernel we have tested): `nocklock doctor` now reports the Unix-socket boundary as unavailable and returns `PARTIAL` (exit 3) where v0.8.0 returned `PROTECTED` (exit 0). Automation that fails on any non-zero `doctor` exit will fail on these kernels. That is intended: Unix sockets are reachable there. Set `network.require_unix_socket_isolation = true` to make `wrap` refuse instead.
+
 ### Changed
 
 - Red-team bench hardening (N11676): a verifier, version or process-group cleanup fault after scoring now fails the run (`no_harness_fault_after_scoring`); a nonzero NockGuard proxy exit at shutdown is a HARNESS-FAULT; the raw-socket and DNS attacks exit 42 when refused, so Python's own exit 1 (an uncaught exception) is a fault, not a block; datagrams already queued at the sink when an attack's deadline passes are counted before scoring. Test fixes: the interrupt test now requires the attack to have started, and the symlink-plant test checks the victim file while it still exists.
+- Docs: `docs/` is now organized as a map for contributors and users: `docs/README.md`, `docs/REPO-MAP.md`, `docs/setup.md`, `docs/how-it-works/` (one page per fence or feature with its limits), `docs/reference/cli.md` (commands, exit codes and config schema as shipped, not yet a compatibility promise), `docs/runbooks/` (release, incident), `docs/decisions/` (records 006-014) and `docs/ROADMAP.md` (the path to 1.0). `CLAUDE.md` is rewritten as a short map and `AGENTS.md` points to it.
 
 ### Security
 
+- Linux `CONFINED` egress below Landlock ABI 9: default non-strict `wrap` runs, warns once, and records a signed session-start row with `unix_sockets=reachable reason=landlock_abi_<n>_below_9`. `doctor` reports the Unix-socket boundary as unavailable and returns `PARTIAL` (exit 3); `status` includes the ABI reason. ABI 9 enforcement has not run on a real kernel yet.
+- `network.require_unix_socket_isolation = true` makes `wrap` refuse when the Unix-socket boundary cannot be enforced. The removed `--allow-unix-sockets` flag is not supported.
+- Record the pre-ABI-9 Linux `CONFINED` limitation: a non-root probe confirmed that a wrapped child can connect to both a throwaway pathname socket and a throwaway abstract socket while a direct AF_INET datagram socket syscall is denied. The design and probe are in `docs/design/unix-socket-reachability.md` and `docs/probes/n11650/`.
 - Linux CONFINED io_uring regression test: bound probe subprocesses, kill their process groups on timeout, skip runners missing `linux/io_uring.h`, and distinguish setup ENOSYS from `IORING_OP_SOCKET` failure.
-- Clarify that Linux `CONFINED` currently does not restrict AF_UNIX destinations. A non-root probe confirmed that a wrapped child can connect to both a throwaway pathname socket and a throwaway abstract socket while a direct AF_INET datagram socket syscall is denied. The design and probe are in `docs/design/unix-socket-reachability.md` and `docs/probes/n11650/`.
-
-### Changed
-
-- Docs: `docs/` is now organized as a map for contributors and users: `docs/README.md`, `docs/REPO-MAP.md`, `docs/setup.md`, `docs/how-it-works/` (one page per fence or feature with its limits), `docs/reference/cli.md` (commands, exit codes and config schema as shipped, not yet a compatibility promise), `docs/runbooks/` (release, incident), `docs/decisions/` (records 006-014) and `docs/ROADMAP.md` (the path to 1.0). `CLAUDE.md` is rewritten as a short map and `AGENTS.md` points to it.
 
 ### Documentation
 
 - Linux source-install docs now say where `libfence_fs.so` must be placed (`findTrustedLibFenceFS`, `internal/cli/wrap.go`); `verify --audit` exit codes per verdict, secret-preflight platform build tags, and the CONFINED socket-family override are documented from code (N11689).
-
 - README: macOS denied-file logging now has one statement (best-effort `file_blocked` tailer); new "What the signed log proves" section on observation coverage (N11642).
 
 ## [0.8.0] - 2026-10-13

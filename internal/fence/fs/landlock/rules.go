@@ -20,25 +20,30 @@ const (
 // Landlock filesystem access bits. They intentionally mirror Linux UAPI values
 // so tests can verify ABI masking on every platform without importing unix.
 const (
-	RightExecute    uint64 = 1 << 0
-	RightWriteFile  uint64 = 1 << 1
-	RightReadFile   uint64 = 1 << 2
-	RightReadDir    uint64 = 1 << 3
-	RightRemoveDir  uint64 = 1 << 4
-	RightRemoveFile uint64 = 1 << 5
-	RightMakeChar   uint64 = 1 << 6
-	RightMakeDir    uint64 = 1 << 7
-	RightMakeReg    uint64 = 1 << 8
-	RightMakeSock   uint64 = 1 << 9
-	RightMakeFifo   uint64 = 1 << 10
-	RightMakeBlock  uint64 = 1 << 11
-	RightMakeSym    uint64 = 1 << 12
-	RightRefer      uint64 = 1 << 13
-	RightTruncate   uint64 = 1 << 14
-	RightIOCTLDev   uint64 = 1 << 15
+	RightExecute     uint64 = 1 << 0
+	RightWriteFile   uint64 = 1 << 1
+	RightReadFile    uint64 = 1 << 2
+	RightReadDir     uint64 = 1 << 3
+	RightRemoveDir   uint64 = 1 << 4
+	RightRemoveFile  uint64 = 1 << 5
+	RightMakeChar    uint64 = 1 << 6
+	RightMakeDir     uint64 = 1 << 7
+	RightMakeReg     uint64 = 1 << 8
+	RightMakeSock    uint64 = 1 << 9
+	RightMakeFifo    uint64 = 1 << 10
+	RightMakeBlock   uint64 = 1 << 11
+	RightMakeSym     uint64 = 1 << 12
+	RightRefer       uint64 = 1 << 13
+	RightTruncate    uint64 = 1 << 14
+	RightIOCTLDev    uint64 = 1 << 15
+	RightResolveUnix uint64 = 1 << 16
 )
 
-const maxSupportedABI = 5
+const (
+	MinUnixSocketABI               = 9
+	ScopeAbstractUnixSocket uint64 = 1 << 0
+	maxSupportedABI                = 9
+)
 
 const readRights = RightExecute | RightReadFile | RightReadDir
 
@@ -72,11 +77,13 @@ type PathRule struct {
 type Spec struct {
 	ABI             int        `json:"abi"`
 	HandledAccessFS uint64     `json:"handled_access_fs"`
+	Scoped          uint64     `json:"scoped,omitempty"`
 	Paths           []PathRule `json:"paths"`
 }
 
-// RightsForABI returns only the Landlock filesystem bits known by the detected
-// ABI. Passing unknown bits makes the kernel reject the entire ruleset.
+// RightsForABI returns the baseline filesystem bits supported by the detected
+// ABI. RightResolveUnix is enabled separately for the exact socket paths
+// allowed by AddUnixSocketIsolation.
 func RightsForABI(abi int) uint64 {
 	if abi <= 0 {
 		return 0
@@ -160,6 +167,62 @@ func RulesFromConfig(cfg *fsfence.FenceConfig, extra []AllowPath, abi int) (Spec
 		return Spec{}, err
 	}
 	return spec, nil
+}
+
+// AddUnixSocketIsolation adds Landlock restrictions for pathname and abstract
+// Unix sockets, allowing only the listed local socket paths. The ruleset must
+// use ABI 9 or later, which provides both pathname lookup control and abstract
+// socket scoping.
+func AddUnixSocketIsolation(spec *Spec, allowedSocketPaths ...string) error {
+	if spec == nil {
+		return fmt.Errorf("Landlock ruleset is required for Unix-socket isolation")
+	}
+	if spec.ABI < MinUnixSocketABI {
+		return fmt.Errorf("Unix-socket isolation requires Landlock ABI v%d or later", MinUnixSocketABI)
+	}
+	if len(allowedSocketPaths) == 0 {
+		return fmt.Errorf("Unix-socket isolation requires at least one allowed socket path")
+	}
+	for _, socketPath := range allowedSocketPaths {
+		if socketPath == "" || !filepath.IsAbs(socketPath) {
+			return fmt.Errorf("Unix-socket isolation requires absolute allowed socket paths")
+		}
+	}
+
+	// A socket-only ruleset is used when filesystem enforcement is disabled.
+	// Landlock denies REFER by default even when that right is not handled, so
+	// explicitly handle and grant it at / to preserve the configured filesystem
+	// posture while still fencing Unix-socket resolution.
+	if spec.HandledAccessFS == 0 {
+		spec.HandledAccessFS |= RightRefer
+		spec.Paths = append(spec.Paths, PathRule{
+			Path:   string(filepath.Separator),
+			Access: AccessReadWrite,
+			Rights: RightRefer,
+		})
+	}
+	spec.HandledAccessFS |= RightResolveUnix
+	spec.Scoped |= ScopeAbstractUnixSocket
+
+	for _, socketPath := range allowedSocketPaths {
+		path := filepath.Clean(socketPath)
+		found := false
+		for i := range spec.Paths {
+			if filepath.Clean(spec.Paths[i].Path) == path {
+				spec.Paths[i].Rights |= RightResolveUnix
+				found = true
+				break
+			}
+		}
+		if !found {
+			spec.Paths = append(spec.Paths, PathRule{
+				Path:   path,
+				Access: AccessReadWrite,
+				Rights: RightResolveUnix,
+			})
+		}
+	}
+	return nil
 }
 
 // baselineDeviceRules grants the standard character devices that ordinary

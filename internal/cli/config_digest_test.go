@@ -172,38 +172,39 @@ func TestConfigDigestCoversRequireEnforcedCLIFlag(t *testing.T) {
 }
 
 var configDigestPolicyFields = map[string]string{
-	"ProfileName":                   "profile",
-	"Project.Name":                  "project.name",
-	"Project.Root":                  "project.root",
-	"Filesystem.Root":               "filesystem.root",
-	"Filesystem.Mode":               "filesystem.mode",
-	"Filesystem.LinuxEnforcement":   "filesystem.linux_enforcement",
-	"Filesystem.Allow":              "filesystem.allow",
-	"Filesystem.AllowRW":            "filesystem.allow_rw",
-	"Filesystem.Deny":               "filesystem.deny",
-	"Filesystem.MacOSAllowUnfenced": "filesystem.macos_allow_unfenced",
-	"Filesystem.Hardened":           "filesystem.hardened",
-	"Network.Allow":                 "network.allow",
-	"Network.AllowAll":              "network.allow_all",
-	"Network.AllowPrivateRanges":    "network.allow_private_ranges",
-	"Network.RequireEnforced":       "network.require_enforced",
-	"Network.Lookback":              "network.lookback",
-	"Secrets.Pass":                  "secrets.pass",
-	"Secrets.Block":                 "secrets.block",
-	"Secrets.ScanEnv":               "secrets.scan_env",
-	"Secrets.ScanPaths":             "secrets.scan_paths",
-	"Secrets.ScanEnvAllow":          "secrets.scan_env_allow",
-	"Syscall.Enforcement":           "syscall.enforcement",
-	"Syscall.AllowNamespaces":       "syscall.allow_namespaces",
-	"Syscall.SocketFamilies":        "syscall.socket_families",
-	"Syscall.ExtraDeny":             "syscall.extra_deny",
-	"Logging.DB":                    "logging.db",
-	"Logging.Level":                 "logging.level",
-	"Audit.Forward.Enabled":         "audit.forward.enabled",
-	"Audit.Forward.URL":             "audit.forward.url",
-	"Audit.Forward.APIKeyEnv":       "audit.forward.api_key_env",
-	"Cloud.Enabled":                 "cloud.enabled",
-	"Cloud.Endpoint":                "cloud.endpoint",
+	"ProfileName":                        "profile",
+	"Project.Name":                       "project.name",
+	"Project.Root":                       "project.root",
+	"Filesystem.Root":                    "filesystem.root",
+	"Filesystem.Mode":                    "filesystem.mode",
+	"Filesystem.LinuxEnforcement":        "filesystem.linux_enforcement",
+	"Filesystem.Allow":                   "filesystem.allow",
+	"Filesystem.AllowRW":                 "filesystem.allow_rw",
+	"Filesystem.Deny":                    "filesystem.deny",
+	"Filesystem.MacOSAllowUnfenced":      "filesystem.macos_allow_unfenced",
+	"Filesystem.Hardened":                "filesystem.hardened",
+	"Network.Allow":                      "network.allow",
+	"Network.AllowAll":                   "network.allow_all",
+	"Network.AllowPrivateRanges":         "network.allow_private_ranges",
+	"Network.RequireEnforced":            "network.require_enforced",
+	"Network.RequireUnixSocketIsolation": "network.require_unix_socket_isolation",
+	"Network.Lookback":                   "network.lookback",
+	"Secrets.Pass":                       "secrets.pass",
+	"Secrets.Block":                      "secrets.block",
+	"Secrets.ScanEnv":                    "secrets.scan_env",
+	"Secrets.ScanPaths":                  "secrets.scan_paths",
+	"Secrets.ScanEnvAllow":               "secrets.scan_env_allow",
+	"Syscall.Enforcement":                "syscall.enforcement",
+	"Syscall.AllowNamespaces":            "syscall.allow_namespaces",
+	"Syscall.SocketFamilies":             "syscall.socket_families",
+	"Syscall.ExtraDeny":                  "syscall.extra_deny",
+	"Logging.DB":                         "logging.db",
+	"Logging.Level":                      "logging.level",
+	"Audit.Forward.Enabled":              "audit.forward.enabled",
+	"Audit.Forward.URL":                  "audit.forward.url",
+	"Audit.Forward.APIKeyEnv":            "audit.forward.api_key_env",
+	"Cloud.Enabled":                      "cloud.enabled",
+	"Cloud.Endpoint":                     "cloud.endpoint",
 }
 
 // configDigestNotSecurityRelevantFields requires an explicit decision for any
@@ -1096,5 +1097,28 @@ func TestConfigDigestCoversLookbackRules(t *testing.T) {
 	}
 	if strings.Contains(policy(), "lookback") {
 		t.Fatal("a config without rules must keep its prior digest: no lookback key")
+	}
+}
+
+func TestConfigDigestIncludesStrictUnixSocketSetting(t *testing.T) {
+	cfg := config.DefaultConfig()
+	without, err := canonicalPolicy(&cfg, "/p/.nock/config.toml", "/p/audit.db", "proxy")
+	if err != nil {
+		t.Fatalf("canonicalPolicy default: %v", err)
+	}
+	if !strings.Contains(string(without), `"require_unix_socket_isolation":false`) {
+		t.Fatalf("false default missing from canonical policy: %s", without)
+	}
+
+	cfg.Network.RequireUnixSocketIsolation = true
+	with, err := canonicalPolicy(&cfg, "/p/.nock/config.toml", "/p/audit.db", "proxy")
+	if err != nil {
+		t.Fatalf("canonicalPolicy strict: %v", err)
+	}
+	if !strings.Contains(string(with), `"require_unix_socket_isolation":true`) {
+		t.Fatalf("strict opt-in missing from canonical policy: %s", with)
+	}
+	if bytes.Equal(without, with) {
+		t.Fatal("strict Unix-socket setting did not change the canonical policy")
 	}
 }

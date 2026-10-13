@@ -39,6 +39,7 @@ func restrictOverlay(base, overlay Config, fields map[string]bool) Config {
 	cfg.Network.AllowAll = base.Network.AllowAll && overlay.Network.AllowAll
 	cfg.Network.AllowPrivateRanges = base.Network.AllowPrivateRanges && overlay.Network.AllowPrivateRanges
 	cfg.Network.RequireEnforced = base.Network.RequireEnforced || overlay.Network.RequireEnforced
+	cfg.Network.RequireUnixSocketIsolation = base.Network.RequireUnixSocketIsolation || overlay.Network.RequireUnixSocketIsolation
 	// Look-back rules only narrow egress, so an overlay adds to the base's.
 	cfg.Network.Lookback = slices.Clone(base.Network.Lookback)
 	if fields["network.lookback"] {
