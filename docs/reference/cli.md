@@ -20,6 +20,12 @@ Registered in `internal/cli/` (one file per command). `README.md` "Commands" has
 | `egress-probe [--json]` | Linux feasibility probe | `egress_probe.go` |
 | `__landlock-exec`, `__netns-*`, `__probe` | Hidden internal re-exec entry points; not part of the interface | `landlock_exec.go`, `netns_helper.go`, `probe.go` |
 
+### Remote anchor commands
+
+`nocklock anchor push [--file <file>]` pushes a signed anchor to the configured remote store. `nocklock verify --against-remote-anchor` fetches the latest anchor and checks it against the local audit chain; a missing or unreachable anchor fails verification (`internal/cli/anchor_push.go`, `internal/anchorclient/client.go`, `internal/logging/anchor.go`).
+
+**Current limit for both commands:** The remote store identifies a chain only by the signing-key fingerprint (`agent_id`). It can hold one chain per signing key, while project audit databases are separate (`internal/config/state.go`). Two projects sharing the default managed key collide: after the larger chain is anchored, the smaller project's valid `anchor push` is rejected as a rollback and `verify --against-remote-anchor` reports `TRUNCATION` against the other project's anchor. Until the [chain identity design](../design/anchor-chain-identity.md) ships, use a separate anchor store per project, or provision separate managed signing keys from the start with distinct `XDG_CONFIG_HOME` values (`internal/logging/signing.go`). There is no per-project signing-key flag, and changing the key of an existing signed chain is not a workaround. That cross-project verdict alone does not establish a real rollback.
+
 ## Exit codes
 Exit codes travel as `exitCodeError` and `Execute()` calls `os.Exit` once (`root.go`). Any other error prints to stderr and exits `1` (`root.go`).
 

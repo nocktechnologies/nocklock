@@ -39,6 +39,10 @@ v0.9.2 makes `doctor` check the signing-key directory, which changes some `docto
 - Who is affected: anyone who sets `XDG_CONFIG_HOME` to a directory outside `~/.config`. On macOS v0.9.0, a fenced child could read the 32-byte signing seed while `doctor` reported `PROTECTED`. Every release since v0.5.0 (#90) carries the same key-path logic; only v0.9.0 was reproduced directly. On Linux, a relocated key was readable only when it sat under a granted tree, such as the project or `/tmp`. If a wrapped agent could have read the key, rows signed with that key no longer prove the agent did not write them. NockLock has no supported way to replace the signing key yet; a documented procedure is the next fix.
 - Linux `--net-fence=netns`: the `__netns-child` process now keeps the capability drop, the supplementary-group drop, the NO_NEW_PRIVS latch and the exec of the agent on one OS thread. Before, Go could run those steps on different threads. CI saw the fail-closed form: `wrap` refused to start with `capability 12 remains`. The fail-open form, where the agent starts on a thread that still has CAP_NET_ADMIN in its bounding set and no NO_NEW_PRIVS, was not observed. The bounding-set gap matters only when nothing later in the chain sets NO_NEW_PRIVS: Landlock is off (`filesystem.root = ""` or `filesystem.linux_enforcement = "off"`) and `syscall.enforcement` is `"off"`, or `"preferred"` on a kernel without seccomp. With the default `__landlock-exec` shim, a setuid binary still cannot regain the capability. In any configuration, that thread could also have kept the root helper's supplementary groups. Every release with the netns egress helper is affected, v0.5.0 through v0.9.0.
 
+### Documentation
+
+- Document the current one-remote-anchor-identity-per-signing-key limit, its cross-project collision and workaround; specify a versioned per-chain identity and explicit legacy migration for the later protocol change (N11707).
+
 ## [0.9.0] - 2026-10-13
 
 ### Breaking
