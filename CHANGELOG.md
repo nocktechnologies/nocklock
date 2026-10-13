@@ -4,6 +4,8 @@ All notable changes to NockLock will be documented in this file.
 
 ## [Unreleased]
 
+## [0.9.0] - 2026-10-13
+
 ### Breaking
 
 - Linux `CONFINED` below Landlock ABI 9 (every kernel we have tested): `nocklock doctor` now reports the Unix-socket boundary as unavailable and returns `PARTIAL` (exit 3) where v0.8.0 returned `PROTECTED` (exit 0). Automation that fails on any non-zero `doctor` exit will fail on these kernels. That is intended: Unix sockets are reachable there. Set `network.require_unix_socket_isolation = true` to make `wrap` refuse instead.
