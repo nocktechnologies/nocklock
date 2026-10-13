@@ -428,16 +428,16 @@ func TestProxyStartUnixRejectsLongSocketPath(t *testing.T) {
 	}
 }
 
-func TestWaitForProxyReadyFailsClosedPort(t *testing.T) {
+func TestWaitForProxyReadyFailsUnresponsiveProxy(t *testing.T) {
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
 		t.Fatalf("listen: %v", err)
 	}
+	defer ln.Close() // Reserve the dead endpoint until probing finishes.
 	addr := ln.Addr().String()
-	ln.Close()
 
 	if err := WaitForProxyReady(t.Context(), addr, 75*time.Millisecond); err == nil {
-		t.Fatal("WaitForProxyReady() should fail for a closed port")
+		t.Fatal("WaitForProxyReady() should fail for an unresponsive proxy")
 	}
 }
 

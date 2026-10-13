@@ -274,7 +274,8 @@ func testSupervisionKillsDescendant(t *testing.T, cancelNow bool) {
 			t.Fatal(err)
 		}
 		health = []string{l.Addr().String()}
-		l.Close()
+		// Keep the dead endpoint reserved while supervision probes it.
+		defer l.Close()
 		interval = 10 * time.Millisecond
 	}
 	if superviseChildContext(ctx, cmd, health, interval) == nil {

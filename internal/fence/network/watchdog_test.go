@@ -109,8 +109,8 @@ func TestWatchdogTriggersFailClosedAfterThreshold(t *testing.T) {
 	if err != nil {
 		t.Fatalf("listen: %v", err)
 	}
+	defer ln.Close() // Reserve the dead endpoint until probing finishes.
 	addr := ln.Addr().String()
-	_ = ln.Close()
 
 	var fired atomic.Bool
 	ctx, cancel := context.WithCancel(context.Background())
@@ -123,7 +123,7 @@ func TestWatchdogTriggersFailClosedAfterThreshold(t *testing.T) {
 	})
 	w.Start(ctx)
 
-	deadline := time.Now().Add(500 * time.Millisecond)
+	deadline := time.Now().Add(2 * time.Second)
 	for time.Now().Before(deadline) {
 		if fired.Load() {
 			break

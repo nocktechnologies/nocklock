@@ -4,6 +4,10 @@ All notable changes to NockLock will be documented in this file.
 
 ## [Unreleased]
 
+### Fixed
+
+- Tests: hold dead proxy ports open until health probes finish, preventing parallel tests from reusing those ports and receiving stray `/healthz` requests (N11729).
+
 ## [0.9.2] - 2026-10-13
 
 v0.9.2 makes `doctor` check the signing-key directory, which changes some `doctor` verdicts and exit codes for the same machine; it also documents signing-key replacement and fixes a proxy shutdown race.
