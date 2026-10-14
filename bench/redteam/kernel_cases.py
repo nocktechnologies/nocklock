@@ -18,6 +18,8 @@ CASES = (
     ("abi9", "./internal/fence/fs/landlock", "TestLandlockABI9UnixSocketIsolation"),
     ("io-uring", "./internal/fence/syscallfence", "TestEnforce_IORingSocketConnectDenied"),
 )
+CASE_TIMEOUT_SECONDS = 300
+CLEANUP_TIMEOUT_SECONDS = 5
 
 
 def parse_result(raw, test, returncode):
@@ -67,14 +69,42 @@ def run_case(repo, out, case, package, test):
     cmd = ["go", "test", "-json", "-count=1", "-timeout=4m", package, "-run", "^" + test + "$"]
     process = subprocess.Popen(cmd, cwd=repo, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
                                text=True, start_new_session=True)
+    timeout_fault = None
     try:
-        stdout, stderr = process.communicate(timeout=300)
-    except subprocess.TimeoutExpired:
-        os.killpg(process.pid, signal.SIGKILL)
-        stdout, stderr = process.communicate()
-        stderr += "\nHarness timeout: process group killed; not a denial verdict.\n"
+        stdout, stderr = process.communicate(timeout=CASE_TIMEOUT_SECONDS)
+    except subprocess.TimeoutExpired as exc:
+        timeout_fault = "Harness timeout: not a denial verdict or completed test run"
+        # TimeoutExpired carries the complete captured bytes so far even in
+        # text mode. A descendant outside the killed group can retain a pipe;
+        # preserve that partial receipt if the bounded second drain times out.
+        def partial(value):
+            return value.decode(errors="replace") if isinstance(value, bytes) else value or ""
+
+        stdout, stderr = partial(exc.stdout), partial(exc.stderr)
+        try:
+            os.killpg(process.pid, signal.SIGKILL)
+        except ProcessLookupError:
+            pass  # The leader/group can have exited while a pipe remains open.
+        except OSError as kill_error:
+            timeout_fault += f"; process-group kill failed: {kill_error}"
+        try:
+            stdout, stderr = process.communicate(timeout=CLEANUP_TIMEOUT_SECONDS)
+        except subprocess.TimeoutExpired as drain_error:
+            stdout, stderr = partial(drain_error.stdout), partial(drain_error.stderr)
+            timeout_fault += "; output drain exceeded cleanup deadline"
+            process.stdout.close()
+            process.stderr.close()
+            try:
+                process.wait(timeout=CLEANUP_TIMEOUT_SECONDS)
+            except subprocess.TimeoutExpired:
+                timeout_fault += "; process was not reaped before cleanup deadline"
+        stderr += "\n" + timeout_fault + "\n"
     (out / (case + ".jsonl")).write_text(stdout)
     (out / (case + ".stderr.txt")).write_text(stderr)
+    # A successful leader and earlier pass events cannot rescue a timed-out
+    # run. Persist receipts before raising so main can include this FAIL row.
+    if timeout_fault is not None:
+        raise ValueError(timeout_fault)
     return classify(case, *parse_result(stdout, test, process.returncode))
 
 

@@ -35,7 +35,11 @@ report. It does not change `attacks.toml`, the main pass bar or breach scoring.
   it is not attributed to NockLock. This probes seccomp directly, not full wrap.
 
 A missing test, unexpected skip, failed control or harness fault fails the
-required step. Explicit unsupported-kernel gaps yield
+required step and the `redteam-bench` job; the main bench then does not run.
+Summary/artifact steps still preserve the failure receipts. Every harness
+timeout fails, even if the test already emitted a passing result and its leader
+exited zero. After group cancellation, output draining and reaping each have a
+five-second bound. Explicit unsupported-kernel gaps yield
 `PASS_WITH_COVERAGE_GAPS`; they remain visible in the job summary and uploaded
 `redteam-report`. An ABI-9 enforcement claim still requires a real ABI-9+ run.
 
@@ -45,7 +49,15 @@ at `GOMAXPROCS=2,8,32`, plus six installed netns wrap sessions. Test-only Go
 overlays must turn the cross-thread final-exec and per-thread proxy-group drops
 red. Original and mutated receipts are uploaded. These jobs require root only
 inside a disposable hosted VM; never run their privileged probes on an agent
-host. They add regression coverage, not a claim of a newly observed runtime bug.
+host. The workflow checks runner-supplied `RUNNER_ENVIRONMENT` and passes it
+through sudo unchanged. Installed-wrap probes run in isolated process groups;
+the 60-second deadline kills the group, with two-second output/reap bounds.
+Unprivileged hanging-stub controls prove that prior success markers cannot mask
+a timeout and that permitted same-group descendants are killed. Cancellation
+does not claim to kill a privileged helper or a descendant that escaped into
+another process group; a timeout, failed kill, or incomplete drain/reap is a
+harness failure. They add regression coverage, not a claim of a newly observed
+runtime bug.
 
 ## Limits
 

@@ -75,7 +75,7 @@ print('CREDENTIALS_OK ' + json.dumps({k: s[k].strip() for k in ('Uid', 'Gid', 'G
 			strconv.Itoa(os.Getuid()), strconv.Itoa(os.Getgid()), strings.Join(groupText, ","))
 		cmd.Dir = project
 		cmd.Env = append(os.Environ(), "GOMAXPROCS=8")
-		out, err := cmd.CombinedOutput()
+		out, err := runCredentialCommand(ctx, cmd, 2*time.Second)
 		cancel()
 		if err != nil || !strings.Contains(string(out), "CREDENTIALS_OK ") {
 			t.Fatalf("wrapped post-exec credential iteration %d: %v\n%s", iteration, err, out)

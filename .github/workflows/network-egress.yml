@@ -266,6 +266,9 @@ jobs:
           cache: true
       - name: provision disposable runner dependencies
         run: |
+          # These values are supplied by the runner, not asserted by this job.
+          test "$GITHUB_ACTIONS" = true
+          test "$RUNNER_ENVIRONMENT" = github-hosted
           sudo apt-get update
           sudo apt-get install -y iproute2 nftables python3 build-essential
       - name: compile original and test-only child exec mutation
@@ -279,19 +282,23 @@ jobs:
             -o "$RUNNER_TEMP/child-mutant.test" ./internal/fence/network/netns/
       - name: post-exec status — 36 drops across GOMAXPROCS 2, 8 and 32
         run: |
-          sudo env GITHUB_ACTIONS=true RUNNER_ENVIRONMENT=github-hosted \
+          sudo env GITHUB_ACTIONS="$GITHUB_ACTIONS" RUNNER_ENVIRONMENT="$RUNNER_ENVIRONMENT" \
             NOCKLOCK_CHILD_CREDENTIALS_REQUIRE=1 "$RUNNER_TEMP/child-original.test" \
             -test.run '^TestChildCredentialsAfterExecStress$' -test.v -test.count=1 \
             |& tee child-credentials-green.txt
       - name: mutation control — exec on a different thread must fail
         run: |
-          if sudo env GITHUB_ACTIONS=true RUNNER_ENVIRONMENT=github-hosted \
+          if sudo env GITHUB_ACTIONS="$GITHUB_ACTIONS" RUNNER_ENVIRONMENT="$RUNNER_ENVIRONMENT" \
             NOCKLOCK_CHILD_CREDENTIALS_REQUIRE=1 "$RUNNER_TEMP/child-mutant.test" \
             -test.run '^TestChildCredentialsAfterExecStress$' -test.v -test.count=1 \
             |& tee child-credentials-red.txt; then
             echo 'FAIL: cross-thread final exec mutation was not caught' >&2; exit 1
           fi
           grep -Eq 'post-exec (Groups|NoNewPrivs|CapBnd)=' child-credentials-red.txt
+      - name: wrap harness timeout negative controls (unprivileged)
+        run: |
+          go test ./internal/cli/ -run '^TestCredentialCommand' -v -count=1 \
+            |& tee child-credentials-timeout.txt
       - name: install original CLI, interposer and helper for full wrap
         run: |
           make build-all
@@ -693,7 +700,10 @@ jobs:
       # Required companion cases have their own truthful per-kernel result.
       # ABI<9 reachability is KNOWN-LIMIT; unavailable ABI9/io_uring proof is
       # SKIP with a named reason, never BLOCKED or a main-bench scoring exception.
+      # A nonzero exit fails this job and skips the main bench below. Summary
+      # and artifact steps still run, preserving the raw failure receipts.
       - name: Unix-socket and io_uring kernel red-team companion
+        id: kernel-companion
         run: python3 bench/redteam/kernel_cases.py --out bench/redteam/kernel-report
 
       - name: publish kernel coverage and explicit gaps
@@ -708,6 +718,7 @@ jobs:
       # pass-bar item fails; the report is uploaded either way.
       # The direct-DNS attack is scored by a host receiver on UDP 53; let the runner user bind it.
       - name: run the red-team bench
+        if: ${{ success() && steps.kernel-companion.outcome == 'success' }}
         run: |
           sudo sysctl -w net.ipv4.ip_unprivileged_port_start=53
           NOCKLOCK_BIN=/usr/local/bin/nocklock NOCKGUARD_BIN=/usr/local/bin/nockguard \
