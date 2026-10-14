@@ -360,7 +360,7 @@ func (l *Logger) lockChainIdentityStore() (*chainIdentityStore, error) {
 		root.Close()
 		return nil, errors.New("trusted chain identity directory changed while opening; refusing operation")
 	}
-	lock, err := root.OpenFile(chainIdentityLockName, os.O_CREATE|os.O_RDWR|oNoFollow|identityNonBlock, 0o600)
+	lock, err := openChainIdentityLock(root)
 	if err != nil {
 		root.Close()
 		return nil, fmt.Errorf("cannot open trusted chain identity lock: %w", err)
@@ -380,6 +380,19 @@ func (l *Logger) lockChainIdentityStore() (*chainIdentityStore, error) {
 		return nil, err
 	}
 	return store, nil
+}
+
+func openChainIdentityLock(root *os.Root) (*os.File, error) {
+	// Distinguish first creation from opening the winner's inode. Concurrent
+	// non-exclusive Root.OpenFile(O_CREATE) calls can return ENOENT on macOS.
+	// O_EXCL makes creation atomic; only EEXIST permits opening the existing
+	// file, still relative to the same anchored root and without symlink follow.
+	flags := os.O_RDWR | oNoFollow | identityNonBlock
+	f, err := root.OpenFile(chainIdentityLockName, flags|os.O_CREATE|os.O_EXCL, 0o600)
+	if errors.Is(err, os.ErrExist) {
+		return root.OpenFile(chainIdentityLockName, flags, 0)
+	}
+	return f, err
 }
 
 func (s *chainIdentityStore) checkFile(name string, f *os.File) error {
