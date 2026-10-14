@@ -215,8 +215,16 @@ def nocklock_detail_matches(detail, atk):
         return False
     field, separator, value = atk["rule"].partition("=")
     report_field = {"op": "operation", "path": "path", "reason": "reason"}.get(field)
-    return (bool(separator) and report_field is not None and report[report_field].startswith(value)
-            and (not atk.get("match") or atk["match"] in report["path"]))
+    if not separator or report_field is None:
+        return False
+    # A path rule matches the whole report path or a path-component suffix, so
+    # a bare filename rule matches an absolute path but "xcanary.txt" does not.
+    # op and reason stay prefix matches.
+    if report_field == "path":
+        field_ok = report["path"] == value or report["path"].endswith("/" + value)
+    else:
+        field_ok = report[report_field].startswith(value)
+    return field_ok and (not atk.get("match") or atk["match"] in report["path"])
 
 
 def nocklock_proof(rows, atk):
