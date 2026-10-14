@@ -13,6 +13,40 @@ The direct-DNS attack is scored by receipt: a host receiver on UDP port 53 (the 
 `net.ipv4.ip_unprivileged_port_start`, or run as root) must log nothing. Whether the client got a
 reply does not matter.
 
+## Kernel-dependent companion cases (N11747)
+
+The Linux CI bench also requires `python3 bench/redteam/kernel_cases.py --out
+bench/redteam/kernel-report`. It runs the real Go/C Unix-socket and io_uring
+controls, retaining raw test JSON, stderr, kernel, source commit and a separate
+report. It does not change `attacks.toml`, the main pass bar or breach scoring.
+
+- `unix-wrap` exercises the complete CONFINED wrapper with live pathname and
+  abstract listeners, allowed proxy/event sockets, signed boundary rows and
+  strict-mode refusal. Below Landlock ABI 9, observed reachable sockets are
+  **KNOWN-LIMIT**, not blocked. On ABI 9+, both normal and socket-only policies
+  must deny the unrelated sockets while the permitted sockets keep working.
+- `abi9` tests the actual kernel directly in a disposable subprocess: an exact
+  permitted pathname connects; unrelated pathname and abstract connects must
+  return `EACCES` or `EPERM`. All three have unfenced live-listener controls.
+  Older kernels produce **SKIP** with `ABI9_COVERAGE_GAP`; that is missing proof.
+- `io-uring` first proves an unfenced raw `IORING_OP_SOCKET`/`CONNECT` reaches a
+  live TCP listener, then requires the seccomp filter to reject `io_uring_setup`
+  with `EPERM`. An unavailable ambient operation is **SKIP** with its reason;
+  it is not attributed to NockLock. This probes seccomp directly, not full wrap.
+
+A missing test, unexpected skip, failed control or harness fault fails the
+required step. Explicit unsupported-kernel gaps yield
+`PASS_WITH_COVERAGE_GAPS`; they remain visible in the job summary and uploaded
+`redteam-report`. An ABI-9 enforcement claim still requires a real ABI-9+ run.
+
+The separate hosted-only credential job reads the final child's five capability
+sets, supplementary groups, UID/GID and `NoNewPrivs` after exec: 36 direct drops
+at `GOMAXPROCS=2,8,32`, plus six installed netns wrap sessions. Test-only Go
+overlays must turn the cross-thread final-exec and per-thread proxy-group drops
+red. Original and mutated receipts are uploaded. These jobs require root only
+inside a disposable hosted VM; never run their privileged probes on an agent
+host. They add regression coverage, not a claim of a newly observed runtime bug.
+
 ## Limits
 
 Known limits of this slice, written down rather than fixed:
