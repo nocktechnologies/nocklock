@@ -7,6 +7,7 @@ database, root privilege, external service, or mock anchor store is used.
 
 import argparse
 import base64
+from contextlib import contextmanager
 import hashlib
 import io
 import json
@@ -15,6 +16,7 @@ from pathlib import Path
 import secrets
 import shutil
 import signal
+import socket
 import socketserver
 import sqlite3
 import subprocess
@@ -89,12 +91,31 @@ def serve(scratch):
         # held only AFTER the real registration transaction has committed.
         fault = json.loads((scratch / "fault.json").read_text())
         original = environ["PATH_INFO"]
+        raw_request = b""
+        posted = {}
+        if environ["REQUEST_METHOD"] == "POST":
+            raw_request = environ["wsgi.input"].read(int(environ.get("CONTENT_LENGTH") or 0))
+            environ["wsgi.input"] = io.BytesIO(raw_request)
+            try:
+                posted = json.loads(raw_request)
+            except ValueError:
+                pass  # Malformed input still reaches the actual validator.
+        pause = fault.get("pause_before", {})
+        candidate = posted.get("anchor", {}) if isinstance(posted, dict) else {}
+        if (pause and original == pause["path"] and environ["REQUEST_METHOD"] == "POST"
+                and all(candidate.get(field) == value for field, value in pause["anchor"].items())):
+            write_json(scratch / (pause["id"] + "-paused.json"), {"path": original})
+            deadline = time.monotonic() + 20
+            while json.loads((scratch / "fault.json").read_text()).get("pause_before", {}).get("id") == pause["id"]:
+                if time.monotonic() >= deadline:
+                    raise RuntimeError("test did not release the paused request")
+                time.sleep(0.02)
         if original == fault.get("swap_from"):
             environ["PATH_INFO"] = fault["swap_to"]
         if fault.get("v1_only") and original.startswith("/api/nocklock/anchors/v2/"):
             environ["PATH_INFO"] = "/unmounted-v2-route/"
         if fault.get("reject_registration") and original.endswith("/register/"):
-            body = json.loads(environ["wsgi.input"].read(int(environ["CONTENT_LENGTH"])))
+            body = json.loads(raw_request)
             body["anchor"]["sig"] = "A" * 86 + "=="
             changed = json.dumps(body).encode()
             environ["wsgi.input"] = io.BytesIO(changed)
@@ -112,6 +133,31 @@ def serve(scratch):
                 iterable.close()
         event = dict(method=environ["REQUEST_METHOD"], path=original,
                      served_path=environ["PATH_INFO"], status=int(response["status"].split()[0]))
+        if raw_request:
+            event["request_sha256"] = hashlib.sha256(raw_request).hexdigest()
+        try:
+            reply = json.loads(body)
+            if isinstance(reply, dict) and isinstance(reply.get("data"), dict):
+                event["code"] = reply["data"].get("code")
+        except ValueError:
+            pass
+        if original == fault.get("corrupt_response_path") and event["status"] == 200:
+            kind = fault["corrupt_response"]
+            if kind == "malformed":
+                body = b'{"version":'
+            else:
+                broken = json.loads(body)
+                if kind in ("chain_id", "chain_id_only"):
+                    broken["chain_id"] = "f" * 64
+                else:
+                    broken["sig"] = "A" * 86 + "=="
+                if kind != "chain_id_only":
+                    broken["row_count"] = 2**64 - 1
+                body = json.dumps(broken).encode()
+            response["headers"] = [(key, value) for key, value in response["headers"]
+                                   if key.lower() != "content-length"]
+            response["headers"].append(("Content-Length", str(len(body))))
+            event["invalid_response_fault"] = kind
         with request_lock, (scratch / "requests.jsonl").open("a") as log:
             log.write(json.dumps(event) + "\n")
         if (fault.get("hold_registration") and original.endswith(("/register/", "/migrate/"))
@@ -183,8 +229,10 @@ class Harness:
                         "XDG_STATE_HOME": str(scratch / "state"),
                         "NOCKLOCK_ANCHOR_URL": self.url, "NOCKLOCK_ANCHOR_TOKEN": self.token}
 
-    def command(self, project, *args, fails=False, remote=True):
+    def command(self, project, *args, fails=False, remote=True, base_url=None):
         env = dict(self.cli_env, XDG_CONFIG_HOME=str(project["key_root"]))
+        if base_url is not None:
+            env["NOCKLOCK_ANCHOR_URL"] = base_url
         if not remote:
             env.pop("NOCKLOCK_ANCHOR_URL", None)
             env.pop("NOCKLOCK_ANCHOR_TOKEN", None)
@@ -197,7 +245,42 @@ class Harness:
         require((result.returncode != 0) == fails, (args, result.returncode, output))
         return output
 
-    def project(self, name, count, group="shared"):
+    @contextmanager
+    def running_cli(self, project, *args):
+        env = dict(self.cli_env, XDG_CONFIG_HOME=str(project["key_root"]))
+        with tempfile.TemporaryFile(mode="w+t", dir=self.scratch) as output:
+            process = subprocess.Popen([str(self.args.nocklock_bin), *args], cwd=project["path"],
+                                       env=env, stdout=output, stderr=subprocess.STDOUT,
+                                       start_new_session=True)
+            try:
+                yield process, output
+            finally:
+                if process.poll() is None:
+                    os.killpg(process.pid, signal.SIGKILL)
+                process.wait(timeout=5)
+
+    def finish_cli(self, project, args, process, output, fails=False):
+        process.wait(timeout=35)
+        output.seek(0)
+        text = output.read().replace(self.token, "[temporary token redacted]")
+        self.commands.append(dict(project=project["path"].name, args=args,
+                                  exit=process.returncode, output=text))
+        require((process.returncode != 0) == fails, (args, process.returncode, text))
+        return text
+
+    @contextmanager
+    def fault(self, value):
+        write_json(self.scratch / "fault.json", value)
+        try:
+            yield
+        finally:
+            write_json(self.scratch / "fault.json", {})
+
+    def requests(self):
+        path = self.scratch / "requests.jsonl"
+        return [json.loads(line) for line in path.read_text().splitlines()] if path.exists() else []
+
+    def project(self, name, count, group="shared", in_project=False, key_root=None):
         project = self.scratch / name
         project.mkdir(mode=0o700)
         (project / ".nock").mkdir(mode=0o700)
@@ -211,14 +294,16 @@ allow_all = true
 [syscall]
 enforcement = "off"
 [logging]
-db = "events.db"
-''')
-        key_root = self.scratch / ("key-" + group)
+db = "DB_PATH"
+'''.replace("DB_PATH", ".nock/events.db" if in_project else "events.db"))
+        key_root = key_root or self.scratch / ("key-" + group)
         key_root.mkdir(mode=0o700, exist_ok=True)
         state = self.state_path(project)
         state.mkdir(mode=0o700, parents=True)
-        info = dict(path=project, state=state, db=state / "events.db", key_root=key_root)
-        self.append_rows(info, count)
+        info = dict(path=project, state=state, db=(project / ".nock/events.db") if in_project else state / "events.db",
+                    key_root=key_root, in_project=in_project)
+        if count:
+            self.append_rows(info, count)
         return info
 
     def state_path(self, project):
@@ -226,10 +311,21 @@ db = "events.db"
         return self.scratch / "state/nocklock" / project_hash
 
     def append_rows(self, project, count):
+        self.fixture_action(project, str(count))
+
+    def fixture_action(self, project, *args):
         env = dict(self.cli_env, XDG_CONFIG_HOME=str(project["key_root"]),
                    NOCKLOCK_NCC_TEST_ROOT=str(self.scratch))
-        subprocess.run([str(self.fixture), str(project["db"]), str(project["path"]), str(count)],
+        subprocess.run([str(self.fixture), str(project["db"]), str(project["path"]), *args],
                        env=env, check=True, timeout=30, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+
+    def clone_project(self, source, name, identity=False):
+        clone = self.project(name, 0, in_project=source["in_project"], key_root=source["key_root"])
+        self.snapshot(source["db"], clone["db"])
+        if identity:
+            for name in ("chain-identity.json", "anchor-registration.json"):
+                shutil.copy2(source["state"] / name, clone["state"] / name)
+        return clone
 
     def identity(self, project):
         return json.loads((project["state"] / "chain-identity.json").read_text())
@@ -270,6 +366,10 @@ db = "events.db"
         requests_before = (self.scratch / "requests.jsonl").read_bytes()
         output = self.command(project, "log", "--prune", "0s", fails=True)
         require("prun" in output.lower() and ("pin" in output.lower() or "identity" in output.lower()), output)
+        if (project["state"] / "chain-identity.json").exists():
+            state = self.identity(project)["registration_state"]
+            if state in ("pending", "enrolled"):
+                require("remote pin" in output and "is " + state in output, output)
         require(self.database_fingerprint(project["db"]) == before, "prune refusal changed the DB")
         require(self.database_fingerprint(self.scratch / "ncc.sqlite3") == store_before, "prune refusal changed remote state")
         require((self.scratch / "requests.jsonl").read_bytes() == requests_before, "prune consulted the remote store")
@@ -279,19 +379,37 @@ db = "events.db"
         self.fixture = self.scratch / "anchor-fixture"
         go = shutil.which("go")
         require(go, "Go is required to build the signed-row fixture")
-        # This compiles the real logging package. The fixture generates rows;
-        # every anchor transition/verdict below goes through the actual CLI.
+        # This compiles the real logging package. The fixture generates rows
+        # and explicit none-state identities. CLI preflights and separately
+        # labeled direct-handler negative controls both use real signed records.
         subprocess.run([go, "build", "-o", str(self.fixture), "./scripts/testdata/anchor-v2-fixture"],
                        cwd=repo, check=True, timeout=120)
         self.case("two-projects-same-key-independent-pins", self.two_projects)
         self.case("swapped-pair-before-count-and-server-url-binding", self.swapped_pair)
         self.case("rollback-rejected-pin-and-other-project-unchanged", self.rollback)
+        for kind in ("chain_id_only", "chain_id", "signature", "malformed"):
+            self.case("invalid-remote-" + kind + "-before-count", lambda kind=kind: self.invalid_remote(kind))
+        self.case("local-mirror-disagreement-before-remote-verdict", self.mirror_disagreement)
         self.case("missing-local-identity-does-not-mint", self.missing_identity)
         self.case("missing-pin-and-old-store-never-downgrade", self.missing_remote)
+        self.case("unreachable-loopback-store-never-downgrades", self.unreachable_remote)
+        self.case("stale-cli-cas-retains-competing-pin", self.stale_cas)
         self.case("legacy-wrong-owner-refused-correct-migration-verifies", self.legacy_migration)
+        self.case("migration-shorter-signed-history-refused", lambda: self.migration_history_conflict(shorter=True))
+        self.case("migration-equal-height-divergence-refused", lambda: self.migration_history_conflict(shorter=False))
+        self.case("migration-stale-witness-retains-advanced-legacy", self.stale_migration)
+        self.case("migration-preidentity-clone-cannot-claim-twice", self.duplicate_migration)
+        self.case("migration-lost-committed-response-exact-retry", lambda: self.crash_retry(mode="migrate"))
+        self.case("v1-real-read-write-before-migration", self.v1_before)
+        self.case("v1-read-write-frozen-after-migration", self.v1_frozen)
+        self.case("v2-body-rejected-by-v1-retained-history-unchanged", self.v1_rejects_v2)
         self.case("committed-response-loss-crash-pending-retry-prune", self.crash_retry)
         self.case("registration-validation-error-stays-pending", self.rejected_registration)
         self.case("offline-project-and-state-move-preserves-pair", self.moved_identity)
+        self.case("in-project-db-and-external-identity-move", self.in_project_move)
+        self.case("explicit-fresh-fork-gets-new-chain-id", self.fresh_fork)
+        self.case("copied-enrolled-id-divergence-cannot-replace-pin", self.copied_fork)
+        self.case("present-identity-none-prune-positive-control", self.identity_none_prune)
         self.case("unenrolled-legacy-prune-positive-control", self.legacy_prune)
 
     def two_projects(self):
@@ -351,7 +469,8 @@ db = "events.db"
             output = self.command(self.a, "verify", "--against-remote-anchor", fails=True)
             require("TRUNCATION" in output, output)
             old_anchor, old_path = self.emit(self.a)
-            self.command(self.a, "anchor", "push", "--file", str(old_path), fails=True)
+            output = self.command(self.a, "anchor", "push", "--file", str(old_path), fails=True)
+            require("remote anchor preflight refused: truncation detected" in output, output)
             # Separately hit the real store's monotonic boundary, bypassing only
             # the CLI's successful refusal, with its current CAS precondition.
             status, result = self.http("/api/nocklock/anchors/v2/", dict(anchor=old_anchor,
@@ -365,23 +484,127 @@ db = "events.db"
         return dict(rolled_back_count=7, retained_remote_count=remote["row_count"], other_project_unchanged=True,
                     direct_store_rejection="row_count_regression")
 
+    def invalid_remote(self, kind):
+        before = self.database_fingerprint(self.scratch / "ncc.sqlite3")
+        local = self.database_fingerprint(self.a["db"])
+        with self.fault(dict(corrupt_response_path=self.latest_path(self.anchor_a), corrupt_response=kind)):
+            output = self.command(self.a, "verify", "--against-remote-anchor", fails=True)
+        expected = {"chain_id_only": "signature does not verify", "chain_id": "signature does not verify",
+                    "signature": "signature does not verify",
+                    "malformed": "invalid remote v2 anchor"}
+        require(expected[kind] in output.lower() and "TRUNCATION" not in output, output)
+        # The invalid fields travel through the actual POST validator too.
+        # The count deliberately exceeds the local count, but is not trusted.
+        if kind != "malformed":
+            _, anchor, headers = self.http(self.latest_path(self.anchor_a), include_headers=True)
+            invalid = dict(anchor)
+            if kind != "chain_id_only":
+                invalid["row_count"] = 2**64 - 1
+            invalid.update({"chain_id": "f" * 64} if kind in ("chain_id", "chain_id_only") else {"sig": "A" * 86 + "=="})
+            if kind == "chain_id_only":
+                require({key for key in anchor if invalid[key] != anchor[key]} == {"chain_id"},
+                        "ID-only negative changed another signed field")
+            status, result = self.http("/api/nocklock/anchors/v2/", dict(anchor=invalid,
+                pubkey=self.public_key(self.a), expected_previous=headers["ETag"].strip('"')))
+            require(status == 400 and result.get("data", {}).get("code") == "invalid_anchor", (status, result))
+        require(self.database_fingerprint(self.scratch / "ncc.sqlite3") == before, "invalid anchor changed remote store")
+        require(self.database_fingerprint(self.a["db"]) == local, "invalid response changed local DB")
+        return dict(invalid_response=kind, before_count=True, id_only_binding=kind == "chain_id_only",
+                    real_post_rejected=kind != "malformed",
+                    remote_fingerprint=before, local_fingerprint=local)
+
+    def mirror_disagreement(self):
+        saved = self.scratch / "mirror-before.sqlite3"
+        self.snapshot(self.a["db"], saved)
+        remote = self.database_fingerprint(self.scratch / "ncc.sqlite3")
+        try:
+            with sqlite3.connect(self.a["db"]) as db:
+                db.execute("UPDATE chain_identity SET chain_id=?", ("e" * 64,))
+            # Baseline after deliberate corruption; a refusal must not repair it.
+            corrupted = self.database_fingerprint(self.a["db"])
+            requests = len(self.requests())
+            for args in (("verify", "--against-remote-anchor"), ("anchor", "push")):
+                output = self.command(self.a, *args, fails=True)
+                require("trusted identity and DB mirror disagree" in output and "TRUNCATION" not in output, output)
+            require(len(self.requests()) == requests, "mirror disagreement made an HTTP request")
+            require(self.database_fingerprint(self.a["db"]) == corrupted, "refusal changed corrupted mirror")
+            require(self.database_fingerprint(self.scratch / "ncc.sqlite3") == remote, "mirror refusal changed remote store")
+        finally:
+            self.snapshot(saved, self.a["db"])
+        return dict(no_http=True, before_count=True, corrupted_db_fingerprint=corrupted, remote_fingerprint=remote)
+
+    def unreachable_remote(self):
+        local = self.database_fingerprint(self.a["db"])
+        remote = self.database_fingerprint(self.scratch / "ncc.sqlite3")
+        requests = len(self.requests())
+        _, path = self.emit(self.a)
+        # Reserve a loopback port without listening: no reuse race or external host.
+        with socket.socket() as reserved:
+            reserved.bind(("127.0.0.1", 0))
+            url = "http://127.0.0.1:" + str(reserved.getsockname()[1])
+            for args in (("verify", "--against-remote-anchor"), ("anchor", "push", "--file", str(path))):
+                output = self.command(self.a, *args, fails=True, base_url=url)
+                require("dial tcp 127.0.0.1:" in output and "connect:" in output and
+                        any(reason in output.lower() for reason in ("connection refused", "operation timed out")), output)
+        require(len(self.requests()) == requests, "unreachable store triggered another endpoint")
+        require(self.database_fingerprint(self.a["db"]) == local, "unreachable store changed local DB")
+        require(self.database_fingerprint(self.scratch / "ncc.sqlite3") == remote, "unreachable store changed pin")
+        return dict(loopback_connect_failed=True, no_fallback=True, local_fingerprint=local, remote_fingerprint=remote)
+
+    def stale_cas(self):
+        project = self.project("stale-cas", 3)
+        self.command(project, "anchor", "enroll")
+        self.append_rows(project, 1)
+        intermediate, _ = self.emit(project)
+        self.append_rows(project, 1)
+        candidate, path = self.emit(project)
+        _, _, headers = self.http(self.latest_path(candidate), include_headers=True)
+        endpoint = "/api/nocklock/anchors/v2/"
+        pause = dict(id="stale-cas", path=endpoint,
+                     anchor=dict(chain_id=candidate["chain_id"], row_count=candidate["row_count"]))
+        args = ("anchor", "push", "--file", str(path))
+        with self.fault(dict(pause_before=pause)), self.running_cli(project, *args) as (process, output):
+            self.wait_file(self.scratch / "stale-cas-paused.json")
+            status, result = self.http(endpoint, dict(anchor=intermediate, pubkey=self.public_key(project),
+                                                     expected_previous=headers["ETag"].strip('"')))
+            require(status == 201, (status, result))
+            competing = self.latest(candidate)
+            before = self.database_fingerprint(self.scratch / "ncc.sqlite3")
+            write_json(self.scratch / "fault.json", {})
+            text = self.finish_cli(project, args, process, output, fails=True)
+            require("previous_mismatch" in text, text)
+        require(self.latest(candidate) == competing, "stale CLI replaced competing pin")
+        require(self.database_fingerprint(self.scratch / "ncc.sqlite3") == before, "stale CAS changed store")
+        require(any(row.get("code") == "previous_mismatch" and row["status"] == 409 for row in self.requests()),
+                "real NCC did not report stale CAS")
+        return dict(candidate_count=candidate["row_count"], retained_count=competing["row_count"],
+                    actual_error="previous_mismatch", post_competing_write_fingerprint=before)
+
     def missing_identity(self):
         record = self.a["state"] / "chain-identity.json"
         saved = self.scratch / "saved-identity.json"
         record.rename(saved)
         before = self.database_fingerprint(self.a["db"])
+        requests = len(self.requests())
         try:
             for args in (("verify", "--against-remote-anchor"), ("anchor", "push")):
-                self.command(self.a, *args, fails=True)
+                output = self.command(self.a, *args, fails=True)
+                require("trusted identity record and DB mirror are incomplete" in output, output)
                 require(not record.exists(), "missing identity was silently recreated")
             self.prune_refused(self.a)
             require(self.database_fingerprint(self.a["db"]) == before, "missing identity changed DB")
+            require(len(self.requests()) == requests, "missing identity consulted remote")
         finally:
             saved.rename(record)
         fresh = self.project("existing-unenrolled", 2)
-        for args in (("verify", "--against-remote-anchor"), ("anchor", "push")):
-            self.command(fresh, *args, fails=True)
+        # Supply an existing valid v2 record with the same shared key. A missing
+        # default file must not satisfy this no-identity preflight control.
+        _, valid_v2_path = self.emit(self.a)
+        for args in (("verify", "--against-remote-anchor"), ("anchor", "push", "--file", str(valid_v2_path))):
+            output = self.command(fresh, *args, fails=True)
+            require("chain identity is not initialized" in output, output)
             require(not (fresh["state"] / "chain-identity.json").exists(), "legacy chain silently enrolled")
+        require(len(self.requests()) == requests, "unenrolled legacy chain consulted remote")
         return "Existing v2 mirror and entirely legacy DB both refuse ordinary remote commands without minting an identity; missing-record prune refused unchanged."
 
     def missing_remote(self):
@@ -394,13 +617,21 @@ db = "events.db"
             stream_id = db.execute("SELECT id FROM nocklock_anchorstream WHERE chain_id=?", (anchor["chain_id"],)).fetchone()[0]
             db.execute("DELETE FROM nocklock_chainanchorv2 WHERE stream_id=?", (stream_id,))
             db.execute("DELETE FROM nocklock_anchorstream WHERE id=?", (stream_id,))
-        offset = len((self.scratch / "requests.jsonl").read_text().splitlines())
-        self.command(missing, "verify", "--against-remote-anchor", fails=True)
-        self.command(missing, "anchor", "push", "--file", str(path), fails=True)
+        offset = len(self.requests())
+        expected_reason = "v2 endpoint or stream unavailable"
+        for args in (("verify", "--against-remote-anchor"), ("anchor", "push", "--file", str(path))):
+            command_offset = len(self.requests())
+            output = self.command(missing, *args, fails=True)
+            require(expected_reason in output and "no v1 fallback" in output, output)
+            requests = self.requests()[command_offset:]
+            require(len(requests) == 1 and requests[0]["method"] == "GET" and
+                    requests[0]["path"] == self.latest_path(anchor) and requests[0]["status"] == 404 and
+                    requests[0].get("code") == "not_registered", ("lost-pin command did not reach real missing pair", requests))
         require(self.http(self.latest_path(anchor))[0] == 404, "ordinary push recreated lost pin")
         write_json(self.scratch / "fault.json", dict(v1_only=True))
         try:
-            self.command(self.a, "verify", "--against-remote-anchor", fails=True)
+            output = self.command(self.a, "verify", "--against-remote-anchor", fails=True)
+            require(expected_reason in output and "no v1 fallback" in output, output)
         finally:
             write_json(self.scratch / "fault.json", {})
         requests = [json.loads(line) for line in (self.scratch / "requests.jsonl").read_text().splitlines()[offset:]]
@@ -430,7 +661,8 @@ db = "events.db"
         require(migrated["version"] == 2 and migrated["legacy_anchor_digest"] != "0" * 64, "migration witness missing")
         self.command(owner, "verify", "--against-remote-anchor")
         require(self.http("/api/nocklock/anchors/" + legacy["agent_id"] + "/latest/")[0] == 409, "v1 read not frozen")
-        self.command(wrong, "anchor", "enroll", fails=True)
+        output = self.command(wrong, "anchor", "enroll", fails=True)
+        require("this key has legacy remote history" in output and "--acknowledge-no-legacy-history" in output, output)
         require(not (wrong["state"] / "chain-identity.json").exists(), "ordinary fresh enrollment claimed legacy history")
         self.command(wrong, "anchor", "enroll", "--acknowledge-no-legacy-history")
         acknowledged, _ = self.emit(wrong)
@@ -439,37 +671,160 @@ db = "events.db"
         return dict(correct_owner_verified=True, wrong_owner_refused=True, explicit_unrelated_acknowledgement=True,
                     legacy_anchor_digest=migrated["legacy_anchor_digest"])
 
-    def crash_retry(self):
-        project = self.project("pending-crash", 4)
-        write_json(self.scratch / "fault.json", dict(hold_registration=True))
-        output_path = self.scratch / "killed-enroll.log"
-        env = dict(self.cli_env, XDG_CONFIG_HOME=str(project["key_root"]))
-        with output_path.open("w") as output:
-            process = subprocess.Popen([str(self.args.nocklock_bin), "anchor", "enroll"],
-                                       cwd=project["path"], env=env, stdout=output,
-                                       stderr=subprocess.STDOUT, start_new_session=True)
-            try:
-                self.wait_file(self.scratch / "registration-committed.json")
-                require(self.identity(project)["registration_state"] == "pending", "pending not durable before committed response")
-                require(process.poll() is None, "CLI exited before crash injection")
-            finally:
-                if process.poll() is None:
-                    os.killpg(process.pid, signal.SIGKILL)
-                process.wait(timeout=5)
-                write_json(self.scratch / "fault.json", {})
+    def post_legacy(self, project):
+        anchor, _ = self.emit(project)
+        require(anchor["version"] == 1, "legacy fixture already has an identity")
+        status, result = self.http("/api/nocklock/anchors/", dict(anchor=anchor, pubkey=self.public_key(project)))
+        require(status == 201, (status, result))
+        return anchor
+
+    def legacy_latest(self, anchor):
+        status, result, headers = self.http("/api/nocklock/anchors/v2/" + anchor["agent_id"] + "/legacy/",
+                                            include_headers=True)
+        require(status == 200, (status, result))
+        return result, headers["ETag"].strip('"')
+
+    def migration_history_conflict(self, shorter):
+        name = "migration-shorter" if shorter else "migration-divergent"
+        owner = self.project(name + "-owner", 3 if shorter else 5, name)
+        if shorter:
+            candidate = self.clone_project(owner, name + "-candidate")
+            self.append_rows(owner, 2)
+        else:
+            candidate = self.project(name + "-candidate", 5, name)
+        legacy = self.post_legacy(owner)
+        _, digest = self.legacy_latest(legacy)
+        before = self.database_fingerprint(self.scratch / "ncc.sqlite3")
+        output = self.command(candidate, "anchor", "migrate", fails=True)
+        require("legacy migration preflight refused" in output, output)
+        require(not (candidate["state"] / "chain-identity.json").exists(), "invalid history minted an identity")
+        require(self.database_fingerprint(self.scratch / "ncc.sqlite3") == before, "migration preflight changed store")
+        # Separately exercise the server boundary with a real signed candidate.
+        # Only the private fixture initializes identity; the CLI signs the record.
+        self.fixture_action(candidate, "init-identity", digest)
+        signed, _ = self.emit(candidate)
+        require((signed["row_count"] < legacy["row_count"]) if shorter else
+                (signed["row_count"] == legacy["row_count"] and signed["head_hash"] != legacy["head_hash"]),
+                "migration history negative control does not differ as intended")
+        status, result = self.http("/api/nocklock/anchors/v2/migrate/", dict(anchor=signed,
+            pubkey=self.public_key(candidate), expected_legacy=digest))
+        code = "row_count_regression" if shorter else "head_conflict"
+        require(status == 409 and result.get("data", {}).get("code") == code, (status, result))
+        require(self.database_fingerprint(self.scratch / "ncc.sqlite3") == before, "rejected migration changed store")
+        return dict(cli_preflight_refused_without_identity=True, separate_real_handler_error=code,
+                    legacy_count=legacy["row_count"], candidate_count=signed["row_count"], remote_fingerprint=before)
+
+    def stale_migration(self):
+        project = self.project("migration-stale", 3, "migration-stale")
+        original = self.post_legacy(project)
+        self.append_rows(project, 2)
+        advanced, _ = self.emit(project)
+        endpoint = "/api/nocklock/anchors/v2/migrate/"
+        pause = dict(id="stale-migration", path=endpoint,
+                     anchor=dict(agent_id=original["agent_id"], row_count=advanced["row_count"]))
+        args = ("anchor", "migrate")
+        with self.fault(dict(pause_before=pause)), self.running_cli(project, *args) as (process, output):
+            self.wait_file(self.scratch / "stale-migration-paused.json")
+            status, result = self.http("/api/nocklock/anchors/", dict(anchor=advanced, pubkey=self.public_key(project)))
+            require(status == 201, (status, result))
+            before = self.database_fingerprint(self.scratch / "ncc.sqlite3")
+            write_json(self.scratch / "fault.json", {})
+            text = self.finish_cli(project, args, process, output, fails=True)
+            require("legacy_previous_mismatch" in text, text)
+        require(self.identity(project)["registration_state"] == "pending", "stale migration cleared pending")
+        require(self.legacy_latest(original)[0] == advanced, "stale migration changed advanced legacy")
+        require(self.database_fingerprint(self.scratch / "ncc.sqlite3") == before, "stale migration changed store")
+        self.prune_refused(project)
+        return dict(actual_error="legacy_previous_mismatch", pending=True, retained_legacy_count=advanced["row_count"],
+                    post_competing_write_fingerprint=before)
+
+    def duplicate_migration(self):
+        owner = self.project("migration-first-claim", 5, "migration-duplicate")
+        legacy = self.post_legacy(owner)
+        clone = self.clone_project(owner, "migration-preidentity-clone")
+        self.command(owner, "anchor", "migrate")
+        before = self.database_fingerprint(self.scratch / "ncc.sqlite3")
+        pin, _ = self.emit(owner)
+        stored = self.latest(pin)
+        output = self.command(clone, "anchor", "migrate", fails=True)
+        require("legacy_already_claimed" in output, output)
+        clone_id = self.identity(clone)
+        require(clone_id["registration_state"] == "pending" and clone_id["chain_id"] != pin["chain_id"],
+                "duplicate claimant did not keep a separate pending identity")
+        require(self.latest(pin) == stored and self.legacy_latest(legacy)[0] == legacy, "duplicate claim moved history")
+        require(self.database_fingerprint(self.scratch / "ncc.sqlite3") == before, "duplicate claim changed store")
+        self.prune_refused(clone)
+        return dict(actual_error="legacy_already_claimed", preidentity_clone=True, distinct_pending_chain=True,
+                    after_first_claim_fingerprint=before)
+
+    def v1_before(self):
+        self.v1_project = self.project("v1-compatibility", 3, "v1-compatibility")
+        self.v1_anchor = self.post_legacy(self.v1_project)
+        self.v1_path = "/api/nocklock/anchors/" + self.v1_anchor["agent_id"] + "/latest/"
+        require(self.http(self.v1_path) == (200, self.v1_anchor), "v1 latest differs before migration")
+        self.v1_retained = self.legacy_latest(self.v1_anchor)
+        return "Real signed v1 POST returns 201 and ordinary GET returns the same anchor before any v2 stream."
+
+    def v1_frozen(self):
+        self.command(self.v1_project, "anchor", "migrate")
+        self.v1_store_after_migration = self.database_fingerprint(self.scratch / "ncc.sqlite3")
+        body = dict(anchor=self.v1_anchor, pubkey=self.public_key(self.v1_project))
+        for path, payload in ((self.v1_path, None), ("/api/nocklock/anchors/", body)):
+            status, result = self.http(path, payload)
+            require(status == 409 and result.get("data", {}).get("code") == "v1_frozen", (status, result))
+        require(self.legacy_latest(self.v1_anchor) == self.v1_retained, "v1 freeze changed retained legacy snapshot")
+        require(self.database_fingerprint(self.scratch / "ncc.sqlite3") == self.v1_store_after_migration,
+                "frozen v1 operations changed store")
+        return dict(read_error="v1_frozen", write_error="v1_frozen", retained_anchor_and_etag_unchanged=True,
+                    after_migration_fingerprint=self.v1_store_after_migration)
+
+    def v1_rejects_v2(self):
+        v2, _ = self.emit(self.v1_project)
+        status, result = self.http("/api/nocklock/anchors/", dict(anchor=v2, pubkey=self.public_key(self.v1_project)))
+        require(status == 400 and "chain_id" in result.get("message", "") and
+                "legacy_anchor_digest" in result.get("message", ""), (status, result))
+        require(self.legacy_latest(self.v1_anchor) == self.v1_retained, "invalid v1 POST changed retained history")
+        require(self.database_fingerprint(self.scratch / "ncc.sqlite3") == self.v1_store_after_migration,
+                "v2 body at v1 endpoint changed store")
+        return "The actual v1 validator rejects the v2 body with HTTP 400; retained signed legacy anchor, ETag and whole store remain unchanged."
+
+    def crash_retry(self, mode="enroll"):
+        project = self.project("pending-crash-" + mode, 4, "pending-crash-" + mode)
+        if mode == "migrate":
+            self.post_legacy(project)
+        marker = self.scratch / "registration-committed.json"
+        marker.unlink(missing_ok=True)
+        offset = len(self.requests())
+        args = ("anchor", mode)
+        with self.fault(dict(hold_registration=True)), self.running_cli(project, *args) as (process, output):
+            self.wait_file(marker)
+            require(self.identity(project)["registration_state"] == "pending", "pending not durable before committed response")
+            require(process.poll() is None, "CLI exited before crash injection")
+            os.killpg(process.pid, signal.SIGKILL)
+            process.wait(timeout=5)
+            self.finish_cli(project, args, process, output, fails=True)
         require(process.returncode == -signal.SIGKILL, "CLI did not undergo the intended crash")
         require(self.identity(project)["registration_state"] == "pending", "crash cleared pending")
+        request = (project["state"] / "anchor-registration.json").read_bytes()
         self.prune_refused(project)
-        self.command(project, "anchor", "enroll")
+        self.command(project, *args)
+        require((project["state"] / "anchor-registration.json").read_bytes() == request, "retry rewrote original signed request")
+        endpoint = "/api/nocklock/anchors/v2/" + ("register/" if mode == "enroll" else "migrate/")
+        posts = [row for row in self.requests()[offset:] if row["path"] == endpoint and row["method"] == "POST"]
+        code = "already_exists" if mode == "enroll" else "already_migrated"
+        require(len(posts) == 2 and posts[0]["request_sha256"] == posts[1]["request_sha256"]
+                and posts[1].get("code") == code, ("retry was not exact", posts))
         require(self.identity(project)["registration_state"] == "enrolled", "retry failed to confirm exact original registration")
         self.command(project, "verify", "--against-remote-anchor")
         self.prune_refused(project)
-        return "Real NCC commit withheld; CLI killed; durable pending blocks prune; exact registration retry confirms enrolled and remote verification passes."
+        return dict(mode=mode, real_commit_before_sigkill=True, exact_request_sha256=posts[0]["request_sha256"],
+                    retry_confirmation=code, pending_and_enrolled_prune_refused_unchanged=True)
 
     def rejected_registration(self):
         project = self.project("pending-rejection", 2)
         write_json(self.scratch / "fault.json", dict(reject_registration=True))
         before = self.database_fingerprint(self.scratch / "ncc.sqlite3")
+        offset = len(self.requests())
         try:
             self.command(project, "anchor", "enroll", fails=True)
         finally:
@@ -477,30 +832,134 @@ db = "events.db"
         require(self.database_fingerprint(self.scratch / "ncc.sqlite3") == before, "invalid signature modified store")
         require(self.identity(project)["registration_state"] == "pending", "validation error cleared pending")
         self.prune_refused(project)
-        return "Transport-corrupted signature rejected by actual NCC validator; local pending persists and prune refuses without DB changes."
+        identity = self.identity(project)
+        request = (project["state"] / "anchor-registration.json").read_bytes()
+        database = self.database_fingerprint(project["db"])
+        require(self.http(self.latest_path(identity))[0] == 404, "rejected registration unexpectedly has a pin")
+        self.move_project(project, "pending-rejection-moved")
+        require(self.identity(project) == identity, "pending move changed identity")
+        require((project["state"] / "anchor-registration.json").read_bytes() == request, "pending move changed original request")
+        require(self.database_fingerprint(project["db"]) == database, "pending move changed signed DB")
+        self.command(project, "anchor", "enroll")
+        posts = [row for row in self.requests()[offset:]
+                 if row["path"] == "/api/nocklock/anchors/v2/register/" and row["method"] == "POST"]
+        require(len(posts) == 2 and posts[0]["status"] == 400 and posts[0].get("code") == "invalid_anchor"
+                and posts[1]["status"] == 201 and posts[1].get("code") == "registered"
+                and posts[0]["request_sha256"] == posts[1]["request_sha256"], ("pending move did not retry exact request", posts))
+        require(self.identity(project)["registration_state"] == "enrolled", "pending move retry did not enroll")
+        require((project["state"] / "anchor-registration.json").read_bytes() == request, "moved retry rewrote request")
+        self.command(project, "verify", "--against-remote-anchor")
+        return dict(real_validator_rejected=True, pending_prune_refused_unchanged=True,
+                    pending_offline_move_without_remote_pin=True, original_request_preserved=True, retry_verified=True,
+                    original_request_sha256=posts[0]["request_sha256"], moved_db_fingerprint=database)
 
-    def moved_identity(self):
-        project = self.a
-        before = self.identity(project)
-        remote = self.latest(self.anchor_a)
-        destination = self.scratch / "project-a-moved"
+    def move_project(self, project, name):
+        destination = self.scratch / name
         state = self.state_path(destination)
         require(not destination.exists() and not state.exists(), "move destinations must be absent")
         project["path"].rename(destination)
         project["state"].rename(state)
-        project.update(path=destination, state=state, db=state / "events.db")
+        project.update(path=destination, state=state,
+                       db=destination / ".nock/events.db" if project["in_project"] else state / "events.db")
+
+    def moved_identity(self):
+        project = self.a
+        before = self.identity(project)
+        request = (project["state"] / "anchor-registration.json").read_bytes()
+        database = self.database_fingerprint(project["db"])
+        remote = self.latest(self.anchor_a)
+        self.move_project(project, "project-a-moved")
         require(self.identity(project) == before, "move changed identity tuple")
+        require((project["state"] / "anchor-registration.json").read_bytes() == request, "move changed original request")
+        require(self.database_fingerprint(project["db"]) == database, "move changed signed DB")
         self.command(project, "verify", "--audit")
         self.command(project, "verify", "--against-remote-anchor")
         require(self.latest(self.anchor_a) == remote, "move changed remote pair")
         return dict(agent_id=before["agent_id"], chain_id=before["chain_id"], registration_state=before["registration_state"])
+
+    def in_project_move(self):
+        self.moving = self.project("in-project-db", 3, "moving-and-forking", in_project=True)
+        self.command(self.moving, "anchor", "enroll")
+        anchor, _ = self.emit(self.moving)
+        identity = self.identity(self.moving)
+        request = (self.moving["state"] / "anchor-registration.json").read_bytes()
+        database = self.database_fingerprint(self.moving["db"])
+        remote = self.latest(anchor)
+        require(self.moving["db"].is_relative_to(self.moving["path"]) and
+                not self.moving["state"].is_relative_to(self.moving["path"]), "move fixture has wrong DB/state placement")
+        self.move_project(self.moving, "in-project-db-moved")
+        require(self.identity(self.moving) == identity, "in-project move changed identity")
+        require((self.moving["state"] / "anchor-registration.json").read_bytes() == request, "move changed original request")
+        require(self.database_fingerprint(self.moving["db"]) == database, "move changed signed DB")
+        self.command(self.moving, "verify", "--audit")
+        self.command(self.moving, "verify", "--against-remote-anchor")
+        require(self.latest(anchor) == remote, "in-project move changed remote pin")
+        return dict(db_within_project=True, identity_external=True, chain_id=identity["chain_id"],
+                    request_and_signed_db_preserved=True, remote_verified=True)
+
+    def fresh_fork(self):
+        original, _ = self.emit(self.moving)
+        remote = self.latest(original)
+        # A supported fresh fork starts a new audit DB; it never resets a copy
+        # of an enrolled chain to none or deletes its trusted identity.
+        self.fork = self.project("explicit-new-audit-fork", 3, key_root=self.moving["key_root"], in_project=True)
+        self.command(self.fork, "anchor", "enroll")
+        anchor, _ = self.emit(self.fork)
+        require(anchor["agent_id"] == original["agent_id"] and anchor["chain_id"] != original["chain_id"],
+                "fresh fork did not obtain an independent pair")
+        for project in (self.moving, self.fork):
+            self.command(project, "verify", "--against-remote-anchor")
+        require(self.latest(original) == remote, "fresh fork changed source pin")
+        return dict(new_audit_db=True, same_key=True, independent_chain_ids=[original["chain_id"], anchor["chain_id"]])
+
+    def copied_fork(self):
+        copy = self.clone_project(self.moving, "copied-enrolled-fork", identity=True)
+        self.append_rows(self.moving, 1)
+        original, path = self.emit(self.moving)
+        self.command(self.moving, "anchor", "push", "--file", str(path))
+        self.append_rows(copy, 1)
+        divergent, copy_path = self.emit(copy)
+        require(divergent["chain_id"] == original["chain_id"] and divergent["row_count"] == original["row_count"]
+                and divergent["head_hash"] != original["head_hash"], "copied fork is not a signed equal-height divergence")
+        self.command(copy, "verify", "--audit")
+        _, pin, headers = self.http(self.latest_path(original), include_headers=True)
+        fork_anchor, _ = self.emit(self.fork)
+        other = self.latest(fork_anchor)
+        before = self.database_fingerprint(self.scratch / "ncc.sqlite3")
+        local = self.database_fingerprint(copy["db"])
+        for args in (("verify", "--against-remote-anchor"), ("anchor", "push", "--file", str(copy_path))):
+            text = self.command(copy, *args, fails=True)
+            require("does not reproduce the anchored head" in text, text)
+        status, result = self.http("/api/nocklock/anchors/v2/", dict(anchor=divergent, pubkey=self.public_key(copy),
+                                                                 expected_previous=headers["ETag"].strip('"')))
+        require(status == 409 and result.get("data", {}).get("code") == "head_conflict", (status, result))
+        require(self.latest(original) == pin and self.latest(fork_anchor) == other, "copied fork replaced a pin")
+        require(self.database_fingerprint(self.scratch / "ncc.sqlite3") == before, "copied fork refusal changed store")
+        require(self.database_fingerprint(copy["db"]) == local, "copied fork refusal changed local signed history")
+        return dict(cli_prefix_refused=True, separate_real_handler_error="head_conflict",
+                    original_and_fresh_fork_pins_unchanged=True, post_competing_write_fingerprint=before)
+
+    def identity_none_prune(self):
+        project = self.project("prune-present-none", 3)
+        self.fixture_action(project, "init-identity")
+        identity = self.identity(project)
+        require(identity["registration_state"] == "none", "fixture did not create an unregistered identity")
+        before = self.database_fingerprint(self.scratch / "ncc.sqlite3")
+        requests = len(self.requests())
+        self.command(project, "log", "--prune", "0s")
+        with sqlite3.connect(project["db"]) as db:
+            require(db.execute("SELECT count(*) FROM events").fetchone()[0] == 0, "present-none identity did not permit prune")
+        require(self.identity(project) == identity, "allowed prune changed trusted identity")
+        require(len(self.requests()) == requests, "none-state prune consulted remote")
+        require(self.database_fingerprint(self.scratch / "ncc.sqlite3") == before, "none-state prune changed remote store")
+        return dict(real_cli_pruned=True, present_identity_state="none", identity_unchanged=True, no_http=True)
 
     def legacy_prune(self):
         project = self.project("prune-unenrolled", 3)
         self.command(project, "log", "--prune", "0s")
         with sqlite3.connect(project["db"]) as db:
             require(db.execute("SELECT count(*) FROM events").fetchone()[0] == 0, "unenrolled control did not prune")
-        return "Actual legacy CLI prune removes rows when registration was never sent. Identity-none and lock/crash filesystem edge cases remain lower-level Go coverage."
+        return "Actual legacy CLI prune removes rows when no identity exists and registration was never sent."
 
     def wait_file(self, path, timeout=15):
         deadline = time.monotonic() + timeout
@@ -540,6 +999,8 @@ db = "events.db"
     def case(self, name, callback):
         try:
             detail = callback()
+            require(not any(row["status"] == 429 for row in self.requests()),
+                    "actual NCC rate limit returned HTTP 429; no negative case may accept it")
             self.rows.append(dict(case=name, verdict="PASS", detail=detail))
             print(name + ": PASS", flush=True)
         except Exception as exc:
@@ -572,6 +1033,9 @@ db = "events.db"
                 text = source.read_text().replace(self.token, "[temporary token redacted]")
                 (self.args.out / name).write_text(text)
         write_json(self.args.out / "commands.json", self.commands)
+        rate_limited = [row for row in self.requests() if row["status"] == 429]
+        if rate_limited:
+            self.rows.append(dict(case="receipt-has-no-http-429", verdict="FAIL", detail=rate_limited))
         write_json(self.args.out / "report.json", {
             "verdict": "FAIL" if any(row["verdict"] == "FAIL" for row in self.rows) else "PASS",
             "scope": "server-smoke" if self.args.server_smoke else "CLI-and-real-NCC",
@@ -581,9 +1045,10 @@ db = "events.db"
             "nocklock_dirty": bool(subprocess.check_output(["git", "status", "--porcelain"], cwd=Path(__file__).resolve().parents[1])),
             "nocklock_binary_sha256": hashlib.sha256(self.args.nocklock_bin.read_bytes()).hexdigest() if self.args.nocklock_bin else None,
             "django": self.ready["django"], "cases": self.rows,
-            "lower_level_only": ["identity-none prune with present record", "registration/prune lock interleaving",
-                                 "durable-write failure before send", "symlink/hardlink/FIFO identity-file controls",
-                                 "stale legacy digest and duplicate migration claims"]})
+            "lower_level_only": ["registration/prune lock interleaving and bounded lock cancellation",
+                                 "durable-write failure before send and retry fsync barriers",
+                                 "symlink/hardlink/FIFO identity-file controls"]})
+        require(not rate_limited, "actual NCC returned HTTP 429; see failed receipt")
 
 
 def main():
