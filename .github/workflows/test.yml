@@ -2,7 +2,7 @@ name: test
 
 on:
   push:
-    branches: [main]
+    branches: [main, next]
   pull_request:
     # ready_for_review is included so the macos-enforce job's
     # `draft == false` gate fires on the draft→ready transition. This applies
@@ -35,8 +35,8 @@ jobs:
 
       # Cheap cross-check that the CLI still compiles for darwin. The macOS
       # enforcement job is PR-and-non-draft-only, so it does not guard pushes to
-      # main; this step runs on every push and PR and is what actually catches a
-      # non-Linux build break (the exact gap that let wrap.go:413 ship — N10709).
+      # main or next; this step runs on every push and PR and catches a non-Linux
+      # build break (the exact gap that let wrap.go:413 ship — N10709).
       # `go vet` (not `go build`) because it compiles the non-test code AND
       # type-checks _test.go files, so a darwin-only test-file break is caught
       # here too rather than only in the PR-gated macOS job.
