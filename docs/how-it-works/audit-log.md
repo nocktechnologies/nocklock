@@ -24,6 +24,38 @@ An early input or availability error still returns its original error without
 inventing an audit verdict. Exporting a public key, anchor enrollment/push, and
 live fence-probe output do not acquire this history-verification notice.
 
+### Linux interposer connection provenance
+
+New Linux interposer `file_blocked` rows use a version 1 JSON detail envelope
+with separate `report` and `connection_peer` sections. `report` preserves the
+child's operation, path, reason, type, action and timestamp claims. The collector
+attaches `connection_peer` independently; identity-looking child JSON fields
+cannot overwrite it. Both ordinary channel logging and synchronous look-back
+logging sign the same detail representation.
+
+At the start of each accepted connection's goroutine, the collector reads Linux
+`SO_PEERCRED` once before parsing any frames. Slow capture on one connection
+does not block the shared accept loop. `credentials_status: "captured"` accompanies numeric PID, UID and GID
+(including legitimate zero UID/GID). If credentials cannot be obtained,
+`credentials_status: "unavailable"` omits the credentials object and retains the
+underlying report. These are the connecting process's credentials at connection
+time, as seen from the collector's namespaces. An inherited or passed socket
+can be written by a different process; this is **not per-action writer identity
+or proof that the reported action happened**.
+
+`executable.status` is `observed` with a path from a later `/proc/<pid>/exe`
+read, `unavailable` when that read fails, or `credentials_unavailable` when no
+usable PID was captured. This path is not atomically bound to the connection,
+authenticated as the executable at connect time, or hashed. Exec, exit, PID
+reuse, procfs permissions and namespace visibility can affect the observation.
+The snapshot is reused for all frames on that connection.
+
+The envelope lives in the existing signed detail column; signature encoding,
+old row bytes and old verification behavior do not change. Existing plain-text
+details remain readable. macOS Seatbelt denial details and unrelated events
+keep their existing formats. Connection provenance adds no recording coverage;
+the limits above still apply. See the [design and test contract](../design/connection-peer-provenance.md).
+
 ## Layers
 | Layer | What it adds | Does not give you |
 |---|---|---|

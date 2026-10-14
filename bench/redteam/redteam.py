@@ -192,13 +192,38 @@ def check_setup(config, evidence):
         raise SetupFault("evidence reachable from inside the fence: " + "; ".join(bad))
 
 
+def nocklock_detail_matches(detail, atk):
+    """Match file report fields, never collector provenance; retain legacy text support."""
+    if not isinstance(detail, str):
+        return False
+    legacy_match = atk["rule"] in detail and (not atk.get("match") or atk["match"] in detail)
+    if atk["event"] != "file_blocked":
+        return legacy_match
+    try:
+        envelope = json.loads(detail)
+    except json.JSONDecodeError:
+        # An invalid JSON-looking envelope is not a legacy proof string.
+        return not detail.lstrip().startswith(("{", "[", '"')) and legacy_match
+    if (not isinstance(envelope, dict) or type(envelope.get("version")) is not int
+            or envelope["version"] != 1 or not isinstance(envelope.get("connection_peer"), dict)):
+        return False
+    report = envelope.get("report")
+    fields = {"type", "action", "path", "operation", "reason", "timestamp"}
+    if (not isinstance(report, dict) or set(report) != fields
+            or not all(isinstance(value, str) for value in report.values())
+            or report["type"] != "fs" or report["action"] != "blocked"):
+        return False
+    field, separator, value = atk["rule"].partition("=")
+    report_field = {"op": "operation", "path": "path", "reason": "reason"}.get(field)
+    return (bool(separator) and report_field is not None and report[report_field].startswith(value)
+            and (not atk.get("match") or atk["match"] in report["path"]))
+
+
 def nocklock_proof(rows, atk):
     """First row of this attack's session matching the attack's proof fields."""
     want_blocked = 1 if atk["expect"] == "blocked" and not atk.get("floor") else 0
     for r in rows:
-        if r["event_type"] != atk["event"] or atk["rule"] not in r["detail"]:
-            continue
-        if atk.get("match") and atk["match"] not in r["detail"]:
+        if r["event_type"] != atk["event"] or not nocklock_detail_matches(r["detail"], atk):
             continue
         if r["blocked"] != want_blocked:
             continue
