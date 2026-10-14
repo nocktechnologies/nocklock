@@ -45,6 +45,8 @@ existence alone does not prove durability. An unreadable ancestor or unsupported
 directory sync blocks identity mutation, while legacy logging and verification
 remain usable. After record rename, file and directory barriers stop at the
 canonical state root. Each new locked mutation performs its own preflight.
+An embedding registration callback may read the DB under the shared lock, but
+must not recursively call identity methods or prune.
 
 ### Remote operations
 
@@ -60,13 +62,17 @@ The upgraded store retains v1 migration history and freezes ordinary v1 access f
 
 `wrap` emits `chain-anchor.json` beside the DB and pushes enrolled v2 chains. Its five-second budget starts before the first identity read and bounds identity-lock waits and HTTP together. Failure warns and retains the child's exit code; interactive anchor commands and anchor verification use 30 seconds. Caller cancellation reaches identity-lock acquisition. Synchronous filesystem/SQLite work and in-progress durable writes complete on the caller; these deadlines do not interrupt them. Legacy chains emit local v1 files but require explicit enrollment/migration for any remote push. The real NCC/CLI [acceptance runbook](../runbooks/anchor-v2-ncc-acceptance.md) exercises distinct projects, rollback, missing/swapped state, migration, lost-response retries and moves.
 
-Prune remains allowed for legacy chains and initialized identities in state
-`none` when the logger has explicit project context. Rootless library callers
-must supply that context: a rolled-back DB cannot prove that external state is
-absent. The CLI already supplies the project root. Prune waits at most five
-seconds for the shared identity lock and holds it through deletion; timeout,
-pending/enrolled identities, missing records and mismatched metadata refuse
-before changing rows.
+Prune requires explicit project context; rootless library calls refuse even for
+legacy databases. On Linux and macOS, neither identity copy may exist, or both
+must agree with registration `none`. The external state directory must be
+resolvable, accessible, correctly owned, free of forbidden symlinks/permissions,
+outside the project and strictly below the state root. Prune holds the shared
+identity lock through deletion and waits at most five seconds to acquire it.
+Unusable storage, lock timeout, pending/enrolled state, a missing identity copy,
+or corrupt/inconsistent metadata refuses before changing events. These storage
+and locking failures also refuse legacy prune. Platforms without identity-lock
+support permit only legacy chains with neither identity copy. The CLI supplies
+the project root; see the [CLI reference](../reference/cli.md) for the full contract.
 
 With a filesystem fence enabled, `wrap` protects the canonical future trusted
 state directory before any identity exists, including when `logging.db` points
@@ -94,19 +100,65 @@ The procedure below applies to **legacy v1 chains without a trusted v2 identity*
 - `nocklock verify --export-pubkey` creates a new key when none exists. After that, `wrap` still refuses: `audit log signing key does not match the adopted public key fingerprint; refusing to write`.
 - `verify --audit` against the old log with the new key reports `FORGED` (`chain_head signing public key fingerprint does not match the supplied key`), exit `1`. Rows signed by the old key are not wrong; they are being checked against the wrong key.
 
-So the old log and the new key cannot share a database. The log must be archived and a new one started. The key is per user, not per project: every project's log under `$XDG_STATE_HOME/nocklock/` has adopted the old key's fingerprint, so repeat steps 3 and 6 for each project you still use.
+So the old log and the new key cannot share a database. The log must be archived and a new one started. The key is per user, not per project: repeat steps 3 and 6 for every project using that key, including logs at absolute or legacy project-local paths.
 
 **Procedure**
 1. Record the old public key off-box, before changing anything: `nocklock verify --export-pubkey > old.pub`. It is a public key; keep it somewhere the agent cannot write. Without it you cannot check old rows once the old key file is gone.
 2. Stop running wrapped sessions.
-3. Archive each project's log. Use `umask 077` (NockLock refuses state directories that are group- or world-writable) and keep the `<root>/nocklock/<project-key>/` layout; `nocklock status` prints the `Event log:` path. Move the database file named there (`events.db` by default; a project with `logging.db = "audit.db"` keeps `audit.db`), its `-wal` and `-shm` sidecars if present, and `chain-anchor.json`, each by name, into `<archive-root>/nocklock/<project-key>/`. Keep the same filename in the archive so the `verify` commands below find it.
+3. Archive each project's log while all wrapped sessions and other log writers remain stopped. From that project's directory, use `nocklock status` to find the resolved `Event log:` path; do not infer it from `logging.db`. Use `umask 077` and a separate private archive directory for each project. Record the original project path (`pwd -P` from its root), resolved DB path, and configured `logging.db` alongside the old public key so the archive stays associated with its project. Move the named DB, its `-wal` and `-shm` sidecars if present, and its sibling `chain-anchor.json` into that archive, each by exact name. Keep the DB's basename and matching sidecar names. This covers a bare filename, a custom basename, an absolute path, and an existing project-local path. Verify the archived copy using **Checking later** below before replacing the key or restarting sessions.
 4. Move the old key aside by name: `mv "${XDG_CONFIG_HOME:-$HOME/.config}/nocklock/signing-ed25519.key" <somewhere-private>/old-signing-ed25519.key` (`verify --export-pubkey` and `wrap` resolve the key from the same `XDG_CONFIG_HOME`, so run every step in one environment). Once the exposure is dealt with, remove that file by its exact path; the old public key is enough to verify old rows.
 5. Create the new key and record its public half: `nocklock verify --export-pubkey > new.pub`.
 6. Run `nocklock wrap` as usual. It opens a new log and adopts the new key. Explicitly enroll the fresh chain before any remote v2 push; this does not claim continuity with the archived legacy chain.
 
 **Checking later**
-- New rows: `nocklock verify --audit --ed25519-pub "$(cut -d' ' -f2 new.pub)"` prints `AUTHENTIC`.
-- Old rows: point `XDG_STATE_HOME` at the archive root (its `nocklock/` directory and the project directory must be mode 0700): `XDG_STATE_HOME=<archive-root> nocklock verify --audit --ed25519-pub "$(cut -d' ' -f2 old.pub)"` prints `AUTHENTIC`. The same command with the new key, or with no `--ed25519-pub`, prints `FORGED`. `XDG_STATE_HOME=<archive-root> nocklock verify --against-anchor <archive-root>/nocklock/<project-key>/chain-anchor.json --ed25519-pub "$(cut -d' ' -f2 old.pub)"` prints `ANCHOR: OK`.
+- New rows: from the original project, `new_pub=$(cat /absolute/path/to/new.pub) && test -n "$new_pub" && nocklock verify --audit --ed25519-pub "$new_pub"` prints `AUTHENTIC`. Stop if reading the public key fails or it is empty.
+- Old rows: use the private verification copy below. Changing only `XDG_STATE_HOME` does **not** redirect an absolute `logging.db`, and a surviving project-local log can take precedence over the archive. The CLI has no config override. A separate directory with its own minimal config avoids both cases without editing the live config.
+
+Set these three absolute paths to one project's archived files, then run the block in a POSIX shell. The public-key file is the complete output of `verify --export-pubkey`. Copy the DB and any sidecars together; never copy a DB while a writer is active.
+
+```sh
+(
+  set -eu
+  umask 077
+  archive_db='/absolute/path/to/project-archive/audit.db'
+  archive_public_key='/absolute/path/to/project-archive/old.pub'
+  archive_anchor='/absolute/path/to/project-archive/chain-anchor.json'
+
+  archived_pub=$(cat "$archive_public_key")
+  if [ -z "$archived_pub" ]; then
+    printf 'Archived public key is empty; stop and recover the saved key.\n' >&2
+    exit 1
+  fi
+  recovery_dir=$(mktemp -d "${TMPDIR:-/tmp}/nocklock-verify.XXXXXX")
+  printf 'Verification workspace: %s\n' "$recovery_dir"
+  mkdir "$recovery_dir/.nock"
+  cp "$archive_db" "$recovery_dir/.nock/events.db"
+  for suffix in -wal -shm; do
+    if [ -f "$archive_db$suffix" ]; then
+      cp "$archive_db$suffix" "$recovery_dir/.nock/events.db$suffix"
+    fi
+  done
+  printf '[logging]\ndb = "events.db"\n' > "$recovery_dir/.nock/config.toml"
+  cd "$recovery_dir"
+  export XDG_STATE_HOME="$recovery_dir/state"
+  nocklock verify --audit --ed25519-pub "$archived_pub"
+  if [ -n "$archive_anchor" ]; then
+    if [ ! -f "$archive_anchor" ]; then
+      printf "Saved anchor not found at %s; fix the path, or set archive_anchor='' to skip the anchor check on purpose.\n" "$archive_anchor" >&2
+      exit 1
+    fi
+    nocklock verify --against-anchor "$archive_anchor" \
+      --ed25519-pub "$archived_pub"
+  else
+    printf 'Anchor check explicitly skipped: only the audit signature check was run.\n'
+  fi
+  printf 'Verification copy retained at %s\n' "$recovery_dir"
+)
+```
+
+Expect `AUDIT: AUTHENTIC` (exit 0) and `ANCHOR: OK` (exit 0). A non-empty anchor path is required to exist; a missing or mistyped path exits 1. Only an intentional `archive_anchor=''` skips the anchor check, prints that only the audit signature check ran, and permits a signature-only exit 0. This checks a saved legacy anchor file, not the remote store. Its identity remains the original signing-key fingerprint; the scratch path does not establish a v2 identity or remote stream. A saved anchor can legitimately disagree after pruning; preserve and investigate that result instead of generating a replacement anchor. The old rows checked with the new public key must report `FORGED` (exit 1). Always pass the archived public key explicitly; omitting it can select a different local key or give only an unsigned consistency verdict.
+
+The scratch directory is only a verification workspace: never run `wrap`, `log --prune`, or `anchor emit` there. The copied signed rows, original config evidence, and v1 anchor identity (the signing-key fingerprint) remain unchanged. The scratch directory has a different path-derived state key; it does not become the original project or migrate its identity. Keep the archive inventory to identify the original project. Verification may create SQLite sidecars or update database metadata in the **copy**; the archived files and live config remain untouched. Retain or remove the scratch copy by its exact printed path when finished.
 
 **Limits**
 - Replacing the key does not repair history. Rows signed while the key was exposed no longer prove the agent did not write them (see the v0.9.1 CHANGELOG entry). `AUTHENTIC` against the old key only proves the rows were signed by whoever held it.

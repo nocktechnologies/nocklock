@@ -130,7 +130,7 @@ func TestAnchorV2RegistrationRetainsOriginalAfterLostResponse(t *testing.T) {
 	if err == nil {
 		t.Fatal("lost response accepted")
 	}
-	assertIdentityPruneRefused(t, f.logger)
+	assertIdentityPruneRefused(t, f.logger, "remote pin")
 	identityOldEvent(t, f.logger)
 	id, err := f.logger.RegisterAnchorV2("fresh", nil, func(req AnchorRegistrationRequest) (*AnchorV2, error) {
 		var disk AnchorRegistrationRequest
@@ -147,7 +147,7 @@ func TestAnchorV2RegistrationRetainsOriginalAfterLostResponse(t *testing.T) {
 	if err != nil || string(after) != string(original) {
 		t.Fatal("retry rewrote original request")
 	}
-	assertIdentityPruneRefused(t, f.logger)
+	assertIdentityPruneRefused(t, f.logger, "remote pin")
 }
 
 func TestAnchorV2RegistrationRejectsDamagedOriginalAndChangedMode(t *testing.T) {
@@ -195,7 +195,7 @@ func TestAnchorV2RegistrationRejectsDamagedOriginalAndChangedMode(t *testing.T) 
 			if err == nil || sent {
 				t.Fatalf("damaged request sent: %v", err)
 			}
-			assertIdentityPruneRefused(t, f.logger)
+			assertIdentityPruneRefused(t, f.logger, "remote pin")
 		})
 	}
 }

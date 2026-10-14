@@ -122,7 +122,7 @@ func TestRegistrationCancellationFinishesDurableState(t *testing.T) {
 			if err != nil || actual.RegistrationState != expected {
 				t.Fatalf("durable state: %+v, %v", actual, err)
 			}
-			assertIdentityPruneRefused(t, f.logger)
+			assertIdentityPruneRefused(t, f.logger, "remote pin")
 		})
 	}
 }

@@ -25,7 +25,11 @@ func setupCLIChainIdentity(t *testing.T) (*logging.Logger, *config.Config, strin
 	project := t.TempDir()
 	t.Chdir(project)
 	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
-	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	stateRoot := t.TempDir()
+	if err := os.Chmod(stateRoot, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("XDG_STATE_HOME", stateRoot)
 	t.Setenv("NOCKLOCK_ANCHOR_URL", "")
 	cfg := config.DefaultConfig()
 	cfg.Logging.DB = filepath.Join(project, ".nock", "custom-events.db")
@@ -130,7 +134,19 @@ func TestWrapProtectsIdentityOutsideConfiguredLogDirectory(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if pathIsWithinDir(dir, project) || dir == filepath.Dir(cfg.Logging.DB) {
+	resolvedDir, err := filepath.EvalSymlinks(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	resolvedProject, err := filepath.EvalSymlinks(project)
+	if err != nil {
+		t.Fatal(err)
+	}
+	resolvedDBDir, err := filepath.EvalSymlinks(filepath.Dir(cfg.Logging.DB))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if pathIsWithinDir(resolvedDir, resolvedProject) || resolvedDir == resolvedDBDir {
 		t.Fatalf("trusted state followed configured in-project DB: %s", dir)
 	}
 	if err := protectChainIdentity(context.Background(), cfg, logger); err != nil {
