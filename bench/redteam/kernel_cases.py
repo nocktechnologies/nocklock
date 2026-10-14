@@ -77,33 +77,45 @@ def _stop_group(process, stdout="", stderr="", grace=0):
 
     Returns (stdout, stderr, fault). A descendant outside the killed group can
     retain a pipe; the partial receipt is preserved if the bounded drain times out.
+    SIGINT and SIGTERM are ignored for the whole cleanup so a second signal cannot
+    skip the SIGKILL, drain or reap; the previous handlers are restored afterwards.
     """
     fault = ""
-    if grace:
+    saved = {}
+    for signum in (signal.SIGINT, signal.SIGTERM):
         try:
-            os.killpg(process.pid, signal.SIGTERM)
-            process.wait(timeout=grace)
-        except (ProcessLookupError, subprocess.TimeoutExpired):
-            pass
-        except OSError as term_error:
-            fault += f"; process-group terminate failed: {term_error}"
+            saved[signum] = signal.signal(signum, signal.SIG_IGN)
+        except ValueError:
+            pass  # Not the main thread: handlers cannot be changed here.
     try:
-        os.killpg(process.pid, signal.SIGKILL)
-    except ProcessLookupError:
-        pass  # The leader/group can have exited while a pipe remains open.
-    except OSError as kill_error:
-        fault += f"; process-group kill failed: {kill_error}"
-    try:
-        stdout, stderr = process.communicate(timeout=CLEANUP_TIMEOUT_SECONDS)
-    except subprocess.TimeoutExpired as drain_error:
-        stdout, stderr = _partial(drain_error.stdout) or stdout, _partial(drain_error.stderr) or stderr
-        fault += "; output drain exceeded cleanup deadline"
-        process.stdout.close()
-        process.stderr.close()
+        if grace:
+            try:
+                os.killpg(process.pid, signal.SIGTERM)
+                process.wait(timeout=grace)
+            except (ProcessLookupError, subprocess.TimeoutExpired):
+                pass
+            except OSError as term_error:
+                fault += f"; process-group terminate failed: {term_error}"
         try:
-            process.wait(timeout=CLEANUP_TIMEOUT_SECONDS)
-        except subprocess.TimeoutExpired:
-            fault += "; process was not reaped before cleanup deadline"
+            os.killpg(process.pid, signal.SIGKILL)
+        except ProcessLookupError:
+            pass  # The leader/group can have exited while a pipe remains open.
+        except OSError as kill_error:
+            fault += f"; process-group kill failed: {kill_error}"
+        try:
+            stdout, stderr = process.communicate(timeout=CLEANUP_TIMEOUT_SECONDS)
+        except subprocess.TimeoutExpired as drain_error:
+            stdout, stderr = _partial(drain_error.stdout) or stdout, _partial(drain_error.stderr) or stderr
+            fault += "; output drain exceeded cleanup deadline"
+            process.stdout.close()
+            process.stderr.close()
+            try:
+                process.wait(timeout=CLEANUP_TIMEOUT_SECONDS)
+            except subprocess.TimeoutExpired:
+                fault += "; process was not reaped before cleanup deadline"
+    finally:
+        for signum, handler in saved.items():
+            signal.signal(signum, handler)
     return stdout, stderr, fault
 
 

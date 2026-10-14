@@ -118,6 +118,54 @@ class KernelReceiptTest(TestCase):
                     except ProcessLookupError:
                         pass
 
+    def test_second_interrupt_during_grace_wait_still_kills_the_group(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            pidfile = root / "leader-pid"
+            stub = root / "go"
+            stub.write_text(f"#!{sys.executable}\n" +
+                            "import os, pathlib, signal, time\n" +
+                            "signal.signal(signal.SIGTERM, signal.SIG_IGN)\n" +
+                            "if os.fork() == 0:\n    time.sleep(30)\n    os._exit(0)\n" +
+                            f"pathlib.Path({str(pidfile)!r}).write_text(str(os.getpid()))\n" +
+                            "time.sleep(30)\n")
+            stub.chmod(0o700)
+
+            def interrupt_twice():
+                deadline = time.monotonic() + 10
+                while not (pidfile.exists() and pidfile.read_text()) and time.monotonic() < deadline:
+                    time.sleep(0.02)
+                os.kill(os.getpid(), signal.SIGINT)  # enters cleanup
+                time.sleep(0.3)                      # inside the 1s grace wait
+                os.kill(os.getpid(), signal.SIGINT)
+
+            old = signal.signal(signal.SIGINT, signal.default_int_handler)
+            threading.Thread(target=interrupt_twice, daemon=True).start()
+            try:
+                with mock.patch.dict(os.environ, PATH=str(root) + os.pathsep + os.environ["PATH"]), \
+                     mock.patch("kernel_cases.SIGTERM_GRACE_SECONDS", 1), \
+                     mock.patch("kernel_cases.CLEANUP_TIMEOUT_SECONDS", 1):
+                    with self.assertRaises(KeyboardInterrupt):
+                        run_case(root, root, *CASES[1])
+                self.assertIs(signal.getsignal(signal.SIGINT), signal.default_int_handler)
+                pgid = int(pidfile.read_text())
+                gone = False
+                for _ in range(100):
+                    try:
+                        os.killpg(pgid, 0)
+                    except ProcessLookupError:
+                        gone = True
+                        break
+                    time.sleep(0.05)
+                self.assertTrue(gone, "process group survived the second interrupt")
+            finally:
+                signal.signal(signal.SIGINT, old)
+                if pidfile.exists() and pidfile.read_text():
+                    try:
+                        os.killpg(int(pidfile.read_text()), signal.SIGKILL)
+                    except ProcessLookupError:
+                        pass
+
     def test_git_head_failure_yields_unknown_and_report_is_written(self):
         import subprocess
         with tempfile.TemporaryDirectory() as directory:
