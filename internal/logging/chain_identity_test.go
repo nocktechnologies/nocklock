@@ -553,7 +553,7 @@ func TestChainIdentitySharedKeyAndConcurrentInitialization(t *testing.T) {
 	}
 	first, second := <-results, <-results
 	if first.err != nil || second.err != nil || *first.id != *second.id {
-		t.Fatalf("concurrent initialization diverged: %+v/%+v", first, second)
+		t.Fatalf("concurrent initialization diverged: id=%+v error=%v / id=%+v error=%v", first.id, first.err, second.id, second.err)
 	}
 	projectB := t.TempDir()
 	chainB, err := NewLogger(filepath.Join(projectB, ".nock", "events.db"), projectB, WithSigning(f.key))
