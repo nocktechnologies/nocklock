@@ -50,6 +50,17 @@ Preserve incomplete or moved state and follow the
 
 The URL and bearer token come from `NOCKLOCK_ANCHOR_URL` / `NOCKLOCK_ANCHOR_TOKEN`; the token is never a flag/config key. Anchor commands and anchor verification share a 30-second budget for identity-lock waits and HTTP. Wrap teardown starts its five-second budget before the first identity read; failure warns and preserves the child exit code. Synchronous filesystem and SQLite work completes on the caller and is not interrupted by these deadlines. An unenrolled legacy chain writes a local v1 file and warns that explicit enrollment is required when a URL is configured. See [audit log](../how-it-works/audit-log.md) for routes, trust boundaries and retries.
 
+`verify --audit`, `verify --against-anchor` (v1 or v2 files), and
+`verify --against-remote-anchor` append one `COVERAGE: LIMITED` notice to their
+text output, including unsuccessful verification and early input or availability errors. It
+states that verification checks recorded events, cannot prove every action was
+logged, and does not establish past enforcement or recording coverage. Individual
+allowed file accesses and some denied or bypassed actions can have no audit row;
+see [audit recording limits](../how-it-works/audit-log.md#what-is-recorded).
+The original verdict and exit code remain unchanged. This adds no aggregate grade,
+host probe or audit JSON format; `--json` remains the live fence-probe format.
+Public-key export and anchor enrollment/push output are unchanged.
+
 ## Exit codes
 Exit codes travel as `exitCodeError` and `Execute()` calls `os.Exit` once (`root.go`). Any other error prints to stderr and exits `1` (`root.go`).
 

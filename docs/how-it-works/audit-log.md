@@ -7,6 +7,23 @@ Most fence decisions are a row in a SQLite `events` table (`internal/logging/log
 
 Not every crossing is logged. No row is written for: allowed file access; file denials that bypass the interposer (static binaries, raw syscalls, cleared `LD_PRELOAD`), so file denials are logged only some of the time; packets dropped by the kernel floor; `ADVISORY` proxy bypass; Linux `CONFINED` AF_UNIX connects.
 
+Audit and local/remote anchor verification append one shared notice after the
+verdict and any boundary notes, including when verification fails:
+
+```text
+COVERAGE: LIMITED
+Verification checks recorded events; it does not prove that every action was logged.
+Individual allowed file accesses are not recorded. Some file denials, kernel-dropped packets, proxy bypasses and Linux CONFINED Unix-socket connections can leave no audit row.
+This check does not establish past enforcement or recording coverage.
+```
+
+The notice describes recording limits; it is not an overall pass or an assessment
+of the current host. Verification does not probe today's fences to infer past
+enforcement. Existing authenticity/integrity verdicts and exit codes are unchanged.
+An early input or availability error still returns its original error without
+inventing an audit verdict. Exporting a public key, anchor enrollment/push, and
+live fence-probe output do not acquire this history-verification notice.
+
 ## Layers
 | Layer | What it adds | Does not give you |
 |---|---|---|
