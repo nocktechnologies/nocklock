@@ -6,7 +6,7 @@ All notable changes to NockLock will be documented in this file.
 
 ## [0.10.0] - 2026-10-14
 
-v0.10.0 gives each project its own remote audit chain: anchor v2 requires explicit `nocklock anchor enroll` or `anchor migrate` before remote push and verify, and prune and `anchor emit` now refuse unsafe states. It fixes two security issues, cloud metadata addresses in Linux netns bridge allocation and current-directory lookup in `nocklock wrap`. Audit and anchor verification output now ends with a `COVERAGE: LIMITED` notice that states what recorded history does and does not prove.
+v0.10.0 gives each project its own remote audit chain: anchor v2 requires explicit `nocklock anchor enroll` or `anchor migrate` before remote push and verify, and prune and `anchor emit` now refuse unsafe states. It fixes two security issues: cloud metadata addresses in Linux netns bridge allocation, and current-directory lookup in `nocklock wrap`. Text output of audit and anchor verification now ends with a `COVERAGE: LIMITED` notice that states what recorded history does and does not prove.
 
 ### Breaking
 
