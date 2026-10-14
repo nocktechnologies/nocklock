@@ -20,11 +20,24 @@ Registered in `internal/cli/` (one file per command). `README.md` "Commands" has
 | `egress-probe [--json]` | Linux feasibility probe | `egress_probe.go` |
 | `__landlock-exec`, `__netns-*`, `__probe` | Hidden internal re-exec entry points; not part of the interface | `landlock_exec.go`, `netns_helper.go`, `probe.go` |
 
-`log --prune` keeps its legacy behavior for chains without a v2 identity, and
-for an initialized identity in registration state `none`. A local trusted record
-in `pending` or `enrolled`, a missing record with an existing DB identity, or
-inconsistent identity metadata refuses prune before changing events. The error
-names the remote-pin risk and the [offline state-move procedure](../runbooks/chain-identity-move.md).
+`log --prune` passes the project root resolved from its configuration. Library
+callers must also supply an explicit project root; rootless prune is refused,
+even for a legacy database.
+
+On Linux and macOS, pruning remains available when neither a trusted identity
+record nor a DB identity exists, or when both agree and registration is `none`,
+provided the external state directory can be resolved and validated and its
+shared lock acquired. Prune refuses before deleting events if one identity copy
+is missing while the other exists, registration is `pending` or `enrolled`,
+identity metadata is corrupt or inconsistent, storage is unusable, or the lock
+times out. Storage is unusable when its path cannot be accessed or created,
+fails ownership/permission/symlink checks, lies inside the project, or is not
+strictly below the configured state root. These storage and locking failures also refuse
+legacy prune. Platforms without identity-lock support permit only legacy chains
+with neither a trusted record nor a DB identity.
+
+Preserve incomplete or moved state and follow the
+[offline state-move procedure](../runbooks/chain-identity-move.md).
 V2 identity/enrollment APIs are a local foundation in this slice; no v2 enrollment
 or migration command is enabled yet.
 
