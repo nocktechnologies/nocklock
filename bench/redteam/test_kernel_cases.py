@@ -4,14 +4,15 @@ from pathlib import Path
 import signal
 import sys
 import tempfile
+import threading
 import time
-import unittest
-from unittest import mock
+from unittest import TestCase, main as unittest_main, mock
 
+import kernel_cases
 from kernel_cases import CASES, classify, parse_result, run_case
 
 
-class KernelReceiptTest(unittest.TestCase):
+class KernelReceiptTest(TestCase):
     def test_timeout_is_failure_even_after_pass_and_zero_leader_exit(self):
         # A real fake-go process emits valid passing test JSON, then leaves a
         # descendant holding output. The leader exits 0: returncode cannot be
@@ -69,6 +70,67 @@ class KernelReceiptTest(unittest.TestCase):
                     except ProcessLookupError:
                         pass
 
+    def test_interrupt_kills_the_owned_process_group(self):
+        # The stub and its child share the session Popen created and ignore
+        # SIGTERM, so the SIGKILL fallback is exercised too. A real SIGINT
+        # arrives while communicate() waits.
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            pidfile = root / "leader-pid"
+            stub = root / "go"
+            stub.write_text(f"#!{sys.executable}\n" +
+                            "import os, pathlib, signal, time\n" +
+                            "signal.signal(signal.SIGTERM, signal.SIG_IGN)\n" +
+                            "if os.fork() == 0:\n    time.sleep(30)\n    os._exit(0)\n" +
+                            f"pathlib.Path({str(pidfile)!r}).write_text(str(os.getpid()))\n" +
+                            "time.sleep(30)\n")
+            stub.chmod(0o700)
+
+            def interrupt_when_ready():
+                deadline = time.monotonic() + 10
+                while not (pidfile.exists() and pidfile.read_text()) and time.monotonic() < deadline:
+                    time.sleep(0.02)
+                os.kill(os.getpid(), signal.SIGINT)
+
+            old = signal.signal(signal.SIGINT, signal.default_int_handler)
+            threading.Thread(target=interrupt_when_ready, daemon=True).start()
+            try:
+                with mock.patch.dict(os.environ, PATH=str(root) + os.pathsep + os.environ["PATH"]), \
+                     mock.patch("kernel_cases.SIGTERM_GRACE_SECONDS", 0.2), \
+                     mock.patch("kernel_cases.CLEANUP_TIMEOUT_SECONDS", 1):
+                    with self.assertRaises(KeyboardInterrupt):
+                        run_case(root, root, *CASES[1])
+                pgid = int(pidfile.read_text())
+                gone = False
+                for _ in range(100):
+                    try:
+                        os.killpg(pgid, 0)
+                    except ProcessLookupError:
+                        gone = True
+                        break
+                    time.sleep(0.05)
+                self.assertTrue(gone, "process group survived the interrupt")
+            finally:
+                signal.signal(signal.SIGINT, old)
+                if pidfile.exists() and pidfile.read_text():
+                    try:
+                        os.killpg(int(pidfile.read_text()), signal.SIGKILL)
+                    except ProcessLookupError:
+                        pass
+
+    def test_git_head_failure_yields_unknown_and_report_is_written(self):
+        import subprocess
+        with tempfile.TemporaryDirectory() as directory:
+            out = Path(directory) / "out"
+            row = dict(case="x", verdict="PASS", reason="stub")
+            with mock.patch("kernel_cases.run_case", return_value=row), \
+                 mock.patch("kernel_cases.subprocess.check_output",
+                            side_effect=subprocess.CalledProcessError(128, "git")), \
+                 mock.patch("sys.argv", ["kernel_cases.py", "--out", str(out)]):
+                self.assertEqual(kernel_cases.main(), 0)
+            self.assertEqual(json.loads((out / "report.json").read_text())["commit"], "unknown")
+            self.assertTrue((out / "REPORT.md").exists())
+
     def test_missing_failed_and_malformed_cannot_pass(self):
         test = CASES[1][2]
         for raw, code in (("", 0), ("not json", 0), (json.dumps(dict(Test=test, Action="fail")), 1),
@@ -111,4 +173,4 @@ class KernelReceiptTest(unittest.TestCase):
 
 
 if __name__ == "__main__":
-    unittest.main()
+    unittest_main()

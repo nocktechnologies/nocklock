@@ -74,6 +74,16 @@ The text output of audit and anchor verification now ends with a `COVERAGE: LIMI
 
 `nocklock wrap -- <cmd>` no longer finds an executable in the current directory. Use an explicit path such as `./<cmd>` where you relied on that.
 
+`nocklock wrap` now protects the trusted audit-chain state directory before it starts the child, and refuses to start when it cannot. The refusals from the protection step (the first, second and last bullets below) are also written to the audit log as a blocked `file_blocked` row. What you may see and what to do:
+
+- `trusted chain identity requires an enabled filesystem fence; refusing to start with a remote pin at risk`: the chain has a trusted identity but `[filesystem] root` is empty, so no filesystem fence is enabled. Set `filesystem.root` to enable the fence. Sessions with no trusted identity and no fence root still start unfenced.
+- `trusted chain identity requires Linux Landlock enforcement; refusing to start with a remote pin at risk` (Linux): the chain has a trusted identity and `filesystem.linux_enforcement` is `off`. Remove the `off` setting (the default, `required`, is enough), or do not use a trusted chain identity in that session.
+- `filesystem fence requires Linux Landlock, but this kernel does not support it` (Linux): the empty and `preferred` values of `filesystem.linux_enforcement` behave as `required`, so a kernel without Landlock refuses to start. Run on a kernel with Landlock, or set `linux_enforcement = "off"` if you accept an unenforced filesystem fence.
+- `failed to build Landlock rules: deny path "<dir>" overlaps Landlock-granted tree "<tree>" and cannot be enforced by Landlock (allow-only); narrow the root/allow grant so it does not include the deny path` (Linux): a `filesystem.root` or `allow` grant contains the audit state directory. Narrow the grant so it does not include that directory.
+- `cannot protect trusted chain identity; refusing to start: ...` and `cannot protect future trusted chain state; refusing to start: ...`: NockLock could not resolve the state directory; the wrapped error names the cause. Fix it and start again.
+
+`file_blocked` audit rows from the filesystem fence now carry a versioned JSON detail envelope when the fence knows the connecting peer. The envelope has `version` (currently `1`), `report` (the fence report), and `connection_peer` (`credentials_status`, optional `credentials`, `executable`). Rows without peer information keep the old `op=<op> path=<path> reason=<reason>` text. A log parser that reads the `detail` field must accept both forms.
+
 ## [0.9.3] - 2026-10-14
 
 ### Documentation

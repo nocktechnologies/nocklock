@@ -1,6 +1,6 @@
 # Roadmap to 1.0
 
-Released baseline: `v0.10.0`. Kevin approved the four 1.0 bars (Telegram 33132, Nock #11662). This page tracks the code and tests that must support each claim.
+Released baseline: `v0.10.0`. The four 1.0 bars are approved. This page tracks the code and tests that must support each claim.
 
 ## The 1.0 bar
 
