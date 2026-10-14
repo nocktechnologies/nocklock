@@ -3,6 +3,7 @@
 package logging
 
 import (
+	"errors"
 	"io/fs"
 	"os"
 	"sync"
@@ -12,6 +13,9 @@ import (
 )
 
 func TestChainIdentityConcurrentLockCreation(t *testing.T) {
+	if isolateIdentityWaitTest(t) {
+		return
+	}
 	// Exercise first-open contention directly, before flock/SQLite can hide it.
 	// Every opener must retain the same persistent inode; replacing the lock or
 	// retrying through an unanchored pathname would split mutual exclusion.
@@ -19,36 +23,59 @@ func TestChainIdentityConcurrentLockCreation(t *testing.T) {
 		dir := t.TempDir()
 		start := make(chan struct{})
 		type outcome struct {
-			file *os.File
-			err  error
+			file  *os.File
+			err   error
+			close func()
 		}
 		results := make(chan outcome, 8)
-		var workers sync.WaitGroup
+		release := sync.OnceFunc(func() { close(start) })
+		var workers []chan struct{}
+		defer func() {
+			release()
+			for _, done := range workers {
+				awaitIdentityTestResult(t, "lock-creation cleanup", done)
+			}
+		}()
 		for i := 0; i < cap(results); i++ {
 			root, err := os.OpenRoot(dir)
 			if err != nil {
 				t.Fatal(err)
 			}
-			workers.Add(1)
+			done := make(chan struct{})
+			workers = append(workers, done)
 			go func() {
-				defer workers.Done()
+				defer close(done)
 				defer root.Close()
-				<-start
+				select {
+				case <-start:
+				case <-time.After(5 * time.Second):
+					results <- outcome{err: errors.New("lock creator was not started within 5s")}
+					return
+				}
 				f, err := openChainIdentityLock(root)
-				results <- outcome{f, err}
+				var closeFile func()
+				if f != nil {
+					closeFile = sync.OnceFunc(func() { f.Close() })
+					t.Cleanup(closeFile)
+				}
+				results <- outcome{f, err, closeFile}
 			}()
 		}
-		close(start)
-		workers.Wait()
-		close(results)
+		release()
+		opened := make([]outcome, 0, cap(results))
+		for i := 0; i < cap(results); i++ {
+			opened = append(opened, awaitIdentityTestResult(t, "lock creator", results))
+		}
+		// Keep every descriptor open until all creators have completed, so
+		// unlink/replacement cannot be hidden by inode reuse between opens.
 		var first os.FileInfo
-		for result := range results {
+		for _, result := range opened {
 			if result.err != nil {
 				t.Errorf("round %d: concurrent lock creation failed: %v", round, result.err)
 				continue
 			}
 			info, err := result.file.Stat()
-			result.file.Close()
+			result.close()
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -90,6 +117,9 @@ func TestChainIdentityFileOwnerAndLinks(t *testing.T) {
 }
 
 func TestChainIdentityFIFORefusesWithoutBlocking(t *testing.T) {
+	if isolateIdentityWaitTest(t) {
+		return
+	}
 	f := newIdentityFixture(t)
 	initIdentity(t, f)
 	if err := os.Remove(f.record); err != nil {

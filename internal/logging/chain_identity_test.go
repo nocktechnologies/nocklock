@@ -10,6 +10,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"slices"
 	"strings"
 	"sync"
@@ -19,6 +20,39 @@ import (
 
 	"github.com/nocktechnologies/nocklock/internal/config"
 )
+
+// isolateIdentityWaitTest contains uncancellable filesystem/SQLite operations
+// in this test binary. A timeout kills and reaps the child, so a failing wait
+// cannot leave a worker mutating fixtures while another test changes its env.
+func isolateIdentityWaitTest(t *testing.T) bool {
+	t.Helper()
+	const marker = "NOCKLOCK_IDENTITY_WAIT_TEST"
+	if os.Getenv(marker) == t.Name() {
+		return false
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, os.Args[0], "-test.run=^"+regexp.QuoteMeta(t.Name())+"$", "-test.v", "-test.timeout=12s")
+	cmd.Env = append(os.Environ(), marker+"="+t.Name(), "TMPDIR="+t.TempDir())
+	cmd.WaitDelay = time.Second
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("identity wait test child: %v (deadline: %v)\n%s", err, ctx.Err(), output)
+	}
+	return true
+}
+
+func awaitIdentityTestResult[T any](t *testing.T, name string, result <-chan T) T {
+	t.Helper()
+	select {
+	case value := <-result:
+		return value
+	case <-time.After(5 * time.Second):
+		t.Fatalf("%s did not complete within 5s", name)
+		var zero T
+		return zero
+	}
+}
 
 type identityFixture struct {
 	logger                   *Logger
@@ -294,6 +328,9 @@ func TestChainIdentityRejectsPartialCorruptAndMismatchedState(t *testing.T) {
 }
 
 func TestChainIdentityRegistrationAndPruneShareLock(t *testing.T) {
+	if isolateIdentityWaitTest(t) {
+		return
+	}
 	f := newIdentityFixture(t)
 	identityOldEvent(t, f.logger)
 	id := initIdentity(t, f)
@@ -304,13 +341,26 @@ func TestChainIdentityRegistrationAndPruneShareLock(t *testing.T) {
 	defer other.Close()
 	entered, release := make(chan struct{}), make(chan struct{})
 	releaseRegistration := sync.OnceFunc(func() { close(release) })
-	defer releaseRegistration()
 	registered := make(chan error, 1)
+	registeredDone := make(chan struct{})
+	var pruneDone chan struct{}
+	defer func() {
+		releaseRegistration()
+		awaitIdentityTestResult(t, "registration cleanup", registeredDone)
+		if pruneDone != nil {
+			awaitIdentityTestResult(t, "prune cleanup", pruneDone)
+		}
+	}()
 	go func() {
+		defer close(registeredDone)
 		_, err := f.logger.RegisterChainIdentity(func(ChainIdentity) (*ChainRegistrationConfirmation, error) {
 			close(entered)
-			<-release
-			return &ChainRegistrationConfirmation{id.AgentID, id.ChainID}, nil
+			select {
+			case <-release:
+				return &ChainRegistrationConfirmation{id.AgentID, id.ChainID}, nil
+			case <-time.After(5 * time.Second):
+				return nil, errors.New("registration callback was not released within 5s")
+			}
 		})
 		registered <- err
 	}()
@@ -322,7 +372,12 @@ func TestChainIdentityRegistrationAndPruneShareLock(t *testing.T) {
 		t.Fatal("registration did not enter callback within 5s")
 	}
 	pruned := make(chan error, 1)
-	go func() { _, err := other.Prune(24 * time.Hour); pruned <- err }()
+	pruneDone = make(chan struct{})
+	go func() {
+		defer close(pruneDone)
+		_, err := other.Prune(24 * time.Hour)
+		pruned <- err
+	}()
 	select {
 	case err := <-pruned:
 		t.Fatalf("prune escaped held registration lock: %v", err)
@@ -355,12 +410,15 @@ func TestChainIdentityCrashAfterPending(t *testing.T) {
 	f := newIdentityFixture(t)
 	identityOldEvent(t, f.logger)
 	initIdentity(t, f)
-	cmd := exec.Command(os.Args[0], "-test.run=^TestChainIdentityCrashHelper$")
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, os.Args[0], "-test.run=^TestChainIdentityCrashHelper$")
+	cmd.WaitDelay = time.Second
 	cmd.Env = append(os.Environ(), "NOCKLOCK_IDENTITY_CRASH_DB="+f.db, "NOCKLOCK_IDENTITY_CRASH_PROJECT="+f.project, "NOCKLOCK_IDENTITY_CRASH_KEY="+f.key)
-	err := cmd.Run()
+	output, err := cmd.CombinedOutput()
 	var exit *exec.ExitError
 	if !errors.As(err, &exit) || exit.ExitCode() != 23 {
-		t.Fatalf("crash helper: %v", err)
+		t.Fatalf("crash helper: %v (deadline: %v)\n%s", err, ctx.Err(), output)
 	}
 	id, err := f.logger.ReadChainIdentity()
 	if err != nil || id.RegistrationState != ChainRegistrationPending {
@@ -574,6 +632,9 @@ func TestChainIdentityUnsupportedPlatformLegacyGuard(t *testing.T) {
 }
 
 func TestChainIdentitySharedKeyAndConcurrentInitialization(t *testing.T) {
+	if isolateIdentityWaitTest(t) {
+		return
+	}
 	f := newIdentityFixture(t)
 	other, err := NewLogger(f.db, f.project, WithSigning(f.key))
 	if err != nil {
@@ -586,12 +647,16 @@ func TestChainIdentitySharedKeyAndConcurrentInitialization(t *testing.T) {
 	}
 	results := make(chan outcome, 2)
 	for _, l := range []*Logger{f.logger, other} {
+		done := make(chan struct{})
+		defer func() { awaitIdentityTestResult(t, "initializer cleanup", done) }()
 		go func(l *Logger) {
+			defer close(done)
 			id, err := l.InitializeChainIdentity(strings.Repeat("0", 64))
 			results <- outcome{id, err}
 		}(l)
 	}
-	first, second := <-results, <-results
+	first := awaitIdentityTestResult(t, "first initializer", results)
+	second := awaitIdentityTestResult(t, "second initializer", results)
 	if first.err != nil || second.err != nil || *first.id != *second.id {
 		t.Fatalf("concurrent initialization diverged: id=%+v error=%v / id=%+v error=%v", first.id, first.err, second.id, second.err)
 	}
@@ -736,6 +801,9 @@ func TestChainIdentityPruneRefusesRootlessAfterDatabaseRollback(t *testing.T) {
 }
 
 func TestChainIdentityPruneLockWaitIsBounded(t *testing.T) {
+	if isolateIdentityWaitTest(t) {
+		return
+	}
 	f := newIdentityFixture(t)
 	identityOldEvent(t, f.logger)
 	holder, err := f.logger.lockChainIdentityStore()
@@ -855,6 +923,9 @@ func assertRootLineageSynced(t *testing.T, root string, actual []string) {
 }
 
 func TestChainIdentityRootPreflightCannotBeBorrowedFromFailedInitializer(t *testing.T) {
+	if isolateIdentityWaitTest(t) {
+		return
+	}
 	f := newIdentityFixture(t)
 	t.Setenv("XDG_STATE_HOME", filepath.Join(t.TempDir(), "new", "nested", "root"))
 	dir, root, err := config.EnsureAuditStateLocation(f.project) // prior legacy mkdir without barriers
@@ -868,20 +939,53 @@ func TestChainIdentityRootPreflightCannotBeBorrowedFromFailedInitializer(t *test
 	}
 	defer other.Close()
 	atBarrier, release := make(chan struct{}), make(chan struct{})
+	releaseInitializer := sync.OnceFunc(func() { close(release) })
 	injected := errors.New("initializer A root sync failed")
-	f.logger.identityRootSync = func(*os.File) error { close(atBarrier); <-release; return injected }
+	f.logger.identityRootSync = func(*os.File) error {
+		close(atBarrier)
+		select {
+		case <-release:
+			return injected
+		case <-time.After(5 * time.Second):
+			return errors.New("initializer A barrier was not released within 5s")
+		}
+	}
 	var synced []string
 	other.identityRootSync = func(file *os.File) error { synced = append(synced, filepath.Clean(file.Name())); return file.Sync() }
 	first := make(chan error, 1)
 	second := make(chan error, 1)
-	go func() { _, err := f.logger.InitializeChainIdentity(strings.Repeat("0", 64)); first <- err }()
-	<-atBarrier
-	go func() { _, err := other.InitializeChainIdentity(strings.Repeat("0", 64)); second <- err }()
-	close(release)
-	if err := <-first; !errors.Is(err, injected) {
+	firstDone := make(chan struct{})
+	var secondDone chan struct{}
+	defer func() {
+		releaseInitializer()
+		awaitIdentityTestResult(t, "initializer A cleanup", firstDone)
+		if secondDone != nil {
+			awaitIdentityTestResult(t, "initializer B cleanup", secondDone)
+		}
+	}()
+	go func() {
+		defer close(firstDone)
+		_, err := f.logger.InitializeChainIdentity(strings.Repeat("0", 64))
+		first <- err
+	}()
+	select {
+	case <-atBarrier:
+	case err := <-first:
+		t.Fatalf("initializer A returned before entering root barrier: %v", err)
+	case <-time.After(5 * time.Second):
+		t.Fatal("initializer A did not enter root barrier within 5s")
+	}
+	secondDone = make(chan struct{})
+	go func() {
+		defer close(secondDone)
+		_, err := other.InitializeChainIdentity(strings.Repeat("0", 64))
+		second <- err
+	}()
+	releaseInitializer()
+	if err := awaitIdentityTestResult(t, "initializer A", first); !errors.Is(err, injected) {
 		t.Fatalf("A error: %v", err)
 	}
-	if err := <-second; err != nil {
+	if err := awaitIdentityTestResult(t, "initializer B", second); err != nil {
 		t.Fatalf("B initialization: %v", err)
 	}
 	assertRootLineageSynced(t, root, synced)
