@@ -223,7 +223,104 @@ jobs:
       # a nonempty group, starts both sidecars as root, then checks Groups for
       # every /proc/<pid>/task/*/status after the identity drop.
       - name: run proxy supplementary-groups proof as root (skips forbidden)
-        run: sudo env NOCKLOCK_PROXY_GROUPS_REQUIRE=1 ./netns.test -test.run '^TestProxySidecarsDropSupplementaryGroupsEveryThread$' -test.v -test.count=1
+        shell: bash
+        run: |
+          sudo env NOCKLOCK_PROXY_GROUPS_REQUIRE=1 GOMAXPROCS=8 ./netns.test \
+            -test.run '^TestProxySidecarsDropSupplementaryGroupsEveryThread$' -test.v -test.count=1 \
+            |& tee proxy-groups-green.txt
+
+      - name: mutation control — raw per-thread proxy group drop must fail
+        shell: bash
+        run: |
+          python3 scripts/credential-mutation-overlay.py proxy-groups-thread "$RUNNER_TEMP/proxy-mutation"
+          go test -overlay "$RUNNER_TEMP/proxy-mutation/overlay.json" -c \
+            -o "$RUNNER_TEMP/proxy-mutant.test" ./internal/fence/network/netns/
+          if sudo env NOCKLOCK_PROXY_GROUPS_REQUIRE=1 GOMAXPROCS=8 "$RUNNER_TEMP/proxy-mutant.test" \
+            -test.run '^TestProxySidecarsDropSupplementaryGroupsEveryThread$' -test.v -test.count=1 \
+            |& tee proxy-groups-red.txt; then
+            echo 'FAIL: per-thread proxy group mutation was not caught' >&2; exit 1
+          fi
+          grep -q 'retains supplementary groups' proxy-groups-red.txt
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: proxy-groups-mutation-receipts
+          path: proxy-groups-*.txt
+          if-no-files-found: error
+
+  child-post-exec-credentials:
+    name: child post-exec credentials · stress + mutation (hosted only)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    defaults:
+      run:
+        shell: bash # Preserve test failures through tee (errexit + pipefail).
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+      - name: provision disposable runner dependencies
+        run: |
+          # These values are supplied by the runner, not asserted by this job.
+          test "$GITHUB_ACTIONS" = true
+          test "$RUNNER_ENVIRONMENT" = github-hosted
+          sudo apt-get update
+          sudo apt-get install -y iproute2 nftables python3 build-essential
+      - name: compile original and test-only child exec mutation
+        run: |
+          { git rev-parse HEAD; uname -a; } > child-credentials-host.txt
+          go test -c -o "$RUNNER_TEMP/child-original.test" ./internal/fence/network/netns/
+          python3 scripts/credential-mutation-overlay.py child-exec-thread "$RUNNER_TEMP/child-mutation"
+          # Only go test -c can resolve the test-only cross-thread exec target.
+          # No production CLI is built from this overlay; source is untouched.
+          go test -overlay "$RUNNER_TEMP/child-mutation/overlay.json" -c \
+            -o "$RUNNER_TEMP/child-mutant.test" ./internal/fence/network/netns/
+      - name: post-exec status — 36 drops across GOMAXPROCS 2, 8 and 32
+        run: |
+          sudo env GITHUB_ACTIONS="$GITHUB_ACTIONS" RUNNER_ENVIRONMENT="$RUNNER_ENVIRONMENT" \
+            NOCKLOCK_CHILD_CREDENTIALS_REQUIRE=1 "$RUNNER_TEMP/child-original.test" \
+            -test.run '^TestChildCredentialsAfterExecStress$' -test.v -test.count=1 \
+            |& tee child-credentials-green.txt
+      - name: mutation control — exec on a different thread must fail
+        run: |
+          if sudo env GITHUB_ACTIONS="$GITHUB_ACTIONS" RUNNER_ENVIRONMENT="$RUNNER_ENVIRONMENT" \
+            NOCKLOCK_CHILD_CREDENTIALS_REQUIRE=1 "$RUNNER_TEMP/child-mutant.test" \
+            -test.run '^TestChildCredentialsAfterExecStress$' -test.v -test.count=1 \
+            |& tee child-credentials-red.txt; then
+            echo 'FAIL: cross-thread final exec mutation was not caught' >&2; exit 1
+          fi
+          grep -Eq 'post-exec (Groups|NoNewPrivs|CapBnd)=' child-credentials-red.txt
+      - name: wrap harness timeout negative controls (unprivileged)
+        run: |
+          go test ./internal/cli/ -run '^TestCredentialCommand' -v -count=1 \
+            |& tee child-credentials-timeout.txt
+      - name: install original CLI, interposer and helper for full wrap
+        run: |
+          make build-all
+          sudo install -m 0755 nocklock /usr/local/bin/nocklock
+          sudo mkdir -p /usr/local/lib/nocklock /usr/libexec
+          sudo install -m 0755 internal/fence/fs/interposer/libfence_fs.so /usr/local/lib/nocklock/libfence_fs.so
+          sudo /bin/sh scripts/install-egress-helper.sh --user "$(id -un)"
+      - name: installed wrap post-exec status — six unprivileged sessions
+        env:
+          NOCKLOCK_CHILD_CREDENTIALS_REQUIRE: "1"
+          NOCKLOCK_AUDIT_REQUIRE: "1"
+          NOCKLOCK_TEST_BIN: /usr/local/bin/nocklock
+          GOMAXPROCS: "8"
+        run: |
+          go test ./internal/cli/ -run '^TestWrapChildCredentialsAfterExec$' -v -count=1 \
+            |& tee child-credentials-wrap.txt
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: child-post-exec-credential-receipts
+          path: child-credentials-*.txt
+          if-no-files-found: error
 
   netns-egress-audit:
     name: netns egress decision audit · signed rows via `nocklock wrap` (root)
@@ -600,11 +697,28 @@ jobs:
       - name: driver unit tests (process handling, scratch placement, breach-before-cleanup)
         run: python3 -m unittest discover -s bench/redteam
 
+      # Required companion cases have their own truthful per-kernel result.
+      # ABI<9 reachability is KNOWN-LIMIT; unavailable ABI9/io_uring proof is
+      # SKIP with a named reason, never BLOCKED or a main-bench scoring exception.
+      # A nonzero exit fails this job and skips the main bench below. Summary
+      # and artifact steps still run, preserving the raw failure receipts.
+      - name: Unix-socket and io_uring kernel red-team companion
+        id: kernel-companion
+        run: python3 bench/redteam/kernel_cases.py --out bench/redteam/kernel-report
+
+      - name: publish kernel coverage and explicit gaps
+        if: always()
+        run: |
+          if test -f bench/redteam/kernel-report/REPORT.md; then
+            cat bench/redteam/kernel-report/REPORT.md >> "$GITHUB_STEP_SUMMARY"
+          fi
+
       # Run AS THE RUNNER USER (not sudo): wrap sudo's the helper itself and the
       # fenced child drops to the invoking uid. The bench exits non-zero when any
       # pass-bar item fails; the report is uploaded either way.
       # The direct-DNS attack is scored by a host receiver on UDP 53; let the runner user bind it.
       - name: run the red-team bench
+        if: ${{ success() && steps.kernel-companion.outcome == 'success' }}
         run: |
           sudo sysctl -w net.ipv4.ip_unprivileged_port_start=53
           NOCKLOCK_BIN=/usr/local/bin/nocklock NOCKGUARD_BIN=/usr/local/bin/nockguard \
@@ -622,4 +736,5 @@ jobs:
           path: |
             bench/redteam/REPORT.md
             bench/redteam/report.json
+            bench/redteam/kernel-report/
           if-no-files-found: error
