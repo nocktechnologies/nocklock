@@ -71,13 +71,19 @@ type ChainRegistrationConfirmation struct {
 // Repeating with an existing matching identity returns it unchanged; partial
 // creation or mismatched state fails closed and requires operator recovery.
 func (l *Logger) InitializeChainIdentity(legacyAnchorDigest string) (*ChainIdentity, error) {
+	return l.InitializeChainIdentityContext(context.Background(), legacyAnchorDigest)
+}
+
+// InitializeChainIdentityContext is InitializeChainIdentity with cancellable identity-lock acquisition.
+// Once a durable write starts, it completes synchronously before returning.
+func (l *Logger) InitializeChainIdentityContext(ctx context.Context, legacyAnchorDigest string) (*ChainIdentity, error) {
 	if l.signer == nil {
 		return nil, errors.New("initializing chain identity requires the audit signing key")
 	}
 	if _, err := anchorHex32("legacy_anchor_digest", legacyAnchorDigest); err != nil {
 		return nil, err
 	}
-	store, err := l.lockChainIdentityStore()
+	store, err := l.lockChainIdentityStoreContext(ctx)
 	if err != nil {
 		return nil, err
 	}
@@ -95,6 +101,9 @@ func (l *Logger) InitializeChainIdentity(legacyAnchorDigest string) (*ChainIdent
 	// Establish previously legacy-created ancestry before even the DB mirror
 	// changes. Unsupported directory durability must not poison a legacy chain.
 	if err := store.prepareWrite(); err != nil {
+		return nil, err
+	}
+	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
 	var randomID [32]byte
@@ -119,6 +128,11 @@ func (l *Logger) InitializeChainIdentity(legacyAnchorDigest string) (*ChainIdent
 // record never falls back to the DB's identity. Both absent returns
 // ErrChainIdentityMissing. V2 emit/push/verify callers must use this check.
 func (l *Logger) ReadChainIdentity() (*ChainIdentity, error) {
+	return l.ReadChainIdentityContext(context.Background())
+}
+
+// ReadChainIdentityContext is ReadChainIdentity with cancellable identity-lock acquisition.
+func (l *Logger) ReadChainIdentityContext(ctx context.Context) (*ChainIdentity, error) {
 	if l.projectRoot == "" {
 		mirror, err := l.readChainIdentityMirror()
 		if err != nil {
@@ -129,7 +143,7 @@ func (l *Logger) ReadChainIdentity() (*ChainIdentity, error) {
 		}
 		return nil, errors.New("chain identity requires the project root; follow docs/runbooks/chain-identity-move.md")
 	}
-	store, err := l.lockChainIdentityStore()
+	store, err := l.lockChainIdentityStoreContext(ctx)
 	if err != nil {
 		return nil, err
 	}
@@ -149,6 +163,11 @@ func (l *Logger) ReadChainIdentity() (*ChainIdentity, error) {
 // returns an empty path without creating state. logging.db cannot select or
 // bypass this directory; incomplete or mismatched identity state is an error.
 func (l *Logger) ChainIdentityDirectory() (string, error) {
+	return l.ChainIdentityDirectoryContext(context.Background())
+}
+
+// ChainIdentityDirectoryContext is ChainIdentityDirectory with cancellable identity-lock acquisition.
+func (l *Logger) ChainIdentityDirectoryContext(ctx context.Context) (string, error) {
 	mirror, err := l.readChainIdentityMirror()
 	if err != nil {
 		return "", err
@@ -170,7 +189,7 @@ func (l *Logger) ChainIdentityDirectory() (string, error) {
 	if err != nil && !errors.Is(err, os.ErrNotExist) {
 		return "", fmt.Errorf("cannot inspect trusted chain identity: %w", err)
 	}
-	if _, err := l.ReadChainIdentity(); err != nil {
+	if _, err := l.ReadChainIdentityContext(ctx); err != nil {
 		return "", err
 	}
 	return config.EnsureAuditStateDir(l.projectRoot)
@@ -185,10 +204,19 @@ func (l *Logger) ChainIdentityDirectory() (string, error) {
 // No network behavior is implemented here. The callback must not call identity
 // lifecycle methods or Prune on this chain (the shared lock is already held).
 func (l *Logger) RegisterChainIdentity(register func(ChainIdentity) (*ChainRegistrationConfirmation, error)) (*ChainIdentity, error) {
+	return l.RegisterChainIdentityContext(context.Background(), register)
+}
+
+// RegisterChainIdentityContext is RegisterChainIdentity with cancellable identity-lock acquisition.
+// Once a durable write starts, it completes synchronously before returning.
+func (l *Logger) RegisterChainIdentityContext(ctx context.Context, register func(ChainIdentity) (*ChainRegistrationConfirmation, error)) (*ChainIdentity, error) {
+	if l.signer == nil {
+		return nil, errors.New("chain registration requires the existing signing key")
+	}
 	if register == nil {
 		return nil, errors.New("chain registration requires a confirmation callback")
 	}
-	store, err := l.lockChainIdentityStore()
+	store, err := l.lockChainIdentityStoreContext(ctx)
 	if err != nil {
 		return nil, err
 	}
@@ -200,6 +228,10 @@ func (l *Logger) RegisterChainIdentity(register func(ChainIdentity) (*ChainRegis
 	if identity == nil {
 		return nil, ErrChainIdentityMissing
 	}
+	return l.registerChainIdentityLocked(ctx, store, identity, register)
+}
+
+func (l *Logger) registerChainIdentityLocked(ctx context.Context, store *chainIdentityStore, identity *ChainIdentity, register func(ChainIdentity) (*ChainRegistrationConfirmation, error)) (*ChainIdentity, error) {
 	if identity.RegistrationState == ChainRegistrationEnrolled {
 		return identity, nil
 	}
@@ -209,6 +241,9 @@ func (l *Logger) RegisterChainIdentity(register func(ChainIdentity) (*ChainRegis
 	identity.RegistrationState = ChainRegistrationPending
 	if err := store.write(identity); err != nil {
 		return nil, err
+	}
+	if err := ctx.Err(); err != nil {
+		return nil, err // pending is durable; cancellation never resets it
 	}
 	confirmation, err := register(*identity)
 	if err != nil {
@@ -247,6 +282,13 @@ func (l *Logger) lockPruneIdentity() (func(), error) {
 	if err == nil && identity != nil && identity.RegistrationState != ChainRegistrationNone {
 		err = fmt.Errorf("refusing prune: remote pin for (%s, %s) is %s; archive the old DB and enroll a fresh chain to bound growth; for moved state follow docs/runbooks/chain-identity-move.md", identity.AgentID, identity.ChainID, identity.RegistrationState)
 	}
+	if err == nil {
+		var request []byte
+		request, err = store.readData(AnchorRegistrationFileName, 16384)
+		if err == nil && request != nil {
+			err = errors.New("refusing prune: retained original anchor registration request requires this signed history; retry the original anchor enroll or anchor migrate before archiving the chain")
+		}
+	}
 	if err != nil {
 		store.close()
 		return nil, err
@@ -261,6 +303,15 @@ func (l *Logger) allowLegacyPruneWithoutIdentity() error {
 	}
 	if dir != "" {
 		return errors.New("trusted chain identity prune checks require Linux or macOS; remote pin preserved")
+	}
+	stateDir, err := config.AuditStateDir(l.projectRoot)
+	if err != nil {
+		return err
+	}
+	if _, err := os.Lstat(filepath.Join(stateDir, AnchorRegistrationFileName)); err == nil {
+		return errors.New("refusing prune: retained original anchor registration request requires Linux or macOS to validate; signed history preserved")
+	} else if !errors.Is(err, os.ErrNotExist) {
+		return fmt.Errorf("cannot inspect retained anchor registration request: %w", err)
 	}
 	return nil
 }
@@ -392,6 +443,9 @@ func (l *Logger) lockChainIdentityStore() (*chainIdentityStore, error) {
 }
 
 func (l *Logger) lockChainIdentityStoreContext(ctx context.Context) (*chainIdentityStore, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
 	dir, syncRoot, err := l.trustedChainStateLocation()
 	if err != nil {
 		return nil, err
@@ -471,20 +525,9 @@ func (s *chainIdentityStore) checkFile(name string, f *os.File) error {
 }
 
 func (s *chainIdentityStore) read() (*ChainIdentity, error) {
-	f, err := s.root.OpenFile(ChainIdentityFileName, os.O_RDONLY|oNoFollow|identityNonBlock, 0)
-	if errors.Is(err, os.ErrNotExist) {
-		return nil, nil
-	}
-	if err != nil {
-		return nil, fmt.Errorf("cannot read trusted chain identity: %w", err)
-	}
-	defer f.Close()
-	if err := s.checkFile(ChainIdentityFileName, f); err != nil {
+	data, err := s.readData(ChainIdentityFileName, 4096)
+	if err != nil || data == nil {
 		return nil, err
-	}
-	data, err := io.ReadAll(io.LimitReader(f, 4097))
-	if err != nil || len(data) > 4096 {
-		return nil, errors.New("cannot read trusted chain identity: invalid or oversized record")
 	}
 	var identity ChainIdentity
 	if err := json.Unmarshal(data, &identity); err != nil {
@@ -500,6 +543,25 @@ func (s *chainIdentityStore) read() (*ChainIdentity, error) {
 		return nil, errors.New("trusted chain identity record is not canonical; recover the original record without editing its identity or registration state")
 	}
 	return &identity, nil
+}
+
+func (s *chainIdentityStore) readData(name string, limit int64) ([]byte, error) {
+	f, err := s.root.OpenFile(name, os.O_RDONLY|oNoFollow|identityNonBlock, 0)
+	if errors.Is(err, os.ErrNotExist) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, fmt.Errorf("cannot read trusted chain identity: %w", err)
+	}
+	defer f.Close()
+	if err := s.checkFile(name, f); err != nil {
+		return nil, err
+	}
+	data, err := io.ReadAll(io.LimitReader(f, limit+1))
+	if err != nil || int64(len(data)) > limit {
+		return nil, errors.New("cannot read trusted chain identity: invalid or oversized record")
+	}
+	return data, nil
 }
 
 // prepareWrite establishes the configured root's complete existing lineage
@@ -529,14 +591,18 @@ func (s *chainIdentityStore) prepareWrite() error {
 }
 
 func (s *chainIdentityStore) write(identity *ChainIdentity) error {
-	if err := s.prepareWrite(); err != nil {
-		return err
-	}
 	if err := validateChainIdentity(identity); err != nil {
 		return err
 	}
 	data, err := json.Marshal(identity)
 	if err != nil {
+		return err
+	}
+	return s.writeData(ChainIdentityFileName, data)
+}
+
+func (s *chainIdentityStore) writeData(name string, data []byte) error {
+	if err := s.prepareWrite(); err != nil {
 		return err
 	}
 	var nonce [16]byte
@@ -555,7 +621,7 @@ func (s *chainIdentityStore) write(identity *ChainIdentity) error {
 	if err := errors.Join(writeErr, syncErr, closeErr); err != nil {
 		return fmt.Errorf("cannot persist trusted chain identity update: %w", err)
 	}
-	if err := s.root.Rename(tmpName, ChainIdentityFileName); err != nil {
+	if err := s.root.Rename(tmpName, name); err != nil {
 		return fmt.Errorf("cannot replace trusted chain identity: %w", err)
 	}
 	// Rename committed the replacement. Subsequent errors mean visible but

@@ -10,6 +10,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -57,6 +58,53 @@ func emitAnchorNow(t *testing.T, dbPath, keyPath string) *logging.Anchor {
 	return a
 }
 
+// emitRemoteAnchorNow explicitly initializes and locally confirms a disposable
+// v2 identity. It is a unit-test fixture; real registration is tested separately.
+func emitRemoteAnchorNow(t *testing.T, dbPath, keyPath string) *logging.AnchorV2 {
+	t.Helper()
+	if runtime.GOOS != "linux" && runtime.GOOS != "darwin" {
+		t.Skip("v2 identity requires Linux or macOS")
+	}
+	root, err := os.Getwd()
+	if err != nil {
+		t.Fatal(err)
+	}
+	l, err := logging.NewLogger(dbPath, root, logging.WithSigning(keyPath))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer l.Close()
+	id, err := l.InitializeChainIdentity(strings.Repeat("0", 64))
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = l.RegisterChainIdentity(func(logging.ChainIdentity) (*logging.ChainRegistrationConfirmation, error) {
+		return &logging.ChainRegistrationConfirmation{AgentID: id.AgentID, ChainID: id.ChainID}, nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	a, err := l.EmitAnchorV2()
+	if err != nil {
+		t.Fatal(err)
+	}
+	return a
+}
+
+func remoteTestLogger(t *testing.T, dbPath, keyPath string) *logging.Logger {
+	t.Helper()
+	root, err := os.Getwd()
+	if err != nil {
+		t.Fatal(err)
+	}
+	l, err := logging.NewLogger(dbPath, root, logging.WithSigning(keyPath))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { l.Close() })
+	return l
+}
+
 // truncateTo deletes every row past keep and rewrites chain_head in lockstep:
 // the rollback an attacker with file access performs.
 func truncateTo(t *testing.T, dbPath string, keep int) {
@@ -79,14 +127,14 @@ func truncateTo(t *testing.T, dbPath string, keep int) {
 }
 
 // anchorStore is a fake off-box store serving one anchor for GET latest.
-func anchorStore(t *testing.T, a *logging.Anchor) *httptest.Server {
+func anchorStore(t *testing.T, a *logging.AnchorV2) *httptest.Server {
 	t.Helper()
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.Method != http.MethodGet || r.URL.Path != "/api/nocklock/anchors/"+a.AgentID+"/latest/" {
+		if r.Method != http.MethodGet || r.URL.Path != "/api/nocklock/anchors/v2/"+a.AgentID+"/"+a.ChainID+"/latest/" {
 			http.NotFound(w, r)
 			return
 		}
-		data, _ := logging.MarshalAnchor(a)
+		data, _ := logging.MarshalAnchorV2(a)
 		w.Write(data)
 	}))
 	t.Cleanup(srv.Close)
@@ -106,7 +154,7 @@ func wantExit1(t *testing.T, err error) {
 func TestVerifyRemoteAnchor_OK(t *testing.T) {
 	dbPath, keyPath := setupAnchorProject(t)
 	seedSignedChain(t, dbPath, keyPath, 5)
-	srv := anchorStore(t, emitAnchorNow(t, dbPath, keyPath))
+	srv := anchorStore(t, emitRemoteAnchorNow(t, dbPath, keyPath))
 	t.Setenv(anchorclient.EnvURL, srv.URL)
 	t.Setenv(anchorclient.EnvToken, remoteTestToken)
 
@@ -124,8 +172,8 @@ func TestVerifyRemoteAnchor_OK(t *testing.T) {
 func TestVerifyRemoteAnchor_Truncation(t *testing.T) {
 	dbPath, keyPath := setupAnchorProject(t)
 	seedSignedChain(t, dbPath, keyPath, 5)
-	remote := emitAnchorNow(t, dbPath, keyPath) // row_count 5, pinned off-box
-	truncateTo(t, dbPath, 3)                    // local rolled back to 3
+	remote := emitRemoteAnchorNow(t, dbPath, keyPath) // row_count 5, pinned off-box
+	truncateTo(t, dbPath, 3)                          // local rolled back to 3
 	srv := anchorStore(t, remote)
 	t.Setenv(anchorclient.EnvURL, srv.URL)
 	t.Setenv(anchorclient.EnvToken, remoteTestToken)
@@ -141,6 +189,7 @@ func TestVerifyRemoteAnchor_Truncation(t *testing.T) {
 func TestVerifyRemoteAnchor_UnavailableExitsNonZero(t *testing.T) {
 	dbPath, keyPath := setupAnchorProject(t)
 	seedSignedChain(t, dbPath, keyPath, 2)
+	emitRemoteAnchorNow(t, dbPath, keyPath)
 
 	notFound := httptest.NewServer(http.NotFoundHandler())
 	defer notFound.Close()
@@ -216,20 +265,27 @@ func TestVerifyAnchorFlagsMutuallyExclusive(t *testing.T) {
 func TestAnchorPushCLI(t *testing.T) {
 	dbPath, keyPath := setupAnchorProject(t)
 	seedSignedChain(t, dbPath, keyPath, 3)
-	a := emitAnchorNow(t, dbPath, keyPath)
-	if err := logging.WriteAnchor(logging.DefaultAnchorPath(dbPath), a); err != nil {
+	a := emitRemoteAnchorNow(t, dbPath, keyPath)
+	if err := logging.WriteAnchorV2(logging.DefaultAnchorPath(dbPath), a); err != nil {
 		t.Fatal(err)
 	}
 
 	var got struct {
-		Anchor *logging.Anchor `json:"anchor"`
-		Pubkey string          `json:"pubkey"`
+		Anchor *logging.AnchorV2 `json:"anchor"`
+		Pubkey string            `json:"pubkey"`
 	}
 	var auth string
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodGet {
+			json.NewEncoder(w).Encode(a)
+			return
+		}
 		auth = r.Header.Get("Authorization")
 		_ = json.NewDecoder(r.Body).Decode(&got)
+		pub, _ := logging.LoadPublicKeyFile(keyPath)
+		digest, _ := logging.AnchorV2SnapshotDigest(a, pub, a.AgentID, a.ChainID)
 		w.WriteHeader(http.StatusCreated)
+		json.NewEncoder(w).Encode(map[string]any{"success": true, "data": map[string]any{"code": "stored", "agent_id": a.AgentID, "chain_id": a.ChainID, "legacy_anchor_digest": a.LegacyAnchorDigest, "snapshot_digest": digest, "registration_digest": digest, "anchor": a}})
 	}))
 	defer srv.Close()
 
@@ -262,19 +318,51 @@ func TestAnchorPushCLI(t *testing.T) {
 func TestAnchorPushCLIRegressionIsError(t *testing.T) {
 	dbPath, keyPath := setupAnchorProject(t)
 	seedSignedChain(t, dbPath, keyPath, 1)
+	anchor := emitRemoteAnchorNow(t, dbPath, keyPath)
 	anchorFile := filepath.Join(t.TempDir(), "a.json")
-	if err := logging.WriteAnchor(anchorFile, emitAnchorNow(t, dbPath, keyPath)); err != nil {
+	if err := logging.WriteAnchorV2(anchorFile, anchor); err != nil {
 		t.Fatal(err)
 	}
+	pub, err := logging.LoadPublicKeyFile(keyPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	digest, err := logging.AnchorV2SnapshotDigest(anchor, pub, anchor.AgentID, anchor.ChainID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var gets, posts atomic.Int32
+	var got struct {
+		Anchor           *logging.AnchorV2 `json:"anchor"`
+		ExpectedPrevious string            `json:"expected_previous"`
+	}
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		http.Error(w, "row_count regression", http.StatusConflict)
+		if r.Method == http.MethodGet {
+			gets.Add(1)
+			json.NewEncoder(w).Encode(anchor)
+			return
+		}
+		if r.Method != http.MethodPost {
+			http.Error(w, "wrong method", http.StatusMethodNotAllowed)
+			return
+		}
+		posts.Add(1)
+		if err := json.NewDecoder(r.Body).Decode(&got); err != nil {
+			http.Error(w, "invalid JSON", http.StatusBadRequest)
+			return
+		}
+		w.WriteHeader(http.StatusConflict)
+		io.WriteString(w, `{"success":false,"message":"row_count regression","data":{"code":"row_count_regression"}}`)
 	}))
 	defer srv.Close()
 	t.Setenv(anchorclient.EnvURL, srv.URL)
 	t.Setenv(anchorclient.EnvToken, remoteTestToken)
-	err := runAnchorPush(context.Background(), io.Discard, anchorFile)
-	if err == nil || !strings.Contains(err.Error(), "regression") || strings.Contains(err.Error(), remoteTestToken) {
-		t.Fatalf("409 must surface as a regression error without the token, got %v", err)
+	err = runAnchorPush(context.Background(), io.Discard, anchorFile)
+	if err == nil || !strings.Contains(err.Error(), "row_count_regression") || strings.Contains(err.Error(), remoteTestToken) {
+		t.Fatalf("conditional POST 409 must surface without the token, got %v", err)
+	}
+	if gets.Load() != 1 || posts.Load() != 1 || got.Anchor == nil || *got.Anchor != *anchor || got.ExpectedPrevious != digest {
+		t.Fatalf("conditional POST not exercised: GET=%d POST=%d candidate=%+v previous=%q", gets.Load(), posts.Load(), got.Anchor, got.ExpectedPrevious)
 	}
 }
 
@@ -300,7 +388,9 @@ func TestStripAnchorEnvRemovesURLAndToken(t *testing.T) {
 func TestPushAnchorOffBox_UnsetURLIsSilent(t *testing.T) {
 	t.Setenv(anchorclient.EnvURL, "")
 	var buf bytes.Buffer
-	pushAnchorOffBox(&buf, &logging.Anchor{}, nil)
+	dbPath, keyPath := setupAnchorProject(t)
+	seedSignedChain(t, dbPath, keyPath, 1)
+	finishAnchorSession(&buf, remoteTestLogger(t, dbPath, keyPath), dbPath)
 	if buf.Len() != 0 {
 		t.Fatalf("unset URL must print nothing, got %q", buf.String())
 	}
@@ -309,8 +399,7 @@ func TestPushAnchorOffBox_UnsetURLIsSilent(t *testing.T) {
 func TestPushAnchorOffBox_FailureWarnsLoudly(t *testing.T) {
 	dbPath, keyPath := setupAnchorProject(t)
 	seedSignedChain(t, dbPath, keyPath, 1)
-	a := emitAnchorNow(t, dbPath, keyPath)
-	pub, _ := logging.LoadPublicKeyFile(keyPath)
+	emitRemoteAnchorNow(t, dbPath, keyPath)
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "boom", http.StatusInternalServerError)
 	}))
@@ -319,7 +408,7 @@ func TestPushAnchorOffBox_FailureWarnsLoudly(t *testing.T) {
 	t.Setenv(anchorclient.EnvToken, remoteTestToken)
 
 	var buf bytes.Buffer
-	pushAnchorOffBox(&buf, a, pub)
+	finishAnchorSession(&buf, remoteTestLogger(t, dbPath, keyPath), dbPath)
 	if !strings.Contains(buf.String(), "NockLock: warning: chain anchor NOT pushed off-box:") || !strings.Contains(buf.String(), "500") {
 		t.Fatalf("missing loud warning: %q", buf.String())
 	}
@@ -331,8 +420,7 @@ func TestPushAnchorOffBox_FailureWarnsLoudly(t *testing.T) {
 func TestPushAnchorOffBox_HonorsTimeout(t *testing.T) {
 	dbPath, keyPath := setupAnchorProject(t)
 	seedSignedChain(t, dbPath, keyPath, 1)
-	a := emitAnchorNow(t, dbPath, keyPath)
-	pub, _ := logging.LoadPublicKeyFile(keyPath)
+	emitRemoteAnchorNow(t, dbPath, keyPath)
 	release := make(chan struct{})
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		_, _ = io.Copy(io.Discard, r.Body)
@@ -352,7 +440,7 @@ func TestPushAnchorOffBox_HonorsTimeout(t *testing.T) {
 
 	var buf bytes.Buffer
 	start := time.Now()
-	pushAnchorOffBox(&buf, a, pub)
+	finishAnchorSession(&buf, remoteTestLogger(t, dbPath, keyPath), dbPath)
 	if el := time.Since(start); el > 3*time.Second {
 		t.Fatalf("teardown push ignored its timeout (%v)", el)
 	}
@@ -410,8 +498,8 @@ func TestWrapTeardownPushFailOpenAndChildEnvStripped(t *testing.T) {
 	if !asExitCodeError(runErr, &ece) || ece.code != 3 {
 		t.Fatalf("wrapped exit code must survive a failed push: want exit 3, got %v", runErr)
 	}
-	if pushes.Load() != 1 {
-		t.Fatalf("teardown should attempt exactly one push, got %d", pushes.Load())
+	if pushes.Load() != 0 {
+		t.Fatalf("unenrolled teardown must never send a v1 request, got %d", pushes.Load())
 	}
 	if !strings.Contains(stderr, "NockLock: warning: chain anchor NOT pushed off-box:") {
 		t.Fatalf("missing push warning on stderr:\n%s", stderr)

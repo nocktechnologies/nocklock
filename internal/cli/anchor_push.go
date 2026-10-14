@@ -2,7 +2,6 @@ package cli
 
 import (
 	"context"
-	"crypto/ed25519"
 	"errors"
 	"fmt"
 	"io"
@@ -13,8 +12,8 @@ import (
 	"github.com/nocktechnologies/nocklock/internal/logging"
 )
 
-// anchorPushTimeout bounds the wrap-teardown push. A package var so tests can
-// shorten it; production is a hard 5 seconds.
+// anchorPushTimeout bounds identity-lock waits and HTTP during wrap teardown.
+// Synchronous filesystem and SQLite work is not interrupted. Tests shorten it.
 var anchorPushTimeout = 5 * time.Second
 
 // anchorEnvKeys are wrap's off-box anchor settings. They are removed from the
@@ -33,22 +32,6 @@ func anchorRemoteConfig() (baseURL, token string) {
 	return os.Getenv(anchorclient.EnvURL), os.Getenv(anchorclient.EnvToken)
 }
 
-// pushAnchorOffBox is wrap teardown's off-box push. With NOCKLOCK_ANCHOR_URL
-// unset it does nothing and prints nothing. Otherwise it pushes a under
-// anchorPushTimeout and, on any failure, prints a loud warning to w and returns:
-// the push is fail-open and never alters the wrapped command's exit code.
-func pushAnchorOffBox(w io.Writer, a *logging.Anchor, pub ed25519.PublicKey) {
-	baseURL, token := anchorRemoteConfig()
-	if baseURL == "" {
-		return
-	}
-	ctx, cancel := context.WithTimeout(context.Background(), anchorPushTimeout)
-	defer cancel()
-	if err := anchorclient.Push(ctx, baseURL, token, a, pub); err != nil {
-		fmt.Fprintf(w, "NockLock: warning: chain anchor NOT pushed off-box: %v\n", err)
-	}
-}
-
 // anchorCLITimeout bounds an interactive 'anchor push' or a remote fetch by
 // 'verify --against-remote-anchor'. Longer than the teardown budget because a
 // person is waiting on the answer, not a session exit.
@@ -65,42 +48,43 @@ func runAnchorPush(ctx context.Context, w io.Writer, file string) error {
 	if baseURL == "" {
 		return errors.New(errNoAnchorURL)
 	}
+	dbPath, projectRoot, err := resolveAuditDBPath()
+	if err != nil {
+		return err
+	}
 	if file == "" {
-		dbPath, _, err := resolveAuditDBPath()
-		if err != nil {
-			return err
-		}
 		file = logging.DefaultAnchorPath(dbPath)
 	}
-	anchor, err := logging.ReadAnchor(file)
+	anchor, err := logging.ReadAnchorV2(file)
 	if err != nil {
-		return fmt.Errorf("failed to read anchor file %s: %w", file, err)
+		return fmt.Errorf("v2 anchor required at %s; explicitly enroll or migrate, then emit a new anchor: %w", file, err)
 	}
 	pub, err := resolveVerifyPublicKey("")
 	if err != nil {
 		return err
 	}
 	if pub == nil {
-		return fmt.Errorf("no signing public key found; the anchor cannot be pushed without the key it is signed with")
+		return errors.New("no signing public key found; cannot authenticate the anchor")
 	}
-	if fp := logging.PublicKeyFingerprint(pub); anchor.AgentID != fp {
-		return fmt.Errorf("anchor agent_id %s does not match the local signing key %s; refusing to push", anchor.AgentID, fp)
+	logger, err := logging.NewLogger(dbPath, projectRoot)
+	if err != nil {
+		return err
 	}
+	defer logger.Close()
 	pctx, cancel := context.WithTimeout(ctx, anchorCLITimeout)
 	defer cancel()
-	if err := anchorclient.Push(pctx, baseURL, token, anchor, pub); err != nil {
+	if err := pushAnchorV2(pctx, logger, anchor, pub, baseURL, token); err != nil {
 		return fmt.Errorf("anchor push failed: %w", err)
 	}
-	fmt.Fprintf(w, "anchor pushed off-box (agent_id=%s, row_count=%d, head=%s)\n", anchor.AgentID, anchor.RowCount, anchor.HeadHash)
+	fmt.Fprintf(w, "anchor pushed off-box (agent_id=%s, chain_id=%s, row_count=%d, head=%s)\n", anchor.AgentID, anchor.ChainID, anchor.RowCount, anchor.HeadHash)
 	return nil
 }
 
-// runVerifyAgainstRemoteAnchor fetches the latest anchor the off-box store
-// holds for the local signing identity and verifies the local chain against it
-// exactly as --against-anchor does. An unreachable store, an unset URL, or no
-// stored anchor is ANCHOR: UNAVAILABLE and exits non-zero: absence of the
-// off-box pin is reported, never read as a pass.
+// runVerifyAgainstRemoteAnchor uses only the trusted v2 pair. Missing identity,
+// unsupported routes and absent remote state fail closed without v1 fallback.
 func runVerifyAgainstRemoteAnchor(ctx context.Context, w io.Writer, pubFlag string) error {
+	fctx, cancel := context.WithTimeout(ctx, anchorCLITimeout)
+	defer cancel()
 	dbPath, projectRoot, err := resolveAuditDBPath()
 	if err != nil {
 		return err
@@ -110,36 +94,30 @@ func runVerifyAgainstRemoteAnchor(ctx context.Context, w io.Writer, pubFlag stri
 		return err
 	}
 	if pub == nil {
-		// Without a key there is no identity to fetch by and nothing could be
-		// authenticated; fail closed through the shared no_key verdict.
-		return writeAnchorVerifyResult(w, &logging.AnchorVerifyResult{
-			Classification: "no_key",
-			Reason:         "no public key available to resolve the signing identity or authenticate the remote anchor (supply --ed25519-pub or run on the signing host)",
-		})
+		return writeAnchorVerifyResult(w, &logging.AnchorVerifyResult{Classification: "no_key", Reason: "no public key available to authenticate the remote anchor"})
 	}
-
 	baseURL, token := anchorRemoteConfig()
 	if baseURL == "" {
 		return writeAnchorVerifyResult(w, anchorUnavailable(errNoAnchorURL))
 	}
-	fctx, cancel := context.WithTimeout(ctx, anchorCLITimeout)
-	defer cancel()
-	anchor, err := anchorclient.FetchLatest(fctx, baseURL, token, logging.PublicKeyFingerprint(pub))
+	logger, err := logging.NewLogger(dbPath, projectRoot)
+	if err != nil {
+		return err
+	}
+	defer logger.Close()
+	id, err := logger.ReadChainIdentityContext(fctx)
 	if err != nil {
 		return writeAnchorVerifyResult(w, anchorUnavailable(err.Error()))
 	}
-
-	logger, err := logging.NewLogger(dbPath, projectRoot)
+	a, err := anchorclient.FetchLatestV2(fctx, baseURL, token, id.AgentID, id.ChainID, pub)
 	if err != nil {
-		return fmt.Errorf("failed to open event log: %w", err)
+		return writeAnchorVerifyResult(w, anchorUnavailable(err.Error()))
 	}
-	defer logger.Close()
-
-	result, err := logger.VerifyAgainstAnchor(anchor, pub)
+	result, err := logger.VerifyAgainstAnchorV2Context(fctx, a, pub)
 	if err != nil {
-		return fmt.Errorf("anchor verification failed: %w", err)
+		return writeAnchorVerifyResult(w, anchorUnavailable(err.Error()))
 	}
-	return writeAnchorVerifyResult(w, result)
+	return writeAnchorV2VerifyResult(w, result)
 }
 
 func anchorUnavailable(reason string) *logging.AnchorVerifyResult {

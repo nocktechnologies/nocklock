@@ -177,30 +177,19 @@ var wrapCmd = &cobra.Command{
 		defer logger.Close()
 
 		// Auto-emit an external chain-head anchor on teardown (N10647). This is the
-		// hook a future NockCC push consumes so tail truncation and rollback become
+		// hook the enrolled v2 push consumes so tail truncation and rollback become
 		// detectable off-box. Best-effort but LOGGED: a failure must not crash
 		// teardown (the session already ran), yet is never silently swallowed. LIFO
 		// defer order places this BEFORE logger.Close (it needs the open signer) and
 		// AFTER the SessionEnd event that every return path logs last. The anchor
 		// lands next to events.db, inside the audit dir the fenced child is denied.
 		//
-		// When NOCKLOCK_ANCHOR_URL is set, the written anchor is then pushed off-box
+		// When NOCKLOCK_ANCHOR_URL is set and v2 is enrolled, the written anchor is pushed off-box
 		// under a hard timeout. The push is FAIL-OPEN: the session already ran, so
 		// a push failure prints a loud warning and never changes the exit code (this
 		// defer does not touch RunE's return value). With the URL unset nothing
 		// further happens.
-		defer func() {
-			anchorPath := logging.DefaultAnchorPath(dbPath)
-			anchor, err := logger.EmitAnchor()
-			if err == nil {
-				err = logging.WriteAnchor(anchorPath, anchor)
-			}
-			if err != nil {
-				fmt.Fprintf(os.Stderr, "NockLock: warning: chain anchor not written to %s: %v\n", anchorPath, err)
-				return
-			}
-			pushAnchorOffBox(os.Stderr, anchor, logger.SigningPublicKey())
-		}()
+		defer func() { finishAnchorSession(os.Stderr, logger, dbPath) }()
 
 		// Record the resolved policy before any child setup or launch. The config
 		// file lives inside the project root by default, so the fenced child can
@@ -211,7 +200,7 @@ var wrapCmd = &cobra.Command{
 		// V2's trusted record stays outside the project even when logging.db
 		// selects a legacy in-project location. Protect it separately and record
 		// any refusal in the signed audit trail before returning.
-		if err := protectChainIdentity(cfg, logger); err != nil {
+		if err := protectChainIdentity(cmd.Context(), cfg, logger); err != nil {
 			logErr := logger.Log(logging.Event{
 				Timestamp: time.Now(), EventType: logging.EventFileBlocked,
 				Category: "filesystem", Detail: "trusted chain identity protection refused: " + err.Error(),
@@ -1427,8 +1416,8 @@ func withManagedSigningKeyDeny(deny []string) ([]string, string, error) {
 	return append(append([]string(nil), deny...), keyDir), keyDir, nil
 }
 
-func protectChainIdentity(cfg *config.Config, logger *logging.Logger) error {
-	dir, err := logger.ChainIdentityDirectory()
+func protectChainIdentity(ctx context.Context, cfg *config.Config, logger *logging.Logger) error {
+	dir, err := logger.ChainIdentityDirectoryContext(ctx)
 	if err != nil {
 		return fmt.Errorf("cannot protect trusted chain identity; refusing to start: %w", err)
 	}

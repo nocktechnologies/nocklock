@@ -1,15 +1,14 @@
 # Move trusted chain state offline
 
-N11744 adds the local identity and prune guard. V2 enrollment, remote verification
-and migration commands are a later slice. This procedure moves local state; it
-cannot establish remote verification success. Complete that check with the v2
-client and actual store before any subsequent v2 push.
+Move the database and complete trusted state directory while both locations are offline. This includes `chain-identity.json`, `chain-identity.lock`, and `anchor-registration.json` when present. The original signed registration must survive a pending retry. Complete remote verification against the existing v2 stream before the next push.
 
 An audit DB with a `chain_id` and no matching external `chain-identity.json`
 **must fail closed**. Do not run initialization to repair it, edit an ID, clear
 `pending`, or copy another project's record. A project move retains the exact
-pair, legacy witness and registration state. A clone intended to become an
-independent chain needs an explicit new enrollment instead. All pruning APIs
+pair, legacy witness and registration state. An independent fork starts a new
+audit DB and explicitly enrolls a new chain; preserve the original archive and
+pin. Copying an enrolled DB and identity does not create a new stream, and must
+not be repaired by deleting or resetting its identity. All pruning APIs
 require the canonical project root even if a restored DB has no identity mirror;
 never pass an empty root to bypass the external record. A lock wait times out
 after five seconds without deleting rows; stop the competing command before
@@ -27,8 +26,13 @@ never roll the state back to `none`.
    location, old/new state directories, and the identity tuple
    `(agent_id, chain_id, legacy_anchor_digest, registration_state)`. Run
    `nocklock verify --audit` in the old project and require authentic, intact
-   results. Validate trusted-record/DB agreement with `Logger.ReadChainIdentity`
-   in an embedding caller; the later v2 CLI must make the same check.
+   results. Validate trusted-record/DB agreement with `Logger.ReadChainIdentity`.
+   For `enrolled` state, also run `nocklock verify --against-remote-anchor` and
+   require `ANCHOR: OK` before moving. A `pending` registration may have no
+   remote pin, or the store may have committed a request whose response was lost;
+   neither case permits clearing pending. Record the original enrollment or
+   migration command and mode, and preserve `anchor-registration.json` byte for
+   byte so that registration can be retried at the destination.
 
 The state directory mapping is the existing `config.AuditStateDir` mapping:
 
@@ -73,10 +77,22 @@ Before modifying anything, require:
    legacy digest. Run `nocklock verify --audit` in the destination and require
    the original signed chain to verify. The old state directory must be absent.
    Stop on any mismatch; do not regenerate a missing record or initialize a new ID.
-7. Before the next v2 push, remotely verify the preserved expected pair with the
-   actual v2 store. A missing/unreachable remote pin is an error. This final step
-   is deferred until the v2 CLI/server integration ships; local agreement alone
-   does not complete remote migration or prove rollback protection.
+7. Complete registration and remote verification for the preserved expected pair:
+   - For `enrolled`, run `nocklock verify --against-remote-anchor` and require
+     `ANCHOR: OK`. A missing or unreachable pin is an error; do not enroll again
+     to recreate it.
+   - For `pending`, retry the original `anchor enroll` command (including its
+     acknowledgement flag, if used) or `anchor migrate`. The client must replay
+     the preserved signed request and mode. Require successful enrollment and
+     `nocklock verify --against-remote-anchor` returning `ANCHOR: OK` before any
+     push. If changed legacy history or another conflict prevents the retry,
+     preserve the pending state and investigate; do not edit or replace it.
+   - For `none`, the local move does not establish a remote pin. Explicitly
+     enroll or migrate and verify the pin before any remote push.
+
+   Local agreement alone does not prove rollback protection. Keep remote writes
+   stopped until registration and verification succeed; pending and enrolled
+   state must never be reset to bypass an error.
 
 If either move fails midway, keep both locations offline and use the saved
 mapping and backup to finish or restore the **same** identity. Do not make an

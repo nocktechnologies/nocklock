@@ -16,8 +16,8 @@ import (
 	"unicode/utf8"
 )
 
-// AnchorV2Version identifies the opt-in, chain-bound record format. EmitAnchor
-// and all existing CLI and network paths still use AnchorVersion (v1).
+// AnchorV2Version identifies the chain-bound record format. EmitAnchor remains
+// the explicit v1 library emitter; enrolled CLI and remote paths use v2.
 const AnchorV2Version = 2
 
 const anchorV2SigVersion byte = 0x06

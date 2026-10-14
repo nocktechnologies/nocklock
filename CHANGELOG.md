@@ -10,17 +10,28 @@ All notable changes to NockLock will be documented in this file.
 
 ### Added
 
-- Add trusted external chain identities and monotonic local registration state for future v2 enrollment (N11744). Registration and prune share a process-safe lock; pending/enrolled or incomplete identity state refuses prune. The existing wrap path protects that directory independently of the configured DB and refuses unenforced filesystem access. Legacy chains still prune normally. No v2 network or enrollment CLI is enabled by this slice; the offline move procedure is documented and tested.
+- Add per-chain remote v2 anchors with explicit `anchor enroll` / `anchor migrate`, durable exact-request retry, expected-pair verification, signed-prefix checks, conditional remote updates and actual NCC handler/CLI acceptance coverage (N11742–N11745). Independent projects may share one signing key. Trusted external identity and SQLite metadata must agree; pending/enrolled chains refuse prune and moved state requires explicit relocation and remote verification.
+
+- Add trusted external chain identities and monotonic local registration state for v2 enrollment (N11744). Registration and prune share a process-safe lock; pending/enrolled or incomplete identity state refuses prune. The existing wrap path protects that directory independently of the configured DB and refuses unenforced filesystem access. Legacy chains still prune normally. The offline move procedure is documented and tested.
 - Linux CI coverage for post-exec child credentials under scheduler stress, full installed netns wrap credentials, and test-only cross-thread exec/proxy-group mutation controls (N11747). The red-team companion records real Unix-socket and io_uring controls separately; older Landlock ABIs and unavailable io_uring remain explicit coverage gaps, with no change to the main bench score or runtime behavior.
 - N11747 acceptance harnesses fail on every timeout, including earlier passing output; installed-wrap probes kill isolated process groups and bound output draining/reaping. Hanging-stub controls cover both harnesses. Hosted-only credential jobs check actual runner metadata, and a failed kernel companion stops the main bench and fails the job while preserving receipts.
 
-- Add opt-in v2 anchor record encoding, signature and expected-pair verification, snapshot digests, and public interoperability vectors (N11742). V2 signs an independent `chain_id` and legacy migration witness. This is record-format support only: v1 remains the default; CLI, chain enrollment, persistence, network routes and server behavior are unchanged.
+- Add opt-in v2 anchor record encoding, signature and expected-pair verification, snapshot digests, and public interoperability vectors (N11742). V2 signs an independent `chain_id` and legacy migration witness. This supplies the record-format foundation for the v2 lifecycle and remote commands described above.
 
 ### Documentation
 
 - Fix signing-key recovery verification for absolute and project-local audit-log paths. Verify an isolated copy with the archived public key, preserving the live config, original archive and project provenance (N11739).
 
+### Breaking
+
+- Remote anchor push/verify now require explicit v2 enrollment or migration and an upgraded store. They never fall back to key-only v1 routes. Legacy files remain explicitly verifiable; legacy local teardown emission remains v1 until enrollment.
+- `anchor emit` requires existing signing adoption and the original key. It refuses unsigned or stripped databases instead of adopting/re-signing them. Normal wrap signing adoption is unchanged.
+
 ### Fixed
+
+- Preserve original registration replay after interrupted writes: any retained request blocks prune, including state `none`. Strict anchor opens validate existing adoption, key fingerprint and signed head before database mutation and observe live WAL state. V2 file verification distinguishes a missing key from a forged signature; emit handles nil contexts and confirms written v2 files. The real NCC acceptance gate adds a same-head `already_stored` CLI case and scopes/redacts its receipts (N11745).
+
+- Anchor v2 identity-lock waits now honor command cancellation and share the existing HTTP deadline. Wrap teardown starts its five-second budget before reading identity; interactive anchor commands and verification use 30 seconds. Durable filesystem writes remain synchronous rather than being abandoned on timeout (N11745).
 
 - Harden trusted identity retries and pruning (N11744): every pending retry redoes file/directory durability barriers before registration; post-rename sync errors explicitly report a committed replacement with uncertain durability. Only trusted identity writes preflight the full state-root lineage before mutation; ordinary state resolution, reads and prune retain their no-fsync behavior. Post-rename barriers stop at the canonical state root, with a defensive filesystem-root stop. State directory and boundary come from one resolution. Prune requires project context after a database rollback and times out on the identity lock after five seconds. Filesystem-enabled wraps deny the future identity directory before enrollment, including custom DB locations and broad grant overlaps. Explicitly unfenced legacy behavior remains degraded; existing identities require enforcement.
 

@@ -117,7 +117,7 @@ func TestLogPruneRespectsTrustedChainRegistration(t *testing.T) {
 
 func TestWrapProtectsIdentityOutsideConfiguredLogDirectory(t *testing.T) {
 	logger, cfg, project, _ := setupCLIChainIdentity(t)
-	if err := protectChainIdentity(cfg, logger); err != nil {
+	if err := protectChainIdentity(context.Background(), cfg, logger); err != nil {
 		t.Fatalf("legacy control: %v", err)
 	}
 	futureDir, err := logger.TrustedChainStateDirectory()
@@ -149,20 +149,20 @@ func TestWrapProtectsIdentityOutsideConfiguredLogDirectory(t *testing.T) {
 	if pathIsWithinDir(resolvedDir, resolvedProject) || resolvedDir == resolvedDBDir {
 		t.Fatalf("trusted state followed configured in-project DB: %s", dir)
 	}
-	if err := protectChainIdentity(cfg, logger); err != nil {
+	if err := protectChainIdentity(context.Background(), cfg, logger); err != nil {
 		t.Fatal(err)
 	}
 	if !slices.Contains(cfg.Filesystem.Deny, dir) {
 		t.Fatalf("trusted directory missing from child deny: %v", cfg.Filesystem.Deny)
 	}
 	cfg.Filesystem.Root = ""
-	if err := protectChainIdentity(cfg, logger); err == nil {
+	if err := protectChainIdentity(context.Background(), cfg, logger); err == nil {
 		t.Fatal("disabled filesystem fence accepted trusted identity")
 	}
 	cfg.Filesystem.Root = project
 	cfg.Filesystem.LinuxEnforcement = "off"
 	if runtime.GOOS == "linux" {
-		if err := protectChainIdentity(cfg, logger); err == nil {
+		if err := protectChainIdentity(context.Background(), cfg, logger); err == nil {
 			t.Fatal("userspace-only filesystem fence accepted trusted identity")
 		}
 	}
@@ -218,7 +218,7 @@ func TestWrapFutureIdentityLandlockDeny(t *testing.T) {
 			case "root":
 				cfg.Filesystem.Root = filepath.Dir(root)
 			}
-			if err := protectChainIdentity(&cfg, logger); err != nil {
+			if err := protectChainIdentity(context.Background(), &cfg, logger); err != nil {
 				t.Fatal(err)
 			}
 			resolved, err := fsfence.ProcessConfig(cfg.Filesystem)
@@ -250,7 +250,7 @@ func TestWrapFutureIdentityUnderDefaultTempGrant(t *testing.T) {
 	}
 	t.Cleanup(func() { os.RemoveAll(root) })
 	t.Setenv("XDG_STATE_HOME", root)
-	if err := protectChainIdentity(cfg, logger); err != nil {
+	if err := protectChainIdentity(context.Background(), cfg, logger); err != nil {
 		t.Fatal(err)
 	}
 	resolved, err := fsfence.ProcessConfig(cfg.Filesystem)
@@ -265,12 +265,12 @@ func TestWrapFutureIdentityUnderDefaultTempGrant(t *testing.T) {
 func TestWrapLegacyUnfencedControlAndFutureStateContainment(t *testing.T) {
 	logger, cfg, project, _ := setupCLIChainIdentity(t)
 	cfg.Filesystem.Root = ""
-	if err := protectChainIdentity(cfg, logger); err != nil {
+	if err := protectChainIdentity(context.Background(), cfg, logger); err != nil {
 		t.Fatalf("explicit legacy unfenced control: %v", err)
 	}
 	cfg.Filesystem.Root = project
 	t.Setenv("XDG_STATE_HOME", filepath.Join(project, "attacker-writable-state"))
-	if err := protectChainIdentity(cfg, logger); err == nil || !strings.Contains(err.Error(), "outside the fenced project") {
+	if err := protectChainIdentity(context.Background(), cfg, logger); err == nil || !strings.Contains(err.Error(), "outside the fenced project") {
 		t.Fatalf("in-project future state accepted: %v", err)
 	}
 }
