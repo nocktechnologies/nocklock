@@ -8,8 +8,9 @@
 // spec and the README name as "external head anchoring."
 //
 // An anchor is a small, signed record of {row_count, head_hash} captured at a
-// point in time and stored OUTSIDE events.db (a future NockCC push consumes the
-// wrap-teardown file). `verify --against-anchor` then detects any local chain
+// point in time and stored OUTSIDE events.db. Remote operations use chain-bound
+// v2 records; explicit legacy-file verification preserves this format.
+// `verify --against-anchor` then detects any local chain
 // that has FEWER rows than the anchor attests (truncation / rollback) or that
 // does not reproduce the anchored head hash at the anchored count (tamper) —
 // even when the local signed verify reads AUTHENTIC, because the anchor pins the
@@ -133,7 +134,7 @@ func anchorAppendLP(buf []byte, s string) []byte {
 	return append(buf, s...)
 }
 
-// EmitAnchor reads the current chain_head and returns a signed anchor record.
+// EmitAnchor verifies the local signed chain and signs that authenticated head snapshot.
 // It requires a signing key (open the log WithSigning); an unsigned log cannot
 // produce an authenticatable anchor, so this fails closed rather than emitting
 // an unsigned record that verify could never trust.
@@ -142,29 +143,21 @@ func (l *Logger) EmitAnchor() (*Anchor, error) {
 		return nil, errors.New("anchor emission requires a signing key: open the audit log with signing enabled")
 	}
 
-	tx, err := l.db.Begin()
+	verified, err := l.VerifyChainSigned(l.signer.pub, true)
 	if err != nil {
-		return nil, fmt.Errorf("failed to begin anchor transaction: %w", err)
+		return nil, err
 	}
-	defer tx.Rollback()
-	if err := initChainHeadIfNeeded(tx); err != nil {
-		return nil, fmt.Errorf("failed to initialize chain_head for anchor: %w", err)
+	if !verified.Intact || verified.SigState != "authentic" {
+		return nil, fmt.Errorf("refusing to anchor an unauthentic local chain: %s %s", verified.BrokenReason, verified.SigBrokenReason)
 	}
-
-	var headHash string
-	var rowCount int
-	if err := tx.QueryRow("SELECT entry_hash, row_count FROM chain_head WHERE id = 1").Scan(&headHash, &rowCount); err != nil {
-		return nil, fmt.Errorf("failed to read chain_head for anchor: %w", err)
-	}
-	if err := tx.Commit(); err != nil {
-		return nil, fmt.Errorf("failed to commit anchor transaction: %w", err)
-	}
+	// Use the authenticated snapshot itself. Re-reading chain_head here could
+	// sign a database head changed after verification ended.
 
 	a := &Anchor{
 		Version:   AnchorVersion,
 		AgentID:   publicKeyFingerprint(l.signer.pub),
-		HeadHash:  headHash,
-		RowCount:  rowCount,
+		HeadHash:  verified.HeadHash,
+		RowCount:  verified.EntriesVerified,
 		CreatedAt: formatTimestampForChain(time.Now()),
 	}
 	cb, err := anchorCanonicalBytes(a)
@@ -189,7 +182,7 @@ func (l *Logger) EmitAnchorToFile(path string) error {
 
 // DefaultAnchorPath returns the default anchor path next to the event DB:
 // <db-dir>/chain-anchor.json. wrap writes it on teardown as the off-box push
-// hook (a future NockCC push consumes it).
+// hook; enrolled remote operations write v2 records at the same location.
 func DefaultAnchorPath(dbPath string) string {
 	return filepath.Join(filepath.Dir(dbPath), "chain-anchor.json")
 }
@@ -206,6 +199,10 @@ func WriteAnchor(path string, a *Anchor) error {
 	if err != nil {
 		return fmt.Errorf("failed to marshal anchor: %w", err)
 	}
+	return writeAnchorData(path, data)
+}
+
+func writeAnchorData(path string, data []byte) error {
 	dir := filepath.Dir(path)
 	tmp, err := os.CreateTemp(dir, ".chain-anchor-*.json.tmp")
 	if err != nil {

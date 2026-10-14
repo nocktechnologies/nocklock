@@ -190,6 +190,10 @@ func (l *Logger) RegisterChainIdentity(register func(ChainIdentity) (*ChainRegis
 	if identity == nil {
 		return nil, ErrChainIdentityMissing
 	}
+	return l.registerChainIdentityLocked(store, identity, register)
+}
+
+func (l *Logger) registerChainIdentityLocked(store *chainIdentityStore, identity *ChainIdentity, register func(ChainIdentity) (*ChainRegistrationConfirmation, error)) (*ChainIdentity, error) {
 	if identity.RegistrationState == ChainRegistrationEnrolled {
 		return identity, nil
 	}
@@ -414,20 +418,9 @@ func (s *chainIdentityStore) checkFile(name string, f *os.File) error {
 }
 
 func (s *chainIdentityStore) read() (*ChainIdentity, error) {
-	f, err := s.root.OpenFile(ChainIdentityFileName, os.O_RDONLY|oNoFollow|identityNonBlock, 0)
-	if errors.Is(err, os.ErrNotExist) {
-		return nil, nil
-	}
-	if err != nil {
-		return nil, fmt.Errorf("cannot read trusted chain identity: %w", err)
-	}
-	defer f.Close()
-	if err := s.checkFile(ChainIdentityFileName, f); err != nil {
+	data, err := s.readData(ChainIdentityFileName, 4096)
+	if err != nil || data == nil {
 		return nil, err
-	}
-	data, err := io.ReadAll(io.LimitReader(f, 4097))
-	if err != nil || len(data) > 4096 {
-		return nil, errors.New("cannot read trusted chain identity: invalid or oversized record")
 	}
 	var identity ChainIdentity
 	if err := json.Unmarshal(data, &identity); err != nil {
@@ -445,6 +438,25 @@ func (s *chainIdentityStore) read() (*ChainIdentity, error) {
 	return &identity, nil
 }
 
+func (s *chainIdentityStore) readData(name string, limit int64) ([]byte, error) {
+	f, err := s.root.OpenFile(name, os.O_RDONLY|oNoFollow|identityNonBlock, 0)
+	if errors.Is(err, os.ErrNotExist) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, fmt.Errorf("cannot read trusted chain identity: %w", err)
+	}
+	defer f.Close()
+	if err := s.checkFile(name, f); err != nil {
+		return nil, err
+	}
+	data, err := io.ReadAll(io.LimitReader(f, limit+1))
+	if err != nil || int64(len(data)) > limit {
+		return nil, errors.New("cannot read trusted chain identity: invalid or oversized record")
+	}
+	return data, nil
+}
+
 func (s *chainIdentityStore) write(identity *ChainIdentity) error {
 	if err := validateChainIdentity(identity); err != nil {
 		return err
@@ -453,6 +465,10 @@ func (s *chainIdentityStore) write(identity *ChainIdentity) error {
 	if err != nil {
 		return err
 	}
+	return s.writeData(ChainIdentityFileName, data)
+}
+
+func (s *chainIdentityStore) writeData(name string, data []byte) error {
 	var nonce [16]byte
 	if _, err := rand.Read(nonce[:]); err != nil {
 		return err
@@ -469,7 +485,7 @@ func (s *chainIdentityStore) write(identity *ChainIdentity) error {
 	if err := errors.Join(writeErr, syncErr, closeErr); err != nil {
 		return fmt.Errorf("cannot persist trusted chain identity update: %w", err)
 	}
-	if err := s.root.Rename(tmpName, ChainIdentityFileName); err != nil {
+	if err := s.root.Rename(tmpName, name); err != nil {
 		return fmt.Errorf("cannot replace trusted chain identity: %w", err)
 	}
 	dir, err := s.root.Open(".")

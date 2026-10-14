@@ -142,10 +142,11 @@ type eventTransaction interface {
 type Option func(*loggerConfig)
 
 type loggerConfig struct {
-	signingEnabled bool
-	signingKeyPath string
-	onCommit       func(Event, string)
-	afterValidate  func() // test seam, see withAfterValidate
+	signingEnabled      bool
+	existingSigningOnly bool
+	signingKeyPath      string
+	onCommit            func(Event, string)
+	afterValidate       func() // test seam, see withAfterValidate
 }
 
 // WithEventCommitted observes an event and its audit-chain entry hash only
@@ -161,6 +162,19 @@ func WithEventCommitted(fn func(Event, string)) Option {
 func WithSigning(keyPath string) Option {
 	return func(c *loggerConfig) {
 		c.signingEnabled = true
+		c.signingKeyPath = keyPath
+	}
+}
+
+// WithExistingSigning loads an existing signing key without generating a key,
+// adopting signing, or re-signing a database head. Anchor operations use this
+// option so a database stripped between preflight and open cannot be blessed
+// as a newly adopted chain. Callers must still verify the signed chain before
+// emitting or registering any anchor.
+func WithExistingSigning(keyPath string) Option {
+	return func(c *loggerConfig) {
+		c.signingEnabled = true
+		c.existingSigningOnly = true
 		c.signingKeyPath = keyPath
 	}
 }
@@ -501,6 +515,10 @@ func NewLogger(dbPath string, projectRoot string, opts ...Option) (*Logger, erro
 			db.Close()
 			return nil, fmt.Errorf("failed to check signing adoption state: %w", err)
 		}
+		if lc.existingSigningOnly && !adopted {
+			db.Close()
+			return nil, errors.New("anchor operations require existing signing adoption; refusing to adopt or re-sign this database")
+		}
 		var s *signer
 		if adopted {
 			// An adopted log must already have its original key. Do not create a
@@ -514,6 +532,9 @@ func NewLogger(dbPath string, projectRoot string, opts ...Option) (*Logger, erro
 			return nil, fmt.Errorf("failed to load signing key: %w", err)
 		}
 		l.signer = s
+		if lc.existingSigningOnly {
+			return l, nil
+		}
 		// Adopt signing on first signed open: record the genesis marker and sign
 		// the current head. Existing rows stay unsigned; verify treats them as
 		// UNSIGNED-but-consistent, not forged.
@@ -1634,12 +1655,18 @@ func readChainHeadRecord(tx *sql.Tx) (chainHeadRecord, error) {
 }
 
 func (l *Logger) verifyChain(pub ed25519.PublicKey, requireSigned bool) (*ChainVerifyResult, error) {
-	result := &ChainVerifyResult{PubKeyProvided: pub != nil}
 	tx, err := l.db.Begin()
 	if err != nil {
 		return nil, fmt.Errorf("failed to begin chain verification transaction: %w", err)
 	}
 	defer tx.Rollback()
+	return verifyChainInTransaction(tx, pub, requireSigned)
+}
+
+// verifyChainInTransaction lets anchor preflight authenticate the head and its
+// prefix in the same SQLite snapshot without weakening ordinary verification.
+func verifyChainInTransaction(tx *sql.Tx, pub ed25519.PublicKey, requireSigned bool) (*ChainVerifyResult, error) {
+	result := &ChainVerifyResult{PubKeyProvided: pub != nil}
 
 	// Get chain_head state
 	head, err := readChainHeadRecord(tx)

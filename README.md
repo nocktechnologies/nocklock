@@ -204,45 +204,37 @@ Supplying `--ed25519-pub` states the external expectation that the log is signed
 
 Because the head is signed, deleting the newest rows and rewriting `chain_head` in lockstep, the attack the unkeyed chain cannot resist, is now caught as FORGED: the attacker cannot re-sign the shortened head. The remaining gap is rollback. An attacker who restores an earlier, legitimately signed snapshot of the whole database presents a shorter log that still verifies, because its head was validly signed at the time. Detecting that requires anchoring the signed head off-box, which is exactly what the external chain-head anchor adds.
 
-## External chain-head anchor (v1.2)
+## External chain-head anchors
 
-An anchor is a small signed record of the audit chain's head, `{version, agent_id, head_hash, row_count, created_at, sig}`, captured at a point in time and stored outside `events.db`. It closes the rollback and tail-truncation gap that the signed head alone cannot: the signed `chain_head` proves a log is authentic for the rows it currently holds, but its signature was valid when it was written, so a shorter, earlier, legitimately signed snapshot still verifies. An anchor pins the row count and head hash the log should have, so a later chain with fewer rows is caught.
+An off-box anchor pins a signed audit chain head and row count, making rollback to an earlier valid database snapshot observable. V2 anchors sign both the key fingerprint (`agent_id`) and an independent random `chain_id`, so projects sharing one managed signing key have separate remote streams. The signature also binds an immutable legacy migration witness. V2 uses domain byte `0x06`; explicit legacy v1 files retain `0x05`.
 
-The anchor is signed with the same NockLock-managed Ed25519 key that signs the audit rows and the head; `agent_id` is that key's fingerprint, the same identity recorded in `chain_head`. Its signed bytes lead with a `0x05` domain-separation byte (rows use `0x01`, the head `0x03`), so a row or head signature can never be replayed as an anchor. The exact layout is pinned by a byte-literal test.
+`nocklock anchor emit --out anchor.json` verifies the existing signed local chain and emits v2 when a trusted identity exists, or v1 for a wholly legacy chain. It requires the original signing key and never adopts or re-signs an unsigned or stripped database. `nocklock verify --against-anchor anchor.json` supports both formats; v2 additionally requires trusted local identity agreement. A valid anchor from another project fails identity checking before any row-count verdict. Fewer local rows is `ANCHOR: TRUNCATION`; a divergent prefix is `ANCHOR: TAMPERED`. Every non-OK verdict exits non-zero.
 
-```
-$ nocklock anchor emit --out anchor.json   # or to stdout without --out
-$ nocklock verify --against-anchor anchor.json
-ANCHOR: OK — local chain reproduces the anchored head at 247 rows (anchor attests 247 rows, local has 247)
-```
+The local `chain-anchor.json` alone cannot defeat an attacker who replaces it together with the DB. Rollback protection requires a pin in an independent store the agent cannot alter. The trusted identity and original registration request live outside the project and DB; `wrap` protects that directory even for a configured in-project database.
 
-`verify --against-anchor` first authenticates the anchor itself, with the supplied `--ed25519-pub` or else the local managed key. Without a key it fails closed rather than falling back to a hash-only pass. Then it checks the local chain. Fewer rows than attested is `ANCHOR: TRUNCATION`, which covers both tail truncation and rollback to an earlier snapshot, since both present a shorter chain. A head-hash mismatch at the attested count is `ANCHOR: TAMPERED`. A bad or wrong-key anchor is `ANCHOR: FORGED`. Every verdict other than OK exits non-zero. A chain that has legitimately grown past the anchor still passes. A `nocklock wrap` session emits an anchor to `<db-dir>/chain-anchor.json` on teardown (best-effort, but logged) and, when configured, pushes it off-box (see below).
+### Enroll, migrate and push off-box
 
-Two limits apply. A legitimate `--prune` re-anchors the chain and invalidates any anchor emitted before it; verify prints a `NOTE` when the local `chain_head` records a prune after the anchor's timestamp, and a fresh anchor should be emitted after a prune (wrap re-emits on every teardown). And `chain-anchor.json` sits in the same trust boundary as `events.db`, so a file-access attacker can delete it or swap in an older valid anchor alongside a matching database rollback. Its real value is as the off-box push hook. Once the head is pinned somewhere the agent cannot reach (NockCC, for example), rollback and truncation become observable even against a full-file adversary.
+Configure an upgraded v2 anchor store:
 
-### Off-box anchor push
+- `NOCKLOCK_ANCHOR_URL`: HTTPS base URL; plain HTTP is accepted only on loopback for development/tests.
+- `NOCKLOCK_ANCHOR_TOKEN`: bearer token from the environment only, never a flag or config key. Both variables are removed from the fenced child's environment.
 
-**Current multi-project limit:** remote anchors are indexed only by the signing key's fingerprint (`agent_id`), while each project has its own audit chain. Projects using the same managed key therefore share one identity in the same store. Off-box anchoring currently requires one audit chain per store identity: a second project can receive a row-count rejection or a false `TRUNCATION`/`TAMPERED` result against the first project's anchor. Multiple project chains sharing that identity are unsupported; a versioned chain namespace is still needed. This does not change local audit verification.
+After creating a signed audit trail with `wrap`, select the current project explicitly:
 
-Set two environment variables to pin anchors somewhere the agent cannot reach:
-
-- `NOCKLOCK_ANCHOR_URL`: base URL of the anchor store. It must be `https://`; plain `http://` is accepted only for loopback hosts (`127.0.0.1`, `::1`, `localhost`) for local development and tests.
-- `NOCKLOCK_ANCHOR_TOKEN`: optional bearer token, read from the environment only (never a config key or flag) and never printed in errors or logs.
-
-`nocklock wrap` strips both variables from the fenced child's environment, whatever the secret-fence config says. With the URL set, wrap pushes the anchor it writes on teardown under a hard 5-second timeout. The push is fail-open: on any failure wrap prints `NockLock: warning: chain anchor NOT pushed off-box: <reason>` and exits with the wrapped command's own exit code. With the URL unset, teardown behaves exactly as before. `nocklock anchor push [--file <path>]` pushes an anchor by hand (default: `<db-dir>/chain-anchor.json`).
-
-```
-$ nocklock verify --against-remote-anchor
-ANCHOR: TRUNCATION — truncation detected: anchor attests 247 rows, local has 190
+```bash
+nocklock anchor enroll                       # establish a new remote pin
+nocklock verify --against-remote-anchor
+nocklock anchor emit --out anchor.json
+nocklock anchor push --file anchor.json
 ```
 
-`verify --against-remote-anchor` fetches the latest stored anchor for the local signing identity and runs the same checks as `--against-anchor` (the two flags are mutually exclusive). An unset URL, an unreachable store, or no stored anchor prints `ANCHOR: UNAVAILABLE (anchor_unavailable)` and exits non-zero. A missing off-box pin is reported, never read as a pass.
+If the signing key already has a legacy v1 pin, back up the DB, anchor and trusted state, select its actual owning project, and run `nocklock anchor migrate`. Migration verifies the exact legacy prefix and witness, conditionally creates the v2 stream, and requires remote verification before reporting completion. For an unrelated project that has no claim to that history, use `anchor enroll --acknowledge-no-legacy-history`. This establishes a new pin without claiming earlier rollback protection. The upgraded store retains legacy history and freezes ordinary v1 access after v2 registration; explicit legacy-file verification still works.
 
-Server contract (the NockCC endpoint ships separately):
+Registration durably stores its exact signed request and `pending` state before network transmission. After a timeout or crash, retry the same command and mode: the original timestamp/signature are reused. Pending never resets to none. `log --prune` refuses pending/enrolled chains; archive the old chain and explicitly enroll a fresh one to bound growth. Legacy and never-registered chains can still prune, invalidating their earlier anchors. Follow the [offline state-move procedure](docs/runbooks/chain-identity-move.md) when moving a project; never regenerate a missing identity.
 
-- `POST {base}/api/nocklock/anchors/` with `{"anchor": <anchor object>, "pubkey": "<base64 Ed25519 public key>"}` and `Authorization: Bearer <token>`. Any 2xx means stored.
-- `GET {base}/api/nocklock/anchors/{agent_id}/latest/` returns the latest anchor, or 404 when none is stored.
-- The server answers 409 when a pushed anchor's `row_count` is lower than the latest one it holds for that `agent_id`. This server-side monotonic check is what makes a local rollback observable: a rolled-back host can no longer re-pin a shorter chain, and `--against-remote-anchor` then reports the gap as `TRUNCATION`. Redirects are not followed and response bodies are capped at 64 KiB.
+`anchor push`, including `--file`, authenticates the candidate and trusted pair, verifies its local prefix and the previous remote head, then sends a compare-and-swap update. It cannot recreate a missing pin or overwrite a newer one. Remote verification requires the expected pair; missing identity, missing/unsupported routes, invalid signatures, mismatches and unavailable stores all fail. No v1 downgrade is attempted.
+
+`wrap` writes a local anchor on teardown and, for enrolled v2 chains with a configured URL, pushes under a five-second timeout. A push failure warns loudly and preserves the child's exit code. A legacy chain with a configured URL warns that explicit enrollment or migration is required. Interactive commands use a 30-second deadline. Redirects are refused and responses are capped at 64 KiB. The [audit-log reference](docs/how-it-works/audit-log.md) describes the v2 routes and trust boundary; [real NCC acceptance](docs/runbooks/anchor-v2-ncc-acceptance.md) runs the CLI against the actual server handlers with disposable state.
 
 ## Secret preflight scanning
 
@@ -440,7 +432,9 @@ Two candidate runtimes are deliberately left without a preset:
 | `nocklock verify --against-anchor <file>` | Verify the audit chain against an external chain-head anchor file |
 | `nocklock verify --against-remote-anchor` | Verify the audit chain against the latest anchor in the off-box store |
 | `nocklock verify --export-pubkey` | Print the Ed25519 audit-log public key for out-of-band verification |
-| `nocklock anchor emit [--out <file>]` | Emit a signed chain-head anchor |
+| `nocklock anchor emit [--out <file>]` | Verify and emit a signed chain-head anchor |
+| `nocklock anchor enroll [--acknowledge-no-legacy-history]` | Explicitly register this project's v2 remote pin |
+| `nocklock anchor migrate` | Explicitly migrate this project's retained legacy pin to v2 |
 | `nocklock anchor push [--file <file>]` | Push an anchor to the off-box store at `NOCKLOCK_ANCHOR_URL` |
 | `nocklock egress-probe` | Probe Linux network-egress enforcement feasibility on this host (structured `--json`) |
 | `nocklock status` | Show configured fences and event log summary (does not track running sessions) |

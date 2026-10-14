@@ -1,9 +1,6 @@
 # Move trusted chain state offline
 
-N11744 adds the local identity and prune guard. V2 enrollment, remote verification
-and migration commands are a later slice. This procedure moves local state; it
-cannot establish remote verification success. Complete that check with the v2
-client and actual store before any subsequent v2 push.
+Move the database and complete trusted state directory while both locations are offline. This includes `chain-identity.json`, `chain-identity.lock`, and `anchor-registration.json` when present. The original signed registration must survive a pending retry. Complete remote verification against the existing v2 stream before the next push.
 
 An audit DB with a `chain_id` and no matching external `chain-identity.json`
 **must fail closed**. Do not run initialization to repair it, edit an ID, clear
@@ -21,8 +18,9 @@ independent chain needs an explicit new enrollment instead.
    location, old/new state directories, and the identity tuple
    `(agent_id, chain_id, legacy_anchor_digest, registration_state)`. Run
    `nocklock verify --audit` in the old project and require authentic, intact
-   results. Validate trusted-record/DB agreement with `Logger.ReadChainIdentity`
-   in an embedding caller; the later v2 CLI must make the same check.
+   results. Run `nocklock verify --against-remote-anchor` to validate trusted-record/DB
+   agreement and the existing remote pin. An embedding caller can also use
+   `Logger.ReadChainIdentity`.
 
 The state directory mapping is the existing `config.AuditStateDir` mapping:
 
@@ -68,9 +66,8 @@ Before modifying anything, require:
    the original signed chain to verify. The old state directory must be absent.
    Stop on any mismatch; do not regenerate a missing record or initialize a new ID.
 7. Before the next v2 push, remotely verify the preserved expected pair with the
-   actual v2 store. A missing/unreachable remote pin is an error. This final step
-   is deferred until the v2 CLI/server integration ships; local agreement alone
-   does not complete remote migration or prove rollback protection.
+   actual v2 store. A missing/unreachable remote pin is an error. Run `nocklock verify --against-remote-anchor` and require `ANCHOR: OK`;
+   local agreement alone does not complete the move or prove rollback protection.
 
 If either move fails midway, keep both locations offline and use the saved
 mapping and backup to finish or restore the **same** identity. Do not make an

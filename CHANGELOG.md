@@ -6,9 +6,12 @@ All notable changes to NockLock will be documented in this file.
 
 ### Added
 
-- Add trusted external chain identities and monotonic local registration state for future v2 enrollment (N11744). Registration and prune share a process-safe lock; pending/enrolled or incomplete identity state refuses prune. The existing wrap path protects that directory independently of the configured DB and refuses unenforced filesystem access. Legacy chains still prune normally. No v2 network or enrollment CLI is enabled by this slice; the offline move procedure is documented and tested.
+- Add per-chain remote v2 anchors with explicit `anchor enroll` / `anchor migrate`, durable exact-request retry, expected-pair verification, signed-prefix checks, conditional remote updates and actual NCC handler/CLI acceptance coverage (N11742–N11745). Independent projects may share one signing key. Trusted external identity and SQLite metadata must agree; pending/enrolled chains refuse prune and moved state requires explicit relocation and remote verification.
 
-- Add opt-in v2 anchor record encoding, signature and expected-pair verification, snapshot digests, and public interoperability vectors (N11742). V2 signs an independent `chain_id` and legacy migration witness. This is record-format support only: v1 remains the default; CLI, chain enrollment, persistence, network routes and server behavior are unchanged.
+### Breaking
+
+- Remote anchor push/verify now require explicit v2 enrollment or migration and an upgraded store. They never fall back to key-only v1 routes. Legacy files remain explicitly verifiable; legacy local teardown emission remains v1 until enrollment.
+- `anchor emit` requires existing signing adoption and the original key. It refuses unsigned or stripped databases instead of adopting/re-signing them. Normal wrap signing adoption is unchanged.
 
 ### Fixed
 

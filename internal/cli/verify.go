@@ -134,9 +134,15 @@ func runVerifyAgainstAnchor(w io.Writer, anchorFile, pubFlag string) error {
 		return err
 	}
 
-	anchor, err := logging.ReadAnchor(anchorFile)
+	data, err := os.ReadFile(anchorFile)
 	if err != nil {
-		return fmt.Errorf("failed to read anchor file %s: %w", anchorFile, err)
+		return err
+	}
+	var version struct {
+		Version int `json:"version"`
+	}
+	if err := json.Unmarshal(data, &version); err != nil {
+		return err
 	}
 
 	pub, err := resolveVerifyPublicKey(pubFlag)
@@ -149,6 +155,22 @@ func runVerifyAgainstAnchor(w io.Writer, anchorFile, pubFlag string) error {
 		return fmt.Errorf("failed to open event log: %w", err)
 	}
 	defer logger.Close()
+
+	if version.Version == logging.AnchorV2Version {
+		anchor, err := logging.UnmarshalAnchorV2(data)
+		if err != nil {
+			return err
+		}
+		result, err := logger.VerifyAgainstAnchorV2(anchor, pub)
+		if err != nil {
+			return err
+		}
+		return writeAnchorV2VerifyResult(w, result)
+	}
+	anchor, err := logging.UnmarshalAnchor(data)
+	if err != nil {
+		return err
+	}
 
 	result, err := logger.VerifyAgainstAnchor(anchor, pub)
 	if err != nil {
