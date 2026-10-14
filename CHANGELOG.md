@@ -33,7 +33,7 @@ All notable changes to NockLock will be documented in this file.
 
 ### Fixed
 
-- Tests: exercise bare PATH command selection and working-directory decoys through the shipped Linux CLI with Landlock and seccomp required (N11777).
+- Resolve the requested command against the caller's PATH before adding Linux/macOS fence helpers, preserving arguments and refusing implicit current-directory lookup even with `GODEBUG=execerrdot=0`. Hosted bare-command and CWD-decoy controls cover Landlock/seccomp and composed netns launch (N11777).
 
 - Exclude `169.254.169.0/24` and `169.254.170.0/24` from private Linux netns bridge allocation so common instance/container metadata endpoints cannot become bridge addresses. Exhaustive pure mapping tests cover all original slots; reservation and fail-closed proxy readiness remain unchanged (N11776).
 

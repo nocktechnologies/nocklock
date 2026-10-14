@@ -72,6 +72,8 @@ On Linux `CONFINED` below Landlock ABI 9, `doctor` returns `PARTIAL` (exit 3) be
 
 `wrap` prints and signs the effective egress level each session (`KERNEL`, `CONFINED`, `SEATBELT`, `ADVISORY`, `OFF`, `UNREACHABLE`). Read it: `ADVISORY` means a client that ignores `HTTP_PROXY` can reach any host. Set `network.require_enforced = true` or pass `--require-enforced-egress` to refuse such levels (`docs/how-it-works/network-fence.md`).
 
+Bare commands are resolved against the caller's `PATH` before fence helpers are added. A relative PATH entry cannot implicitly select a program in the working directory; use an explicit `./tool` path when intended. Lookup failure exits 1 with a `resolve command` error. Fence policy still governs whether the selected program may execute.
+
 ## 4. Where state goes
 The audit log lives in `$XDG_STATE_HOME/nocklock/<project-key>/` (or `~/.local/state/nocklock/<project-key>/`), not in the project, so for a fresh project the agent cannot edit it. An existing `.nock/events.db` is kept in place, inside the project (`docs/decisions/010-audit-state-outside-project.md`, `ResolveDBPath` in `internal/config/config.go`). Whether the agent can write it on Linux depends on the filesystem fence:
 

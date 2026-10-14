@@ -46,7 +46,7 @@ func TestWrapClaudeCodePresetLaunchPath(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			projectDir := t.TempDir()
-			writeProcTestConfig(t, projectDir, "/usr/", "/lib/", "/lib64/", "/bin/", "/etc/", "/dev/")
+			writeProcTestConfig(t, projectDir, "/usr/", "/lib/", "/lib64/", "/bin/", "/etc/", "/dev/", filepath.Dir(bin))
 			path := tc.path
 			if path == "" {
 				path = t.TempDir()

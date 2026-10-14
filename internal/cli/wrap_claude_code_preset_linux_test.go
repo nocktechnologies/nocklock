@@ -205,9 +205,8 @@ func TestWrapClaudeCodePresetBlocksDescendantParentProcEnviron(t *testing.T) {
 }
 
 // requireNode returns an absolute path to node, or self-skips (hard-fails under
-// NOCKLOCK_AUDIT_REQUIRE=1). The absolute path matters: with Landlock + seccomp
-// on, the child runs through the __landlock-exec shim, which execve's argv[0]
-// directly (no PATH search).
+// NOCKLOCK_AUDIT_REQUIRE=1). These runtime-introspection tests use the known
+// runtime explicitly; TestWrapClaudeCodePresetLaunchPath covers bare lookup.
 func requireNode(t *testing.T) string {
 	t.Helper()
 	node, err := exec.LookPath("node")
