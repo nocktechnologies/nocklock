@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync/atomic"
 	"testing"
 
 	"github.com/nocktechnologies/nocklock/internal/logging"
@@ -332,23 +333,38 @@ func TestV2RegistrationConfirmationCannotRollBackOriginal(t *testing.T) {
 }
 
 func TestV2MalformedSuccessRedactsBearer(t *testing.T) {
-	a, pub := v2Fixture(t)
-	for _, operation := range []string{"fetch", "register", "push", "migrate"} {
+	// Migrate first: a shared fixture would leave a nonzero legacy digest and
+	// make fresh registration fail locally without testing response redaction.
+	for _, operation := range []string{"migrate", "fetch", "register", "push"} {
 		t.Run(operation, func(t *testing.T) {
+			legacy := strings.Repeat("0", 64)
+			if operation == "migrate" {
+				legacy = strings.Repeat("e", 64)
+			}
+			a, pub := v2FixtureLegacy(t, legacy)
 			token := "review-secret-token"
+			method, path, status := http.MethodPost, "/api/nocklock/anchors/v2/", http.StatusCreated
+			code := "stored"
+			if operation == "register" || operation == "migrate" {
+				path += operation + "/"
+				code = "registered"
+			}
+			reply := v2Reply(t, a, pub, code)
+			reply["data"].(map[string]any)["anchor"] = map[string]any{token: "echo"}
+			if operation == "fetch" {
+				method, path, status = http.MethodGet, path+a.AgentID+"/"+a.ChainID+"/latest/", http.StatusOK
+				reply = map[string]any{token: "echo"}
+			}
+			var calls atomic.Int32
 			s := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-				if operation == "fetch" {
-					w.WriteHeader(200)
-					_ = json.NewEncoder(w).Encode(map[string]any{token: "echo"})
-					return
+				calls.Add(1)
+				if r.Method != method || r.URL.Path != path {
+					t.Errorf("malformed-response request = %s %s, want %s %s", r.Method, r.URL.Path, method, path)
 				}
-				code := "stored"
-				if operation != "push" {
-					code = "registered"
+				if r.Header.Get("Authorization") != "Bearer "+token {
+					t.Error("malformed-response request missing bearer authentication")
 				}
-				reply := v2Reply(t, a, pub, code)
-				reply["data"].(map[string]any)["anchor"] = map[string]any{token: "echo"}
-				w.WriteHeader(201)
+				w.WriteHeader(status)
 				_ = json.NewEncoder(w).Encode(reply)
 			}))
 			defer s.Close()
@@ -361,11 +377,17 @@ func TestV2MalformedSuccessRedactsBearer(t *testing.T) {
 			case "push":
 				_, err = PushV2(context.Background(), s.URL, token, a, pub, strings.Repeat("c", 64))
 			case "migrate":
-				a, pub = v2FixtureLegacy(t, strings.Repeat("e", 64))
 				_, err = MigrateV2(context.Background(), s.URL, token, a, pub, a.LegacyAnchorDigest)
 			}
-			if err == nil {
-				t.Fatal("expected malformed response error")
+			if calls.Load() != 1 {
+				t.Fatalf("malformed-response case did not reach its HTTP handler exactly once: requests=%d error=%v", calls.Load(), err)
+			}
+			prefix := "anchor v2: invalid stored anchor: "
+			if operation == "fetch" {
+				prefix = "invalid remote v2 anchor: "
+			}
+			if err == nil || !strings.HasPrefix(err.Error(), prefix) {
+				t.Fatalf("expected malformed response error from HTTP, got %v", err)
 			}
 			if strings.Contains(err.Error(), token) {
 				t.Fatalf("bearer leaked in error: %v", err)
