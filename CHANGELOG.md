@@ -31,6 +31,8 @@ All notable changes to NockLock will be documented in this file.
 
 ### Fixed
 
+- Exclude `169.254.169.0/24` and `169.254.170.0/24` from private Linux netns bridge allocation so common instance/container metadata endpoints cannot become bridge addresses. Exhaustive pure mapping tests cover all original slots; reservation and fail-closed proxy readiness remain unchanged (N11776).
+
 - Preserve original registration replay after interrupted writes: any retained request blocks prune, including state `none`. Strict anchor opens validate existing adoption, key fingerprint and signed head before database mutation and observe live WAL state. V2 file verification distinguishes a missing key from a forged signature; emit handles nil contexts and confirms written v2 files. The real NCC acceptance gate adds a same-head `already_stored` CLI case and scopes/redacts its receipts (N11745).
 
 - Anchor v2 identity-lock waits now honor command cancellation and share the existing HTTP deadline. Wrap teardown starts its five-second budget before reading identity; interactive anchor commands and verification use 30 seconds. Durable filesystem writes remain synchronous rather than being abandoned on timeout (N11745).
