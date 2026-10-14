@@ -38,7 +38,7 @@ Go tests sit beside the code as `*_test.go`. Files ending `_linux_test.go` or `_
 | `internal/fence/syscallfence/` | Linux seccomp syscall fence: denylist (`denylist.go`), policy (`policy.go`), filter build (`seccomp_linux.go`); `seccomp_stub.go` elsewhere | `program_test.go`, `denylist_test.go`, `seccomp_enforce_linux_test.go` |
 | `internal/fence/network/` | Local HTTP/HTTPS CONNECT proxy and domain allowlist (`proxy.go`, `handler.go`, `connect.go`), DNS cache, watchdog, look-back rules (`lookback.go`) | `*_test.go` here, `lookback_race_linux_test.go` |
 | `internal/fence/network/netns/` | Linux `--net-fence=netns`: network namespace, nftables floor, transparent proxy, egress helper, subnet reservation | `*_linux_test.go` here (`netns_bypass`, `protocol_matrix`, `dns_escape`, `subnet_reservation`) |
-| `internal/logging/` | SQLite event log: hash chain, Ed25519 signing (`signing.go`), anchors (`anchor.go`), chain export | `logger_test.go`, `signing_test.go`, `anchor_test.go`, `logger_symlink_test.go` |
+| `internal/logging/` | SQLite event log: hash chain, Ed25519 signing (`signing.go`), default v1 anchors (`anchor.go`), opt-in v2 record format (`anchor_v2.go`), chain export | `logger_test.go`, `signing_test.go`, `anchor_test.go`, `anchor_v2_test.go`, `testdata/anchor-v2/` (public interoperability vectors), `logger_symlink_test.go` |
 | `internal/anchorclient/` | HTTP client that pushes a chain-head anchor off-box and fetches the latest (`client.go`) | `client_test.go` |
 | `internal/forward/` | Opt-in `[audit.forward]` queue that sends decisions to Command's ops log (`forward.go`) | `forward_test.go` |
 | `internal/version/` | Version string, set by ldflags | `version_test.go` |
