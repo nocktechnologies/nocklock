@@ -5,8 +5,10 @@ Move the database and complete trusted state directory while both locations are 
 An audit DB with a `chain_id` and no matching external `chain-identity.json`
 **must fail closed**. Do not run initialization to repair it, edit an ID, clear
 `pending`, or copy another project's record. A project move retains the exact
-pair, legacy witness and registration state. A clone intended to become an
-independent chain needs an explicit new enrollment instead. All pruning APIs
+pair, legacy witness and registration state. An independent fork starts a new
+audit DB and explicitly enrolls a new chain; preserve the original archive and
+pin. Copying an enrolled DB and identity does not create a new stream, and must
+not be repaired by deleting or resetting its identity. All pruning APIs
 require the canonical project root even if a restored DB has no identity mirror;
 never pass an empty root to bypass the external record. A lock wait times out
 after five seconds without deleting rows; stop the competing command before
