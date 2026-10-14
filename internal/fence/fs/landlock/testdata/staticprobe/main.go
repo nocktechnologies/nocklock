@@ -43,7 +43,10 @@ func main() {
 		fmt.Fprintf(os.Stderr, "apply Landlock rules: %v\n", err)
 		os.Exit(1)
 	}
+	runFilesystemChecks(root, auditDB, denied)
+}
 
+func runFilesystemChecks(root, auditDB, denied string) {
 	// The fence root is usable: the child creates and removes an entry DIRECTLY
 	// IN the root, not merely inside a subdirectory that already existed.
 	created := filepath.Join(root, "created-by-child")

@@ -66,7 +66,7 @@ jobs:
               -count=10 -v -timeout=3m
           done
 
-      - name: reject the old unpinned static probe (negative control)
+      - name: deterministic cross-thread Landlock control
         run: |
           PYTHONDONTWRITEBYTECODE=1 python3 scripts/test_landlock_probe_thread_affinity.py
           python3 scripts/test-landlock-probe-thread-affinity.py
@@ -81,6 +81,22 @@ jobs:
         run: |
           make build-all
           bash scripts/test-init-default-linux.sh
+
+  unpinned-landlock-soak:
+    name: optional unpinned Landlock reproduction
+    if: github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    timeout-minutes: 12
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+      - name: attempt natural migration (inconclusive is not an enforcement pass)
+        run: python3 scripts/test-landlock-probe-thread-affinity.py --unpinned
 
   claude-code-preset:
     name: claude-code preset · Landlock enforcement (non-root)
