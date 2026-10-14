@@ -72,22 +72,52 @@ def _partial(value):
     return value.decode(errors="replace") if isinstance(value, bytes) else value or ""
 
 
+# Set to a signal number when SIGINT or SIGTERM arrives during cleanup. The
+# signal is recorded, never dropped and never raised there; run_case and main
+# act on it once cleanup has finished.
+_termination_requested = None
+
+
+def _record_termination(signum, frame):
+    global _termination_requested
+    if _termination_requested is None:
+        _termination_requested = signum
+
+
+def _raise_if_terminated():
+    if _termination_requested == signal.SIGINT:
+        raise KeyboardInterrupt
+    if _termination_requested is not None:
+        raise SystemExit(128 + _termination_requested)
+
+
 def _stop_group(process, stdout="", stderr="", grace=0):
     """Kill the case's owned process group, drain output within a deadline and reap.
 
     Returns (stdout, stderr, fault). A descendant outside the killed group can
     retain a pipe; the partial receipt is preserved if the bounded drain times out.
-    SIGINT and SIGTERM are ignored for the whole cleanup so a second signal cannot
-    skip the SIGKILL, drain or reap; the previous handlers are restored afterwards.
+    SIGINT and SIGTERM are only recorded (see _record_termination) for the whole
+    cleanup, so a signal cannot skip the SIGKILL, drain or reap and is not lost;
+    the previous handlers are restored afterwards. Callers act on the record.
     """
     fault = ""
     saved = {}
-    for signum in (signal.SIGINT, signal.SIGTERM):
-        try:
-            saved[signum] = signal.signal(signum, signal.SIG_IGN)
-        except ValueError:
-            pass  # Not the main thread: handlers cannot be changed here.
+    signals = (signal.SIGINT, signal.SIGTERM)
     try:
+        # Block both while swapping handlers so none reaches an old handler
+        # mid-swap; a pending one is delivered to the recorder on unblock.
+        old_mask = signal.pthread_sigmask(signal.SIG_BLOCK, signals)
+    except (AttributeError, ValueError):
+        old_mask = None
+    try:
+        for signum in signals:
+            try:
+                saved[signum] = signal.signal(signum, _record_termination)
+            except ValueError:
+                pass  # Not the main thread: handlers cannot be changed here.
+        if old_mask is not None:
+            signal.pthread_sigmask(signal.SIG_SETMASK, old_mask)
+
         if grace:
             try:
                 os.killpg(process.pid, signal.SIGTERM)
@@ -114,6 +144,8 @@ def _stop_group(process, stdout="", stderr="", grace=0):
             except subprocess.TimeoutExpired:
                 fault += "; process was not reaped before cleanup deadline"
     finally:
+        if old_mask is not None:
+            signal.pthread_sigmask(signal.SIG_SETMASK, old_mask)
         for signum, handler in saved.items():
             signal.signal(signum, handler)
     return stdout, stderr, fault
@@ -135,11 +167,13 @@ def run_case(repo, out, case, package, test):
         # KeyboardInterrupt, SIGTERM (see main) or any other exit path: never
         # leave the owned process group running.
         _stop_group(process, grace=SIGTERM_GRACE_SECONDS)
+        _raise_if_terminated()
         raise
     (out / (case + ".jsonl")).write_text(stdout)
     (out / (case + ".stderr.txt")).write_text(stderr)
     # A successful leader and earlier pass events cannot rescue a timed-out
     # run. Persist receipts before raising so main can include this FAIL row.
+    _raise_if_terminated()
     if timeout_fault is not None:
         raise ValueError(timeout_fault)
     return classify(case, *parse_result(stdout, test, process.returncode))
@@ -168,6 +202,7 @@ def main():
     args.out.mkdir(parents=True, exist_ok=True)
     rows = []
     for case, package, test in CASES:
+        _raise_if_terminated()
         try:
             if platform.system() != "Linux":
                 raise ValueError("Linux kernel required; no cross-platform enforcement claim")

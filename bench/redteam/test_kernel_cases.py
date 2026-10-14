@@ -13,6 +13,10 @@ from kernel_cases import CASES, classify, parse_result, run_case
 
 
 class KernelReceiptTest(TestCase):
+    def setUp(self):
+        kernel_cases._termination_requested = None
+        self.addCleanup(setattr, kernel_cases, "_termination_requested", None)
+
     def test_timeout_is_failure_even_after_pass_and_zero_leader_exit(self):
         # A real fake-go process emits valid passing test JSON, then leaves a
         # descendant holding output. The leader exits 0: returncode cannot be
@@ -163,6 +167,53 @@ class KernelReceiptTest(TestCase):
                 if pidfile.exists() and pidfile.read_text():
                     try:
                         os.killpg(int(pidfile.read_text()), signal.SIGKILL)
+                    except ProcessLookupError:
+                        pass
+
+    def test_sigterm_during_timeout_cleanup_stops_the_harness(self):
+        # The first case times out; its cleanup drain is held open by an escaped
+        # child. SIGTERM arrives during that drain. It must be recorded, not
+        # dropped: main exits 143 and never starts the second case.
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            log = root / "starts"
+            escaped = root / "escaped"
+            stub = root / "go"
+            stub.write_text(f"#!{sys.executable}\n" +
+                            "import os, pathlib, time\n" +
+                            f"open({str(log)!r}, 'a').write(str(os.getpid()) + '\\n')\n" +
+                            "if os.fork() == 0:\n    os.setsid()\n" +
+                            f"    open({str(escaped)!r}, 'a').write(str(os.getpid()) + '\\n')\n" +
+                            "    time.sleep(4)\n    os._exit(0)\n" +
+                            "time.sleep(30)\n")
+            stub.chmod(0o700)
+            cases = (("a", "pkg", CASES[1][2]), ("b", "pkg", CASES[1][2]))
+            old = signal.getsignal(signal.SIGTERM)
+            threading.Timer(0.6, os.kill, (os.getpid(), signal.SIGTERM)).start()
+            try:
+                with mock.patch.dict(os.environ, PATH=str(root) + os.pathsep + os.environ["PATH"]), \
+                     mock.patch("kernel_cases.CASES", cases), \
+                     mock.patch("kernel_cases.CASE_TIMEOUT_SECONDS", 0.3), \
+                     mock.patch("kernel_cases.CLEANUP_TIMEOUT_SECONDS", 1.5), \
+                     mock.patch("sys.argv", ["kernel_cases.py", "--out", str(root / "out")]):
+                    with self.assertRaises(SystemExit) as raised:
+                        kernel_cases.main()
+                self.assertEqual(raised.exception.code, 143)
+                starts = log.read_text().split()
+                self.assertEqual(len(starts), 1, "a second case started after SIGTERM")
+                for _ in range(100):
+                    try:
+                        os.killpg(int(starts[0]), 0)
+                    except ProcessLookupError:
+                        break
+                    time.sleep(0.05)
+                else:
+                    self.fail("process group survived")
+            finally:
+                signal.signal(signal.SIGTERM, old)
+                for pid in (escaped.read_text().split() if escaped.exists() else []):
+                    try:
+                        os.kill(int(pid), signal.SIGKILL)
                     except ProcessLookupError:
                         pass
 
