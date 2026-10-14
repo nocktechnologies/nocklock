@@ -892,10 +892,15 @@ var wrapCmd = &cobra.Command{
 			return &exitCodeError{code: 2}
 		}
 
-		// On macOS the filesystem fence wraps the child argv with sandbox-exec
-		// (kernel-enforced, inherited by all descendants). On Linux fsSandboxPrefix
-		// is empty and the child runs directly with the LD_PRELOAD env above.
-		childArgv := composeChildArgv(args, landlockPrefix, fsSandboxPrefix)
+		// Resolve the requested command before any kernel-fence shim or netns
+		// helper receives it; their execve calls do not search the caller's PATH.
+		childArgv, err := resolveChildArgv(args, landlockPrefix, fsSandboxPrefix)
+		if err != nil {
+			logEvent(logging.EventSessionEnd, "session", "exit_code=1", false)
+			cmd.SilenceErrors = true
+			cmd.SilenceUsage = true
+			return err
+		}
 		// Export this run's session id to the child (N10647) so a co-located tool
 		// can stamp the SAME id. Done here, after every other env mutation and
 		// immediately before the single point where childEnv is consumed, so it

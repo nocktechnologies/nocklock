@@ -45,7 +45,12 @@ func (b *credentialOutput) snapshot() []byte {
 func runCredentialCommand(ctx context.Context, cmd *exec.Cmd, cleanupWait time.Duration) ([]byte, error) {
 	var output credentialOutput
 	cmd.Stdout, cmd.Stderr = &output, &output
-	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	// Preserve caller options such as Linux Pdeathsig while isolating the
+	// command's group for timeout and output-drain cleanup.
+	if cmd.SysProcAttr == nil {
+		cmd.SysProcAttr = &syscall.SysProcAttr{}
+	}
+	cmd.SysProcAttr.Setpgid = true
 	killGroup := func() error {
 		err := syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
 		if errors.Is(err, syscall.ESRCH) {
