@@ -6,7 +6,13 @@ An audit DB with a `chain_id` and no matching external `chain-identity.json`
 **must fail closed**. Do not run initialization to repair it, edit an ID, clear
 `pending`, or copy another project's record. A project move retains the exact
 pair, legacy witness and registration state. A clone intended to become an
-independent chain needs an explicit new enrollment instead.
+independent chain needs an explicit new enrollment instead. All pruning APIs
+require the canonical project root even if a restored DB has no identity mirror;
+never pass an empty root to bypass the external record. A lock wait times out
+after five seconds without deleting rows; stop the competing command before
+retrying. If a write reports committed replacement with uncertain durability,
+preserve the visible state and retry registration to complete its barriers;
+never roll the state back to `none`.
 
 ## Record the mapping before moving
 

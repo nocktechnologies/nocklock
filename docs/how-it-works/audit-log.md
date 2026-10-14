@@ -26,6 +26,16 @@ V2 anchors sign the verified `(agent_id, chain_id)` pair, current head/count, ti
 
 The random ID lives in `chain-identity.json` under the trusted external project state directory and is mirrored in DB metadata. Both copies must agree. `anchor-registration.json` durably retains the exact original signed request, mode and migration witness before registration. Under the shared identity/prune lock, the client verifies the local signed prefix and syncs `pending` before sending. A lost response, rejected request or crash leaves pending; retrying the same command replays the original snapshot. Verified exact-request confirmation moves to `enrolled`; no transition clears pending or enrolled. The operator must restore a missing record, never mint a replacement.
 
+Every pending retry rewrites and syncs the record before sending again; finding
+`pending` on disk does not prove the last directory sync succeeded. A
+`ChainIdentityDurabilityError` means replacement committed but durability is
+uncertain: preserve the visible state and retry, never restore `none`. A
+pending-write failure sends no callback; an enrolled-write failure follows the
+already-confirmed remote request and retains the previously durable pending
+guard. File and directory barriers stop at the configured state root. State-root establishment separately refreshes its immediate owning-parent
+barrier, including when already present; creating missing components syncs each
+new entry before descending. Existence alone never proves a completed barrier.
+
 ### Remote operations
 
 Set `NOCKLOCK_ANCHOR_URL` and `NOCKLOCK_ANCHOR_TOKEN` in the operator environment. Token errors are redacted and both variables are stripped from the child. Remote commands use only `/api/nocklock/anchors/v2/` (`internal/anchorclient/client_v2.go`):
@@ -40,7 +50,26 @@ The upgraded store retains v1 migration history and freezes ordinary v1 access f
 
 `wrap` emits `chain-anchor.json` beside the DB and pushes enrolled v2 chains under a five-second deadline. Failure warns and retains the child's exit code; interactive commands use 30 seconds. Legacy chains emit local v1 files but require explicit enrollment/migration for any remote push. The real NCC/CLI [acceptance runbook](../runbooks/anchor-v2-ncc-acceptance.md) exercises distinct projects, rollback, missing/swapped state, migration, lost-response retries and moves.
 
-Prune remains allowed for legacy chains and identities in state `none`. Pending/enrolled identities, missing records and mismatched metadata refuse prune before changing rows. `wrap` protects the external trusted directory independently of `logging.db` and refuses an absent filesystem fence or Linux enforcement set to `off`. Follow the [offline move procedure](../runbooks/chain-identity-move.md); an in-project DB and its external trusted directory must move together, followed by remote verification before another push.
+Prune remains allowed for legacy chains and initialized identities in state
+`none` when the logger has explicit project context. Rootless library callers
+must supply that context: a rolled-back DB cannot prove that external state is
+absent. The CLI already supplies the project root. Prune waits at most five
+seconds for the shared identity lock and holds it through deletion; timeout,
+pending/enrolled identities, missing records and mismatched metadata refuse
+before changing rows.
+
+With a filesystem fence enabled, `wrap` protects the canonical future trusted
+state directory before any identity exists, including when `logging.db` points
+inside the project. After any identity exists (`none`, `pending` or `enrolled`),
+it also refuses an absent filesystem fence or Linux enforcement set to `off`.
+On Linux, valid non-off modes (default, `preferred`, `required`) normalize to
+`required`: absent Landlock, failed activation, or a deny beneath a broader grant
+stops the child. Legacy sessions explicitly disabling the fence or setting Linux
+enforcement to `off` retain their existing degraded behavior; they make no
+kernel-backed trusted-state custody claim and should not precede enrollment of
+state that an unfenced child could have modified. Follow the
+[offline move procedure](../runbooks/chain-identity-move.md) when relocating a
+project; never regenerate an ID to bypass a missing record. Complete remote verification at the moved path before another push.
 
 ## Where the log lives
 Outside the project: `$XDG_STATE_HOME/nocklock/<project-key>/` (or `~/.local/state/nocklock/<project-key>/`). The filesystem fence grants the project root and Landlock cannot exclude a path beneath a grant, so a log inside the project would be editable by the agent. An existing `.nock/events.db` stays where it is (the README explains why NockLock does not move it). Path resolution fails closed (`internal/config/state.go`); `wrap` refuses to start when `logging.db` resolves to the project root. Decision record: `docs/decisions/010-audit-state-outside-project.md`.

@@ -3,8 +3,10 @@
 package logging
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -576,4 +578,141 @@ func TestChainIdentitySharedKeyAndConcurrentInitialization(t *testing.T) {
 		t.Fatalf("A enrollment blocked B prune: %d,%v", n, err)
 	}
 	assertIdentityPruneRefused(t, f.logger)
+}
+
+func TestChainIdentityPendingRetryReestablishesDurability(t *testing.T) {
+	f := newIdentityFixture(t)
+	initial := initIdentity(t, f)
+	recordDir, err := filepath.EvalSymlinks(filepath.Dir(f.record))
+	if err != nil {
+		t.Fatal(err)
+	}
+	root, err := config.AuditStateRoot()
+	if err != nil {
+		t.Fatal(err)
+	}
+	var syncs []string
+	failed := false
+	injected := errors.New("injected first directory fsync failure")
+	f.logger.identitySync = func(file *os.File) error {
+		info, err := file.Stat()
+		if err != nil {
+			return err
+		}
+		syncs = append(syncs, filepath.Clean(file.Name()))
+		if info.IsDir() && !failed {
+			failed = true
+			return injected
+		}
+		return file.Sync()
+	}
+	calls := 0
+	callback := func(id ChainIdentity) (*ChainRegistrationConfirmation, error) {
+		calls++
+		if len(syncs) != 4 || !strings.HasPrefix(filepath.Base(syncs[0]), ".chain-identity-") || syncs[1] != recordDir || syncs[2] != filepath.Dir(recordDir) || syncs[3] != root {
+			t.Fatalf("callback before complete bounded durability barrier: %v", syncs)
+		}
+		return &ChainRegistrationConfirmation{AgentID: id.AgentID, ChainID: id.ChainID}, nil
+	}
+	_, err = f.logger.RegisterChainIdentity(callback)
+	var durability *ChainIdentityDurabilityError
+	if !errors.As(err, &durability) || !errors.Is(err, injected) || calls != 0 {
+		t.Fatalf("post-rename failure: err=%v callback=%d", err, calls)
+	}
+	pending, err := f.logger.ReadChainIdentity()
+	if err != nil || pending.ChainID != initial.ChainID || pending.RegistrationState != ChainRegistrationPending {
+		t.Fatalf("committed pending record lost: %+v, %v", pending, err)
+	}
+	syncs = nil
+	enrolled, err := f.logger.RegisterChainIdentity(callback)
+	if err != nil || calls != 1 || enrolled.RegistrationState != ChainRegistrationEnrolled {
+		t.Fatalf("durable retry: %+v, %v, calls=%d", enrolled, err, calls)
+	}
+	// Both pending and enrolled updates sync no ancestor above the state root.
+	for _, path := range syncs {
+		if !pathContains(root, path) {
+			t.Fatalf("synced unrelated ancestor %q above %q", path, root)
+		}
+	}
+}
+
+func TestChainIdentityPruneRefusesRootlessAfterDatabaseRollback(t *testing.T) {
+	for _, enrolled := range []bool{false, true} {
+		t.Run(fmt.Sprintf("enrolled=%t", enrolled), func(t *testing.T) {
+			f := newIdentityFixture(t)
+			identityOldEvent(t, f.logger)
+			backup := filepath.Join(t.TempDir(), "before-identity.db")
+			if _, err := f.logger.db.Exec("VACUUM INTO ?", backup); err != nil {
+				t.Fatal(err)
+			}
+			initIdentity(t, f)
+			_, err := f.logger.RegisterChainIdentity(func(id ChainIdentity) (*ChainRegistrationConfirmation, error) {
+				if !enrolled {
+					return nil, errors.New("lost registration response")
+				}
+				return &ChainRegistrationConfirmation{AgentID: id.AgentID, ChainID: id.ChainID}, nil
+			})
+			if enrolled && err != nil {
+				t.Fatal(err)
+			}
+			f.logger.Close()
+			originalRecord, err := os.ReadFile(f.record)
+			if err != nil {
+				t.Fatal(err)
+			}
+			snapshot, err := os.ReadFile(backup)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(f.db, snapshot, 0600); err != nil {
+				t.Fatal(err)
+			}
+			for _, project := range []string{"", f.project} {
+				l, err := NewLogger(f.db, project, WithSigning(f.key))
+				if err != nil {
+					t.Fatal(err)
+				}
+				mirror, err := l.readChainIdentityMirror()
+				if err != nil || mirror != nil {
+					t.Fatalf("rollback fixture retained mirror: %+v, %v", mirror, err)
+				}
+				assertIdentityPruneRefused(t, l)
+				l.Close()
+			}
+			actual, err := os.ReadFile(f.record)
+			if err != nil || string(actual) != string(originalRecord) {
+				t.Fatalf("prune changed trusted record: %v", err)
+			}
+		})
+	}
+	// Allowed control: explicit project context still permits a legacy prune.
+	f := newIdentityFixture(t)
+	identityOldEvent(t, f.logger)
+	if n, err := f.logger.Prune(24 * time.Hour); err != nil || n != 1 {
+		t.Fatalf("legacy control: %d, %v", n, err)
+	}
+}
+
+func TestChainIdentityPruneLockWaitIsBounded(t *testing.T) {
+	f := newIdentityFixture(t)
+	identityOldEvent(t, f.logger)
+	holder, err := f.logger.lockChainIdentityStore()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer holder.close()
+	start := time.Now()
+	_, err = f.logger.Prune(24 * time.Hour)
+	elapsed := time.Since(start)
+	if !errors.Is(err, context.DeadlineExceeded) || elapsed < pruneIdentityLockTimeout || elapsed > pruneIdentityLockTimeout+2*time.Second {
+		t.Fatalf("prune lock wait: %v after %s", err, elapsed)
+	}
+	stats, err := f.logger.Stats("")
+	if err != nil || stats.TotalEvents != 1 {
+		t.Fatalf("timed-out prune changed rows: %+v, %v", stats, err)
+	}
+	holder.close()
+	if n, err := f.logger.Prune(24 * time.Hour); err != nil || n != 1 {
+		t.Fatalf("released lock control: %d, %v", n, err)
+	}
 }

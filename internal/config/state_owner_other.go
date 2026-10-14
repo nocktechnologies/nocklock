@@ -8,3 +8,7 @@ import "io/fs"
 func validateStateDirOwner(info fs.FileInfo) error {
 	return nil
 }
+
+// Trusted chain identity lifecycle is unsupported on these platforms. Preserve
+// legacy state-directory creation without claiming Unix directory durability.
+func syncCreatedStateRootParent(string) error { return nil }

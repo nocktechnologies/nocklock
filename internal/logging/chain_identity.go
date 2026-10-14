@@ -2,6 +2,7 @@ package logging
 
 import (
 	"bytes"
+	"context"
 	"crypto/rand"
 	"encoding/hex"
 	"encoding/json"
@@ -10,6 +11,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"time"
 
 	"github.com/nocktechnologies/nocklock/internal/config"
 )
@@ -19,6 +21,8 @@ import (
 const ChainIdentityFileName = "chain-identity.json"
 
 const chainIdentityLockName = "chain-identity.lock"
+
+const pruneIdentityLockTimeout = 5 * time.Second
 
 // ChainRegistrationState records whether the remote store might hold a pin.
 // Transitions are monotonic: none -> pending -> enrolled. Pending is persisted
@@ -170,8 +174,9 @@ func (l *Logger) ChainIdentityDirectory() (string, error) {
 // RegisterChainIdentity serializes registration with prune and persists pending
 // durably before invoking register. The callback must use a bounded deadline
 // and affirm the exact trusted pair only after authenticating the store's
-// response. Every error, panic, timeout or interrupted process leaves pending;
-// there is no transition back to none. Already enrolled is an idempotent no-op.
+// response. Request errors, panics, timeouts or interruptions leave pending;
+// there is no transition back to none. A post-rename durability error preserves
+// the visible replacement. Already enrolled is an idempotent no-op.
 // No network behavior is implemented here. The callback must not call identity
 // lifecycle methods or Prune on this chain (the shared lock is already held).
 func (l *Logger) RegisterChainIdentity(register func(ChainIdentity) (*ChainRegistrationConfirmation, error)) (*ChainIdentity, error) {
@@ -197,11 +202,12 @@ func (l *Logger) registerChainIdentityLocked(store *chainIdentityStore, identity
 	if identity.RegistrationState == ChainRegistrationEnrolled {
 		return identity, nil
 	}
-	if identity.RegistrationState == ChainRegistrationNone {
-		identity.RegistrationState = ChainRegistrationPending
-		if err := store.write(identity); err != nil {
-			return nil, err
-		}
+	// A prior rename may have succeeded while its directory fsync failed.
+	// Never infer durability from finding pending: every retry re-establishes
+	// the complete file and directory barrier before any remote side effect.
+	identity.RegistrationState = ChainRegistrationPending
+	if err := store.write(identity); err != nil {
+		return nil, err
 	}
 	confirmation, err := register(*identity)
 	if err != nil {
@@ -218,6 +224,9 @@ func (l *Logger) registerChainIdentityLocked(store *chainIdentityStore, identity
 }
 
 func (l *Logger) lockPruneIdentity() (func(), error) {
+	if l.projectRoot == "" {
+		return nil, errors.New("refusing prune without an explicit project root: a rolled-back DB cannot prove absence of a remote pin; reopen with project context and follow docs/runbooks/chain-identity-move.md")
+	}
 	if !identityLockSupported {
 		// These platforms cannot initialize/register an identity, so there is
 		// no competing enrollment operation to lock against. Preserve legacy
@@ -227,14 +236,9 @@ func (l *Logger) lockPruneIdentity() (func(), error) {
 		}
 		return func() {}, nil
 	}
-	if l.projectRoot == "" {
-		_, err := l.ReadChainIdentity()
-		if errors.Is(err, ErrChainIdentityMissing) {
-			return func() {}, nil // Legacy library callers without project context.
-		}
-		return nil, err
-	}
-	store, err := l.lockChainIdentityStore()
+	ctx, cancel := context.WithTimeout(context.Background(), pruneIdentityLockTimeout)
+	defer cancel()
+	store, err := l.lockChainIdentityStoreContext(ctx)
 	if err != nil {
 		return nil, err
 	}
@@ -329,8 +333,40 @@ func validateChainIdentity(identity *ChainIdentity) error {
 }
 
 type chainIdentityStore struct {
-	root *os.Root
-	lock *os.File
+	root     *os.Root
+	lock     *os.File
+	syncRoot string
+	syncFile func(*os.File) error
+}
+
+// ChainIdentityDurabilityError means the replacement record is visible, but a
+// directory barrier failed. It must not be treated as an uncommitted write or
+// permission to send registration. Retrying pending registration redoes all barriers.
+type ChainIdentityDurabilityError struct{ Err error }
+
+// Error describes the committed replacement and required retry.
+func (e *ChainIdentityDurabilityError) Error() string {
+	return "trusted chain identity replacement committed, but durability is uncertain; preserve its visible state and retry the operation: " + e.Err.Error()
+}
+
+// Unwrap returns the directory synchronization failure.
+func (e *ChainIdentityDurabilityError) Unwrap() error { return e.Err }
+
+// TrustedChainStateDirectory returns the canonical external audit-state
+// directory to protect even before an identity is created. It does not mint an
+// identity. A configured logging.db cannot change this trusted location.
+func (l *Logger) TrustedChainStateDirectory() (string, error) {
+	if l.projectRoot == "" {
+		return "", errors.New("chain identity requires an explicit project root")
+	}
+	dir, err := config.EnsureAuditStateDir(l.projectRoot)
+	if err != nil {
+		return "", fmt.Errorf("cannot protect trusted chain identity directory: %w", err)
+	}
+	if pathContains(l.projectRoot, dir) {
+		return "", errors.New("trusted chain identity directory must be outside the fenced project; move XDG_STATE_HOME outside the project")
+	}
+	return dir, nil
 }
 
 func (s *chainIdentityStore) close() {
@@ -341,15 +377,20 @@ func (s *chainIdentityStore) close() {
 }
 
 func (l *Logger) lockChainIdentityStore() (*chainIdentityStore, error) {
-	if l.projectRoot == "" {
-		return nil, errors.New("chain identity requires an explicit project root")
-	}
-	dir, err := config.EnsureAuditStateDir(l.projectRoot)
+	return l.lockChainIdentityStoreContext(context.Background())
+}
+
+func (l *Logger) lockChainIdentityStoreContext(ctx context.Context) (*chainIdentityStore, error) {
+	dir, err := l.TrustedChainStateDirectory()
 	if err != nil {
-		return nil, fmt.Errorf("cannot protect trusted chain identity directory: %w", err)
+		return nil, err
 	}
-	if pathContains(l.projectRoot, dir) {
-		return nil, errors.New("trusted chain identity directory must be outside the fenced project; move XDG_STATE_HOME outside the project")
+	syncRoot, err := config.AuditStateRoot()
+	if err != nil {
+		return nil, err
+	}
+	if !pathContains(syncRoot, dir) {
+		return nil, errors.New("trusted chain identity state root changed; refusing operation")
 	}
 	before, err := os.Lstat(dir)
 	if err != nil {
@@ -369,12 +410,16 @@ func (l *Logger) lockChainIdentityStore() (*chainIdentityStore, error) {
 		root.Close()
 		return nil, fmt.Errorf("cannot open trusted chain identity lock: %w", err)
 	}
-	store := &chainIdentityStore{root: root, lock: lock}
+	syncFile := l.identitySync
+	if syncFile == nil {
+		syncFile = (*os.File).Sync
+	}
+	store := &chainIdentityStore{root: root, lock: lock, syncRoot: syncRoot, syncFile: syncFile}
 	if err := store.checkFile(chainIdentityLockName, lock); err != nil {
 		store.close()
 		return nil, err
 	}
-	if err := lockIdentityFile(lock); err != nil {
+	if err := lockIdentityFileContext(ctx, lock); err != nil {
 		store.close()
 		return nil, fmt.Errorf("cannot lock trusted chain identity: %w", err)
 	}
@@ -480,7 +525,7 @@ func (s *chainIdentityStore) writeData(name string, data []byte) error {
 	}
 	defer s.root.Remove(tmpName)
 	_, writeErr := f.Write(append(data, '\n'))
-	syncErr := f.Sync()
+	syncErr := s.syncFile(f)
 	closeErr := f.Close()
 	if err := errors.Join(writeErr, syncErr, closeErr); err != nil {
 		return fmt.Errorf("cannot persist trusted chain identity update: %w", err)
@@ -488,26 +533,27 @@ func (s *chainIdentityStore) writeData(name string, data []byte) error {
 	if err := s.root.Rename(tmpName, name); err != nil {
 		return fmt.Errorf("cannot replace trusted chain identity: %w", err)
 	}
+	// Rename committed the replacement. Subsequent errors mean visible but
+	// uncertain durability, not that the old record is still present.
 	dir, err := s.root.Open(".")
 	if err != nil {
-		return fmt.Errorf("cannot sync trusted chain identity directory: %w", err)
+		return &ChainIdentityDurabilityError{Err: err}
 	}
-	err = errors.Join(dir.Sync(), dir.Close())
-	if err != nil {
-		return fmt.Errorf("cannot sync trusted chain identity directory: %w", err)
+	if err := errors.Join(s.syncFile(dir), dir.Close()); err != nil {
+		return &ChainIdentityDurabilityError{Err: err}
 	}
-	// EnsureAuditStateDir may have just created several ancestors. Persist
-	// their directory entries too: losing the whole new state directory after
-	// a power failure must not erase a pending remote registration.
+	// Persist NockLock-owned directory entries through the configured state
+	// root only. Root creation establishes its own barrier; unrelated ancestors
+	// (home mounts, /, etc.) are not part of an identity update.
 	for parent := filepath.Dir(s.root.Name()); ; parent = filepath.Dir(parent) {
 		dir, err := os.Open(parent)
 		if err != nil {
-			return fmt.Errorf("cannot sync trusted chain identity ancestor: %w", err)
+			return &ChainIdentityDurabilityError{Err: err}
 		}
-		if err := errors.Join(dir.Sync(), dir.Close()); err != nil {
-			return fmt.Errorf("cannot sync trusted chain identity ancestor: %w", err)
+		if err := errors.Join(s.syncFile(dir), dir.Close()); err != nil {
+			return &ChainIdentityDurabilityError{Err: err}
 		}
-		if filepath.Dir(parent) == parent {
+		if parent == s.syncRoot {
 			break
 		}
 	}

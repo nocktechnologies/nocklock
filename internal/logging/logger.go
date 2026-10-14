@@ -125,10 +125,11 @@ type Stats struct {
 
 // Logger handles SQLite event storage.
 type Logger struct {
-	db          *sql.DB
-	signer      *signer // nil when Ed25519 signing is off
-	onCommit    func(Event, string)
-	projectRoot string // canonical project root for the external trusted identity
+	db           *sql.DB
+	signer       *signer // nil when Ed25519 signing is off
+	onCommit     func(Event, string)
+	projectRoot  string               // canonical project root for the external trusted identity
+	identitySync func(*os.File) error // per-instance durability fault injection for tests
 }
 
 // eventTransaction is the common database/sql operation set shared by a
@@ -1027,7 +1028,9 @@ func (l *Logger) Stats(sessionID string) (*Stats, error) {
 // Prune removes events older than the given duration and re-anchors the chain.
 // Re-anchoring sets the first surviving row's prev_hash to genesis and recomputes
 // the forward chain, recording a prune-boundary marker in chain_head.
-// Returns the number of events removed.
+// Requires explicit project context, even for a legacy chain: a rolled-back DB
+// cannot prove that no external remote pin exists. The shared identity-lock wait
+// is bounded to five seconds. Returns the number of events removed.
 func (l *Logger) Prune(olderThan time.Duration) (int, error) {
 	unlock, err := l.lockPruneIdentity()
 	if err != nil {
