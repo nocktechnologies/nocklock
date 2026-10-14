@@ -4,6 +4,10 @@ All notable changes to NockLock will be documented in this file.
 
 ## [Unreleased]
 
+### Added
+
+- Build and sign Ubuntu 24.04 amd64 CI candidates containing the CLI and matching filesystem interposer, with manifest/build provenance and disposable-host fresh-install acceptance (N11746). Candidates are not releases; production installation, upgrades, rollback and publication remain staged.
+
 ## [0.9.3] - 2026-10-14
 
 ### Documentation

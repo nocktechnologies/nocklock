@@ -2,9 +2,68 @@
 
 Date: 2026-10-13
 
-Status: **Proposed; design only, no installer or release assets added**
+Status: **Production contract proposed; N11746 implements CI candidates only**
 
 Nock: N11643
+
+## Candidate implementation boundary (N11746)
+
+The first implementation is `.github/workflows/linux-candidate.yml`, with
+build, validation and disposable-host acceptance tooling in `packaging/linux/`.
+It creates **CI candidates, not GitHub releases**. No release is published and
+no production support claim follows from a green candidate run. The workflow
+has no `contents: write` permission or release trigger.
+
+Mira approved keyless Cosign with GitHub Actions OIDC for this slice (NockCC
+87196, 2026-10-13 local). The current stable versions were verified against the
+primary GitHub release APIs on 2026-10-14 UTC:
+
+- [Cosign v3.1.3](https://github.com/sigstore/cosign/releases/tag/v3.1.3), exact
+  binary version; Linux amd64 SHA-256
+  `4629c757b7618056f8ddd7e2625ae9fdd94c0372a65049520bc7d9df9efc7f71`.
+- [cosign-installer v4.1.2](https://github.com/sigstore/cosign-installer/releases/tag/v4.1.2),
+  pinned to full commit `6f9f17788090df1f26f669e9d70d6ae9567deba6`.
+
+The action pin fixes the installer code; the exact binary version and checksum
+fix the tool executed again inside root-controlled staging. Updating either
+requires a reviewed change. No long-lived signing key is introduced. The
+candidate certificate identity is exactly
+`https://github.com/nocktechnologies/nocklock/.github/workflows/linux-candidate.yml@<run-ref>`
+with the GitHub Actions issuer, where `<run-ref>` is the actual branch or PR
+merge ref. Tag refs are refused. This is explicitly distinct from the proposed
+tag-specific `release.yml` identity below. Verification tests reject a candidate
+as a release identity and reject a changed manifest.
+
+Candidates use `nocklock-candidate-<full-commit>-linux-amd64.tar.gz` and version
+`0.0.0-candidate.<full-commit>`. Native builds require Ubuntu 24.04 amd64 and
+glibc 2.39; build-info records the full commit, Go/C toolchains, hosted image
+revision, symbol requirements and hashes for the paired payload. The hosted
+image is pinned by OS label, not an immutable image digest; final production
+builder reproducibility remains a later release gate.
+
+The candidate omits the proposed public `install.sh`. Its trusted CI checkout
+supplies a **CI-only provisioning harness**, never a public bootstrap. Only that
+harness runs privileged, on a disposable GitHub-hosted VM. It verifies staged
+bytes before executing any packaged script, installs adjacent CLI/library
+files under root-owned versioned paths, and refuses every pre-existing
+installation, including broken links and interrupted installations. This
+fresh-only boundary avoids making an unimplemented active-session upgrade or
+helper/version-handshake promise. The packaged helper script's ownership
+preconditions are enforced by the CI harness; the source script itself has not
+become a secure general-purpose package installer.
+
+A new dedicated account has only the two helper sudo vectors. Two fresh
+projects exercise version/path selection, filesystem allow/deny controls,
+exact doctor boundary reasons, AUTHENTIC audit verification and signed CONFINED
+and KERNEL session levels. The workflow also checks repeat-install refusal and
+missing-interposer refusal. Public evidence contains the recorded environment,
+doctor output, public verification key, audit verdict and events; it never
+uploads the private signing key or entire account home. The resulting run is
+the acceptance receipt and must be linked in the implementation PR.
+
+Public installation, upgrades, rollback, interrupted-update recovery, expanded
+network/OS acceptance and production release publication remain later slices.
+The contract below continues to describe those required production gates.
 
 Baseline: `89c1bb6e` (v0.9.1); refreshed after the v0.8/v0.9 doctor and Unix-socket changes and the v0.9.1 signing-key fence and netns child thread lock.
 
@@ -16,9 +75,9 @@ helper installer. Keep Homebrew as the macOS installation path. Expand the Linux
 matrix only after clean-machine acceptance on each added architecture and libc.
 Do not describe this first artifact as a portable binary for every Linux system.
 
-This decision is proposed for review. Signing introduces Cosign as release and
-verification tooling; it adds no Go runtime dependency. Approve that tooling and
-its pinned version before implementing the release workflow.
+Signing introduces Cosign as release and verification tooling; it adds no Go
+runtime dependency. The approved CI pins above cover candidates only. Production
+publication still requires the release workflow and identity gates below.
 
 The first implementation should cover packaging and installation only. It must
 not change fence policy, doctor semantics, init output, or signing-key format.

@@ -13,6 +13,7 @@ Go tests sit beside the code as `*_test.go`. Files ending `_linux_test.go` or `_
 | `pkg/receipt/` | Public, read-only per-session audit-chain verifier (`VerifySession`, `pkg/receipt/receipt.go`), importable by other modules | `pkg/receipt/receipt_test.go`, `external_test.go` (imports it as an outside module would), `testdata/` |
 | `integration/` | End-to-end test of the built binary | `integration/integration_test.go`, run with `go test -tags=integration ./...` (`CONTRIBUTING.md`) |
 | `scripts/` | `install-egress-helper.sh` (root-owned helper plus sudoers grant) and `test-init-default-linux.sh` (fresh `init` then wrapped shell, run by CI) | helper: `internal/fence/network/netns/install_helper_script_linux_test.go` |
+| `packaging/linux/` | Ubuntu 24.04 amd64 paired CI candidate build, strict archive validator, CI-only fresh-install provisioning and unprivileged acceptance; no public installer or release publication | `test_artifact.py`; `.github/workflows/linux-candidate.yml` |
 | `docs/` | This documentation set; index at `docs/README.md` | none |
 | `bench/redteam/` | NockLock + NockGuard scripted attack bench (`attacks.toml`, `run.sh`, `redteam.py`) and signed receipt report | bench cases in `attacks.toml`, CI `redteam-bench` job in `.github/workflows/network-egress.yml` |
 | `.claude/` | Agent config: branch-lock hook, `decisions/` (ADR-001..005), `design/`, `diagrams/`, `lessons/`, `review/PIPELINE.md` | none |

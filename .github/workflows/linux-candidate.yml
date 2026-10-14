@@ -1,0 +1,169 @@
+name: Linux candidate artifact
+
+on:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    # Candidate signing is confined to this repository's reviewed PR/workflow
+    # refs. No release trigger, contents:write, release API or production key.
+    if: >-
+      !startsWith(github.ref, 'refs/tags/') &&
+      (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    permissions:
+      contents: read
+      id-token: write
+    outputs:
+      commit: ${{ steps.build.outputs.commit }}
+      identity: ${{ steps.build.outputs.identity }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
+        with:
+          go-version-file: go.mod
+      - uses: sigstore/cosign-installer@6f9f17788090df1f26f669e9d70d6ae9567deba6 # v4.1.2
+        with:
+          cosign-release: v3.1.3
+      - name: Validate packaging rejection controls
+        run: PYTHONDONTWRITEBYTECODE=1 python3 -m unittest discover -s packaging/linux -v
+      - name: Build native paired candidate
+        id: build
+        env:
+          CANDIDATE_IDENTITY: https://github.com/${{ github.workflow_ref }}
+        run: |
+          bash packaging/linux/build-candidate.sh "$RUNNER_TEMP/candidate"
+          echo "commit=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+          echo "identity=$CANDIDATE_IDENTITY" >> "$GITHUB_OUTPUT"
+      - name: Sign and authenticate candidate manifest
+        env:
+          CANDIDATE_IDENTITY: ${{ steps.build.outputs.identity }}
+        run: |
+          cd "$RUNNER_TEMP/candidate"
+          cosign sign-blob --yes --bundle SHA256SUMS.sigstore.json SHA256SUMS
+          cosign verify-blob SHA256SUMS --bundle SHA256SUMS.sigstore.json \
+            --certificate-identity "$CANDIDATE_IDENTITY" \
+            --certificate-oidc-issuer https://token.actions.githubusercontent.com
+          if cosign verify-blob SHA256SUMS --bundle SHA256SUMS.sigstore.json \
+            --certificate-identity 'https://github.com/nocktechnologies/nocklock/.github/workflows/release.yml@refs/tags/v0.0.0' \
+            --certificate-oidc-issuer https://token.actions.githubusercontent.com; then
+            echo 'FAIL: candidate accepted as a release identity' >&2; exit 1
+          fi
+          cp SHA256SUMS changed-manifest.txt
+          echo changed >> changed-manifest.txt
+          if cosign verify-blob changed-manifest.txt --bundle SHA256SUMS.sigstore.json \
+            --certificate-identity "$CANDIDATE_IDENTITY" \
+            --certificate-oidc-issuer https://token.actions.githubusercontent.com; then
+            echo 'FAIL: changed manifest authenticated' >&2; exit 1
+          fi
+          rm changed-manifest.txt
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: linux-amd64-ci-candidate
+          path: ${{ runner.temp }}/candidate/
+          if-no-files-found: error
+          retention-days: 14
+
+  accept:
+    needs: build
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      # This separate hosted VM never builds the product. Only the reviewed CI
+      # harness is read from this checkout; the new test account has no checkout.
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: linux-amd64-ci-candidate
+          path: ${{ runner.temp }}/candidate
+      - uses: sigstore/cosign-installer@6f9f17788090df1f26f669e9d70d6ae9567deba6 # v4.1.2
+        with:
+          cosign-release: v3.1.3
+      - name: Provision disposable host dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y iproute2 nftables sudo python3
+      - name: Fresh install from root-staged authenticated candidate
+        env:
+          CANDIDATE_COMMIT: ${{ needs.build.outputs.commit }}
+          CANDIDATE_IDENTITY: ${{ needs.build.outputs.identity }}
+        run: |
+          sudo env -i GITHUB_ACTIONS=true RUNNER_ENVIRONMENT=github-hosted \
+            /usr/bin/python3 packaging/linux/provision-ci.py \
+            "$RUNNER_TEMP/candidate" "$(command -v cosign)" "$CANDIDATE_COMMIT" "$CANDIDATE_IDENTITY"
+          # A repeat must refuse without replacing the installed pair/helper.
+          # Captured diagnostics intentionally belong to the unprivileged runner.
+          # shellcheck disable=SC2024
+          if sudo env -i GITHUB_ACTIONS=true RUNNER_ENVIRONMENT=github-hosted \
+            /usr/bin/python3 packaging/linux/provision-ci.py \
+            "$RUNNER_TEMP/candidate" "$(command -v cosign)" "$CANDIDATE_COMMIT" "$CANDIDATE_IDENTITY" \
+            > "$RUNNER_TEMP/repeated-install.txt" 2>&1; then
+            echo 'FAIL: repeated candidate installation succeeded' >&2; exit 1
+          fi
+          grep -q 'refusing pre-existing installation' "$RUNNER_TEMP/repeated-install.txt"
+          sudo install -m 0755 packaging/linux/accept-installed.sh /usr/local/bin/nocklock-accept-ci
+          sudo install -m 0644 packaging/linux/acceptance.py /usr/local/bin/nocklock-check-acceptance-ci.py
+      - name: Unprivileged acceptance of installed CONFINED and KERNEL paths
+        env:
+          CANDIDATE_COMMIT: ${{ needs.build.outputs.commit }}
+        run: |
+          sudo -u nocklock-candidate env -i HOME=/home/nocklock-candidate \
+            USER=nocklock-candidate LOGNAME=nocklock-candidate PATH=/usr/bin:/bin \
+            /bin/bash /usr/local/bin/nocklock-accept-ci \
+            "$CANDIDATE_COMMIT" /home/nocklock-candidate/evidence
+      - name: Missing adjacent interposer must refuse without stale fallback
+        env:
+          CANDIDATE_COMMIT: ${{ needs.build.outputs.commit }}
+        run: |
+          lib="/usr/local/lib/nocklock/releases/nocklock-candidate-$CANDIDATE_COMMIT-linux-amd64/libfence_fs.so"
+          sudo mv "$lib" "$lib.disabled"
+          trap 'sudo mv "$lib.disabled" "$lib"' EXIT
+          # Captured diagnostics intentionally belong to the runner, not test user.
+          # shellcheck disable=SC2024
+          if sudo -u nocklock-candidate env -i HOME=/home/nocklock-candidate \
+            USER=nocklock-candidate PATH=/usr/bin:/bin /bin/bash -c \
+            'cd "$(mktemp -d "$HOME/missing-library.XXXXXX")" && /usr/local/bin/nocklock init && /usr/local/bin/nocklock wrap -- /bin/true' \
+            > "$RUNNER_TEMP/missing-interposer.txt" 2>&1; then
+            echo 'FAIL: missing adjacent library allowed launch' >&2; exit 1
+          fi
+          grep -q 'trusted filesystem fence library not found' "$RUNNER_TEMP/missing-interposer.txt"
+      - name: Collect public evidence (never keys or whole HOME)
+        if: always()
+        env:
+          CANDIDATE_COMMIT: ${{ needs.build.outputs.commit }}
+          CANDIDATE_IDENTITY: ${{ needs.build.outputs.identity }}
+        run: |
+          mkdir -p "$RUNNER_TEMP/acceptance"
+          if sudo test -d /home/nocklock-candidate/evidence; then
+            sudo cp -r /home/nocklock-candidate/evidence "$RUNNER_TEMP/acceptance/"
+            sudo chown -R "$(id -u):$(id -g)" "$RUNNER_TEMP/acceptance"
+          fi
+          for name in repeated-install missing-interposer; do
+            if test -f "$RUNNER_TEMP/$name.txt"; then cp "$RUNNER_TEMP/$name.txt" "$RUNNER_TEMP/acceptance/"; fi
+          done
+          printf 'Candidate commit: %s\nCandidate signer: %s\nRunner image: %s\n' \
+            "$CANDIDATE_COMMIT" "$CANDIDATE_IDENTITY" "$ImageVersion" > "$RUNNER_TEMP/acceptance/provenance.txt"
+          uname -a >> "$RUNNER_TEMP/acceptance/provenance.txt"
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        if: always()
+        with:
+          name: linux-amd64-candidate-acceptance
+          path: ${{ runner.temp }}/acceptance/
+          if-no-files-found: error
+          retention-days: 14
+      - name: Record accepted candidate
+        run: |
+          echo '### Linux amd64 CI candidate accepted (not a release)' >> "$GITHUB_STEP_SUMMARY"
+          cat "$RUNNER_TEMP/acceptance/provenance.txt" >> "$GITHUB_STEP_SUMMARY"
+          for mode in proxy netns; do
+            cat "$RUNNER_TEMP/acceptance/evidence/$mode/receipt.json" >> "$GITHUB_STEP_SUMMARY"
+          done
