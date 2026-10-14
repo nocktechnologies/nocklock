@@ -48,10 +48,10 @@ follows from it.
 | Same-head CLI push | A freshly emitted re-attestation reaches the real conditional POST and returns `200 already_stored`; the original signed snapshot, ETag and whole store remain unchanged |
 | Swapped pair before count comparison (transit swap plus direct HTTP control) | Serve B's actual signed higher-count latest through A's requested path; A refuses identity before `TRUNCATION`; the real server also rejects URL/body pair disagreement |
 | Transit-forged ID, bad signature, malformed response plus direct HTTP controls | An ID-only case changes only `chain_id` and retains the original count/signature, proving ID signature binding. Three further cases corrupt the ID plus count, signature plus count, or JSON in an actual successful latest response. CLI authentication/parsing refuses them before a truncation verdict. Real POST validators also reject both forged-ID cases and the bad signature without storage changes |
-| Local mirror disagreement | Corrupt only the disposable DB mirror, then require specific CLI verify/push refusal before HTTP or a count verdict; the corrupted DB and remote store stay unchanged |
+| Local mirror disagreement | Use direct SQL to corrupt only the disposable DB mirror, then require specific CLI verify/push refusal before HTTP or a count verdict; the corrupted DB and remote store stay unchanged |
 | CLI rollback and direct HTTP regression control | Restore A's earlier signed SQLite snapshot, preserve trusted identity, require failed verification/push; the actual store also rejects a direct lower-count CAS update with `row_count_regression`, and A/B pins stay unchanged |
 | Missing local identity | Verify/push require specific incomplete/missing identity diagnostics without HTTP or minting; the fresh legacy push receives an existing valid v2 file so missing input cannot satisfy the control. A missing external record also blocks prune without changing rows |
-| Missing remote pin / old route set | Remove only a disposable fixture pair; each failed verify/push must make exactly one real GET returning `404 not_registered`, without recreation. Unmount v2 and require actual 404 with no v1 request |
+| Missing remote pin / old route set | Use direct SQL to remove only a disposable fixture pair; each failed verify/push must make exactly one real GET returning `404 not_registered`, without recreation. Unmount v2 and require actual 404 with no v1 request |
 | Unreachable store | Reserve an unlistened loopback port; verify/push must fail while connecting (refusal or OS connect timeout), without fallback or local/remote state changes |
 | Stale CAS | Pause a real CLI update before its handler, commit a valid intermediate signed update over HTTP, then release the stale request; require real `409 previous_mismatch`, failed CLI exit and preservation of the competing pin |
 | Legacy migration | Explicit v1 file verification works; wrong project cannot claim the pin; correct owner migrates with a signed witness and freezes v1 reads; an unrelated project requires explicit no-legacy-history acknowledgement and keeps a zero witness |
@@ -59,19 +59,20 @@ follows from it.
 | Stale migration witness | Pause real CLI migration before its handler, advance the real v1 pin over HTTP, release, and require `legacy_previous_mismatch`; the advanced legacy pin stays intact and local state stays pending |
 | Duplicate legacy claimant | Clone the signed DB before either identity exists; migrate the owner, then require the clone's real CLI migration to fail with `legacy_already_claimed`, preserving the owner's pin and a separate pending clone identity |
 | Lost committed response and crash | Separate enrollment and migration cases hold the response after the real transaction commits, kill the CLI, require persistent `pending` and prune refusal, then retry. The original request file and both HTTP request hashes match; actual `already_exists` / `already_migrated` confirms the retry |
-| Direct HTTP v1 compatibility around CLI migration | Separate cases prove real v1 POST/GET before migration, both ordinary operations frozen with `v1_frozen` afterward, and a v2 body rejected by the v1 validator. The migration-only retained legacy anchor and ETag remain unchanged |
+| Direct HTTP v1 compatibility around CLI migration | The `v1_before` and `v1_rejects_v2` methods make direct HTTP assertions with CLI fixture creation: real v1 POST/GET before migration and a v2 body rejected by the v1 validator. `v1_frozen` directly checks both ordinary operations return `v1_frozen` after CLI migration. The migration-only retained legacy anchor and ETag remain unchanged |
 | Rejected pending registration and offline move | Corrupt a registration signature in transit; the actual validator refuses it without a remote pin. Preserve the pending tuple/request and signed DB while moving project and external state. Exactly two registration POSTs must have the same original request hash: first `400 invalid_anchor`, then `201 registered`; remote verification must pass |
 | Enrolled offline moves | External-DB and in-project-DB cases move the project and entire external trusted state directory together; preserve the tuple, original request and signed DB, then remotely verify the existing pair |
 | Explicit fresh fork | Start a new audit DB and explicitly enroll it with the same key; require a new chain ID, independent verification and an unchanged source pin |
 | Copied enrolled identity | Copy signed DB plus enrolled identity/request, then append different valid signed histories. CLI prefix checks refuse the copied fork; a direct current-CAS POST receives `head_conflict`, retaining source and fresh-fork pins |
 | Prune states | Both an entirely legacy DB and a present `none` identity with no retained registration request can prune through the CLI. Pending and enrolled cases require their specific state diagnostic, unchanged local/remote databases and no HTTP |
 
-Transport fault injection wraps the actual Django application. It can corrupt
-an invalid response or delay a selected real request/committed response; it
+An in-process wrapper around the actual Django application swaps or corrupts
+the forged, malformed and swapped responses after the real handler runs. It can
+also delay a selected real request/committed response; it
 never fabricates a valid signed anchor or success response. All valid records
-come from actual signing code. Removing the temporary pair is a
-direct SQL store-loss fixture, not an exposed server API or supported recovery
-procedure. Concurrent cases fingerprint the store **after** their intentional
+come from actual signing code. Both the missing-pin and local-mirror-disagreement
+cases modify disposable SQLite state with direct SQL; neither is an exposed
+server API or supported recovery procedure. Concurrent cases fingerprint the store **after** their intentional
 competing write, then prove the refused operation makes no further change.
 Waits are bounded; cleanup kills and reaps only the harness's own CLI/server
 process groups. Authentication and the real per-view rate limits remain active;
@@ -87,7 +88,7 @@ fixture, not a supported fork or identity-reset procedure.
 ## Review the receipt
 
 Require process exit zero and `report.json` verdict `PASS` with scope
-`CLI-and-real-NCC` and 31 rows: 30 CLI-oriented scenarios (some contain separately named direct HTTP controls) plus one direct HTTP server smoke test. Check each case, the built binary digest, source revisions
+`CLI-and-real-NCC` and 31 total rows across CLI, mixed CLI/direct-HTTP and direct-HTTP cases. The server smoke and v1 compatibility rows contain direct HTTP assertions; CLI fixture creation alone does not make an assertion a CLI integration check. Check each case, the built binary digest, source revisions
 and dirty-state indicators. `commands.json` records the CLI argument vectors,
 exit codes and output; `requests.jsonl` records methods, requested/effective
 paths, actual HTTP status/error codes, request body hashes and any invalid
