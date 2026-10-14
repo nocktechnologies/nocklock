@@ -8,6 +8,10 @@ All notable changes to NockLock will be documented in this file.
 
 - Build and sign Ubuntu 24.04 amd64 CI candidates containing the CLI and matching filesystem interposer, with manifest/build provenance and disposable-host fresh-install acceptance (N11746). Candidates are not releases; production installation, upgrades, rollback and publication remain staged.
 
+### Documentation
+
+- Fix signing-key recovery verification for absolute and project-local audit-log paths. Verify an isolated copy with the archived public key, preserving the live config, original archive and project provenance (N11739).
+
 ### Fixed
 
 - Linux candidate CI: prepare only the three exact `/usr/local` install parent directories on the disposable hosted VM and retain their before/after ownership and mode receipt. The installer continues to reject symlinks, non-root owners and group/other-writable ancestors.
