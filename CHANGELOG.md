@@ -4,6 +4,8 @@ All notable changes to NockLock will be documented in this file.
 
 ## [Unreleased]
 
+## [0.9.3] - 2026-10-14
+
 ### Documentation
 
 - Document the current one-remote-anchor-identity-per-signing-key limit, its cross-project collision and workaround; specify a versioned per-chain identity and explicit legacy migration for the later protocol change (N11707).
