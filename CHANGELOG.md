@@ -4,38 +4,45 @@ All notable changes to NockLock will be documented in this file.
 
 ## [Unreleased]
 
-### Changed
+## [0.10.0] - 2026-10-14
 
-- Document the card-to-`next` and batched `next`-to-`main` review/release workflow, verified ruleset checks and Mira's exact-head gate; run test and network-egress CI on pushes to `next` as well as `main`. Refresh the roadmap to v0.9.3 while retaining the unimplemented packaging and anchor-protocol limits (N11740).
+v0.10.0 gives each project its own remote audit chain: anchor v2 requires explicit `nocklock anchor enroll` or `anchor migrate` before remote push and verify, and prune and `anchor emit` now refuse unsafe states. It fixes two security issues: cloud metadata addresses in Linux netns bridge allocation, and current-directory lookup in `nocklock wrap`. Text output of audit and anchor verification now ends with a `COVERAGE: LIMITED` notice that states what recorded history does and does not prove.
+
+### Breaking
+
+- Remote anchor push/verify now require explicit v2 enrollment or migration and an upgraded store. They never fall back to key-only v1 routes. Legacy files remain explicitly verifiable; legacy local teardown emission remains v1 until enrollment.
+
+- `anchor emit` requires existing signing adoption and the original key. It refuses unsigned or stripped databases instead of adopting/re-signing them. Normal wrap signing adoption is unchanged.
 
 ### Added
-
-- Sign a versioned Linux interposer report detail containing separate child report and collector-observed connection peer sections. Linux `SO_PEERCRED` identifies the connector; executable paths are best-effort procfs observations with explicit unavailable statuses. Capture runs before parsing in each connection's goroutine so it cannot stall the shared accept loop. The red-team bench matches legacy and version 1 report fields while preserving signed detail bytes. This does not identify each action's writer or prove an action occurred; existing audit signatures and enforcement/ACK behavior are unchanged (N11762).
-
-- Append `COVERAGE: LIMITED` to audit and local/remote anchor verification, including errors. The notice distinguishes verified recorded history from complete activity logging or past enforcement; verdicts, exit codes, protocol behavior and live-probe/JSON output remain unchanged (N11761).
 
 - Add per-chain remote v2 anchors with explicit `anchor enroll` / `anchor migrate`, durable exact-request retry, expected-pair verification, signed-prefix checks, conditional remote updates and actual NCC handler/CLI acceptance coverage (N11742–N11745). Independent projects may share one signing key. Trusted external identity and SQLite metadata must agree; pending/enrolled chains refuse prune and moved state requires explicit relocation and remote verification.
 
 - Add trusted external chain identities and monotonic local registration state for v2 enrollment (N11744). Registration and prune share a process-safe lock; pending/enrolled or incomplete identity state refuses prune. The existing wrap path protects that directory independently of the configured DB and refuses unenforced filesystem access. Legacy chains still prune normally. The offline move procedure is documented and tested.
-- Linux CI coverage for post-exec child credentials under scheduler stress, full installed netns wrap credentials, and test-only cross-thread exec/proxy-group mutation controls (N11747). The red-team companion records real Unix-socket and io_uring controls separately; older Landlock ABIs and unavailable io_uring remain explicit coverage gaps, with no change to the main bench score or runtime behavior.
-- N11747 acceptance harnesses fail on every timeout, including earlier passing output; installed-wrap probes kill isolated process groups and bound output draining/reaping. Hanging-stub controls cover both harnesses. Hosted-only credential jobs check actual runner metadata, and a failed kernel companion stops the main bench and fails the job while preserving receipts.
 
 - Add opt-in v2 anchor record encoding, signature and expected-pair verification, snapshot digests, and public interoperability vectors (N11742). V2 signs an independent `chain_id` and legacy migration witness. This supplies the record-format foundation for the v2 lifecycle and remote commands described above.
+
+- Sign a versioned Linux interposer report detail containing separate child report and collector-observed connection peer sections. Linux `SO_PEERCRED` identifies the connector; executable paths are best-effort procfs observations with explicit unavailable statuses. Capture runs before parsing in each connection's goroutine so it cannot stall the shared accept loop. The red-team bench matches legacy and version 1 report fields while preserving signed detail bytes. This does not identify each action's writer or prove an action occurred; existing audit signatures and enforcement/ACK behavior are unchanged (N11762).
+
+### Security
+
+- Exclude `169.254.169.0/24` and `169.254.170.0/24` from private Linux netns bridge allocation so common instance/container metadata endpoints cannot become bridge addresses. Exhaustive pure mapping tests cover all original slots; reservation and fail-closed proxy readiness remain unchanged (N11776).
+
+- Resolve the requested command against the caller's PATH before adding Linux/macOS fence helpers, preserving arguments and refusing implicit current-directory lookup even with `GODEBUG=execerrdot=0`. Hosted bare-command and CWD-decoy controls cover Landlock/seccomp and composed netns launch (N11777).
+
+### Changed
+
+- Append `COVERAGE: LIMITED` to audit and local/remote anchor verification, including errors. The notice distinguishes verified recorded history from complete activity logging or past enforcement; verdicts, exit codes, protocol behavior and live-probe/JSON output remain unchanged (N11761).
+
+- `nocklock wrap -- <cmd>` now resolves `<cmd>` on the caller's PATH and no longer runs an executable from the current directory. A command that relied on being found in the current directory must be given as an explicit path such as `./<cmd>` (N11777).
+
+- Document the card-to-`next` and batched `next`-to-`main` review/release workflow, verified ruleset checks and Mira's exact-head gate; run test and network-egress CI on pushes to `next` as well as `main`. Refresh the roadmap to v0.9.3 while retaining the unimplemented packaging and anchor-protocol limits (N11740).
 
 ### Documentation
 
 - Fix signing-key recovery verification for absolute and project-local audit-log paths. Verify an isolated copy with the archived public key, preserving the live config, original archive and project provenance (N11739).
 
-### Breaking
-
-- Remote anchor push/verify now require explicit v2 enrollment or migration and an upgraded store. They never fall back to key-only v1 routes. Legacy files remain explicitly verifiable; legacy local teardown emission remains v1 until enrollment.
-- `anchor emit` requires existing signing adoption and the original key. It refuses unsigned or stripped databases instead of adopting/re-signing them. Normal wrap signing adoption is unchanged.
-
 ### Fixed
-
-- Resolve the requested command against the caller's PATH before adding Linux/macOS fence helpers, preserving arguments and refusing implicit current-directory lookup even with `GODEBUG=execerrdot=0`. Hosted bare-command and CWD-decoy controls cover Landlock/seccomp and composed netns launch (N11777).
-
-- Exclude `169.254.169.0/24` and `169.254.170.0/24` from private Linux netns bridge allocation so common instance/container metadata endpoints cannot become bridge addresses. Exhaustive pure mapping tests cover all original slots; reservation and fail-closed proxy readiness remain unchanged (N11776).
 
 - Preserve original registration replay after interrupted writes: any retained request blocks prune, including state `none`. Strict anchor opens validate existing adoption, key fingerprint and signed head before database mutation and observe live WAL state. V2 file verification distinguishes a missing key from a forged signature; emit handles nil contexts and confirms written v2 files. The real NCC acceptance gate adds a same-head `already_stored` CLI case and scopes/redacts its receipts (N11745).
 
@@ -45,8 +52,27 @@ All notable changes to NockLock will be documented in this file.
 
 - Concurrent first-time chain identity initialization now creates its persistent lock exclusively, then opens the winning inode. This avoids a macOS `os.Root.OpenFile` creation race while retaining anchored path, ownership and symlink checks.
 
+### Testing
+
+- Linux CI coverage for post-exec child credentials under scheduler stress, full installed netns wrap credentials, and test-only cross-thread exec/proxy-group mutation controls (N11747). The red-team companion records real Unix-socket and io_uring controls separately; older Landlock ABIs and unavailable io_uring remain explicit coverage gaps, with no change to the main bench score or runtime behavior.
+
+- N11747 acceptance harnesses fail on every timeout, including earlier passing output; installed-wrap probes kill isolated process groups and bound output draining/reaping. Hanging-stub controls cover both harnesses. Hosted-only credential jobs check actual runner metadata, and a failed kernel companion stops the main bench and fails the job while preserving receipts.
+
 - Tests: pin three disposable Landlock probes to their OS threads so Go cannot move their checks away from the restricted thread. Production already pinned its launch thread; runtime behavior is unchanged. CI repeats the probes under scheduler variation and deterministically proves that a separate existing thread remains unrestricted. Natural unpinned reproduction is an optional manual soak (N11773).
+
 - CI: fail the scoped-sudoers artifact check when a blanket `NOPASSWD:ALL` grant is present or grep cannot read the file. Only grep's no-match exit code passes; the previous standalone negation could continue under Bash errexit (N11749).
+
+### Upgrading from 0.9.3
+
+Remote anchor push and verify (`nocklock anchor push`, `nocklock verify --against-remote-anchor`) need `nocklock anchor enroll` or `nocklock anchor migrate` first. There is no fallback to the v1 key-only routes. The anchor store at `NOCKLOCK_ANCHOR_URL` must be upgraded to v2 before enroll, migrate, push or verify will work.
+
+Pruning (`nocklock log --prune`) refuses a chain whose registration is pending, enrolled, or left incomplete by an interrupted enroll (any retained registration request). To move that state to another machine or path, follow `docs/runbooks/chain-identity-move.md`.
+
+`nocklock anchor emit` refuses an unsigned or stripped database. It needs existing signing adoption and the original key.
+
+The text output of audit and anchor verification now ends with a `COVERAGE: LIMITED` block, including on errors. Verdicts and exit codes are unchanged; JSON and live-probe output are unchanged.
+
+`nocklock wrap -- <cmd>` no longer finds an executable in the current directory. Use an explicit path such as `./<cmd>` where you relied on that.
 
 ## [0.9.3] - 2026-10-14
 
