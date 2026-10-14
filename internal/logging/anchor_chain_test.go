@@ -417,3 +417,52 @@ func TestAnchorV2OriginalRequestDirectoryFailureRetry(t *testing.T) {
 		t.Fatalf("retry enrollment: %+v, %v calls=%d", enrolled, err, calls)
 	}
 }
+
+func TestAnchorV2OriginalRequestRootPreflightFailure(t *testing.T) {
+	f := newIdentityFixture(t)
+	identityOldEvent(t, f.logger)
+	id := initIdentity(t, f)
+	requestPath := filepath.Join(filepath.Dir(f.record), AnchorRegistrationFileName)
+	originalIdentity, err := os.ReadFile(f.record)
+	if err != nil {
+		t.Fatal(err)
+	}
+	injected := errors.New("original request root preflight failed")
+	f.logger.identityRootSync = func(*os.File) error { return injected }
+	writes, calls := 0, 0
+	f.logger.identitySync = func(file *os.File) error { writes++; return file.Sync() }
+	_, err = f.logger.RegisterAnchorV2("fresh", nil, func(AnchorRegistrationRequest) (*AnchorV2, error) {
+		calls++
+		return nil, nil
+	})
+	if !errors.Is(err, injected) || writes != 0 || calls != 0 {
+		t.Fatalf("mutation before request preflight: err=%v writes=%d calls=%d", err, writes, calls)
+	}
+	if _, err := os.Stat(requestPath); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("request created before root preflight: %v", err)
+	}
+	actual, err := os.ReadFile(f.record)
+	if err != nil || string(actual) != string(originalIdentity) {
+		t.Fatalf("identity changed before root preflight: %v", err)
+	}
+	if got, err := f.logger.ReadChainIdentity(); err != nil || *got != *id {
+		t.Fatalf("identity agreement changed: %+v, %v", got, err)
+	}
+	_, root, err := config.EnsureAuditStateLocation(f.project)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var synced []string
+	f.logger.identityRootSync = func(file *os.File) error {
+		synced = append(synced, filepath.Clean(file.Name()))
+		return file.Sync()
+	}
+	enrolled, err := f.logger.RegisterAnchorV2("fresh", nil, func(req AnchorRegistrationRequest) (*AnchorV2, error) {
+		calls++
+		assertRootLineageSynced(t, root, synced)
+		return req.Anchor, nil
+	})
+	if err != nil || calls != 1 || enrolled.RegistrationState != ChainRegistrationEnrolled {
+		t.Fatalf("durable retry failed: %+v, %v calls=%d", enrolled, err, calls)
+	}
+}
