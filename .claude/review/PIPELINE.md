@@ -8,6 +8,8 @@ Keep the card and PR to one reviewable change. Define the expected behavior and 
 
 Before requesting the gate, run `go test ./... -v`, `go vet ./...`, and `go fmt ./...`; `gofmt -l .` must print nothing. Review for hardcoded secrets, path traversal, races and subprocess injection. Record relevant platform checks and any untested paths in the PR.
 
+Run the code-simplifier pass for every Tier 1 or higher change: three agents independently review the changed code or documentation for simplification while preserving its behavior and requirements. Apply justified simplifications, rerun affected checks, and record completion and any resulting changes in the PR body. This pass is separate from the builder's self-review and the exact-head reviews below.
+
 ## Review the exact head
 
 1. Open the card PR with base `next` and mark it ready. Record its full head SHA and label its [risk tier](#risk-tiers) in the PR body.
@@ -22,11 +24,17 @@ GitHub's required-check subset is a minimum, not a substitute for the complete [
 
 The builder labels the tier in the PR body when opening it. Use the highest applicable tier:
 
-- **Tier 1 (default):** Gander Opus and Sol at the exact head, required checks green, and no open MAJOR findings.
-- **Tier 2 (auth, fences, secrets, the audit/signing path, installer or privilege code):** Tier 1, plus a security pass in the PR body with a negative control showing that the guard fails when removed or bypassed.
+- **Tier 1 (default, including docs-only changes):** the three-agent code-simplifier pass, Gander Opus and Sol at the exact head, required checks green, and no open MAJOR findings. Record simplifier completion in the PR body.
+- **Tier 2 (auth, secrets, env vars, subprocess, file handling, network, data deletion, new external dependencies, new modules, fences, the audit/signing path, installer or privilege code):** Tier 1, plus a written spec and security pass in the PR body, including a negative control showing that the guard fails when removed or bypassed.
 - **Tier 3 (key custody, release signing, changes to a privilege boundary):** Tier 2, plus a short threat note and a one-line rollback in the PR body.
 
-Mira's gate is the sign-off for every tier; Kevin delegated NockLock merge ownership to her. These tiers supplement the complete exact-head gate above, including applicable CI and review requirements.
+The following repository exceptions govern NockLock:
+
+- There is no Tier 0; docs-only changes use Tier 1 by default.
+- Mira's gate is the human sign-off for every tier. Mar is retired, and Kevin delegated NockLock merge ownership to Mira; separate Kevin or Mar review is not required.
+- NockLock ships as a CLI release. The batched `next` → `main` release PR and its full-diff gate provide staging; Tier 3 does not require a separate staged rollout. Its threat note and rollback line remain required.
+
+These tiers and exceptions supplement the complete exact-head gate above, including applicable CI and review requirements.
 
 ## Remediation
 
