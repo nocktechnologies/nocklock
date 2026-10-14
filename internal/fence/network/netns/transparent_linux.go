@@ -262,7 +262,10 @@ func dropProxyIdentity() error {
 	if os.Geteuid() != 0 {
 		return fmt.Errorf("transparent proxy must start as root to bind DNS and transparent sockets")
 	}
-	if err := unix.Setgroups(nil); err != nil {
+	// The sidecar keeps serving on multiple Go threads after this drop. Use the
+	// standard library's process-wide Setgroups; unix.Setgroups changes only the
+	// calling thread on Linux.
+	if err := syscall.Setgroups(nil); err != nil {
 		return fmt.Errorf("clear transparent proxy groups: %w", err)
 	}
 	if err := unix.Setresgid(proxyUID, proxyUID, proxyUID); err != nil {
@@ -274,6 +277,8 @@ func dropProxyIdentity() error {
 	if os.Geteuid() == 0 || os.Getegid() == 0 {
 		return fmt.Errorf("transparent proxy credential did not drop to uid/gid %d", proxyUID)
 	}
+	// PR_SET_NO_NEW_PRIVS is per-thread. This is defense in depth for the
+	// calling thread; neither proxy forks or execs after dropping identity.
 	if err := unix.Prctl(unix.PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0); err != nil {
 		return fmt.Errorf("latch transparent proxy no_new_privs: %w", err)
 	}
