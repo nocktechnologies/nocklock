@@ -58,7 +58,7 @@ PY
   mode_args=()
   level=CONFINED
   if [[ $mode == netns ]]; then mode_args=(--net-fence=netns); level=KERNEL; fi
-  timeout 60 "$bin" wrap "${mode_args[@]}" --require-enforced-egress -- \
+  timeout --kill-after=5s 60s "$bin" wrap "${mode_args[@]}" --require-enforced-egress -- \
     /usr/bin/python3 -I probe.py "$fixture/outside/forbidden.txt" > "$record/wrap.txt" 2>&1
   grep -Fxq ALLOW_AND_DENY_PASS "$record/wrap.txt"
   [[ -f allowed.txt && ! -e "$fixture/outside/forbidden.txt" ]]
