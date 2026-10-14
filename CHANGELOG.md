@@ -4,6 +4,10 @@ All notable changes to NockLock will be documented in this file.
 
 ## [Unreleased]
 
+### Added
+
+- Add opt-in v2 anchor record encoding, signature and expected-pair verification, snapshot digests, and public interoperability vectors (N11742). V2 signs an independent `chain_id` and legacy migration witness. This is record-format support only: v1 remains the default; CLI, chain enrollment, persistence, network routes and server behavior are unchanged.
+
 ## [0.9.3] - 2026-10-14
 
 ### Documentation
