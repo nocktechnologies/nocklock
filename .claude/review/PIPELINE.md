@@ -10,12 +10,23 @@ Before requesting the gate, run `go test ./... -v`, `go vet ./...`, and `go fmt 
 
 ## Review the exact head
 
-1. Open the card PR with base `next` and mark it ready. Record its full head SHA.
+1. Open the card PR with base `next` and mark it ready. Record its full head SHA and label its [risk tier](#risk-tiers) in the PR body.
 2. Obtain both Gander nock-review lenses, **Opus and Sol**, at that exact head. Keep the review receipts with the PR.
 3. Require CodeRabbit, `claude-review` and all applicable CI to finish successfully, including the native macOS and root netns proofs. Read failures and skips; a green aggregate or a skipped enforcement job is not evidence that the fence ran.
-4. Mira gates the same head against those reviews and checks. If commits change the head, refresh the review receipts and validation before the gate; earlier-head approval does not approve the new code.
+4. Satisfy the applicable [risk-tier requirements](#risk-tiers) before approval.
+5. Mira gates the same head against those reviews and checks. If commits change the head, refresh the review receipts and validation before the gate; earlier-head approval does not approve the new code.
 
-GitHub's required-check subset is a minimum, not a substitute for the complete gate below. Gander's two-lens review and Mira's decision are recorded review evidence, not checks enforced by the rulesets listed here.
+GitHub's required-check subset is a minimum, not a substitute for the complete [exact-head gate above](#review-the-exact-head). Gander's two-lens review and Mira's decision are recorded review evidence, not checks enforced by the rulesets listed here.
+
+## Risk tiers
+
+The builder labels the tier in the PR body when opening it. Use the highest applicable tier:
+
+- **Tier 1 (default):** Gander Opus and Sol at the exact head, required checks green, and no open MAJOR findings.
+- **Tier 2 (auth, fences, secrets, the audit/signing path, installer or privilege code):** Tier 1, plus a security pass in the PR body with a negative control showing that the guard fails when removed or bypassed.
+- **Tier 3 (key custody, release signing, changes to a privilege boundary):** Tier 2, plus a short threat note and a one-line rollback in the PR body.
+
+Mira's gate is the sign-off for every tier; Kevin delegated NockLock merge ownership to her. These tiers supplement the complete exact-head gate above, including applicable CI and review requirements.
 
 ## Remediation
 
@@ -44,4 +55,4 @@ The two macOS jobs have different scope and triggers. The push-running DNS/netwo
 
 ## Merge and release
 
-After the exact head passes the gate, Mira squash-merges the card PR into `next` and checks the resulting push CI. Do not tag or announce it as shipped yet. The release owner promotes the approved batch through **one `next` → `main` PR**, runs the same gate on its final head, and squash-merges it. Tagging, GitHub release creation, tap update and installation smoke follow the [release runbook](../../docs/runbooks/release.md). Mira holds all card merges into `next` from release gating until the back-sync SHA is recorded. If new work lands during that freeze, stop and hand the release back to Mira; builders do not independently reconcile shared branches. Immediately after tagging, before the Homebrew step, the release owner back-syncs `main` into `next` with a real merge commit whose tree equals released main. This single direct push uses the next ruleset's administrator bypass; it is never a squash, reset or force-push. File the required session report even for docs-only work.
+After the exact head passes the gate, Mira squash-merges the card PR into `next` and checks the resulting push CI. Do not tag or announce it as shipped yet. The release owner promotes the approved batch through **one `next` → `main` PR**, runs the same gate on its final head, and squash-merges it. Tagging, GitHub release creation, tap update and installation smoke follow the [release runbook](../../docs/runbooks/release.md). Mira holds all card merges into `next` from release gating until the back-sync SHA is recorded. Release-gate fixes go through a card PR into `next` while the freeze holds, and only Mira merges them. If new work lands during that freeze, stop and hand the release back to Mira; builders do not independently reconcile shared branches. Immediately after tagging, before the Homebrew step, the release owner back-syncs `main` into `next` with a real merge commit whose tree equals released main. This single direct push uses the next ruleset's administrator bypass; it is never a squash, reset or force-push. File the required session report even for docs-only work.
