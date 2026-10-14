@@ -11,6 +11,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
@@ -168,8 +169,8 @@ func WithSigning(keyPath string) Option {
 	}
 }
 
-// WithExistingSigning loads an existing signing key without generating a key,
-// adopting signing, or re-signing a database head. Anchor operations use this
+// WithExistingSigning opens an existing adopted database with its matching key,
+// without creating a database, adopting signing, or re-signing its head. Anchor operations use this
 // option so a database stripped between preflight and open cannot be blessed
 // as a newly adopted chain. Callers must still verify the signed chain before
 // emitting or registering any anchor.
@@ -388,8 +389,10 @@ func NewLogger(dbPath string, projectRoot string, opts ...Option) (*Logger, erro
 		lc.afterValidate()
 	}
 	dir := filepath.Dir(dbPath)
-	if err := os.MkdirAll(dir, 0o700); err != nil {
-		return nil, fmt.Errorf("failed to create log directory %s: %w", dir, err)
+	if !lc.existingSigningOnly {
+		if err := os.MkdirAll(dir, 0o700); err != nil {
+			return nil, fmt.Errorf("failed to create log directory %s: %w", dir, err)
+		}
 	}
 
 	// Reject a symlink at the final DB path before touching it. A repository
@@ -408,7 +411,11 @@ func NewLogger(dbPath string, projectRoot string, opts ...Option) (*Logger, erro
 	// Pre-create file with correct permissions to avoid a TOCTOU window, and
 	// with O_NOFOLLOW so the open fails (ELOOP) rather than following a symlink
 	// swapped in after the lstat above.
-	f, err := os.OpenFile(dbPath, os.O_CREATE|os.O_RDWR|oNoFollow, 0o600)
+	flags := os.O_RDWR | oNoFollow
+	if !lc.existingSigningOnly {
+		flags |= os.O_CREATE
+	}
+	f, err := os.OpenFile(dbPath, flags, 0o600)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create event log at %s: %w", dbPath, err)
 	}
@@ -435,13 +442,35 @@ func NewLogger(dbPath string, projectRoot string, opts ...Option) (*Logger, erro
 
 	// Fix permissions through the file descriptor so we never chmod a symlink
 	// target by path.
-	if err := f.Chmod(0o600); err != nil {
-		f.Close()
-		return nil, fmt.Errorf("failed to set DB file permissions: %w", err)
+	if !lc.existingSigningOnly {
+		if err := f.Chmod(0o600); err != nil {
+			f.Close()
+			return nil, fmt.Errorf("failed to set DB file permissions: %w", err)
+		}
 	}
 	f.Close()
 
-	db, err := sql.Open("sqlite", dbPath)
+	canonicalRoot := ""
+	if projectRoot != "" {
+		canonicalRoot, err = filepath.Abs(projectRoot)
+		if err == nil {
+			canonicalRoot, err = resolveDeepestExisting(canonicalRoot)
+		}
+		if err != nil {
+			return nil, fmt.Errorf("cannot resolve project root for chain identity: %w", err)
+		}
+	}
+	dsn := dbPath
+	if lc.existingSigningOnly {
+		absolute, err := filepath.Abs(dbPath)
+		if err != nil {
+			return nil, err
+		}
+		// mode=rw cannot create a missing DB and observes committed WAL pages.
+		// immutable=1 would incorrectly ignore a live WAL and is not safe here.
+		dsn = (&url.URL{Scheme: "file", Path: filepath.ToSlash(absolute), RawQuery: "mode=rw"}).String()
+	}
+	db, err := sql.Open("sqlite", dsn)
 	if err != nil {
 		return nil, fmt.Errorf("failed to open event log at %s: %w", dbPath, err)
 	}
@@ -455,6 +484,14 @@ func NewLogger(dbPath string, projectRoot string, opts ...Option) (*Logger, erro
 	if _, err := db.Exec("PRAGMA busy_timeout=5000"); err != nil {
 		db.Close()
 		return nil, fmt.Errorf("failed to set busy timeout: %w", err)
+	}
+
+	if lc.existingSigningOnly {
+		l, err := openExistingSignedLogger(db, canonicalRoot, lc)
+		if err != nil {
+			db.Close()
+		}
+		return l, err
 	}
 
 	// Enable WAL mode for concurrent read/write.
@@ -488,26 +525,9 @@ func NewLogger(dbPath string, projectRoot string, opts ...Option) (*Logger, erro
 		return nil, fmt.Errorf("failed to migrate signature columns: %w", err)
 	}
 
-	if _, err := db.Exec(`CREATE TABLE IF NOT EXISTS chain_identity (
-		id INTEGER PRIMARY KEY CHECK (id = 1),
-		version INTEGER NOT NULL,
-		agent_id TEXT NOT NULL,
-		chain_id TEXT NOT NULL,
-		legacy_anchor_digest TEXT NOT NULL
-	)`); err != nil {
+	if _, err := db.Exec(chainIdentitySchema); err != nil {
 		db.Close()
 		return nil, fmt.Errorf("failed to initialize chain identity metadata: %w", err)
-	}
-	canonicalRoot := ""
-	if projectRoot != "" {
-		canonicalRoot, err = filepath.Abs(projectRoot)
-		if err == nil {
-			canonicalRoot, err = resolveDeepestExisting(canonicalRoot)
-		}
-		if err != nil {
-			db.Close()
-			return nil, fmt.Errorf("cannot resolve project root for chain identity: %w", err)
-		}
 	}
 	l := &Logger{db: db, onCommit: lc.onCommit, projectRoot: canonicalRoot}
 
@@ -516,10 +536,6 @@ func NewLogger(dbPath string, projectRoot string, opts ...Option) (*Logger, erro
 		if err != nil {
 			db.Close()
 			return nil, fmt.Errorf("failed to check signing adoption state: %w", err)
-		}
-		if lc.existingSigningOnly && !adopted {
-			db.Close()
-			return nil, errors.New("anchor operations require existing signing adoption; refusing to adopt or re-sign this database")
 		}
 		var s *signer
 		if adopted {
@@ -534,9 +550,6 @@ func NewLogger(dbPath string, projectRoot string, opts ...Option) (*Logger, erro
 			return nil, fmt.Errorf("failed to load signing key: %w", err)
 		}
 		l.signer = s
-		if lc.existingSigningOnly {
-			return l, nil
-		}
 		// Adopt signing on first signed open: record the genesis marker and sign
 		// the current head. Existing rows stay unsigned; verify treats them as
 		// UNSIGNED-but-consistent, not forged.
@@ -547,6 +560,71 @@ func NewLogger(dbPath string, projectRoot string, opts ...Option) (*Logger, erro
 	}
 
 	return l, nil
+}
+
+const chainIdentitySchema = `CREATE TABLE IF NOT EXISTS chain_identity (
+	id INTEGER PRIMARY KEY CHECK (id = 1),
+	version INTEGER NOT NULL,
+	agent_id TEXT NOT NULL,
+	chain_id TEXT NOT NULL,
+	legacy_anchor_digest TEXT NOT NULL
+)`
+
+// openExistingSignedLogger validates the current SQLite snapshot before any
+// schema or signing mutation. The same transaction protects validation and the
+// optional v2 mirror-table addition for a valid older signed log. A concurrent
+// WAL writer makes an unsafe read-to-write promotion fail rather than blessing
+// another snapshot. SQLite may manage its WAL/SHM files; no immutable read is used.
+func openExistingSignedLogger(db *sql.DB, projectRoot string, lc loggerConfig) (*Logger, error) {
+	s, err := loadSigner(lc.signingKeyPath)
+	if err != nil {
+		return nil, fmt.Errorf("failed to load signing key: %w", err)
+	}
+	tx, err := db.Begin()
+	if err != nil {
+		return nil, err
+	}
+	defer tx.Rollback()
+	var genesis *string
+	var fingerprint string
+	if err := tx.QueryRow("SELECT signed_genesis_at, signing_pubkey_fingerprint FROM chain_head WHERE id = 1").Scan(&genesis, &fingerprint); err != nil {
+		return nil, fmt.Errorf("anchor operations require existing signing adoption: %w", err)
+	}
+	if genesis == nil {
+		return nil, errors.New("anchor operations require existing signing adoption; refusing to adopt or re-sign this database")
+	}
+	if err := validateAdoptedSigningHead(tx, s, fingerprint); err != nil {
+		return nil, err
+	}
+	if _, err := tx.Exec(chainIdentitySchema); err != nil {
+		return nil, fmt.Errorf("failed to initialize chain identity metadata: %w", err)
+	}
+	if err := tx.Commit(); err != nil {
+		return nil, err
+	}
+	return &Logger{db: db, signer: s, onCommit: lc.onCommit, projectRoot: projectRoot}, nil
+}
+
+func validateAdoptedSigningHead(tx *sql.Tx, s *signer, fingerprint string) error {
+	if fingerprint == "" {
+		return fmt.Errorf("audit log signing metadata has no public key fingerprint; refusing to write")
+	}
+	if fingerprint != publicKeyFingerprint(s.pub) {
+		return fmt.Errorf("audit log signing key does not match the adopted public key fingerprint; refusing to write")
+	}
+	var headHash, headSig string
+	var rowCount int
+	if err := tx.QueryRow("SELECT entry_hash, row_count, head_sig FROM chain_head WHERE id = 1").Scan(&headHash, &rowCount, &headSig); err != nil {
+		return fmt.Errorf("failed to read chain head for signing key validation: %w", err)
+	}
+	headMeta, err := readHeadSignatureMetadata(tx)
+	if err != nil {
+		return fmt.Errorf("failed to read chain head signing metadata for key validation: %w", err)
+	}
+	if headSig == "" || !verifyHeadSig(s.pub, headHash, rowCount, headMeta, headSig) {
+		return fmt.Errorf("audit log signing key does not verify the adopted chain head; refusing to write")
+	}
+	return nil
 }
 
 // Log records a single event with hash chain. Thread-safe (SQLite WAL handles locking).
@@ -1433,23 +1511,8 @@ func adoptSigningIfNeeded(db *sql.DB, s *signer) error {
 		return fmt.Errorf("failed to read signing genesis: %w", err)
 	}
 	if genesis != nil {
-		if fingerprint == "" {
-			return fmt.Errorf("audit log signing metadata has no public key fingerprint; refusing to write")
-		}
-		if fingerprint != publicKeyFingerprint(s.pub) {
-			return fmt.Errorf("audit log signing key does not match the adopted public key fingerprint; refusing to write")
-		}
-		var headHash, headSig string
-		var rowCount int
-		if err := tx.QueryRow("SELECT entry_hash, row_count, head_sig FROM chain_head WHERE id = 1").Scan(&headHash, &rowCount, &headSig); err != nil {
-			return fmt.Errorf("failed to read chain head for signing key validation: %w", err)
-		}
-		headMeta, err := readHeadSignatureMetadata(tx)
-		if err != nil {
-			return fmt.Errorf("failed to read chain head signing metadata for key validation: %w", err)
-		}
-		if headSig == "" || !verifyHeadSig(s.pub, headHash, rowCount, headMeta, headSig) {
-			return fmt.Errorf("audit log signing key does not verify the adopted chain head; refusing to write")
+		if err := validateAdoptedSigningHead(tx, s, fingerprint); err != nil {
+			return err
 		}
 		// Already adopted with the same key.
 		return tx.Commit()

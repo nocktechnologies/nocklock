@@ -61,6 +61,9 @@ func init() {
 // runAnchorEmit verifies existing signing without adopting or repairing the
 // database, then emits the selected v1/v2 record to --out or stdout.
 func runAnchorEmit(ctx context.Context, w io.Writer, outPath string) error {
+	if ctx == nil {
+		ctx = context.Background()
+	}
 	ctx, cancel := context.WithTimeout(ctx, anchorCLITimeout)
 	defer cancel()
 	dbPath, projectRoot, err := resolveAuditDBPath()
@@ -86,7 +89,11 @@ func runAnchorEmit(ctx context.Context, w io.Writer, outPath string) error {
 			return err
 		}
 		if outPath != "" {
-			return logging.WriteAnchorV2(outPath, anchor)
+			if err := logging.WriteAnchorV2(outPath, anchor); err != nil {
+				return err
+			}
+			_, err := fmt.Fprintf(w, "anchor written to %s (row_count=%d, head=%s)\n", outPath, anchor.RowCount, anchor.HeadHash)
+			return err
 		}
 		data, err := logging.MarshalAnchorV2(anchor)
 		if err != nil {

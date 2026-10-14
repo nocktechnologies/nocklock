@@ -20,11 +20,19 @@ The managed signing key lives in `$XDG_CONFIG_HOME/nocklock/signing-ed25519.key`
 
 V2 anchors sign the verified `(agent_id, chain_id)` pair, current head/count, timestamp and immutable legacy witness with domain byte `0x06` (`internal/logging/anchor_v2.go`). Independent projects can share a managed key without sharing a stream. V1 file verification preserves its original `0x05` encoding. `anchor emit` verifies the signed chain and uses v2 when a trusted identity exists, otherwise v1. It loads the existing key without generating a key or adopting/re-signing the database (`WithExistingSigning`); an unsigned or stripped log is refused. `pkg/receipt` continues verifying individual sessions offline.
 
+Existing-signing opens used by anchor commands validate the adopted key fingerprint
+and signed head before any schema or signing change. Absent, unsigned or stripped
+databases are refused without creating directories/files, changing permissions,
+or adding tables. SQLite `mode=rw` observes committed WAL pages; this is not an
+immutable snapshot. SQLite may manage WAL/SHM sidecars. Valid older signed logs
+can receive the v2 metadata table only in the transaction that validated adoption.
+Normal wrap's initial signing adoption remains unchanged.
+
 ### Explicit enrollment and migration
 
 `anchor enroll` checks the signed local chain and asks the upgraded store whether retained v1 history exists. A key with no legacy pin can establish a new pin. When history belongs to a different project, `anchor enroll --acknowledge-no-legacy-history` explicitly declines that history and uses a zero witness. `anchor migrate` selects the actual owning project, authenticates its retained legacy anchor, proves the local prefix and signs its exact snapshot digest into the new v2 stream. Wrong-project, shorter or divergent local chains cannot migrate. Both commands require remote v2 verification before reporting completion.
 
-The random ID lives in `chain-identity.json` under the trusted external project state directory and is mirrored in DB metadata. Both copies must agree. `anchor-registration.json` durably retains the exact original signed request, mode and migration witness before registration. Under the shared identity/prune lock, the client verifies the local signed prefix and syncs `pending` before sending. A lost response, rejected request or crash leaves pending; retrying the same command replays the original snapshot. Verified exact-request confirmation moves to `enrolled`; no transition clears pending or enrolled. The operator must restore a missing record, never mint a replacement.
+The random ID lives in `chain-identity.json` under the trusted external project state directory and is mirrored in DB metadata. Both copies must agree. `anchor-registration.json` durably retains the exact original signed request, mode and migration witness before registration. Under the shared identity/prune lock, the client verifies the local signed prefix and syncs `pending` before sending. A lost response, rejected request or crash after pending is persisted leaves pending; a failure after request persistence but before pending leaves a retained request that also blocks prune; retrying the same command replays the original snapshot. Verified exact-request confirmation moves to `enrolled`; no transition clears pending or enrolled. The operator must restore a missing record, never mint a replacement.
 
 If the original request's rename committed but its directory sync failed,
 retry preserves the original signed bytes. The request file was synced before
@@ -64,14 +72,14 @@ The upgraded store retains v1 migration history and freezes ordinary v1 access f
 
 Prune requires explicit project context; rootless library calls refuse even for
 legacy databases. On Linux and macOS, neither identity copy may exist, or both
-must agree with registration `none`. The external state directory must be
+must agree with registration `none`; neither case may have a retained original registration request. A request left before pending was durably written must remain replayable. The external state directory must be
 resolvable, accessible, correctly owned, free of forbidden symlinks/permissions,
 outside the project and strictly below the state root. Prune holds the shared
 identity lock through deletion and waits at most five seconds to acquire it.
-Unusable storage, lock timeout, pending/enrolled state, a missing identity copy,
+Unusable request/state storage, a retained registration request, lock timeout, pending/enrolled state, a missing identity copy,
 or corrupt/inconsistent metadata refuses before changing events. These storage
 and locking failures also refuse legacy prune. Platforms without identity-lock
-support permit only legacy chains with neither identity copy. The CLI supplies
+support permit only legacy chains with neither identity copy nor a retained registration request. The CLI supplies
 the project root; see the [CLI reference](../reference/cli.md) for the full contract.
 
 With a filesystem fence enabled, `wrap` protects the canonical future trusted
@@ -173,7 +181,7 @@ The scratch directory is only a verification workspace: never run `wrap`, `log -
 - macOS records per-file denials best-effort (`filesystem-fence.md`). The HTTP proxy ignores audit-write errors on the allow path, while the netns path fails closed (`docs/design/look-back-rules.md` section 1, item 5).
 - Allowed file reads are never logged, only denials.
 - On legacy chains, `--prune` removes history and invalidates earlier anchors;
-  `verify` prints a `NOTE`. V2 local pending/enrolled state refuses prune.
+  `verify` prints a `NOTE`. V2 local pending/enrolled state or a retained original registration request refuses prune, including state none after an interrupted write.
 
 ## Tests
 `internal/logging/*_test.go`, `internal/cli/verify_test.go`, `verify_signing_test.go`, `audit_state_*_test.go`, `anchor_*_test.go`, `internal/anchorclient/client*_test.go`, `pkg/receipt/*_test.go`.

@@ -318,19 +318,51 @@ func TestAnchorPushCLI(t *testing.T) {
 func TestAnchorPushCLIRegressionIsError(t *testing.T) {
 	dbPath, keyPath := setupAnchorProject(t)
 	seedSignedChain(t, dbPath, keyPath, 1)
+	anchor := emitRemoteAnchorNow(t, dbPath, keyPath)
 	anchorFile := filepath.Join(t.TempDir(), "a.json")
-	if err := logging.WriteAnchorV2(anchorFile, emitRemoteAnchorNow(t, dbPath, keyPath)); err != nil {
+	if err := logging.WriteAnchorV2(anchorFile, anchor); err != nil {
 		t.Fatal(err)
 	}
+	pub, err := logging.LoadPublicKeyFile(keyPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	digest, err := logging.AnchorV2SnapshotDigest(anchor, pub, anchor.AgentID, anchor.ChainID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var gets, posts atomic.Int32
+	var got struct {
+		Anchor           *logging.AnchorV2 `json:"anchor"`
+		ExpectedPrevious string            `json:"expected_previous"`
+	}
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		http.Error(w, "row_count regression", http.StatusConflict)
+		if r.Method == http.MethodGet {
+			gets.Add(1)
+			json.NewEncoder(w).Encode(anchor)
+			return
+		}
+		if r.Method != http.MethodPost {
+			http.Error(w, "wrong method", http.StatusMethodNotAllowed)
+			return
+		}
+		posts.Add(1)
+		if err := json.NewDecoder(r.Body).Decode(&got); err != nil {
+			http.Error(w, "invalid JSON", http.StatusBadRequest)
+			return
+		}
+		w.WriteHeader(http.StatusConflict)
+		io.WriteString(w, `{"success":false,"message":"row_count regression","data":{"code":"row_count_regression"}}`)
 	}))
 	defer srv.Close()
 	t.Setenv(anchorclient.EnvURL, srv.URL)
 	t.Setenv(anchorclient.EnvToken, remoteTestToken)
-	err := runAnchorPush(context.Background(), io.Discard, anchorFile)
-	if err == nil || !strings.Contains(err.Error(), "regression") || strings.Contains(err.Error(), remoteTestToken) {
-		t.Fatalf("409 must surface as a regression error without the token, got %v", err)
+	err = runAnchorPush(context.Background(), io.Discard, anchorFile)
+	if err == nil || !strings.Contains(err.Error(), "row_count_regression") || strings.Contains(err.Error(), remoteTestToken) {
+		t.Fatalf("conditional POST 409 must surface without the token, got %v", err)
+	}
+	if gets.Load() != 1 || posts.Load() != 1 || got.Anchor == nil || *got.Anchor != *anchor || got.ExpectedPrevious != digest {
+		t.Fatalf("conditional POST not exercised: GET=%d POST=%d candidate=%+v previous=%q", gets.Load(), posts.Load(), got.Anchor, got.ExpectedPrevious)
 	}
 }
 

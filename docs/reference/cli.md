@@ -27,15 +27,15 @@ even for a legacy database.
 
 On Linux and macOS, pruning remains available when neither a trusted identity
 record nor a DB identity exists, or when both agree and registration is `none`,
-provided the external state directory can be resolved and validated and its
+provided no original registration request is retained, the external state directory can be resolved and validated and its
 shared lock acquired. Prune refuses before deleting events if one identity copy
 is missing while the other exists, registration is `pending` or `enrolled`,
-identity metadata is corrupt or inconsistent, storage is unusable, or the lock
+an original registration request is retained (even in state `none`), identity metadata is corrupt or inconsistent, storage is unusable, or the lock
 times out. Storage is unusable when its path cannot be accessed or created,
 fails ownership/permission/symlink checks, lies inside the project, or is not
 strictly below the configured state root. These storage and locking failures also refuse
 legacy prune. Platforms without identity-lock support permit only legacy chains
-with neither a trusted record nor a DB identity.
+with neither a trusted record, DB identity nor retained registration request.
 
 Preserve incomplete or moved state and follow the
 [offline state-move procedure](../runbooks/chain-identity-move.md).

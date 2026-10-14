@@ -103,6 +103,11 @@ func (l *Logger) verifyAgainstAnchorV2Locked(a *AnchorV2, pub ed25519.PublicKey,
 	if a != nil {
 		r.AnchorRowCount, r.AnchorHeadHash = a.RowCount, a.HeadHash
 	}
+	if pub == nil {
+		r.Classification = "no_key"
+		r.Reason = "no public key available to authenticate the anchor (supply --ed25519-pub or run on the signing host)"
+		return r, nil
+	}
 	if err := VerifyAnchorV2(a, pub, id.AgentID, id.ChainID); err != nil {
 		r.Classification, r.Reason = "forged", err.Error()
 		if errors.Is(err, ErrAnchorIdentityMismatch) {

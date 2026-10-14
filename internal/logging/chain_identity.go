@@ -210,6 +210,9 @@ func (l *Logger) RegisterChainIdentity(register func(ChainIdentity) (*ChainRegis
 // RegisterChainIdentityContext is RegisterChainIdentity with cancellable identity-lock acquisition.
 // Once a durable write starts, it completes synchronously before returning.
 func (l *Logger) RegisterChainIdentityContext(ctx context.Context, register func(ChainIdentity) (*ChainRegistrationConfirmation, error)) (*ChainIdentity, error) {
+	if l.signer == nil {
+		return nil, errors.New("chain registration requires the existing signing key")
+	}
 	if register == nil {
 		return nil, errors.New("chain registration requires a confirmation callback")
 	}
@@ -279,6 +282,13 @@ func (l *Logger) lockPruneIdentity() (func(), error) {
 	if err == nil && identity != nil && identity.RegistrationState != ChainRegistrationNone {
 		err = fmt.Errorf("refusing prune: remote pin for (%s, %s) is %s; archive the old DB and enroll a fresh chain to bound growth; for moved state follow docs/runbooks/chain-identity-move.md", identity.AgentID, identity.ChainID, identity.RegistrationState)
 	}
+	if err == nil {
+		var request []byte
+		request, err = store.readData(AnchorRegistrationFileName, 16384)
+		if err == nil && request != nil {
+			err = errors.New("refusing prune: retained original anchor registration request requires this signed history; retry the original anchor enroll or anchor migrate before archiving the chain")
+		}
+	}
 	if err != nil {
 		store.close()
 		return nil, err
@@ -293,6 +303,15 @@ func (l *Logger) allowLegacyPruneWithoutIdentity() error {
 	}
 	if dir != "" {
 		return errors.New("trusted chain identity prune checks require Linux or macOS; remote pin preserved")
+	}
+	stateDir, err := config.AuditStateDir(l.projectRoot)
+	if err != nil {
+		return err
+	}
+	if _, err := os.Lstat(filepath.Join(stateDir, AnchorRegistrationFileName)); err == nil {
+		return errors.New("refusing prune: retained original anchor registration request requires Linux or macOS to validate; signed history preserved")
+	} else if !errors.Is(err, os.ErrNotExist) {
+		return fmt.Errorf("cannot inspect retained anchor registration request: %w", err)
 	}
 	return nil
 }
