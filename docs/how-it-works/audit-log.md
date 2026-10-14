@@ -75,17 +75,21 @@ Set these three absolute paths to one project's archived files, then run the blo
   cd "$recovery_dir"
   export XDG_STATE_HOME="$recovery_dir/state"
   nocklock verify --audit --ed25519-pub "$archived_pub"
-  if [ -f "$archive_anchor" ]; then
+  if [ -n "$archive_anchor" ]; then
+    if [ ! -f "$archive_anchor" ]; then
+      printf "Saved anchor not found at %s; fix the path, or set archive_anchor='' to skip the anchor check on purpose.\n" "$archive_anchor" >&2
+      exit 1
+    fi
     nocklock verify --against-anchor "$archive_anchor" \
       --ed25519-pub "$archived_pub"
   else
-    printf 'No saved anchor: only the audit signature check was run.\n'
+    printf 'Anchor check explicitly skipped: only the audit signature check was run.\n'
   fi
   printf 'Verification copy retained at %s\n' "$recovery_dir"
 )
 ```
 
-Expect `AUDIT: AUTHENTIC` (exit 0) and, when an anchor is supplied, `ANCHOR: OK` (exit 0). This checks a saved anchor file, not the remote store; current remote lookup remains tied to the signing-key fingerprint, not the scratch path. A saved anchor can legitimately disagree after pruning; preserve and investigate that result instead of generating a replacement anchor. The old rows checked with the new public key must report `FORGED` (exit 1). Always pass the archived public key explicitly; omitting it can select a different local key or give only an unsigned consistency verdict.
+Expect `AUDIT: AUTHENTIC` (exit 0) and `ANCHOR: OK` (exit 0). A non-empty anchor path is required to exist; a missing or mistyped path exits 1. Only an intentional `archive_anchor=''` skips the anchor check, prints that only the audit signature check ran, and permits a signature-only exit 0. This checks a saved anchor file, not the remote store; current remote lookup remains tied to the signing-key fingerprint, not the scratch path. A saved anchor can legitimately disagree after pruning; preserve and investigate that result instead of generating a replacement anchor. The old rows checked with the new public key must report `FORGED` (exit 1). Always pass the archived public key explicitly; omitting it can select a different local key or give only an unsigned consistency verdict.
 
 The scratch directory is only a verification workspace: never run `wrap`, `log --prune`, or `anchor emit` there. The copied signed rows, original config evidence, and v1 anchor identity (the signing-key fingerprint) remain unchanged. The scratch directory has a different path-derived state key; it does not become the original project or migrate its identity. Keep the archive inventory to identify the original project. Verification may create SQLite sidecars or update database metadata in the **copy**; the archived files and live config remain untouched. Retain or remove the scratch copy by its exact printed path when finished.
 
