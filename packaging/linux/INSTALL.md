@@ -13,7 +13,7 @@ run it on a workstation or agent host. Never run the included helper script
 directly from an untrusted download with sudo.
 
 The disposable-host workflow first checks that `/usr/local` and its `bin` and
-`lib` children are real directories, then makes only those three directories
+`lib` children and `/opt` are real directories, then makes only those four directories
 root-owned and removes group/other write permission. Hosted runner images can
 otherwise leave them writable by the runner. Before/after owners and modes are
 retained in the acceptance artifact; the installer still rejects any untrusted

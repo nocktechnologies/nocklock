@@ -98,12 +98,12 @@ jobs:
           test "$RUNNER_ENVIRONMENT" = github-hosted
           # Hosted images allow runner writes under /usr/local. This explicit
           # VM setup is not part of the installer and never changes descendants.
-          # Check every component before changing any of the three exact paths.
-          for directory in / /usr /usr/local /usr/local/bin /usr/local/lib; do
+          # Check every component before changing any of the four exact paths.
+          for directory in / /usr /usr/local /usr/local/bin /usr/local/lib /opt; do
             test ! -L "$directory"
             test -d "$directory"
           done
-          for directory in /usr/local /usr/local/bin /usr/local/lib; do
+          for directory in /usr/local /usr/local/bin /usr/local/lib /opt; do
             stat --format='before %n uid=%u gid=%g mode=%a' "$directory"
             sudo chown root:root "$directory"
             sudo chmod go-w "$directory"
