@@ -92,6 +92,11 @@ func (l *Logger) InitializeChainIdentity(legacyAnchorDigest string) (*ChainIdent
 		}
 		return identity, nil
 	}
+	// Establish previously legacy-created ancestry before even the DB mirror
+	// changes. Unsupported directory durability must not poison a legacy chain.
+	if err := store.prepareWrite(); err != nil {
+		return nil, err
+	}
 	var randomID [32]byte
 	if _, err := rand.Read(randomID[:]); err != nil {
 		return nil, fmt.Errorf("cannot generate chain identity: %w", err)
@@ -329,10 +334,12 @@ func validateChainIdentity(identity *ChainIdentity) error {
 }
 
 type chainIdentityStore struct {
-	root     *os.Root
-	lock     *os.File
-	syncRoot string
-	syncFile func(*os.File) error
+	root         *os.Root
+	lock         *os.File
+	syncRoot     string
+	syncFile     func(*os.File) error
+	syncRootFile func(*os.File) error
+	rootDurable  bool
 }
 
 // ChainIdentityDurabilityError means the replacement record is visible, but a
@@ -352,17 +359,25 @@ func (e *ChainIdentityDurabilityError) Unwrap() error { return e.Err }
 // directory to protect even before an identity is created. It does not mint an
 // identity. A configured logging.db cannot change this trusted location.
 func (l *Logger) TrustedChainStateDirectory() (string, error) {
+	dir, _, err := l.trustedChainStateLocation()
+	return dir, err
+}
+
+func (l *Logger) trustedChainStateLocation() (string, string, error) {
 	if l.projectRoot == "" {
-		return "", errors.New("chain identity requires an explicit project root")
+		return "", "", errors.New("chain identity requires an explicit project root")
 	}
-	dir, err := config.EnsureAuditStateDir(l.projectRoot)
+	dir, root, err := config.EnsureAuditStateLocation(l.projectRoot)
 	if err != nil {
-		return "", fmt.Errorf("cannot protect trusted chain identity directory: %w", err)
+		return "", "", fmt.Errorf("cannot protect trusted chain identity directory: %w", err)
 	}
 	if pathContains(l.projectRoot, dir) {
-		return "", errors.New("trusted chain identity directory must be outside the fenced project; move XDG_STATE_HOME outside the project")
+		return "", "", errors.New("trusted chain identity directory must be outside the fenced project; move XDG_STATE_HOME outside the project")
 	}
-	return dir, nil
+	if dir == root || !pathContains(root, dir) {
+		return "", "", errors.New("trusted chain identity directory must be strictly below its state root; refusing operation")
+	}
+	return dir, root, nil
 }
 
 func (s *chainIdentityStore) close() {
@@ -377,16 +392,9 @@ func (l *Logger) lockChainIdentityStore() (*chainIdentityStore, error) {
 }
 
 func (l *Logger) lockChainIdentityStoreContext(ctx context.Context) (*chainIdentityStore, error) {
-	dir, err := l.TrustedChainStateDirectory()
+	dir, syncRoot, err := l.trustedChainStateLocation()
 	if err != nil {
 		return nil, err
-	}
-	syncRoot, err := config.AuditStateRoot()
-	if err != nil {
-		return nil, err
-	}
-	if !pathContains(syncRoot, dir) {
-		return nil, errors.New("trusted chain identity state root changed; refusing operation")
 	}
 	before, err := os.Lstat(dir)
 	if err != nil {
@@ -410,7 +418,11 @@ func (l *Logger) lockChainIdentityStoreContext(ctx context.Context) (*chainIdent
 	if syncFile == nil {
 		syncFile = (*os.File).Sync
 	}
-	store := &chainIdentityStore{root: root, lock: lock, syncRoot: syncRoot, syncFile: syncFile}
+	syncRootFile := l.identityRootSync
+	if syncRootFile == nil {
+		syncRootFile = (*os.File).Sync
+	}
+	store := &chainIdentityStore{root: root, lock: lock, syncRoot: syncRoot, syncFile: syncFile, syncRootFile: syncRootFile}
 	if err := store.checkFile(chainIdentityLockName, lock); err != nil {
 		store.close()
 		return nil, err
@@ -490,7 +502,36 @@ func (s *chainIdentityStore) read() (*ChainIdentity, error) {
 	return &identity, nil
 }
 
+// prepareWrite establishes the configured root's complete existing lineage
+// before changing trusted state. Legacy path resolution may have created any
+// number of ancestors without directory fsync; existence is not proof of their
+// durability. Only identity mutation pays this stricter requirement. Reads,
+// legacy logging and prune do not call it. The post-rename barrier remains
+// bounded by syncRoot, and every new locked mutation performs its own preflight.
+func (s *chainIdentityStore) prepareWrite() error {
+	if s.rootDurable {
+		return nil
+	}
+	for path := s.syncRoot; ; path = filepath.Dir(path) {
+		dir, err := os.Open(path)
+		if err != nil {
+			return fmt.Errorf("cannot establish trusted identity storage durability before writing: %w", err)
+		}
+		if err := errors.Join(s.syncRootFile(dir), dir.Close()); err != nil {
+			return fmt.Errorf("cannot establish trusted identity storage durability before writing: %w", err)
+		}
+		if filepath.Dir(path) == path {
+			break
+		}
+	}
+	s.rootDurable = true
+	return nil
+}
+
 func (s *chainIdentityStore) write(identity *ChainIdentity) error {
+	if err := s.prepareWrite(); err != nil {
+		return err
+	}
 	if err := validateChainIdentity(identity); err != nil {
 		return err
 	}
@@ -539,6 +580,9 @@ func (s *chainIdentityStore) write(identity *ChainIdentity) error {
 		}
 		if parent == s.syncRoot {
 			break
+		}
+		if filepath.Dir(parent) == parent {
+			return &ChainIdentityDurabilityError{Err: errors.New("cannot reach the configured state root while syncing; preserve the record and correct the state path")}
 		}
 	}
 	return nil
