@@ -464,3 +464,109 @@ func TestLoadAcceptsAuditLogInProjectSubdirectory(t *testing.T) {
 		t.Fatalf("an audit log in a project subdirectory should load: %v", err)
 	}
 }
+
+func TestAuditStateRootCreationBarriersAreBounded(t *testing.T) {
+	base := resolvedTempDir(t)
+	first := filepath.Join(base, "new")
+	root := filepath.Join(first, "state")
+	var synced []string
+	syncParent := func(path string) error { synced = append(synced, path); return nil }
+	if err := makeAuditStateRoot(root, syncParent); err != nil {
+		t.Fatal(err)
+	}
+	if len(synced) != 3 || synced[0] != filepath.Dir(base) || synced[1] != base || synced[2] != first {
+		t.Fatalf("creation barriers: %v", synced)
+	}
+	synced = nil
+	if err := makeAuditStateRoot(root, syncParent); err != nil || len(synced) != 1 || synced[0] != first {
+		t.Fatalf("existing root did not refresh only its parent: %v, %v", synced, err)
+	}
+}
+
+func TestAuditStateRootCreationFailureRemovesUncertainEntry(t *testing.T) {
+	base := resolvedTempDir(t)
+	root := filepath.Join(base, "new-state")
+	injected := errors.New("injected root creation fsync failure")
+	if err := makeAuditStateRoot(root, func(parent string) error {
+		if parent == base {
+			return injected
+		}
+		return nil
+	}); !errors.Is(err, injected) {
+		t.Fatalf("creation failure: %v", err)
+	}
+	if _, err := os.Stat(root); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("uncertain empty root retained: %v", err)
+	}
+	calls := 0
+	if err := makeAuditStateRoot(root, func(parent string) error {
+		if parent == base {
+			calls++
+		}
+		return nil
+	}); err != nil || calls != 1 {
+		t.Fatalf("retry did not re-establish root: calls=%d, %v", calls, err)
+	}
+}
+
+func TestAuditStateRootConcurrentVisibleBeforeSync(t *testing.T) {
+	base := resolvedTempDir(t)
+	root := filepath.Join(base, "new-state")
+	atBarrier, release := make(chan struct{}), make(chan struct{})
+	result := make(chan error, 1)
+	injected := errors.New("first initializer fsync failed")
+	go func() {
+		result <- makeAuditStateRoot(root, func(parent string) error {
+			if parent == base {
+				close(atBarrier)
+				<-release
+				return injected
+			}
+			return nil
+		})
+	}()
+	<-atBarrier // A's mkdir is visible, but A has not completed its parent barrier.
+	calls := 0
+	err := makeAuditStateRoot(root, func(parent string) error {
+		calls++
+		if parent != base {
+			t.Errorf("existing root synced unrelated ancestor %q", parent)
+		}
+		return nil
+	})
+	if err != nil || calls != 1 {
+		t.Errorf("B bypassed A's incomplete barrier: calls=%d, %v", calls, err)
+	}
+	// A cannot clean up after B starts populating the now-established root.
+	if err := os.WriteFile(filepath.Join(root, "owned-state"), []byte("fixture"), 0600); err != nil {
+		t.Error(err)
+	}
+	close(release)
+	if err := <-result; !errors.Is(err, injected) {
+		t.Fatalf("A failure hidden: %v", err)
+	}
+	// Even this populated-directory retry must establish its own barrier.
+	calls = 0
+	if err := makeAuditStateRoot(root, func(parent string) error { calls++; return injected }); !errors.Is(err, injected) || calls != 1 {
+		t.Fatalf("populated retry skipped barrier: calls=%d, %v", calls, err)
+	}
+}
+
+func TestAuditStateRootExistingSymlinkSyncsTargetParent(t *testing.T) {
+	base := resolvedTempDir(t)
+	target := filepath.Join(base, "real", "state")
+	if err := os.MkdirAll(target, 0700); err != nil {
+		t.Fatal(err)
+	}
+	alias := filepath.Join(base, "alias")
+	if err := os.Symlink(target, alias); err != nil {
+		t.Skipf("symlinks unsupported: %v", err)
+	}
+	var synced []string
+	if err := makeAuditStateRoot(alias, func(path string) error { synced = append(synced, path); return nil }); err != nil {
+		t.Fatal(err)
+	}
+	if len(synced) != 1 || synced[0] != filepath.Dir(target) {
+		t.Fatalf("synced alias parent instead of state-root entry: %v", synced)
+	}
+}

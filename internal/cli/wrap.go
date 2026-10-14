@@ -1432,14 +1432,22 @@ func protectChainIdentity(cfg *config.Config, logger *logging.Logger) error {
 	if err != nil {
 		return fmt.Errorf("cannot protect trusted chain identity; refusing to start: %w", err)
 	}
-	if dir == "" {
-		return nil
-	}
 	if cfg.Filesystem.Root == "" {
+		if dir == "" {
+			// Explicitly unfenced legacy sessions make no custody claim.
+			return nil
+		}
 		return errors.New("trusted chain identity requires an enabled filesystem fence; refusing to start with a remote pin at risk")
 	}
-	if runtime.GOOS == "linux" && linuxEnforcementMode(cfg.Filesystem.LinuxEnforcement) == linuxEnforcementOff {
+	if dir != "" && runtime.GOOS == "linux" && linuxEnforcementMode(cfg.Filesystem.LinuxEnforcement) == linuxEnforcementOff {
 		return errors.New("trusted chain identity requires Linux Landlock enforcement; refusing to start with a remote pin at risk")
+	}
+	// Protect the future record even for legacy chains and custom logging.db.
+	// Valid non-off Linux modes normalize to required, so unavailable Landlock
+	// or a grant overlapping this deny fails startup before the child executes.
+	dir, err = logger.TrustedChainStateDirectory()
+	if err != nil {
+		return fmt.Errorf("cannot protect future trusted chain state; refusing to start: %w", err)
 	}
 	cfg.Filesystem.Deny = append(cfg.Filesystem.Deny, dir)
 	return nil

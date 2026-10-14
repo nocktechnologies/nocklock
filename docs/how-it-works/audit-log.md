@@ -29,16 +29,38 @@ a random ID in the external per-project state directory, mirrored in DB metadata
 registration state outside rollbackable DB snapshots. `RegisterChainIdentity`
 holds the same process-safe lock as prune, writes and syncs `pending` before its
 request callback, and moves to `enrolled` only after exact-pair confirmation.
+Every pending retry rewrites and syncs the record before sending again; finding
+`pending` on disk does not prove the last directory sync succeeded. A
+`ChainIdentityDurabilityError` means replacement committed but durability is
+uncertain: preserve the visible state and retry, never restore `none`. A
+pending-write failure sends no callback; an enrolled-write failure follows the
+already-confirmed remote request and retains the previously durable pending
+guard. File and directory barriers stop at the configured state root. State-root establishment separately refreshes its immediate owning-parent
+barrier, including when already present; creating missing components syncs each
+new entry before descending. Existence alone never proves a completed barrier.
 Errors and interrupted requests never clear pending. The callback may read the
 DB under that lock, but must not recursively call identity methods or prune.
 Later network integration must preserve the original signed registration request
 for retries and authenticate the store's confirmation.
 
 Prune remains allowed for legacy chains and initialized identities in state
-`none`. Pending/enrolled identities, missing records and mismatched metadata
-refuse prune before changing rows. `wrap` protects the trusted directory even
-when `logging.db` points inside the project, and refuses an absent filesystem
-fence or Linux enforcement set to `off`. Follow the
+`none` when the logger has explicit project context. Rootless library callers
+must supply that context: a rolled-back DB cannot prove that external state is
+absent. The CLI already supplies the project root. Prune waits at most five
+seconds for the shared identity lock and holds it through deletion; timeout,
+pending/enrolled identities, missing records and mismatched metadata refuse
+before changing rows.
+
+With a filesystem fence enabled, `wrap` protects the canonical future trusted
+state directory before any identity exists, including when `logging.db` points
+inside the project. After any identity exists (`none`, `pending` or `enrolled`),
+it also refuses an absent filesystem fence or Linux enforcement set to `off`.
+On Linux, valid non-off modes (default, `preferred`, `required`) normalize to
+`required`: absent Landlock, failed activation, or a deny beneath a broader grant
+stops the child. Legacy sessions explicitly disabling the fence or setting Linux
+enforcement to `off` retain their existing degraded behavior; they make no
+kernel-backed trusted-state custody claim and should not precede enrollment of
+state that an unfenced child could have modified. Follow the
 [offline move procedure](../runbooks/chain-identity-move.md) when relocating a
 project; never regenerate an ID to bypass a missing record. These local guards
 do not resolve the remote one-chain-per-key limitation by themselves.

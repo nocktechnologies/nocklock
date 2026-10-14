@@ -14,6 +14,8 @@ import (
 	"time"
 
 	"github.com/nocktechnologies/nocklock/internal/config"
+	fsfence "github.com/nocktechnologies/nocklock/internal/fence/fs"
+	"github.com/nocktechnologies/nocklock/internal/fence/fs/landlock"
 	"github.com/nocktechnologies/nocklock/internal/logging"
 	"github.com/spf13/cobra"
 )
@@ -114,6 +116,13 @@ func TestWrapProtectsIdentityOutsideConfiguredLogDirectory(t *testing.T) {
 	if err := protectChainIdentity(cfg, logger); err != nil {
 		t.Fatalf("legacy control: %v", err)
 	}
+	futureDir, err := logger.TrustedChainStateDirectory()
+	if err != nil || !slices.Contains(cfg.Filesystem.Deny, futureDir) {
+		t.Fatalf("future identity not denied before creation: %q, %v", futureDir, err)
+	}
+	if _, err := logger.ReadChainIdentity(); !errors.Is(err, logging.ErrChainIdentityMissing) {
+		t.Fatalf("fence minted identity: %v", err)
+	}
 	if _, err := logger.InitializeChainIdentity(strings.Repeat("0", 64)); err != nil {
 		t.Fatal(err)
 	}
@@ -176,5 +185,87 @@ func TestWrapRefusesUnfencedTrustedIdentityBeforeChild(t *testing.T) {
 	verified, err := check.VerifyChainSigned(check.SigningPublicKey(), true)
 	if err != nil || !verified.Intact || verified.SigState != "authentic" {
 		t.Fatalf("refusal audit chain is not authentic: %+v, %v", verified, err)
+	}
+}
+
+func TestWrapFutureIdentityLandlockDeny(t *testing.T) {
+	logger, _, project, _ := setupCLIChainIdentity(t)
+	root := os.Getenv("XDG_STATE_HOME")
+	for _, grant := range []string{"none", "read", "write", "root"} {
+		t.Run(grant, func(t *testing.T) {
+			cfg := config.Config{Filesystem: config.FilesystemConfig{Root: project, Mode: "read-write"}}
+			switch grant {
+			case "read":
+				cfg.Filesystem.Allow = []string{root}
+			case "write":
+				cfg.Filesystem.AllowRW = []string{root}
+			case "root":
+				cfg.Filesystem.Root = filepath.Dir(root)
+			}
+			if err := protectChainIdentity(&cfg, logger); err != nil {
+				t.Fatal(err)
+			}
+			resolved, err := fsfence.ProcessConfig(cfg.Filesystem)
+			if err != nil {
+				t.Fatal(err)
+			}
+			_, err = landlock.RulesFromConfig(resolved, nil, 3)
+			if grant == "none" {
+				if err != nil {
+					t.Fatalf("separate writable project refused: %v", err)
+				}
+			} else if err == nil || !strings.Contains(err.Error(), "cannot be enforced by Landlock") {
+				t.Fatalf("future identity overlap accepted: %s, %v", grant, err)
+			}
+		})
+	}
+	if _, err := logger.ReadChainIdentity(); !errors.Is(err, logging.ErrChainIdentityMissing) {
+		t.Fatalf("minted identity: %v", err)
+	}
+}
+
+func TestWrapFutureIdentityUnderDefaultTempGrant(t *testing.T) {
+	logger, cfg, _, _ := setupCLIChainIdentity(t)
+	// The normal filesystem preset grants /tmp. A custom state root beneath
+	// that broad grant must refuse before any identity has been created.
+	root, err := os.MkdirTemp("/tmp", "nocklock-future-state-")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { os.RemoveAll(root) })
+	t.Setenv("XDG_STATE_HOME", root)
+	if err := protectChainIdentity(cfg, logger); err != nil {
+		t.Fatal(err)
+	}
+	resolved, err := fsfence.ProcessConfig(cfg.Filesystem)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := landlock.RulesFromConfig(resolved, nil, 3); err == nil || !strings.Contains(err.Error(), "cannot be enforced by Landlock") {
+		t.Fatalf("default broad temp grant accepted future state: %v", err)
+	}
+}
+
+func TestWrapLegacyUnfencedControlAndFutureStateContainment(t *testing.T) {
+	logger, cfg, project, _ := setupCLIChainIdentity(t)
+	cfg.Filesystem.Root = ""
+	if err := protectChainIdentity(cfg, logger); err != nil {
+		t.Fatalf("explicit legacy unfenced control: %v", err)
+	}
+	cfg.Filesystem.Root = project
+	t.Setenv("XDG_STATE_HOME", filepath.Join(project, "attacker-writable-state"))
+	if err := protectChainIdentity(cfg, logger); err == nil || !strings.Contains(err.Error(), "outside the fenced project") {
+		t.Fatalf("in-project future state accepted: %v", err)
+	}
+}
+
+func TestTrustedIdentityNonOffLinuxEnforcementRequiresLandlock(t *testing.T) {
+	for _, mode := range []string{"", "preferred", "required"} {
+		if got := linuxEnforcementMode(mode); got != linuxEnforcementRequired {
+			t.Fatalf("%q normalized to %q, not required", mode, got)
+		}
+	}
+	if got := linuxEnforcementMode("off"); got != linuxEnforcementOff {
+		t.Fatalf("legacy off control = %q", got)
 	}
 }

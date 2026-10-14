@@ -20,7 +20,8 @@ func newSigningLogger(t *testing.T) (*Logger, string, ed25519.PublicKey) {
 	t.Helper()
 	dbPath := filepath.Join(t.TempDir(), "events.db")
 	keyPath := filepath.Join(t.TempDir(), "keys", "audit.key")
-	l, err := NewLogger(dbPath, "", WithSigning(keyPath))
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	l, err := NewLogger(dbPath, filepath.Dir(dbPath), WithSigning(keyPath))
 	if err != nil {
 		t.Fatalf("NewLogger(WithSigning) failed: %v", err)
 	}
