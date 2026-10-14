@@ -12,6 +12,13 @@ together. It is not an upgrade, rollback, or general-purpose installer. Do not
 run it on a workstation or agent host. Never run the included helper script
 directly from an untrusted download with sudo.
 
+The disposable-host workflow first checks that `/usr/local` and its `bin` and
+`lib` children are real directories, then makes only those three directories
+root-owned and removes group/other write permission. Hosted runner images can
+otherwise leave them writable by the runner. Before/after owners and modes are
+retained in the acceptance artifact; the installer still rejects any untrusted
+path component. This VM preparation is not a public installation procedure.
+
 `SHA256SUMS` and its Sigstore bundle accompany the archive in the CI artifact.
 The workflow signs a **candidate manifest**, not a release. Verification must
 pin the GitHub Actions OIDC issuer and the exact candidate workflow identity

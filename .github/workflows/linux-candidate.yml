@@ -92,6 +92,24 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y iproute2 nftables sudo python3
+      - name: Establish root-owned install parents on disposable host
+        run: |
+          test "$GITHUB_ACTIONS" = true
+          test "$RUNNER_ENVIRONMENT" = github-hosted
+          # Hosted images allow runner writes under /usr/local. This explicit
+          # VM setup is not part of the installer and never changes descendants.
+          # Check every component before changing any of the three exact paths.
+          for directory in / /usr /usr/local /usr/local/bin /usr/local/lib; do
+            test ! -L "$directory"
+            test -d "$directory"
+          done
+          for directory in /usr/local /usr/local/bin /usr/local/lib; do
+            stat --format='before %n uid=%u gid=%g mode=%a' "$directory"
+            sudo chown root:root "$directory"
+            sudo chmod go-w "$directory"
+            stat --format='after  %n uid=%u gid=%g mode=%a' "$directory"
+          done > "$RUNNER_TEMP/install-parent-permissions.txt"
+          cat "$RUNNER_TEMP/install-parent-permissions.txt"
       - name: Fresh install from root-staged authenticated candidate
         env:
           CANDIDATE_COMMIT: ${{ needs.build.outputs.commit }}
@@ -147,7 +165,7 @@ jobs:
             sudo cp -r /home/nocklock-candidate/evidence "$RUNNER_TEMP/acceptance/"
             sudo chown -R "$(id -u):$(id -g)" "$RUNNER_TEMP/acceptance"
           fi
-          for name in repeated-install missing-interposer; do
+          for name in install-parent-permissions repeated-install missing-interposer; do
             if test -f "$RUNNER_TEMP/$name.txt"; then cp "$RUNNER_TEMP/$name.txt" "$RUNNER_TEMP/acceptance/"; fi
           done
           printf 'Candidate commit: %s\nCandidate signer: %s\nRunner image: %s\n' \

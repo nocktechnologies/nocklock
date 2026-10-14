@@ -10,6 +10,7 @@ All notable changes to NockLock will be documented in this file.
 
 ### Fixed
 
+- Linux candidate CI: prepare only the three exact `/usr/local` install parent directories on the disposable hosted VM and retain their before/after ownership and mode receipt. The installer continues to reject symlinks, non-root owners and group/other-writable ancestors.
 - CI: fail the scoped-sudoers artifact check when a blanket `NOPASSWD:ALL` grant is present or grep cannot read the file. Only grep's no-match exit code passes; the previous standalone negation could continue under Bash errexit (N11749).
 
 ## [0.9.3] - 2026-10-14
