@@ -10,6 +10,7 @@ All notable changes to NockLock will be documented in this file.
 
 ### Added
 
+- Add trusted external chain identities and monotonic local registration state for future v2 enrollment (N11744). Registration and prune share a process-safe lock; pending/enrolled or incomplete identity state refuses prune. The existing wrap path protects that directory independently of the configured DB and refuses unenforced filesystem access. Legacy chains still prune normally. No v2 network or enrollment CLI is enabled by this slice; the offline move procedure is documented and tested.
 - Linux CI coverage for post-exec child credentials under scheduler stress, full installed netns wrap credentials, and test-only cross-thread exec/proxy-group mutation controls (N11747). The red-team companion records real Unix-socket and io_uring controls separately; older Landlock ABIs and unavailable io_uring remain explicit coverage gaps, with no change to the main bench score or runtime behavior.
 - N11747 acceptance harnesses fail on every timeout, including earlier passing output; installed-wrap probes kill isolated process groups and bound output draining/reaping. Hanging-stub controls cover both harnesses. Hosted-only credential jobs check actual runner metadata, and a failed kernel companion stops the main bench and fails the job while preserving receipts.
 
@@ -20,6 +21,10 @@ All notable changes to NockLock will be documented in this file.
 - Fix signing-key recovery verification for absolute and project-local audit-log paths. Verify an isolated copy with the archived public key, preserving the live config, original archive and project provenance (N11739).
 
 ### Fixed
+
+- Harden trusted identity retries and pruning (N11744): every pending retry redoes file/directory durability barriers before registration; post-rename sync errors explicitly report a committed replacement with uncertain durability. Only trusted identity writes preflight the full state-root lineage before mutation; ordinary state resolution, reads and prune retain their no-fsync behavior. Post-rename barriers stop at the canonical state root, with a defensive filesystem-root stop. State directory and boundary come from one resolution. Prune requires project context after a database rollback and times out on the identity lock after five seconds. Filesystem-enabled wraps deny the future identity directory before enrollment, including custom DB locations and broad grant overlaps. Explicitly unfenced legacy behavior remains degraded; existing identities require enforcement.
+
+- Concurrent first-time chain identity initialization now creates its persistent lock exclusively, then opens the winning inode. This avoids a macOS `os.Root.OpenFile` creation race while retaining anchored path, ownership and symlink checks.
 
 - Tests: pin three disposable Landlock probes to their OS threads so Go cannot move their checks away from the restricted thread. Production already pinned its launch thread; runtime behavior is unchanged. CI repeats the probes under scheduler variation and deterministically proves that a separate existing thread remains unrestricted. Natural unpinned reproduction is an optional manual soak (N11773).
 - CI: fail the scoped-sudoers artifact check when a blanket `NOPASSWD:ALL` grant is present or grep cannot read the file. Only grep's no-match exit code passes; the previous standalone negation could continue under Bash errexit (N11749).

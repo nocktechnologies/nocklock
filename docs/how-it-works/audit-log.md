@@ -22,6 +22,54 @@ Anchors use a distinct domain-separation byte (`0x05`; rows `0x01`, head `0x03`)
 
 **Remote anchor limit:** The current anchor identifies a chain by its signing-key fingerprint (`agent_id`), and remote lookup uses that same fingerprint (`internal/logging/anchor.go`, `internal/cli/anchor_push.go`, `internal/anchorclient/client.go`). A remote store therefore supports only one chain per signing key. Two projects using the default managed key share this identity even though they have separate audit databases (`internal/config/state.go`). After the larger project's anchor is stored, the smaller project's valid push is rejected as a rollback, and its remote verification reports `TRUNCATION` (or `TAMPERED`) against the other project's anchor. Until the [chain identity design](../design/anchor-chain-identity.md) is implemented, use a separate anchor store per project, or provision a separate signing key per project by using distinct `XDG_CONFIG_HOME` values from the start (`internal/logging/signing.go`). Changing the key of an existing signed chain is not a workaround. Do not interpret that cross-project `TRUNCATION` or `TAMPERED` verdict as proof that the smaller database was rolled back.
 
+The v2 record and local identity foundations are opt-in library APIs, not an
+enabled v2 enrollment/network CLI. `InitializeChainIdentity` explicitly creates
+a random ID in the external per-project state directory, mirrored in DB metadata;
+`ReadChainIdentity` requires both copies to agree. The trusted record keeps
+registration state outside rollbackable DB snapshots. `RegisterChainIdentity`
+holds the same process-safe lock as prune, writes and syncs `pending` before its
+request callback, and moves to `enrolled` only after exact-pair confirmation.
+Every pending retry rewrites and syncs the record before sending again; finding
+`pending` on disk does not prove the last directory sync succeeded. A
+`ChainIdentityDurabilityError` means replacement committed but durability is
+uncertain: preserve the visible state and retry, never restore `none`. A
+pending-write failure sends no callback; an enrolled-write failure follows the
+already-confirmed remote request and retains the previously durable pending
+guard. Ordinary state resolution, reads and prune perform no directory fsync.
+Only trusted identity writes first sync the configured state root and every
+ancestor through the filesystem root, before any DB mirror change or record
+rename. This establishes entries that a prior legacy `MkdirAll` may have created;
+existence alone does not prove durability. An unreadable ancestor or unsupported
+directory sync blocks identity mutation, while legacy logging and verification
+remain usable. After record rename, file and directory barriers stop at the
+canonical state root. Each new locked mutation performs its own preflight.
+Errors and interrupted requests never clear pending. The callback may read the
+DB under that lock, but must not recursively call identity methods or prune.
+Later network integration must preserve the original signed registration request
+for retries and authenticate the store's confirmation.
+
+Prune remains allowed for legacy chains and initialized identities in state
+`none` when the logger has explicit project context. Rootless library callers
+must supply that context: a rolled-back DB cannot prove that external state is
+absent. The CLI already supplies the project root. Prune waits at most five
+seconds for the shared identity lock and holds it through deletion; timeout,
+pending/enrolled identities, missing records and mismatched metadata refuse
+before changing rows.
+
+With a filesystem fence enabled, `wrap` protects the canonical future trusted
+state directory before any identity exists, including when `logging.db` points
+inside the project. After any identity exists (`none`, `pending` or `enrolled`),
+it also refuses an absent filesystem fence or Linux enforcement set to `off`.
+On Linux, valid non-off modes (default, `preferred`, `required`) normalize to
+`required`: absent Landlock, failed activation, or a deny beneath a broader grant
+stops the child. Legacy sessions explicitly disabling the fence or setting Linux
+enforcement to `off` retain their existing degraded behavior; they make no
+kernel-backed trusted-state custody claim and should not precede enrollment of
+state that an unfenced child could have modified. Follow the
+[offline move procedure](../runbooks/chain-identity-move.md) when relocating a
+project; never regenerate an ID to bypass a missing record. These local guards
+do not resolve the remote one-chain-per-key limitation by themselves.
+
 ## Where the log lives
 Outside the project: `$XDG_STATE_HOME/nocklock/<project-key>/` (or `~/.local/state/nocklock/<project-key>/`). The filesystem fence grants the project root and Landlock cannot exclude a path beneath a grant, so a log inside the project would be editable by the agent. An existing `.nock/events.db` stays where it is (the README explains why NockLock does not move it). Path resolution fails closed (`internal/config/state.go`); `wrap` refuses to start when `logging.db` resolves to the project root. Decision record: `docs/decisions/010-audit-state-outside-project.md`.
 
@@ -105,7 +153,8 @@ The scratch directory is only a verification workspace: never run `wrap`, `log -
 - Not externally anchored by default; v1 is tamper-evident, not an unforgeable receipt.
 - macOS records per-file denials best-effort (`filesystem-fence.md`). The HTTP proxy ignores audit-write errors on the allow path, while the netns path fails closed (`docs/design/look-back-rules.md` section 1, item 5).
 - Allowed file reads are never logged, only denials.
-- `--prune` removes history and invalidates earlier anchors; `verify` prints a `NOTE`.
+- On legacy chains, `--prune` removes history and invalidates earlier anchors;
+  `verify` prints a `NOTE`. V2 local pending/enrolled state refuses prune.
 
 ## Tests
 `internal/logging/*_test.go`, `internal/cli/verify_test.go`, `verify_signing_test.go`, `audit_state_*_test.go`, `anchor_*_test.go`, `internal/anchorclient/client_test.go`, `pkg/receipt/*_test.go`.

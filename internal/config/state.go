@@ -38,12 +38,24 @@ var evalAuditStateRoot = filepath.EvalSymlinks
 // This mirrors logging.DefaultSigningKeyPath, which already keeps the Ed25519
 // signing key under $XDG_CONFIG_HOME for the same reason.
 func EnsureAuditStateDir(projectRoot string) (string, error) {
+	dir, _, err := EnsureAuditStateLocation(projectRoot)
+	return dir, err
+}
+
+// EnsureAuditStateLocation returns the project directory and its canonical
+// configured root from one resolution. The two paths cannot diverge if a state
+// root symlink is retargeted between independent resolutions.
+func EnsureAuditStateLocation(projectRoot string) (dir, root string, err error) {
 	base, owned, checkBase := auditStateLayout(projectRoot)
-	base, err := resolveAuditStateRoot(base)
+	root, err = resolveAuditStateRoot(base)
 	if err != nil {
-		return "", err
+		return "", "", err
 	}
-	return ensureAuditStateDirAt(base, owned, checkBase)
+	dir, err = ensureAuditStateDirAt(root, owned, checkBase)
+	if err != nil {
+		return "", "", err
+	}
+	return dir, root, nil
 }
 
 // resolveAuditStateRoot creates the non-NockLock-owned state root when needed

@@ -208,6 +208,17 @@ var wrapCmd = &cobra.Command{
 		if err := recordConfigDigest(logger, &effectiveCfg, configPath, dbPath, sessionID, resolvedNetworkFenceMode(wrapFlags), cmd.ErrOrStderr()); err != nil {
 			return fmt.Errorf("could not record the effective config digest: %w\nThe audit trail is required — refusing to run unrecorded", err)
 		}
+		// V2's trusted record stays outside the project even when logging.db
+		// selects a legacy in-project location. Protect it separately and record
+		// any refusal in the signed audit trail before returning.
+		if err := protectChainIdentity(cfg, logger); err != nil {
+			logErr := logger.Log(logging.Event{
+				Timestamp: time.Now(), EventType: logging.EventFileBlocked,
+				Category: "filesystem", Detail: "trusted chain identity protection refused: " + err.Error(),
+				Blocked: true, SessionID: sessionID,
+			})
+			return errors.Join(err, logErr)
+		}
 
 		// logEvent records one event. logger is guaranteed non-nil here (the open
 		// above fails closed), so no nil guard is needed.
@@ -1414,6 +1425,32 @@ func withManagedSigningKeyDeny(deny []string) ([]string, string, error) {
 		return nil, "", err
 	}
 	return append(append([]string(nil), deny...), keyDir), keyDir, nil
+}
+
+func protectChainIdentity(cfg *config.Config, logger *logging.Logger) error {
+	dir, err := logger.ChainIdentityDirectory()
+	if err != nil {
+		return fmt.Errorf("cannot protect trusted chain identity; refusing to start: %w", err)
+	}
+	if cfg.Filesystem.Root == "" {
+		if dir == "" {
+			// Explicitly unfenced legacy sessions make no custody claim.
+			return nil
+		}
+		return errors.New("trusted chain identity requires an enabled filesystem fence; refusing to start with a remote pin at risk")
+	}
+	if dir != "" && runtime.GOOS == "linux" && linuxEnforcementMode(cfg.Filesystem.LinuxEnforcement) == linuxEnforcementOff {
+		return errors.New("trusted chain identity requires Linux Landlock enforcement; refusing to start with a remote pin at risk")
+	}
+	// Protect the future record even for legacy chains and custom logging.db.
+	// Valid non-off Linux modes normalize to required, so unavailable Landlock
+	// or a grant overlapping this deny fails startup before the child executes.
+	dir, err = logger.TrustedChainStateDirectory()
+	if err != nil {
+		return fmt.Errorf("cannot protect future trusted chain state; refusing to start: %w", err)
+	}
+	cfg.Filesystem.Deny = append(cfg.Filesystem.Deny, dir)
+	return nil
 }
 
 // egressDecisionDir returns the per-session directory that holds the egress
