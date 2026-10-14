@@ -8,6 +8,10 @@ All notable changes to NockLock will be documented in this file.
 
 - Build and sign Ubuntu 24.04 amd64 CI candidates containing the CLI and matching filesystem interposer, with manifest/build provenance and disposable-host fresh-install acceptance (N11746). Candidates are not releases; production installation, upgrades, rollback and publication remain staged.
 
+### Fixed
+
+- CI: fail the scoped-sudoers artifact check when a blanket `NOPASSWD:ALL` grant is present or grep cannot read the file. Only grep's no-match exit code passes; the previous standalone negation could continue under Bash errexit (N11749).
+
 ## [0.9.3] - 2026-10-14
 
 ### Documentation
