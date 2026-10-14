@@ -568,8 +568,8 @@ func (s *chainIdentityStore) write(identity *ChainIdentity) error {
 		return &ChainIdentityDurabilityError{Err: err}
 	}
 	// Persist NockLock-owned directory entries through the configured state
-	// root only. Root creation establishes its own barrier; unrelated ancestors
-	// (home mounts, /, etc.) are not part of an identity update.
+	// root only. prepareWrite already established the root's ancestry before
+	// mutation; post-rename uncertainty is bounded to this owned subtree.
 	for parent := filepath.Dir(s.root.Name()); ; parent = filepath.Dir(parent) {
 		dir, err := os.Open(parent)
 		if err != nil {
