@@ -206,6 +206,13 @@ class NockLockProofTest(unittest.TestCase):
                 with self.subTest(attack=attack["id"], detail=detail):
                     self.assertTrue(redteam.nocklock_detail_matches(detail, attack))
 
+    def test_bare_filename_path_rule_matches_absolute_report_path(self):
+        rule = {**self.attack, "rule": "path=canary.txt"}
+        envelope = self.envelope()
+        self.assertTrue(redteam.nocklock_detail_matches(json.dumps(envelope), rule))
+        envelope["report"]["path"] = "/tmp/other.txt"
+        self.assertFalse(redteam.nocklock_detail_matches(json.dumps(envelope), {**rule, "match": ""}))
+
     def test_collector_metadata_cannot_supply_action_proof(self):
         envelope = self.envelope()
         envelope["report"].update(path="/unrelated", reason="different reason")

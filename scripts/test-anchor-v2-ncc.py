@@ -148,6 +148,8 @@ def serve(scratch):
             if isinstance(reply, dict) and isinstance(reply.get("data"), dict):
                 event["code"] = reply["data"].get("code")
         except ValueError:
+            # The body is not JSON (for example a plain-text or HTML error
+            # page). The event is still logged, only without a "code" field.
             pass
         if original == fault.get("corrupt_response_path") and event["status"] == 200:
             kind = fault["corrupt_response"]

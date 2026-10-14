@@ -1,3 +1,5 @@
+import contextlib
+import io
 import json
 import os
 from pathlib import Path
@@ -9,7 +11,6 @@ import time
 from unittest import TestCase, main as unittest_main, mock
 
 import kernel_cases
-from kernel_cases import CASES, classify, parse_result, run_case
 
 
 class KernelReceiptTest(TestCase):
@@ -24,7 +25,7 @@ class KernelReceiptTest(TestCase):
         for leader_waits in (False, True):
             with self.subTest(leader_waits=leader_waits), tempfile.TemporaryDirectory() as directory:
                 root = Path(directory)
-                test = CASES[1][2]
+                test = kernel_cases.CASES[1][2]
                 stub = root / "go"
                 stub.write_text(f"#!{sys.executable}\n" +
                                 "import json, os, time\n" +
@@ -37,7 +38,7 @@ class KernelReceiptTest(TestCase):
                      mock.patch("kernel_cases.CASE_TIMEOUT_SECONDS", 0.3), \
                      mock.patch("kernel_cases.CLEANUP_TIMEOUT_SECONDS", 0.3):
                     with self.assertRaisesRegex(ValueError, "Harness timeout"):
-                        run_case(root, root, *CASES[1])
+                        kernel_cases.run_case(root, root, *kernel_cases.CASES[1])
                 self.assertLess(time.monotonic() - start, 2)
                 self.assertIn('"Action": "pass"', (root / "abi9.jsonl").read_text())
                 self.assertIn("Harness timeout", (root / "abi9.stderr.txt").read_text())
@@ -63,7 +64,7 @@ class KernelReceiptTest(TestCase):
                      mock.patch("kernel_cases.CASE_TIMEOUT_SECONDS", 0.3), \
                      mock.patch("kernel_cases.CLEANUP_TIMEOUT_SECONDS", 0.3):
                     with self.assertRaisesRegex(ValueError, "output drain exceeded"):
-                        run_case(root, root, *CASES[1])
+                        kernel_cases.run_case(root, root, *kernel_cases.CASES[1])
                 self.assertLess(time.monotonic() - start, 2)
                 self.assertIn("partial receipt", (root / "abi9.jsonl").read_text())
                 self.assertIn("output drain exceeded", (root / "abi9.stderr.txt").read_text())
@@ -103,7 +104,7 @@ class KernelReceiptTest(TestCase):
                      mock.patch("kernel_cases.SIGTERM_GRACE_SECONDS", 0.2), \
                      mock.patch("kernel_cases.CLEANUP_TIMEOUT_SECONDS", 1):
                     with self.assertRaises(KeyboardInterrupt):
-                        run_case(root, root, *CASES[1])
+                        kernel_cases.run_case(root, root, *kernel_cases.CASES[1])
                 pgid = int(pidfile.read_text())
                 gone = False
                 for _ in range(100):
@@ -150,7 +151,7 @@ class KernelReceiptTest(TestCase):
                      mock.patch("kernel_cases.SIGTERM_GRACE_SECONDS", 1), \
                      mock.patch("kernel_cases.CLEANUP_TIMEOUT_SECONDS", 1):
                     with self.assertRaises(KeyboardInterrupt):
-                        run_case(root, root, *CASES[1])
+                        kernel_cases.run_case(root, root, *kernel_cases.CASES[1])
                 self.assertIs(signal.getsignal(signal.SIGINT), signal.default_int_handler)
                 pgid = int(pidfile.read_text())
                 gone = False
@@ -187,9 +188,10 @@ class KernelReceiptTest(TestCase):
                             "    time.sleep(4)\n    os._exit(0)\n" +
                             "time.sleep(30)\n")
             stub.chmod(0o700)
-            cases = (("a", "pkg", CASES[1][2]), ("b", "pkg", CASES[1][2]))
+            cases = (("a", "pkg", kernel_cases.CASES[1][2]), ("b", "pkg", kernel_cases.CASES[1][2]))
             old = signal.getsignal(signal.SIGTERM)
-            threading.Timer(0.6, os.kill, (os.getpid(), signal.SIGTERM)).start()
+            timer = threading.Timer(0.6, os.kill, (os.getpid(), signal.SIGTERM))
+            timer.start()
             try:
                 with mock.patch.dict(os.environ, PATH=str(root) + os.pathsep + os.environ["PATH"]), \
                      mock.patch("kernel_cases.CASES", cases), \
@@ -210,6 +212,7 @@ class KernelReceiptTest(TestCase):
                 else:
                     self.fail("process group survived")
             finally:
+                timer.cancel()
                 signal.signal(signal.SIGTERM, old)
                 for pid in (escaped.read_text().split() if escaped.exists() else []):
                     try:
@@ -219,10 +222,14 @@ class KernelReceiptTest(TestCase):
 
     def test_git_head_failure_yields_unknown_and_report_is_written(self):
         import subprocess
+        saved = signal.getsignal(signal.SIGTERM)
+        # main() installs its own SIGTERM handler and never restores it.
+        self.addCleanup(signal.signal, signal.SIGTERM, saved)
         with tempfile.TemporaryDirectory() as directory:
             out = Path(directory) / "out"
             row = dict(case="x", verdict="PASS", reason="stub")
-            with mock.patch("kernel_cases.run_case", return_value=row), \
+            with mock.patch("kernel_cases.platform.system", return_value="Linux"), \
+                 mock.patch("kernel_cases.run_case", return_value=row), \
                  mock.patch("kernel_cases.subprocess.check_output",
                             side_effect=subprocess.CalledProcessError(128, "git")), \
                  mock.patch("sys.argv", ["kernel_cases.py", "--out", str(out)]):
@@ -230,45 +237,82 @@ class KernelReceiptTest(TestCase):
             self.assertEqual(json.loads((out / "report.json").read_text())["commit"], "unknown")
             self.assertTrue((out / "REPORT.md").exists())
 
+    def test_main_sigterm_handler_is_restored_by_cleanup(self):
+        saved = signal.getsignal(signal.SIGTERM)
+        with tempfile.TemporaryDirectory() as directory:
+            row = dict(case="x", verdict="PASS", reason="stub")
+            try:
+                with mock.patch("kernel_cases.platform.system", return_value="Linux"), \
+                     mock.patch("kernel_cases.run_case", return_value=row), \
+                     mock.patch("kernel_cases.head_commit", return_value="unknown"), \
+                     mock.patch("sys.argv", ["kernel_cases.py", "--out", str(Path(directory) / "out")]):
+                    kernel_cases.main()
+                self.assertEqual(signal.getsignal(signal.SIGTERM), kernel_cases._on_sigterm)
+            finally:
+                signal.signal(signal.SIGTERM, saved)
+        self.assertEqual(signal.getsignal(signal.SIGTERM), saved)
+
+    def test_cleanup_fault_after_interrupt_reaches_stderr(self):
+        # communicate() is interrupted. The SIGKILL in cleanup then fails with
+        # PermissionError. The fault must be reported and the interrupt kept.
+        process = mock.Mock(pid=4242)
+        process.communicate.side_effect = [KeyboardInterrupt, ("", "")]
+        process.wait.return_value = 0
+
+        def killpg(pgid, sig):
+            if sig == signal.SIGKILL:
+                raise PermissionError("denied")
+
+        stderr = io.StringIO()
+        with tempfile.TemporaryDirectory() as directory, \
+             mock.patch("kernel_cases.subprocess.Popen", return_value=process), \
+             mock.patch("kernel_cases.os.killpg", side_effect=killpg), \
+             contextlib.redirect_stderr(stderr):
+            root = Path(directory)
+            with self.assertRaises(KeyboardInterrupt):
+                kernel_cases.run_case(root, root, *kernel_cases.CASES[1])
+        self.assertIn("kernel_cases: cleanup after interrupt", stderr.getvalue())
+        self.assertIn("process-group kill failed: denied", stderr.getvalue())
+
     def test_missing_failed_and_malformed_cannot_pass(self):
-        test = CASES[1][2]
+        test = kernel_cases.CASES[1][2]
         for raw, code in (("", 0), ("not json", 0), (json.dumps(dict(Test=test, Action="fail")), 1),
                           (json.dumps(dict(Test=test, Action="pass")), 1)):
             with self.subTest(raw=raw, code=code):
-                with self.assertRaises(ValueError): parse_result(raw, test, code)
+                with self.assertRaises(ValueError): kernel_cases.parse_result(raw, test, code)
 
     def test_abi9_skip_is_gap_not_pass(self):
-        test = CASES[1][2]
+        test = kernel_cases.CASES[1][2]
         raw = "\n".join(json.dumps(e) for e in [dict(Test=test, Action="output", Output="ABI9_COVERAGE_GAP: real kernel ABI 6 < 9"), dict(Test=test, Action="skip")])
-        row = classify("abi9", *parse_result(raw, test, 0))
+        row = kernel_cases.classify("abi9", *kernel_cases.parse_result(raw, test, 0))
         self.assertEqual(row["verdict"], "SKIP")
-        self.assertEqual(classify("abi9", {test: "pass"}, "")["verdict"], "PASS")
+        self.assertEqual(kernel_cases.classify("abi9", {test: "pass"}, "")["verdict"], "PASS")
 
     def test_unavailable_io_uring_is_not_a_block(self):
-        test = CASES[2][2]
-        row = classify("io-uring", {test: "skip"}, "ambient io_uring control is unavailable (probe exit 10)")
+        test = kernel_cases.CASES[2][2]
+        row = kernel_cases.classify("io-uring", {test: "skip"}, "ambient io_uring control is unavailable (probe exit 10)")
         self.assertEqual(row["verdict"], "SKIP")
-        with self.assertRaises(ValueError): classify("io-uring", {test: "skip"}, "C compiler unavailable")
+        with self.assertRaises(ValueError): kernel_cases.classify("io-uring", {test: "skip"}, "C compiler unavailable")
 
     def test_reachable_unix_sockets_are_known_limit(self):
-        test = CASES[0][2]
+        test = kernel_cases.CASES[0][2]
         actions = {test: "pass", test + "/default_below_ABI_9_runs_and_records_reachability": "pass",
                    test + "/strict_config_refuses_below_ABI_9": "pass",
                    test + "/Landlock_ABI_9_enforcement_with_filesystem_rules": "skip",
                    test + "/Landlock_ABI_9_synthesized_socket-only_spec_is_applied": "skip"}
-        self.assertEqual(classify("unix-wrap", actions, "")["verdict"], "KNOWN-LIMIT")
+        self.assertEqual(kernel_cases.classify("unix-wrap", actions, "")["verdict"], "KNOWN-LIMIT")
         actions[test + "/Landlock_ABI_9_enforcement_with_filesystem_rules"] = "pass"
-        with self.assertRaises(ValueError): classify("unix-wrap", actions, "")
+        with self.assertRaises(ValueError): kernel_cases.classify("unix-wrap", actions, "")
 
     def test_abi9_wrap_requires_both_enforcement_paths(self):
-        test = CASES[0][2]
+        test = kernel_cases.CASES[0][2]
         actions = {test: "pass", test + "/default_below_ABI_9_runs_and_records_reachability": "skip",
                    test + "/strict_config_refuses_below_ABI_9": "skip",
                    test + "/Landlock_ABI_9_enforcement_with_filesystem_rules": "pass",
                    test + "/Landlock_ABI_9_synthesized_socket-only_spec_is_applied": "pass"}
-        self.assertEqual(classify("unix-wrap", actions, "")["verdict"], "PASS")
+        self.assertEqual(kernel_cases.classify("unix-wrap", actions, "")["verdict"], "PASS")
         del actions[test + "/Landlock_ABI_9_synthesized_socket-only_spec_is_applied"]
-        with self.assertRaises(ValueError): classify("unix-wrap", actions, "")
+        with self.assertRaises(ValueError): kernel_cases.classify("unix-wrap", actions, "")
 
 
 if __name__ == "__main__":
