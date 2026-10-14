@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"runtime"
 	"syscall"
 
 	fsfence "github.com/nocktechnologies/nocklock/internal/fence/fs"
@@ -16,6 +17,9 @@ import (
 )
 
 func main() {
+	// Landlock restricts the calling OS thread. Keep every probe operation on
+	// that thread; this disposable process exits without returning it to Go.
+	runtime.LockOSThread()
 	if len(os.Args) != 4 {
 		fmt.Fprintln(os.Stderr, "usage: staticprobe ROOT AUDIT_DB DENIED_PATH")
 		os.Exit(2)
@@ -39,7 +43,10 @@ func main() {
 		fmt.Fprintf(os.Stderr, "apply Landlock rules: %v\n", err)
 		os.Exit(1)
 	}
+	runFilesystemChecks(root, auditDB, denied)
+}
 
+func runFilesystemChecks(root, auditDB, denied string) {
 	// The fence root is usable: the child creates and removes an entry DIRECTLY
 	// IN the root, not merely inside a subdirectory that already existed.
 	created := filepath.Join(root, "created-by-child")
