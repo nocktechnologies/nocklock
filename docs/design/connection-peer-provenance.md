@@ -1,6 +1,6 @@
 # Signed Linux connection-peer provenance
 
-N11762 is a Tier 2 audit-path change, implemented on `next` for the next release.
+N11762 is a Tier 2 audit-path change, implemented and shipped in v0.10.0.
 It records connection provenance; it makes no new authorization or activity
 recording claim.
 

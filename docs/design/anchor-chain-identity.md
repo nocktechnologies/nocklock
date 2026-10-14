@@ -1,6 +1,6 @@
 # Remote anchor chain identity
 
-Status: original design for Nock #11707, implemented by N11742–N11745 on `next` and awaiting a tagged NockLock release. The released v0.9.3 client still uses v1 remote anchors. The current v2 commands and limits are documented in [audit log](../how-it-works/audit-log.md) and the [CLI reference](../reference/cli.md).
+Status: original design for Nock #11707, implemented by N11742–N11745 and shipped in v0.10.0. The released v0.9.3 client still uses v1 remote anchors. The current v2 commands and limits are documented in [audit log](../how-it-works/audit-log.md) and the [CLI reference](../reference/cli.md).
 
 ## Problem and boundary
 

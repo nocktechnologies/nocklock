@@ -31,7 +31,7 @@ The builder labels the tier in the PR body when opening it. Use the highest appl
 The following repository exceptions govern NockLock:
 
 - There is no Tier 0; docs-only changes use Tier 1 by default.
-- Mira's gate is the human sign-off for every tier. Mar is retired, and Kevin delegated NockLock merge ownership to Mira; separate Kevin or Mar review is not required.
+- Mira gates and merges NockLock; a separate architecture review is not required.
 - NockLock ships as a CLI release. The batched `next` → `main` release PR and its full-diff gate provide staging; Tier 3 does not require a separate staged rollout. Its threat note and rollback line remain required.
 
 These tiers and exceptions supplement the complete exact-head gate above, including applicable CI and review requirements.

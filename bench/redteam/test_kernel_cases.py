@@ -4,14 +4,19 @@ from pathlib import Path
 import signal
 import sys
 import tempfile
+import threading
 import time
-import unittest
-from unittest import mock
+from unittest import TestCase, main as unittest_main, mock
 
+import kernel_cases
 from kernel_cases import CASES, classify, parse_result, run_case
 
 
-class KernelReceiptTest(unittest.TestCase):
+class KernelReceiptTest(TestCase):
+    def setUp(self):
+        kernel_cases._termination_requested = None
+        self.addCleanup(setattr, kernel_cases, "_termination_requested", None)
+
     def test_timeout_is_failure_even_after_pass_and_zero_leader_exit(self):
         # A real fake-go process emits valid passing test JSON, then leaves a
         # descendant holding output. The leader exits 0: returncode cannot be
@@ -69,6 +74,162 @@ class KernelReceiptTest(unittest.TestCase):
                     except ProcessLookupError:
                         pass
 
+    def test_interrupt_kills_the_owned_process_group(self):
+        # The stub and its child share the session Popen created and ignore
+        # SIGTERM, so the SIGKILL fallback is exercised too. A real SIGINT
+        # arrives while communicate() waits.
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            pidfile = root / "leader-pid"
+            stub = root / "go"
+            stub.write_text(f"#!{sys.executable}\n" +
+                            "import os, pathlib, signal, time\n" +
+                            "signal.signal(signal.SIGTERM, signal.SIG_IGN)\n" +
+                            "if os.fork() == 0:\n    time.sleep(30)\n    os._exit(0)\n" +
+                            f"pathlib.Path({str(pidfile)!r}).write_text(str(os.getpid()))\n" +
+                            "time.sleep(30)\n")
+            stub.chmod(0o700)
+
+            def interrupt_when_ready():
+                deadline = time.monotonic() + 10
+                while not (pidfile.exists() and pidfile.read_text()) and time.monotonic() < deadline:
+                    time.sleep(0.02)
+                os.kill(os.getpid(), signal.SIGINT)
+
+            old = signal.signal(signal.SIGINT, signal.default_int_handler)
+            threading.Thread(target=interrupt_when_ready, daemon=True).start()
+            try:
+                with mock.patch.dict(os.environ, PATH=str(root) + os.pathsep + os.environ["PATH"]), \
+                     mock.patch("kernel_cases.SIGTERM_GRACE_SECONDS", 0.2), \
+                     mock.patch("kernel_cases.CLEANUP_TIMEOUT_SECONDS", 1):
+                    with self.assertRaises(KeyboardInterrupt):
+                        run_case(root, root, *CASES[1])
+                pgid = int(pidfile.read_text())
+                gone = False
+                for _ in range(100):
+                    try:
+                        os.killpg(pgid, 0)
+                    except ProcessLookupError:
+                        gone = True
+                        break
+                    time.sleep(0.05)
+                self.assertTrue(gone, "process group survived the interrupt")
+            finally:
+                signal.signal(signal.SIGINT, old)
+                if pidfile.exists() and pidfile.read_text():
+                    try:
+                        os.killpg(int(pidfile.read_text()), signal.SIGKILL)
+                    except ProcessLookupError:
+                        pass
+
+    def test_second_interrupt_during_grace_wait_still_kills_the_group(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            pidfile = root / "leader-pid"
+            stub = root / "go"
+            stub.write_text(f"#!{sys.executable}\n" +
+                            "import os, pathlib, signal, time\n" +
+                            "signal.signal(signal.SIGTERM, signal.SIG_IGN)\n" +
+                            "if os.fork() == 0:\n    time.sleep(30)\n    os._exit(0)\n" +
+                            f"pathlib.Path({str(pidfile)!r}).write_text(str(os.getpid()))\n" +
+                            "time.sleep(30)\n")
+            stub.chmod(0o700)
+
+            def interrupt_twice():
+                deadline = time.monotonic() + 10
+                while not (pidfile.exists() and pidfile.read_text()) and time.monotonic() < deadline:
+                    time.sleep(0.02)
+                os.kill(os.getpid(), signal.SIGINT)  # enters cleanup
+                time.sleep(0.3)                      # inside the 1s grace wait
+                os.kill(os.getpid(), signal.SIGINT)
+
+            old = signal.signal(signal.SIGINT, signal.default_int_handler)
+            threading.Thread(target=interrupt_twice, daemon=True).start()
+            try:
+                with mock.patch.dict(os.environ, PATH=str(root) + os.pathsep + os.environ["PATH"]), \
+                     mock.patch("kernel_cases.SIGTERM_GRACE_SECONDS", 1), \
+                     mock.patch("kernel_cases.CLEANUP_TIMEOUT_SECONDS", 1):
+                    with self.assertRaises(KeyboardInterrupt):
+                        run_case(root, root, *CASES[1])
+                self.assertIs(signal.getsignal(signal.SIGINT), signal.default_int_handler)
+                pgid = int(pidfile.read_text())
+                gone = False
+                for _ in range(100):
+                    try:
+                        os.killpg(pgid, 0)
+                    except ProcessLookupError:
+                        gone = True
+                        break
+                    time.sleep(0.05)
+                self.assertTrue(gone, "process group survived the second interrupt")
+            finally:
+                signal.signal(signal.SIGINT, old)
+                if pidfile.exists() and pidfile.read_text():
+                    try:
+                        os.killpg(int(pidfile.read_text()), signal.SIGKILL)
+                    except ProcessLookupError:
+                        pass
+
+    def test_sigterm_during_timeout_cleanup_stops_the_harness(self):
+        # The first case times out; its cleanup drain is held open by an escaped
+        # child. SIGTERM arrives during that drain. It must be recorded, not
+        # dropped: main exits 143 and never starts the second case.
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            log = root / "starts"
+            escaped = root / "escaped"
+            stub = root / "go"
+            stub.write_text(f"#!{sys.executable}\n" +
+                            "import os, pathlib, time\n" +
+                            f"open({str(log)!r}, 'a').write(str(os.getpid()) + '\\n')\n" +
+                            "if os.fork() == 0:\n    os.setsid()\n" +
+                            f"    open({str(escaped)!r}, 'a').write(str(os.getpid()) + '\\n')\n" +
+                            "    time.sleep(4)\n    os._exit(0)\n" +
+                            "time.sleep(30)\n")
+            stub.chmod(0o700)
+            cases = (("a", "pkg", CASES[1][2]), ("b", "pkg", CASES[1][2]))
+            old = signal.getsignal(signal.SIGTERM)
+            threading.Timer(0.6, os.kill, (os.getpid(), signal.SIGTERM)).start()
+            try:
+                with mock.patch.dict(os.environ, PATH=str(root) + os.pathsep + os.environ["PATH"]), \
+                     mock.patch("kernel_cases.CASES", cases), \
+                     mock.patch("kernel_cases.CASE_TIMEOUT_SECONDS", 0.3), \
+                     mock.patch("kernel_cases.CLEANUP_TIMEOUT_SECONDS", 1.5), \
+                     mock.patch("sys.argv", ["kernel_cases.py", "--out", str(root / "out")]):
+                    with self.assertRaises(SystemExit) as raised:
+                        kernel_cases.main()
+                self.assertEqual(raised.exception.code, 143)
+                starts = log.read_text().split()
+                self.assertEqual(len(starts), 1, "a second case started after SIGTERM")
+                for _ in range(100):
+                    try:
+                        os.killpg(int(starts[0]), 0)
+                    except ProcessLookupError:
+                        break
+                    time.sleep(0.05)
+                else:
+                    self.fail("process group survived")
+            finally:
+                signal.signal(signal.SIGTERM, old)
+                for pid in (escaped.read_text().split() if escaped.exists() else []):
+                    try:
+                        os.kill(int(pid), signal.SIGKILL)
+                    except ProcessLookupError:
+                        pass
+
+    def test_git_head_failure_yields_unknown_and_report_is_written(self):
+        import subprocess
+        with tempfile.TemporaryDirectory() as directory:
+            out = Path(directory) / "out"
+            row = dict(case="x", verdict="PASS", reason="stub")
+            with mock.patch("kernel_cases.run_case", return_value=row), \
+                 mock.patch("kernel_cases.subprocess.check_output",
+                            side_effect=subprocess.CalledProcessError(128, "git")), \
+                 mock.patch("sys.argv", ["kernel_cases.py", "--out", str(out)]):
+                self.assertEqual(kernel_cases.main(), 0)
+            self.assertEqual(json.loads((out / "report.json").read_text())["commit"], "unknown")
+            self.assertTrue((out / "REPORT.md").exists())
+
     def test_missing_failed_and_malformed_cannot_pass(self):
         test = CASES[1][2]
         for raw, code in (("", 0), ("not json", 0), (json.dumps(dict(Test=test, Action="fail")), 1),
@@ -111,4 +272,4 @@ class KernelReceiptTest(unittest.TestCase):
 
 
 if __name__ == "__main__":
-    unittest.main()
+    unittest_main()

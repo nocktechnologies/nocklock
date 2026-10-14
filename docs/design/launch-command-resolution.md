@@ -1,6 +1,6 @@
 # Requested command resolution
 
-Status: N11777 implemented, pending final hosted validation and Mira gate.
+Status: N11777 implemented and shipped in v0.10.0.
 The diagnostic-only head first reproduced the defect before production edits.
 
 ## Objective and contract
