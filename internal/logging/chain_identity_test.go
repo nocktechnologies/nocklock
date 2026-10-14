@@ -10,7 +10,9 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
 
@@ -587,7 +589,7 @@ func TestChainIdentityPendingRetryReestablishesDurability(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	root, err := config.AuditStateRoot()
+	_, root, err := config.EnsureAuditStateLocation(f.project)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -714,5 +716,197 @@ func TestChainIdentityPruneLockWaitIsBounded(t *testing.T) {
 	holder.close()
 	if n, err := f.logger.Prune(24 * time.Hour); err != nil || n != 1 {
 		t.Fatalf("released lock control: %d, %v", n, err)
+	}
+}
+
+func TestChainIdentityRootDurabilityIsOnlyRequiredForMutation(t *testing.T) {
+	f := newIdentityFixture(t)
+	// Legacy code could have created several nested components without syncing
+	// any of them. A mutation must establish all of that existing lineage.
+	t.Setenv("XDG_STATE_HOME", filepath.Join(t.TempDir(), "legacy", "nested", "state"))
+	dir, root, err := config.EnsureAuditStateLocation(f.project)
+	if err != nil {
+		t.Fatal(err)
+	}
+	f.record = filepath.Join(dir, ChainIdentityFileName)
+	injected := syscall.EINVAL
+	var synced []string
+	f.logger.identityRootSync = func(file *os.File) error {
+		synced = append(synced, filepath.Clean(file.Name()))
+		if filepath.Clean(file.Name()) == filepath.Dir(root) {
+			return injected
+		}
+		return file.Sync()
+	}
+	if _, err := f.logger.InitializeChainIdentity(strings.Repeat("0", 64)); !errors.Is(err, injected) {
+		t.Fatalf("identity accepted unsupported root durability: %v", err)
+	}
+	mirror, err := f.logger.readChainIdentityMirror()
+	if err != nil || mirror != nil {
+		t.Fatalf("failed preflight changed DB mirror: %+v, %v", mirror, err)
+	}
+	if _, err := os.Stat(f.record); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("failed preflight wrote identity: %v", err)
+	}
+	calls := len(synced)
+	identityOldEvent(t, f.logger)
+	if _, err := f.logger.Stats(""); err != nil {
+		t.Fatal(err)
+	}
+	verified, err := f.logger.VerifyChainSigned(f.logger.SigningPublicKey(), true)
+	if err != nil || !verified.Intact || verified.SigState != "authentic" {
+		t.Fatalf("legacy verification: %+v, %v", verified, err)
+	}
+	if _, err := f.logger.ReadChainIdentity(); !errors.Is(err, ErrChainIdentityMissing) {
+		t.Fatalf("legacy read: %v", err)
+	}
+	if _, err := f.logger.TrustedChainStateDirectory(); err != nil {
+		t.Fatalf("future fence directory: %v", err)
+	}
+	if n, err := f.logger.Prune(24 * time.Hour); err != nil || n != 1 {
+		t.Fatalf("legacy prune: %d, %v", n, err)
+	}
+	if len(synced) != calls {
+		t.Fatal("legacy operation invoked trusted-write durability")
+	}
+	synced = nil
+	f.logger.identityRootSync = func(file *os.File) error { synced = append(synced, filepath.Clean(file.Name())); return file.Sync() }
+	id := initIdentity(t, f)
+	assertRootLineageSynced(t, root, synced)
+	// Existing records can still be read and an unregistered chain pruned on
+	// a filesystem that rejects directory sync. Registration cannot proceed.
+	f.logger.identityRootSync = func(*os.File) error { return injected }
+	if got, err := f.logger.ReadChainIdentity(); err != nil || *got != *id {
+		t.Fatalf("existing identity read: %+v, %v", got, err)
+	}
+	identityOldEvent(t, f.logger)
+	if n, err := f.logger.Prune(24 * time.Hour); err != nil || n != 1 {
+		t.Fatalf("unregistered identity prune: %d, %v", n, err)
+	}
+	if _, err := f.logger.RegisterChainIdentity(func(ChainIdentity) (*ChainRegistrationConfirmation, error) {
+		t.Fatal("registration sent before root preflight succeeded")
+		return nil, nil
+	}); !errors.Is(err, injected) {
+		t.Fatalf("registration ignored unsupported durability: %v", err)
+	}
+	f.logger.identityRootSync = func(file *os.File) error { synced = append(synced, filepath.Clean(file.Name())); return file.Sync() }
+	synced = nil
+	if _, err := f.logger.RegisterChainIdentity(func(ChainIdentity) (*ChainRegistrationConfirmation, error) {
+		assertRootLineageSynced(t, root, synced)
+		return &ChainRegistrationConfirmation{AgentID: id.AgentID, ChainID: id.ChainID}, nil
+	}); err != nil {
+		t.Fatalf("allowed registration: %v", err)
+	}
+}
+
+func assertRootLineageSynced(t *testing.T, root string, actual []string) {
+	t.Helper()
+	var expected []string
+	for path := root; ; path = filepath.Dir(path) {
+		expected = append(expected, path)
+		if filepath.Dir(path) == path {
+			break
+		}
+	}
+	if !slices.Equal(actual, expected) {
+		t.Fatalf("root lineage barrier: got %v; want %v", actual, expected)
+	}
+}
+
+func TestChainIdentityRootPreflightCannotBeBorrowedFromFailedInitializer(t *testing.T) {
+	f := newIdentityFixture(t)
+	t.Setenv("XDG_STATE_HOME", filepath.Join(t.TempDir(), "new", "nested", "root"))
+	dir, root, err := config.EnsureAuditStateLocation(f.project) // prior legacy mkdir without barriers
+	if err != nil {
+		t.Fatal(err)
+	}
+	f.record = filepath.Join(dir, ChainIdentityFileName)
+	other, err := NewLogger(f.db, f.project, WithSigning(f.key))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer other.Close()
+	atBarrier, release := make(chan struct{}), make(chan struct{})
+	injected := errors.New("initializer A root sync failed")
+	f.logger.identityRootSync = func(*os.File) error { close(atBarrier); <-release; return injected }
+	var synced []string
+	other.identityRootSync = func(file *os.File) error { synced = append(synced, filepath.Clean(file.Name())); return file.Sync() }
+	first := make(chan error, 1)
+	second := make(chan error, 1)
+	go func() { _, err := f.logger.InitializeChainIdentity(strings.Repeat("0", 64)); first <- err }()
+	<-atBarrier
+	go func() { _, err := other.InitializeChainIdentity(strings.Repeat("0", 64)); second <- err }()
+	close(release)
+	if err := <-first; !errors.Is(err, injected) {
+		t.Fatalf("A error: %v", err)
+	}
+	if err := <-second; err != nil {
+		t.Fatalf("B initialization: %v", err)
+	}
+	assertRootLineageSynced(t, root, synced)
+}
+
+func TestChainIdentityExecuteOnlyParentPreservesLegacyOperations(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("root bypasses directory permissions")
+	}
+	f := newIdentityFixture(t)
+	parent := filepath.Join(t.TempDir(), "search-only")
+	t.Setenv("XDG_STATE_HOME", filepath.Join(parent, "state"))
+	if _, err := config.EnsureAuditStateDir(f.project); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(parent, 0111); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { os.Chmod(parent, 0700) })
+	identityOldEvent(t, f.logger)
+	if _, err := f.logger.ReadChainIdentity(); !errors.Is(err, ErrChainIdentityMissing) {
+		t.Fatalf("legacy read: %v", err)
+	}
+	if n, err := f.logger.Prune(24 * time.Hour); err != nil || n != 1 {
+		t.Fatalf("legacy prune: %d, %v", n, err)
+	}
+	if _, err := f.logger.InitializeChainIdentity(strings.Repeat("0", 64)); !errors.Is(err, os.ErrPermission) {
+		t.Fatalf("identity ignored unreadable ancestor: %v", err)
+	}
+	mirror, err := f.logger.readChainIdentityMirror()
+	if err != nil || mirror != nil {
+		t.Fatalf("failed mutation changed mirror: %+v, %v", mirror, err)
+	}
+	if err := os.Chmod(parent, 0700); err != nil {
+		t.Fatal(err)
+	}
+	initIdentity(t, f)
+}
+
+func TestChainIdentitySyncRootGuardTerminatesOnUnreachableRoot(t *testing.T) {
+	f := newIdentityFixture(t)
+	id := initIdentity(t, f)
+	store, err := f.logger.lockChainIdentityStore()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.close()
+	store.rootDurable = true           // exercise only the post-rename defensive guard
+	store.syncRoot = store.root.Name() // cannot be reached by a loop starting at its parent
+	var synced []string
+	store.syncFile = func(file *os.File) error {
+		synced = append(synced, filepath.Clean(file.Name()))
+		// Keep the negative control bounded if the production root guard is
+		// removed: a repeated root must produce the wrong error, not hang.
+		if len(synced) > 1 && synced[len(synced)-1] == synced[len(synced)-2] {
+			return errors.New("repeated filesystem root without terminating")
+		}
+		return nil
+	}
+	err = store.write(id)
+	var durability *ChainIdentityDurabilityError
+	if !errors.As(err, &durability) || !strings.Contains(err.Error(), "cannot reach the configured state root") {
+		t.Fatalf("missing root termination: %v", err)
+	}
+	last := synced[len(synced)-1]
+	if filepath.Dir(last) != last {
+		t.Fatalf("did not stop at filesystem root: %v", synced)
 	}
 }

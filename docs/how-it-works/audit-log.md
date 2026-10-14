@@ -37,10 +37,14 @@ Every pending retry rewrites and syncs the record before sending again; finding
 uncertain: preserve the visible state and retry, never restore `none`. A
 pending-write failure sends no callback; an enrolled-write failure follows the
 already-confirmed remote request and retains the previously durable pending
-guard. File and directory barriers stop at the configured state root.
-State-root establishment separately refreshes its immediate owning-parent
-barrier, including when already present; creating missing components syncs each
-new entry before descending. Existence alone never proves a completed barrier.
+guard. Ordinary state resolution, reads and prune perform no directory fsync.
+Only trusted identity and original registration-request writes first sync the configured state root and every
+ancestor through the filesystem root, before any DB mirror change or record
+rename. This establishes entries that a prior legacy `MkdirAll` may have created;
+existence alone does not prove durability. An unreadable ancestor or unsupported
+directory sync blocks identity mutation, while legacy logging and verification
+remain usable. After record rename, file and directory barriers stop at the
+canonical state root. Each new locked mutation performs its own preflight.
 
 ### Remote operations
 

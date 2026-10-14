@@ -125,11 +125,12 @@ type Stats struct {
 
 // Logger handles SQLite event storage.
 type Logger struct {
-	db           *sql.DB
-	signer       *signer // nil when Ed25519 signing is off
-	onCommit     func(Event, string)
-	projectRoot  string               // canonical project root for the external trusted identity
-	identitySync func(*os.File) error // per-instance durability fault injection for tests
+	db               *sql.DB
+	signer           *signer // nil when Ed25519 signing is off
+	onCommit         func(Event, string)
+	projectRoot      string               // canonical project root for the external trusted identity
+	identitySync     func(*os.File) error // per-instance record durability fault injection for tests
+	identityRootSync func(*os.File) error // per-instance root-establishment fault injection
 }
 
 // eventTransaction is the common database/sql operation set shared by a

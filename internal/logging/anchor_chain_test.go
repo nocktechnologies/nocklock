@@ -390,7 +390,7 @@ func TestAnchorV2OriginalRequestDirectoryFailureRetry(t *testing.T) {
 	// the pending rewrite's directory barrier also persists its sibling entry.
 	identityOldEvent(t, f.logger)
 	synced = nil
-	root, err := config.AuditStateRoot()
+	_, root, err := config.EnsureAuditStateLocation(f.project)
 	if err != nil {
 		t.Fatal(err)
 	}

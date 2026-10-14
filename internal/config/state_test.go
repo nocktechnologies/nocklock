@@ -465,108 +465,69 @@ func TestLoadAcceptsAuditLogInProjectSubdirectory(t *testing.T) {
 	}
 }
 
-func TestAuditStateRootCreationBarriersAreBounded(t *testing.T) {
+func TestLegacyAuditStateResolutionWithExecuteOnlyParent(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("root bypasses parent read permissions")
+	}
 	base := resolvedTempDir(t)
-	first := filepath.Join(base, "new")
-	root := filepath.Join(first, "state")
-	var synced []string
-	syncParent := func(path string) error { synced = append(synced, path); return nil }
-	if err := makeAuditStateRoot(root, syncParent); err != nil {
+	parent := filepath.Join(base, "search-only")
+	state := filepath.Join(parent, "state")
+	if err := os.MkdirAll(state, 0700); err != nil {
 		t.Fatal(err)
 	}
-	if len(synced) != 3 || synced[0] != filepath.Dir(base) || synced[1] != base || synced[2] != first {
-		t.Fatalf("creation barriers: %v", synced)
+	t.Setenv("XDG_STATE_HOME", state)
+	project := resolvedTempDir(t)
+	if _, err := EnsureAuditStateDir(project); err != nil {
+		t.Fatalf("readable parent control: %v", err)
 	}
-	synced = nil
-	if err := makeAuditStateRoot(root, syncParent); err != nil || len(synced) != 1 || synced[0] != first {
-		t.Fatalf("existing root did not refresh only its parent: %v, %v", synced, err)
-	}
-}
-
-func TestAuditStateRootCreationFailureRemovesUncertainEntry(t *testing.T) {
-	base := resolvedTempDir(t)
-	root := filepath.Join(base, "new-state")
-	injected := errors.New("injected root creation fsync failure")
-	if err := makeAuditStateRoot(root, func(parent string) error {
-		if parent == base {
-			return injected
-		}
-		return nil
-	}); !errors.Is(err, injected) {
-		t.Fatalf("creation failure: %v", err)
-	}
-	if _, err := os.Stat(root); !errors.Is(err, os.ErrNotExist) {
-		t.Fatalf("uncertain empty root retained: %v", err)
-	}
-	calls := 0
-	if err := makeAuditStateRoot(root, func(parent string) error {
-		if parent == base {
-			calls++
-		}
-		return nil
-	}); err != nil || calls != 1 {
-		t.Fatalf("retry did not re-establish root: calls=%d, %v", calls, err)
-	}
-}
-
-func TestAuditStateRootConcurrentVisibleBeforeSync(t *testing.T) {
-	base := resolvedTempDir(t)
-	root := filepath.Join(base, "new-state")
-	atBarrier, release := make(chan struct{}), make(chan struct{})
-	result := make(chan error, 1)
-	injected := errors.New("first initializer fsync failed")
-	go func() {
-		result <- makeAuditStateRoot(root, func(parent string) error {
-			if parent == base {
-				close(atBarrier)
-				<-release
-				return injected
-			}
-			return nil
-		})
-	}()
-	<-atBarrier // A's mkdir is visible, but A has not completed its parent barrier.
-	calls := 0
-	err := makeAuditStateRoot(root, func(parent string) error {
-		calls++
-		if parent != base {
-			t.Errorf("existing root synced unrelated ancestor %q", parent)
-		}
-		return nil
-	})
-	if err != nil || calls != 1 {
-		t.Errorf("B bypassed A's incomplete barrier: calls=%d, %v", calls, err)
-	}
-	// A cannot clean up after B starts populating the now-established root.
-	if err := os.WriteFile(filepath.Join(root, "owned-state"), []byte("fixture"), 0600); err != nil {
-		t.Error(err)
-	}
-	close(release)
-	if err := <-result; !errors.Is(err, injected) {
-		t.Fatalf("A failure hidden: %v", err)
-	}
-	// Even this populated-directory retry must establish its own barrier.
-	calls = 0
-	if err := makeAuditStateRoot(root, func(parent string) error { calls++; return injected }); !errors.Is(err, injected) || calls != 1 {
-		t.Fatalf("populated retry skipped barrier: calls=%d, %v", calls, err)
-	}
-}
-
-func TestAuditStateRootExistingSymlinkSyncsTargetParent(t *testing.T) {
-	base := resolvedTempDir(t)
-	target := filepath.Join(base, "real", "state")
-	if err := os.MkdirAll(target, 0700); err != nil {
+	if err := os.Chmod(parent, 0111); err != nil {
 		t.Fatal(err)
 	}
-	alias := filepath.Join(base, "alias")
-	if err := os.Symlink(target, alias); err != nil {
+	t.Cleanup(func() { os.Chmod(parent, 0700) })
+	if _, err := EnsureAuditStateDir(project); err != nil {
+		t.Fatalf("legacy existing state requires only parent search permission: %v", err)
+	}
+	cfg := DefaultConfig()
+	if _, _, err := ResolveDBPath(&cfg, filepath.Join(project, Dir, File)); err != nil {
+		t.Fatalf("legacy log/status DB resolution: %v", err)
+	}
+}
+
+// Keep the directory and its sync boundary in the same resolution even if the
+// configured symlink changes before the caller starts operating on the paths.
+func TestEnsureAuditStateLocationResolvesRootOnce(t *testing.T) {
+	project := resolvedTempDir(t)
+	first, second := trustedStateRoot(t), trustedStateRoot(t)
+	link := filepath.Join(resolvedTempDir(t), "state-link")
+	if err := os.Symlink(first, link); err != nil {
 		t.Skipf("symlinks unsupported: %v", err)
 	}
-	var synced []string
-	if err := makeAuditStateRoot(alias, func(path string) error { synced = append(synced, path); return nil }); err != nil {
+	t.Setenv("XDG_STATE_HOME", link)
+	original := evalAuditStateRoot
+	calls := 0
+	evalAuditStateRoot = func(path string) (string, error) {
+		calls++
+		resolved, err := original(path)
+		if err != nil || calls != 1 {
+			return resolved, err
+		}
+		if err := os.Remove(link); err != nil {
+			return "", err
+		}
+		if err := os.Symlink(second, link); err != nil {
+			return "", err
+		}
+		return resolved, nil
+	}
+	t.Cleanup(func() { evalAuditStateRoot = original })
+	dir, root, err := EnsureAuditStateLocation(project)
+	if err != nil {
 		t.Fatal(err)
 	}
-	if len(synced) != 1 || synced[0] != filepath.Dir(target) {
-		t.Fatalf("synced alias parent instead of state-root entry: %v", synced)
+	if calls != 1 || root != first || dir != filepath.Join(first, "nocklock", projectStateKey(project)) {
+		t.Fatalf("split state resolution: calls=%d dir=%q root=%q", calls, dir, root)
+	}
+	if _, err := os.Stat(filepath.Join(second, "nocklock")); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("used retargeted state root: %v", err)
 	}
 }

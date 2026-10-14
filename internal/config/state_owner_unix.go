@@ -3,7 +3,6 @@
 package config
 
 import (
-	"errors"
 	"fmt"
 	"io/fs"
 	"os"
@@ -25,12 +24,4 @@ func validateStateDirOwner(info fs.FileInfo) error {
 		return fmt.Errorf("directory is owned by uid %d, not current uid %d", stat.Uid, os.Geteuid())
 	}
 	return nil
-}
-
-func syncCreatedStateRootParent(path string) error {
-	dir, err := os.Open(path)
-	if err != nil {
-		return err
-	}
-	return errors.Join(dir.Sync(), dir.Close())
 }

@@ -38,23 +38,24 @@ var evalAuditStateRoot = filepath.EvalSymlinks
 // This mirrors logging.DefaultSigningKeyPath, which already keeps the Ed25519
 // signing key under $XDG_CONFIG_HOME for the same reason.
 func EnsureAuditStateDir(projectRoot string) (string, error) {
-	base, owned, checkBase := auditStateLayout(projectRoot)
-	base, err := resolveAuditStateRoot(base)
-	if err != nil {
-		return "", err
-	}
-	return ensureAuditStateDirAt(base, owned, checkBase)
+	dir, _, err := EnsureAuditStateLocation(projectRoot)
+	return dir, err
 }
 
-// AuditStateRoot resolves the existing configured state root. It is the upper
-// bound for syncing NockLock-owned state entries; call EnsureAuditStateDir first.
-func AuditStateRoot() (string, error) {
-	base, _, _ := auditStateLayout("")
-	root, err := filepath.EvalSymlinks(base)
+// EnsureAuditStateLocation returns the project directory and its canonical
+// configured root from one resolution. The two paths cannot diverge if a state
+// root symlink is retargeted between independent resolutions.
+func EnsureAuditStateLocation(projectRoot string) (dir, root string, err error) {
+	base, owned, checkBase := auditStateLayout(projectRoot)
+	root, err = resolveAuditStateRoot(base)
 	if err != nil {
-		return "", fmt.Errorf("cannot resolve audit state root: %w", err)
+		return "", "", err
 	}
-	return root, nil
+	dir, err = ensureAuditStateDirAt(root, owned, checkBase)
+	if err != nil {
+		return "", "", err
+	}
+	return dir, root, nil
 }
 
 // resolveAuditStateRoot creates the non-NockLock-owned state root when needed
@@ -65,7 +66,7 @@ func resolveAuditStateRoot(base string) (string, error) {
 	// ~/.local/state). Create it with ordinary directory permissions: it is not
 	// NockLock's directory and forcing 0700 on a user's ~/.local would be
 	// overreach.
-	if err := makeAuditStateRoot(base, syncCreatedStateRootParent); err != nil {
+	if err := os.MkdirAll(base, 0o755); err != nil {
 		return "", fmt.Errorf("cannot create the audit state root %s: %w", base, err)
 	}
 	// Resolve the state ROOT once, and only here. Symlinks above the root are
@@ -78,51 +79,6 @@ func resolveAuditStateRoot(base string) (string, error) {
 		return "", fmt.Errorf("cannot resolve the audit state root %s: %w", base, err)
 	}
 	return dir, nil
-}
-
-// makeAuditStateRoot establishes the root's immediate owning-parent barrier,
-// even when another initializer has already made it visible. For missing paths,
-// each new entry is synced before descending. Identity updates subsequently stop
-// at the configured root; establishment does not walk existing ancestors to /.
-func makeAuditStateRoot(dir string, syncParent func(string) error) error {
-	info, err := os.Stat(dir)
-	if err == nil {
-		if !info.IsDir() {
-			return fmt.Errorf("%s is not a directory", dir)
-		}
-		// Existence is not evidence of durability: a competing mkdir may have
-		// happened immediately before this Stat, or an earlier barrier failed.
-		resolved, err := filepath.EvalSymlinks(dir)
-		if err != nil {
-			return err
-		}
-		return syncParent(filepath.Dir(resolved))
-	}
-	if !errors.Is(err, os.ErrNotExist) {
-		return err
-	}
-	parent := filepath.Dir(dir)
-	if parent == dir {
-		return err
-	}
-	if err := makeAuditStateRoot(parent, syncParent); err != nil {
-		return err
-	}
-	if err := os.Mkdir(dir, 0o755); err != nil {
-		if !errors.Is(err, os.ErrExist) {
-			return err
-		}
-		// Validate the winning directory and establish our own barrier. Do
-		// not remove a competing initializer's entry if our barrier fails.
-		return makeAuditStateRoot(dir, syncParent)
-	}
-	if err := syncParent(parent); err != nil {
-		// Do not leave an empty, uncertain new root for a retry to mistake for
-		// established state. Removal failures are reported, never hidden.
-		cleanupErr := os.Remove(dir)
-		return errors.Join(fmt.Errorf("state root created but directory durability is uncertain: %w", err), cleanupErr)
-	}
-	return nil
 }
 
 // ensureAuditStateDirAt creates and validates NockLock-owned components below
