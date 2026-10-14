@@ -499,7 +499,19 @@ jobs:
           # that the helper path appears somewhere.
           f=/etc/sudoers.d/nocklock-egress
           sudo grep -qxF 'runner ALL = (root) NOPASSWD: NOCKLOCK_EGRESS' "$f"
-          ! sudo grep -qiE 'NOPASSWD:[[:space:]]*ALL' "$f"
+          # Only grep's no-match status passes; matches and read errors fail.
+          sudo grep -qiE 'NOPASSWD:[[:space:]]*ALL' "$f" && grep_rc=0 || grep_rc=$?
+          case "$grep_rc" in
+            1) ;;
+            0)
+              echo "ERROR: $f contains a blanket NOPASSWD:ALL grant" >&2
+              exit 1
+              ;;
+            *)
+              echo "ERROR: cannot check $f for blanket grants (grep exit $grep_rc)" >&2
+              exit 1
+              ;;
+          esac
           test "$(sudo grep -oE 'nocklock-egress-helper [a-z]+' "$f" | sort -u | tr '\n' ',')" = "nocklock-egress-helper check,nocklock-egress-helper setup,"
 
       # `nocklock doctor` early-returns a critical "config missing" before any
