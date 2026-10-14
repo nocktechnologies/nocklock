@@ -122,6 +122,16 @@ func init() {
 	rootCmd.AddCommand(verifyCmd)
 }
 
+// writeVerificationCoverage describes recording limits, not the current host
+// or historical enforcement. Public history-verification helpers defer it so
+// failures retain the same notice without changing their verdict or exit code.
+func writeVerificationCoverage(w io.Writer) {
+	fmt.Fprintln(w, "COVERAGE: LIMITED")
+	fmt.Fprintln(w, "Verification checks recorded events; it does not prove that every action was logged.")
+	fmt.Fprintln(w, "Individual allowed file accesses are not recorded. Some file denials, kernel-dropped packets, proxy bypasses and Linux CONFINED Unix-socket connections can leave no audit row.")
+	fmt.Fprintln(w, "This check does not establish past enforcement or recording coverage.")
+}
+
 // runVerifyAgainstAnchor authenticates an external anchor and checks the local
 // chain against it: FEWER rows than attested is truncation/rollback, a head-hash
 // mismatch at the attested count is tamper, and a bad/forged anchor is FORGED.
@@ -129,6 +139,7 @@ func init() {
 // verify --audit (an explicit --ed25519-pub, else the local managed key). The
 // log is opened READ-ONLY (no signing option): verifying never writes.
 func runVerifyAgainstAnchor(ctx context.Context, w io.Writer, anchorFile, pubFlag string) error {
+	defer writeVerificationCoverage(w)
 	ctx, cancel := context.WithTimeout(ctx, anchorCLITimeout)
 	defer cancel()
 	dbPath, projectRoot, err := resolveAuditDBPath()
@@ -259,6 +270,7 @@ func resolveAuditDBPath() (dbPath, projectRoot string, err error) {
 }
 
 func runAuditVerify(ctx context.Context, w io.Writer, pubFlag string) error {
+	defer writeVerificationCoverage(w)
 	dbPath, projectRoot, err := resolveAuditDBPath()
 	if err != nil {
 		return err

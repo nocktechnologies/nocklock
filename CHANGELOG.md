@@ -10,6 +10,8 @@ All notable changes to NockLock will be documented in this file.
 
 ### Added
 
+- Append `COVERAGE: LIMITED` to audit and local/remote anchor verification, including errors. The notice distinguishes verified recorded history from complete activity logging or past enforcement; verdicts, exit codes, protocol behavior and live-probe/JSON output remain unchanged (N11761).
+
 - Add per-chain remote v2 anchors with explicit `anchor enroll` / `anchor migrate`, durable exact-request retry, expected-pair verification, signed-prefix checks, conditional remote updates and actual NCC handler/CLI acceptance coverage (N11742–N11745). Independent projects may share one signing key. Trusted external identity and SQLite metadata must agree; pending/enrolled chains refuse prune and moved state requires explicit relocation and remote verification.
 
 - Add trusted external chain identities and monotonic local registration state for v2 enrollment (N11744). Registration and prune share a process-safe lock; pending/enrolled or incomplete identity state refuses prune. The existing wrap path protects that directory independently of the configured DB and refuses unenforced filesystem access. Legacy chains still prune normally. The offline move procedure is documented and tested.
