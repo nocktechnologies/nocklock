@@ -8,6 +8,7 @@ import sys
 import tempfile
 import threading
 import time
+import unittest
 from unittest import TestCase, main as unittest_main, mock
 
 import kernel_cases
@@ -237,20 +238,16 @@ class KernelReceiptTest(TestCase):
             self.assertEqual(json.loads((out / "report.json").read_text())["commit"], "unknown")
             self.assertTrue((out / "REPORT.md").exists())
 
-    def test_main_sigterm_handler_is_restored_by_cleanup(self):
-        saved = signal.getsignal(signal.SIGTERM)
-        with tempfile.TemporaryDirectory() as directory:
-            row = dict(case="x", verdict="PASS", reason="stub")
-            try:
-                with mock.patch("kernel_cases.platform.system", return_value="Linux"), \
-                     mock.patch("kernel_cases.run_case", return_value=row), \
-                     mock.patch("kernel_cases.head_commit", return_value="unknown"), \
-                     mock.patch("sys.argv", ["kernel_cases.py", "--out", str(Path(directory) / "out")]):
-                    kernel_cases.main()
-                self.assertEqual(signal.getsignal(signal.SIGTERM), kernel_cases._on_sigterm)
-            finally:
-                signal.signal(signal.SIGTERM, saved)
-        self.assertEqual(signal.getsignal(signal.SIGTERM), saved)
+    def test_git_head_test_restores_the_sigterm_handler(self):
+        name = "test_kernel_cases.KernelReceiptTest.test_git_head_failure_yields_unknown_and_report_is_written"
+        # Start from a known handler so earlier tests cannot mask a leak.
+        self.addCleanup(signal.signal, signal.SIGTERM, signal.getsignal(signal.SIGTERM))
+        signal.signal(signal.SIGTERM, lambda signum, frame: None)
+        before = signal.getsignal(signal.SIGTERM)
+        result = unittest.TestResult()
+        unittest.defaultTestLoader.loadTestsFromName(name).run(result)
+        self.assertTrue(result.wasSuccessful(), result.errors + result.failures)
+        self.assertIs(signal.getsignal(signal.SIGTERM), before)
 
     def test_cleanup_fault_after_interrupt_reaches_stderr(self):
         # communicate() is interrupted. The SIGKILL in cleanup then fails with
@@ -273,6 +270,30 @@ class KernelReceiptTest(TestCase):
                 kernel_cases.run_case(root, root, *kernel_cases.CASES[1])
         self.assertIn("kernel_cases: cleanup after interrupt", stderr.getvalue())
         self.assertIn("process-group kill failed: denied", stderr.getvalue())
+
+    def test_broken_stderr_cannot_replace_the_interrupt(self):
+        process = mock.Mock(pid=4242)
+        process.communicate.side_effect = [KeyboardInterrupt, ("", "")]
+        process.wait.return_value = 0
+
+        class BrokenStderr:
+            def write(self, text):
+                raise BrokenPipeError("closed")
+
+            def flush(self):
+                pass
+
+        def killpg(pgid, sig):
+            if sig == signal.SIGKILL:
+                raise PermissionError("denied")
+
+        with tempfile.TemporaryDirectory() as directory, \
+             mock.patch("kernel_cases.subprocess.Popen", return_value=process), \
+             mock.patch("kernel_cases.os.killpg", side_effect=killpg), \
+             mock.patch("sys.stderr", BrokenStderr()):
+            root = Path(directory)
+            with self.assertRaises(KeyboardInterrupt):
+                kernel_cases.run_case(root, root, *kernel_cases.CASES[1])
 
     def test_missing_failed_and_malformed_cannot_pass(self):
         test = kernel_cases.CASES[1][2]

@@ -6,7 +6,7 @@ All notable changes to NockLock will be documented in this file.
 
 ### Fixed
 
-- The red-team bench now matches a `path=` rule against any part of an absolute report path, so a bare filename rule works. The kernel companion report now prints cleanup failures after an interrupt, and its tests restore the SIGTERM handler.
+- The red-team bench now matches a `path=` rule against the whole report path or a path-component suffix, so a bare filename rule works and `xcanary.txt` does not match `canary.txt`. The kernel companion report now prints cleanup failures after an interrupt, and its tests restore the SIGTERM handler.
 
 ## [0.10.0] - 2026-10-14
 

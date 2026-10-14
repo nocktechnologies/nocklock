@@ -171,7 +171,10 @@ def run_case(repo, out, case, package, test):
         # leave the owned process group running.
         _, _, fault = _stop_group(process, grace=SIGTERM_GRACE_SECONDS)
         if fault:
-            sys.stderr.write("kernel_cases: cleanup after interrupt" + fault + "\n")
+            try:
+                sys.stderr.write("kernel_cases: cleanup after interrupt" + fault + "\n")
+            except OSError:
+                pass  # A closed pipe after Ctrl-C must not replace the interrupt.
         _raise_if_terminated()
         raise
     (out / (case + ".jsonl")).write_text(stdout)
