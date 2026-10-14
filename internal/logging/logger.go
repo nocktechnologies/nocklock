@@ -125,9 +125,10 @@ type Stats struct {
 
 // Logger handles SQLite event storage.
 type Logger struct {
-	db       *sql.DB
-	signer   *signer // nil when Ed25519 signing is off
-	onCommit func(Event, string)
+	db          *sql.DB
+	signer      *signer // nil when Ed25519 signing is off
+	onCommit    func(Event, string)
+	projectRoot string // canonical project root for the external trusted identity
 }
 
 // eventTransaction is the common database/sql operation set shared by a
@@ -471,7 +472,28 @@ func NewLogger(dbPath string, projectRoot string, opts ...Option) (*Logger, erro
 		return nil, fmt.Errorf("failed to migrate signature columns: %w", err)
 	}
 
-	l := &Logger{db: db, onCommit: lc.onCommit}
+	if _, err := db.Exec(`CREATE TABLE IF NOT EXISTS chain_identity (
+		id INTEGER PRIMARY KEY CHECK (id = 1),
+		version INTEGER NOT NULL,
+		agent_id TEXT NOT NULL,
+		chain_id TEXT NOT NULL,
+		legacy_anchor_digest TEXT NOT NULL
+	)`); err != nil {
+		db.Close()
+		return nil, fmt.Errorf("failed to initialize chain identity metadata: %w", err)
+	}
+	canonicalRoot := ""
+	if projectRoot != "" {
+		canonicalRoot, err = filepath.Abs(projectRoot)
+		if err == nil {
+			canonicalRoot, err = resolveDeepestExisting(canonicalRoot)
+		}
+		if err != nil {
+			db.Close()
+			return nil, fmt.Errorf("cannot resolve project root for chain identity: %w", err)
+		}
+	}
+	l := &Logger{db: db, onCommit: lc.onCommit, projectRoot: canonicalRoot}
 
 	if lc.signingEnabled {
 		adopted, err := signingAlreadyAdopted(db)
@@ -986,6 +1008,11 @@ func (l *Logger) Stats(sessionID string) (*Stats, error) {
 // the forward chain, recording a prune-boundary marker in chain_head.
 // Returns the number of events removed.
 func (l *Logger) Prune(olderThan time.Duration) (int, error) {
+	unlock, err := l.lockPruneIdentity()
+	if err != nil {
+		return 0, err
+	}
+	defer unlock()
 	cutoff := formatTimestampForChain(time.Now().Add(-olderThan))
 
 	tx, err := l.db.Begin()

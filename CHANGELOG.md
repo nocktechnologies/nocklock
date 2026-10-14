@@ -6,6 +6,8 @@ All notable changes to NockLock will be documented in this file.
 
 ### Added
 
+- Add trusted external chain identities and monotonic local registration state for future v2 enrollment (N11744). Registration and prune share a process-safe lock; pending/enrolled or incomplete identity state refuses prune. The existing wrap path protects that directory independently of the configured DB and refuses unenforced filesystem access. Legacy chains still prune normally. No v2 network or enrollment CLI is enabled by this slice; the offline move procedure is documented and tested.
+
 - Add opt-in v2 anchor record encoding, signature and expected-pair verification, snapshot digests, and public interoperability vectors (N11742). V2 signs an independent `chain_id` and legacy migration witness. This is record-format support only: v1 remains the default; CLI, chain enrollment, persistence, network routes and server behavior are unchanged.
 
 ### Fixed

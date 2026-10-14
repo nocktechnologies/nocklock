@@ -208,6 +208,17 @@ var wrapCmd = &cobra.Command{
 		if err := recordConfigDigest(logger, &effectiveCfg, configPath, dbPath, sessionID, resolvedNetworkFenceMode(wrapFlags), cmd.ErrOrStderr()); err != nil {
 			return fmt.Errorf("could not record the effective config digest: %w\nThe audit trail is required — refusing to run unrecorded", err)
 		}
+		// V2's trusted record stays outside the project even when logging.db
+		// selects a legacy in-project location. Protect it separately and record
+		// any refusal in the signed audit trail before returning.
+		if err := protectChainIdentity(cfg, logger); err != nil {
+			logErr := logger.Log(logging.Event{
+				Timestamp: time.Now(), EventType: logging.EventFileBlocked,
+				Category: "filesystem", Detail: "trusted chain identity protection refused: " + err.Error(),
+				Blocked: true, SessionID: sessionID,
+			})
+			return errors.Join(err, logErr)
+		}
 
 		// logEvent records one event. logger is guaranteed non-nil here (the open
 		// above fails closed), so no nil guard is needed.
@@ -1414,6 +1425,24 @@ func withManagedSigningKeyDeny(deny []string) ([]string, string, error) {
 		return nil, "", err
 	}
 	return append(append([]string(nil), deny...), keyDir), keyDir, nil
+}
+
+func protectChainIdentity(cfg *config.Config, logger *logging.Logger) error {
+	dir, err := logger.ChainIdentityDirectory()
+	if err != nil {
+		return fmt.Errorf("cannot protect trusted chain identity; refusing to start: %w", err)
+	}
+	if dir == "" {
+		return nil
+	}
+	if cfg.Filesystem.Root == "" {
+		return errors.New("trusted chain identity requires an enabled filesystem fence; refusing to start with a remote pin at risk")
+	}
+	if runtime.GOOS == "linux" && linuxEnforcementMode(cfg.Filesystem.LinuxEnforcement) == linuxEnforcementOff {
+		return errors.New("trusted chain identity requires Linux Landlock enforcement; refusing to start with a remote pin at risk")
+	}
+	cfg.Filesystem.Deny = append(cfg.Filesystem.Deny, dir)
+	return nil
 }
 
 // egressDecisionDir returns the per-session directory that holds the egress
