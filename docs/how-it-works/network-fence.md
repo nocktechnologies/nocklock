@@ -22,6 +22,15 @@ The level is computed once by `effectiveEgressLevel` (`internal/cli/egress_level
 ## Linux netns mode (`--net-fence=netns`)
 Needs Linux (`wrap.go`) and the privileged helper (`docs/setup.md`), and fails closed without the helper (README). It also needs `network.allow` entries (`wrap.go`). The child runs in its own namespace, keeps its configured IP socket families, and reaches only `network.allow` hosts through a transparent proxy and a fixed-answer DNS stub. Direct DNS to other resolvers, non-DNS UDP, QUIC, SCTP and raw IP are dropped in the kernel. The setup request travels in a 0600 file, not stdin (`.claude/decisions/004-netns-setup-request-channel.md`). Code: `internal/fence/network/netns/`. Feasibility probe: `nocklock egress-probe`.
 
+New netns bridge allocations reserve `169.254.169.0/24` and `169.254.170.0/24`,
+which contain common instance and container metadata endpoints. The remaining
+16,256 aligned `/30` subnets form the candidate pool. The original random ID
+still names the interfaces and namespace; the helper reserves the selected
+subnet against concurrent use before setup. This exclusion does not promise
+freedom from every provider-specific host route or replace fail-closed proxy
+readiness. Pure mapping tests cover every original slot without running a
+namespace or contacting a metadata service (`bridge_candidate_test.go`).
+
 ## macOS Seatbelt floor
 With the network fence active the profile denies `network-outbound` except TCP to `localhost:<proxy port>`, allows no Unix-socket connect, and denies Mach lookups of `com.apple.mDNSResponder` and `com.apple.mDNSResponderHelper` (`CHANGELOG.md`, v0.7.0 section). The proxy listener is bound once and handed over; `[::1]:<port>` is held or wrap refuses to start.
 
