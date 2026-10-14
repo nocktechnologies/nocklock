@@ -21,6 +21,7 @@ All notable changes to NockLock will be documented in this file.
 
 ### Fixed
 
+- Tests: pin three disposable Landlock probes to their OS threads so Go cannot move their checks away from the restricted thread. Production already pinned its launch thread; runtime behavior is unchanged. CI repeats the probes under scheduler variation and requires the old unpinned helper to fail its audit-write check (N11773).
 - CI: fail the scoped-sudoers artifact check when a blanket `NOPASSWD:ALL` grant is present or grep cannot read the file. Only grep's no-match exit code passes; the previous standalone negation could continue under Bash errexit (N11749).
 
 ## [0.9.3] - 2026-10-14

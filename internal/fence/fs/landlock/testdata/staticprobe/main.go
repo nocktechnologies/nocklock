@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"runtime"
 	"syscall"
 
 	fsfence "github.com/nocktechnologies/nocklock/internal/fence/fs"
@@ -16,6 +17,9 @@ import (
 )
 
 func main() {
+	// Landlock restricts the calling OS thread. Keep every probe operation on
+	// that thread; this disposable process exits without returning it to Go.
+	runtime.LockOSThread()
 	if len(os.Args) != 4 {
 		fmt.Fprintln(os.Stderr, "usage: staticprobe ROOT AUDIT_DB DENIED_PATH")
 		os.Exit(2)
