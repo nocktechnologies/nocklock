@@ -24,9 +24,13 @@ never roll the state back to `none`.
    location, old/new state directories, and the identity tuple
    `(agent_id, chain_id, legacy_anchor_digest, registration_state)`. Run
    `nocklock verify --audit` in the old project and require authentic, intact
-   results. Run `nocklock verify --against-remote-anchor` to validate trusted-record/DB
-   agreement and the existing remote pin. An embedding caller can also use
-   `Logger.ReadChainIdentity`.
+   results. Validate trusted-record/DB agreement with `Logger.ReadChainIdentity`.
+   For `enrolled` state, also run `nocklock verify --against-remote-anchor` and
+   require `ANCHOR: OK` before moving. A `pending` registration may have no
+   remote pin, or the store may have committed a request whose response was lost;
+   neither case permits clearing pending. Record the original enrollment or
+   migration command and mode, and preserve `anchor-registration.json` byte for
+   byte so that registration can be retried at the destination.
 
 The state directory mapping is the existing `config.AuditStateDir` mapping:
 
@@ -71,9 +75,22 @@ Before modifying anything, require:
    legacy digest. Run `nocklock verify --audit` in the destination and require
    the original signed chain to verify. The old state directory must be absent.
    Stop on any mismatch; do not regenerate a missing record or initialize a new ID.
-7. Before the next v2 push, remotely verify the preserved expected pair with the
-   actual v2 store. A missing/unreachable remote pin is an error. Run `nocklock verify --against-remote-anchor` and require `ANCHOR: OK`;
-   local agreement alone does not complete the move or prove rollback protection.
+7. Complete registration and remote verification for the preserved expected pair:
+   - For `enrolled`, run `nocklock verify --against-remote-anchor` and require
+     `ANCHOR: OK`. A missing or unreachable pin is an error; do not enroll again
+     to recreate it.
+   - For `pending`, retry the original `anchor enroll` command (including its
+     acknowledgement flag, if used) or `anchor migrate`. The client must replay
+     the preserved signed request and mode. Require successful enrollment and
+     `nocklock verify --against-remote-anchor` returning `ANCHOR: OK` before any
+     push. If changed legacy history or another conflict prevents the retry,
+     preserve the pending state and investigate; do not edit or replace it.
+   - For `none`, the local move does not establish a remote pin. Explicitly
+     enroll or migrate and verify the pin before any remote push.
+
+   Local agreement alone does not prove rollback protection. Keep remote writes
+   stopped until registration and verification succeed; pending and enrolled
+   state must never be reset to bypass an error.
 
 If either move fails midway, keep both locations offline and use the saved
 mapping and backup to finish or restore the **same** identity. Do not make an
