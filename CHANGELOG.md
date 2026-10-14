@@ -4,6 +4,10 @@ All notable changes to NockLock will be documented in this file.
 
 ## [Unreleased]
 
+### Fixed
+
+- CI: fail the scoped-sudoers artifact check when a blanket `NOPASSWD:ALL` grant is present or grep cannot read the file. Only grep's no-match exit code passes; the previous standalone negation could continue under Bash errexit (N11749).
+
 ## [0.9.3] - 2026-10-14
 
 ### Documentation
