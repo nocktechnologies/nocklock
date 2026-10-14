@@ -177,36 +177,36 @@ var wrapCmd = &cobra.Command{
 		defer logger.Close()
 
 		// Auto-emit an external chain-head anchor on teardown (N10647). This is the
-		// hook a future NockCC push consumes so tail truncation and rollback become
+		// hook the enrolled v2 push consumes so tail truncation and rollback become
 		// detectable off-box. Best-effort but LOGGED: a failure must not crash
 		// teardown (the session already ran), yet is never silently swallowed. LIFO
 		// defer order places this BEFORE logger.Close (it needs the open signer) and
 		// AFTER the SessionEnd event that every return path logs last. The anchor
 		// lands next to events.db, inside the audit dir the fenced child is denied.
 		//
-		// When NOCKLOCK_ANCHOR_URL is set, the written anchor is then pushed off-box
+		// When NOCKLOCK_ANCHOR_URL is set and v2 is enrolled, the written anchor is pushed off-box
 		// under a hard timeout. The push is FAIL-OPEN: the session already ran, so
 		// a push failure prints a loud warning and never changes the exit code (this
 		// defer does not touch RunE's return value). With the URL unset nothing
 		// further happens.
-		defer func() {
-			anchorPath := logging.DefaultAnchorPath(dbPath)
-			anchor, err := logger.EmitAnchor()
-			if err == nil {
-				err = logging.WriteAnchor(anchorPath, anchor)
-			}
-			if err != nil {
-				fmt.Fprintf(os.Stderr, "NockLock: warning: chain anchor not written to %s: %v\n", anchorPath, err)
-				return
-			}
-			pushAnchorOffBox(os.Stderr, anchor, logger.SigningPublicKey())
-		}()
+		defer func() { finishAnchorSession(os.Stderr, logger, dbPath) }()
 
 		// Record the resolved policy before any child setup or launch. The config
 		// file lives inside the project root by default, so the fenced child can
 		// change it for a later run; this signed row makes that change visible.
 		if err := recordConfigDigest(logger, &effectiveCfg, configPath, dbPath, sessionID, resolvedNetworkFenceMode(wrapFlags), cmd.ErrOrStderr()); err != nil {
 			return fmt.Errorf("could not record the effective config digest: %w\nThe audit trail is required — refusing to run unrecorded", err)
+		}
+		// V2's trusted record stays outside the project even when logging.db
+		// selects a legacy in-project location. Protect it separately and record
+		// any refusal in the signed audit trail before returning.
+		if err := protectChainIdentity(cmd.Context(), cfg, logger); err != nil {
+			logErr := logger.Log(logging.Event{
+				Timestamp: time.Now(), EventType: logging.EventFileBlocked,
+				Category: "filesystem", Detail: "trusted chain identity protection refused: " + err.Error(),
+				Blocked: true, SessionID: sessionID,
+			})
+			return errors.Join(err, logErr)
 		}
 
 		// logEvent records one event. logger is guaranteed non-nil here (the open
@@ -892,10 +892,15 @@ var wrapCmd = &cobra.Command{
 			return &exitCodeError{code: 2}
 		}
 
-		// On macOS the filesystem fence wraps the child argv with sandbox-exec
-		// (kernel-enforced, inherited by all descendants). On Linux fsSandboxPrefix
-		// is empty and the child runs directly with the LD_PRELOAD env above.
-		childArgv := composeChildArgv(args, landlockPrefix, fsSandboxPrefix)
+		// Resolve the requested command before any kernel-fence shim or netns
+		// helper receives it; their execve calls do not search the caller's PATH.
+		childArgv, err := resolveChildArgv(args, landlockPrefix, fsSandboxPrefix)
+		if err != nil {
+			logEvent(logging.EventSessionEnd, "session", "exit_code=1", false)
+			cmd.SilenceErrors = true
+			cmd.SilenceUsage = true
+			return err
+		}
 		// Export this run's session id to the child (N10647) so a co-located tool
 		// can stamp the SAME id. Done here, after every other env mutation and
 		// immediately before the single point where childEnv is consumed, so it
@@ -1171,7 +1176,7 @@ func loadWrapConfig(flags WrapFlags) (*config.Config, string, error) {
 }
 
 func fileBlockedDetail(ev fsfence.FenceEvent) string {
-	return fmt.Sprintf("op=%s path=%s reason=%s", ev.Operation, ev.Path, ev.Reason)
+	return ev.Detail()
 }
 
 func printProfiles(w io.Writer) {
@@ -1414,6 +1419,32 @@ func withManagedSigningKeyDeny(deny []string) ([]string, string, error) {
 		return nil, "", err
 	}
 	return append(append([]string(nil), deny...), keyDir), keyDir, nil
+}
+
+func protectChainIdentity(ctx context.Context, cfg *config.Config, logger *logging.Logger) error {
+	dir, err := logger.ChainIdentityDirectoryContext(ctx)
+	if err != nil {
+		return fmt.Errorf("cannot protect trusted chain identity; refusing to start: %w", err)
+	}
+	if cfg.Filesystem.Root == "" {
+		if dir == "" {
+			// Explicitly unfenced legacy sessions make no custody claim.
+			return nil
+		}
+		return errors.New("trusted chain identity requires an enabled filesystem fence; refusing to start with a remote pin at risk")
+	}
+	if dir != "" && runtime.GOOS == "linux" && linuxEnforcementMode(cfg.Filesystem.LinuxEnforcement) == linuxEnforcementOff {
+		return errors.New("trusted chain identity requires Linux Landlock enforcement; refusing to start with a remote pin at risk")
+	}
+	// Protect the future record even for legacy chains and custom logging.db.
+	// Valid non-off Linux modes normalize to required, so unavailable Landlock
+	// or a grant overlapping this deny fails startup before the child executes.
+	dir, err = logger.TrustedChainStateDirectory()
+	if err != nil {
+		return fmt.Errorf("cannot protect future trusted chain state; refusing to start: %w", err)
+	}
+	cfg.Filesystem.Deny = append(cfg.Filesystem.Deny, dir)
+	return nil
 }
 
 // egressDecisionDir returns the per-session directory that holds the egress

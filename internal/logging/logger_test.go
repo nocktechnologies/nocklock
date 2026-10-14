@@ -21,7 +21,8 @@ func tempDBPath(t *testing.T) string {
 func mustNewLogger(t *testing.T) (*Logger, string) {
 	t.Helper()
 	dbPath := tempDBPath(t)
-	l, err := NewLogger(dbPath, "")
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	l, err := NewLogger(dbPath, filepath.Dir(dbPath))
 	if err != nil {
 		t.Fatalf("NewLogger(%q) failed: %v", dbPath, err)
 	}
@@ -1575,7 +1576,7 @@ func TestPruneReAnchorsChain(t *testing.T) {
 	l, dbPath := mustNewLogger(t)
 	l.Close()
 
-	l, _ = NewLogger(dbPath, "")
+	l, _ = NewLogger(dbPath, filepath.Dir(dbPath))
 
 	// Log an old event and several recent events
 	oldTime := time.Now().Add(-48 * time.Hour).UTC().Truncate(time.Second)
@@ -1671,7 +1672,7 @@ func TestTamperingAfterPruneDetected(t *testing.T) {
 	l, dbPath := mustNewLogger(t)
 	l.Close()
 
-	l, _ = NewLogger(dbPath, "")
+	l, _ = NewLogger(dbPath, filepath.Dir(dbPath))
 
 	// Log old event + new events
 	oldTime := time.Now().Add(-48 * time.Hour).UTC().Truncate(time.Second)
@@ -1729,7 +1730,7 @@ func TestTamperingAfterPruneDetected(t *testing.T) {
 	db.Close()
 
 	// Re-open and verify: should detect tampering
-	l, _ = NewLogger(dbPath, "")
+	l, _ = NewLogger(dbPath, filepath.Dir(dbPath))
 	defer l.Close()
 
 	result, err = l.VerifyChain()

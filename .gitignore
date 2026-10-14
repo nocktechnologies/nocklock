@@ -52,4 +52,5 @@ nocklock.exe
 # Red-team bench scratch dirs and generated reports
 bench/redteam/REPORT.md
 bench/redteam/report.json
+bench/redteam/kernel-report/
 bench/redteam/__pycache__/

@@ -96,6 +96,13 @@ const epermMarker = "operation not permitted"
 // TestMain intercepts the re-exec'd child helper before the test framework runs,
 // so the child does exactly one fenced mutation and exits with a decodable code.
 func TestMain(m *testing.M) {
+	if os.Getenv(childCredentialProbe) == "1" {
+		if err := runChildCredentialProbe(); err != nil {
+			fmt.Fprintln(os.Stderr, err)
+			os.Exit(2)
+		}
+		os.Exit(0)
+	}
 	if len(os.Args) == 2 {
 		switch os.Args[1] {
 		case "__netns-proxy":

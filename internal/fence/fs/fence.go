@@ -53,6 +53,9 @@ type FenceEvent struct {
 	Operation string `json:"operation"`
 	Reason    string `json:"reason"`
 	Timestamp string `json:"timestamp"`
+	// Collector-owned values are deliberately outside the JSON decoding surface.
+	peer    connectionPeer
+	hasPeer bool
 }
 
 // Fence manages the filesystem fence lifecycle, including the Unix domain
@@ -131,6 +134,12 @@ func (f *Fence) EnvVars() []string {
 // A sync.WaitGroup ensures all connection handlers finish before the channel
 // is closed, preventing send-on-closed-channel panics.
 func (f *Fence) Listen(ctx context.Context) <-chan FenceEvent {
+	return f.listen(ctx, captureConnectionPeer)
+}
+
+// listen keeps the capture seam local to one listener invocation. Capture runs
+// before parsing but cannot hold the shared accept loop behind a slow procfs read.
+func (f *Fence) listen(ctx context.Context, capture func(net.Conn) connectionPeer) <-chan FenceEvent {
 	ch := make(chan FenceEvent, 64)
 	var wg sync.WaitGroup
 
@@ -155,7 +164,8 @@ func (f *Fence) Listen(ctx context.Context) <-chan FenceEvent {
 			wg.Add(1)
 			go func() {
 				defer wg.Done()
-				f.handleConn(ctx, conn, ch)
+				peer := capture(conn)
+				f.handleConn(ctx, conn, ch, peer)
 			}()
 		}
 	}()
@@ -165,7 +175,7 @@ func (f *Fence) Listen(ctx context.Context) <-chan FenceEvent {
 
 // handleConn reads newline-delimited JSON events from a single connection
 // and sends parsed events to the channel.
-func (f *Fence) handleConn(ctx context.Context, conn net.Conn, ch chan<- FenceEvent) {
+func (f *Fence) handleConn(ctx context.Context, conn net.Conn, ch chan<- FenceEvent, peer connectionPeer) {
 	defer conn.Close()
 	scanner := bufio.NewScanner(conn)
 	scanner.Buffer(make([]byte, 4096), 16*1024)
@@ -180,6 +190,7 @@ func (f *Fence) handleConn(ctx context.Context, conn net.Conn, ch chan<- FenceEv
 			// Skip malformed lines.
 			continue
 		}
+		event.peer, event.hasPeer = peer, true
 		if h := f.handler.Load(); h != nil {
 			(*h)(event)
 		} else {

@@ -6,6 +6,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -79,13 +80,12 @@ enforcement = "required"
 		t.Fatalf("write config.toml: %v", err)
 	}
 
-	// ABSOLUTE paths only. With Landlock + seccomp ON the child runs through the
-	// __landlock-exec shim, which execve's argv[0] directly (unix.Exec, no PATH
-	// search) — so a bare `sh` would ENOENT. (The sibling egress-audit test gets
-	// away with bare `sh` because it disables both fences, so no shim is inserted
-	// and wrap's exec.LookPath resolves the command.) /usr/bin/curl is likewise
-	// explicit to avoid a PATH walk across ungranted dirs.
-	//
+	// A bare shell must resolve in the unprivileged parent before both the
+	// Landlock/seccomp shim and netns helper. A CWD decoy must never run.
+	const decoyMarker = "N11777_UNEXPECTED_NETNS_CWD_TARGET"
+	if err := os.WriteFile(filepath.Join(projectDir, "sh"), []byte("#!/bin/sh\nprintf '%s\\n' '"+decoyMarker+"'\n"), 0o700); err != nil {
+		t.Fatal(err)
+	}
 	// curl streams to stdout (the wrap-inherited pipe) rather than a file. The
 	// fence root IS writable now, so a `-o file` would work, but writing nothing
 	// keeps the test about the audit rows rather than about filesystem rights.
@@ -93,10 +93,11 @@ enforcement = "required"
 	// the session exit 0 regardless of curl's result.
 	script := "/usr/bin/curl -s --max-time 20 https://example.com/; " +
 		"/usr/bin/curl -s --max-time 20 http://blocked.test/; true"
-	wrap := exec.Command(bin, "wrap", "--net-fence=netns", "--", "/bin/sh", "-c", script)
+	wrap := exec.Command(bin, "wrap", "--net-fence=netns", "--", "sh", "-c", script)
 	wrap.Dir = projectDir
-	wrap.Env = os.Environ()
-	if out, err := wrap.CombinedOutput(); err != nil {
+	wrap.Env = append(removeEnvVars(os.Environ(), "PATH"), "PATH=/usr/bin:/bin")
+	out, err := wrap.CombinedOutput()
+	if err != nil || strings.Contains(string(out), decoyMarker) {
 		t.Fatalf("composed-default nocklock wrap --net-fence=netns failed: %v\n%s", err, out)
 	}
 

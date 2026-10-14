@@ -21,25 +21,24 @@ var anchorCmd = &cobra.Command{
 var anchorEmitCmd = &cobra.Command{
 	Use:   "emit",
 	Short: "Emit a signed anchor of the current audit chain head",
-	Long: "Read the current chain_head and emit a signed anchor record\n" +
-		"{version, agent_id, head_hash, row_count, created_at, sig} as compact JSON.\n\n" +
-		"The anchor is signed with the same NockLock-managed Ed25519 key the audit log signs with;\n" +
-		"agent_id is that key's fingerprint. Emitting requires the signing key (the anchor must be\n" +
-		"authenticatable), so on a never-signed log this adopts signing, exactly as 'wrap' does.",
+	Long: "Verify the signed local chain and emit its head as compact JSON. A trusted chain\n" +
+		"identity selects v2; a wholly legacy chain emits v1 for explicit file verification.\n" +
+		"Emission requires the existing signing key and signing adoption; it never adopts\n" +
+		"or re-signs an unsigned or stripped database. Use wrap to create a signed audit trail.",
 	RunE: func(cmd *cobra.Command, args []string) error {
 		out, _ := cmd.Flags().GetString("out")
-		return runAnchorEmit(cmd.OutOrStdout(), out)
+		return runAnchorEmit(cmd.Context(), cmd.OutOrStdout(), out)
 	},
 }
 
 var anchorPushCmd = &cobra.Command{
 	Use:   "push",
 	Short: "Push a signed anchor to the off-box anchor store",
-	Long: "Push an anchor file to the off-box anchor store at $NOCKLOCK_ANCHOR_URL, authenticated\n" +
-		"with the bearer token in $NOCKLOCK_ANCHOR_TOKEN (environment only). The body carries the\n" +
-		"anchor and the base64 Ed25519 public key it is signed with. The store refuses (HTTP 409) an\n" +
-		"anchor whose row_count is below the latest one it holds for the same agent_id.\n\n" +
-		"Defaults to the anchor 'wrap' writes on teardown next to events.db.",
+	Long: "Push a v2 anchor to $NOCKLOCK_ANCHOR_URL using $NOCKLOCK_ANCHOR_TOKEN (environment\n" +
+		"only). Explicit enrollment is required. Authenticate the trusted pair, candidate\n" +
+		"local prefix and latest remote prefix before a conditional store update. Missing\n" +
+		"pins and unsupported v2 routes fail; this command never falls back to v1.\n\n" +
+		"Defaults to the anchor wrap writes on teardown next to events.db.",
 	RunE: func(cmd *cobra.Command, args []string) error {
 		file, _ := cmd.Flags().GetString("file")
 		ctx := cmd.Context()
@@ -59,22 +58,50 @@ func init() {
 	rootCmd.AddCommand(anchorCmd)
 }
 
-// runAnchorEmit opens the audit log WITH signing (the anchor must be signed to
-// be authenticatable), emits an anchor of the current head, and writes it to
-// --out or stdout. Opening with signing adopts signing on a never-signed log,
-// the same write 'wrap' performs; this is a deliberate, documented side effect
-// of anchoring, which is meaningless without a key.
-func runAnchorEmit(w io.Writer, outPath string) error {
+// runAnchorEmit verifies existing signing without adopting or repairing the
+// database, then emits the selected v1/v2 record to --out or stdout.
+func runAnchorEmit(ctx context.Context, w io.Writer, outPath string) error {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	ctx, cancel := context.WithTimeout(ctx, anchorCLITimeout)
+	defer cancel()
 	dbPath, projectRoot, err := resolveAuditDBPath()
 	if err != nil {
 		return err
 	}
 
-	logger, err := logging.NewLogger(dbPath, projectRoot, signingLoggerOpts()...)
+	key, err := logging.DefaultSigningKeyPath()
+	if err != nil {
+		return err
+	}
+	logger, err := logging.NewLogger(dbPath, projectRoot, logging.WithExistingSigning(key))
 	if err != nil {
 		return fmt.Errorf("failed to open event log: %w", err)
 	}
 	defer logger.Close()
+
+	if dir, err := logger.ChainIdentityDirectoryContext(ctx); err != nil {
+		return err
+	} else if dir != "" {
+		anchor, err := logger.EmitAnchorV2Context(ctx)
+		if err != nil {
+			return err
+		}
+		if outPath != "" {
+			if err := logging.WriteAnchorV2(outPath, anchor); err != nil {
+				return err
+			}
+			_, err := fmt.Fprintf(w, "anchor written to %s (row_count=%d, head=%s)\n", outPath, anchor.RowCount, anchor.HeadHash)
+			return err
+		}
+		data, err := logging.MarshalAnchorV2(anchor)
+		if err != nil {
+			return err
+		}
+		_, err = fmt.Fprintf(w, "%s\n", data)
+		return err
+	}
 
 	anchor, err := logger.EmitAnchor()
 	if err != nil {
