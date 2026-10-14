@@ -9,6 +9,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
 )
@@ -69,8 +70,11 @@ func TestWrapClaudeCodePresetLaunchPath(t *testing.T) {
 				cmd := exec.CommandContext(ctx, bin, "wrap", "--", command, "-c", "printf '%s\\n' '"+marker+"'")
 				cmd.Dir = projectDir
 				cmd.Env = append(removeEnvVars(os.Environ(), "PATH", "GODEBUG"), "PATH="+path, "GODEBUG=execerrdot=0")
-				cmd.WaitDelay = 2 * time.Second
-				out, err := cmd.CombinedOutput()
+				// The shared harness kills this isolated group on timeout or
+				// drain failure. Pdeathsig kills this direct probe if the test
+				// parent dies; neither promises to reap arbitrary regrouped trees.
+				cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true, Pdeathsig: syscall.SIGKILL}
+				out, err := runCredentialCommand(ctx, cmd, 2*time.Second)
 				if ctx.Err() != nil || errors.Is(err, exec.ErrWaitDelay) {
 					t.Fatalf("launch-path probe did not complete normally: context=%v err=%v\n%s", ctx.Err(), err, out)
 				}
