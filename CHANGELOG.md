@@ -8,6 +8,10 @@ All notable changes to NockLock will be documented in this file.
 
 - Document the card-to-`next` and batched `next`-to-`main` review/release workflow, verified ruleset checks and Mira's exact-head gate; run test and network-egress CI on pushes to `next` as well as `main`. Refresh the roadmap to v0.9.3 while retaining the unimplemented packaging and anchor-protocol limits (N11740).
 
+### Documentation
+
+- Fix signing-key recovery verification for absolute and project-local audit-log paths. Verify an isolated copy with the archived public key, preserving the live config, original archive and project provenance (N11739).
+
 ### Fixed
 
 - CI: fail the scoped-sudoers artifact check when a blanket `NOPASSWD:ALL` grant is present or grep cannot read the file. Only grep's no-match exit code passes; the previous standalone negation could continue under Bash errexit (N11749).
