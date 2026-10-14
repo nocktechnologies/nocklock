@@ -255,6 +255,10 @@ func (l *Logger) RegisterAnchorV2(mode string, legacy *Anchor, send func(AnchorR
 			return nil, err
 		}
 	}
+	// If the original request's rename succeeded but directory sync failed,
+	// its file data was already synced. On retry the pending rewrite below
+	// syncs their shared directory and ancestors before send, making the exact
+	// retained request entry durable without regenerating its signed snapshot.
 	return l.registerChainIdentityLocked(store, id, func(ChainIdentity) (*ChainRegistrationConfirmation, error) {
 		stored, err := send(request)
 		if err != nil {

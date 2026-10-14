@@ -26,13 +26,19 @@ V2 anchors sign the verified `(agent_id, chain_id)` pair, current head/count, ti
 
 The random ID lives in `chain-identity.json` under the trusted external project state directory and is mirrored in DB metadata. Both copies must agree. `anchor-registration.json` durably retains the exact original signed request, mode and migration witness before registration. Under the shared identity/prune lock, the client verifies the local signed prefix and syncs `pending` before sending. A lost response, rejected request or crash leaves pending; retrying the same command replays the original snapshot. Verified exact-request confirmation moves to `enrolled`; no transition clears pending or enrolled. The operator must restore a missing record, never mint a replacement.
 
+If the original request's rename committed but its directory sync failed,
+retry preserves the original signed bytes. The request file was synced before
+rename; the next pending write syncs their shared directory and ancestor entries
+before any request is sent.
+
 Every pending retry rewrites and syncs the record before sending again; finding
 `pending` on disk does not prove the last directory sync succeeded. A
 `ChainIdentityDurabilityError` means replacement committed but durability is
 uncertain: preserve the visible state and retry, never restore `none`. A
 pending-write failure sends no callback; an enrolled-write failure follows the
 already-confirmed remote request and retains the previously durable pending
-guard. File and directory barriers stop at the configured state root. State-root establishment separately refreshes its immediate owning-parent
+guard. File and directory barriers stop at the configured state root.
+State-root establishment separately refreshes its immediate owning-parent
 barrier, including when already present; creating missing components syncs each
 new entry before descending. Existence alone never proves a completed barrier.
 

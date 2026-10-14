@@ -13,6 +13,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/nocktechnologies/nocklock/internal/config"
 )
 
 func signV2Fixture(t *testing.T, l *Logger, a *AnchorV2) {
@@ -343,5 +345,75 @@ func TestAnchorV2PruneCannotInterleaveRegistration(t *testing.T) {
 	}
 	if err := <-pruned; err == nil {
 		t.Fatal("enrolled chain pruned")
+	}
+}
+
+func TestAnchorV2OriginalRequestDirectoryFailureRetry(t *testing.T) {
+	f := newIdentityFixture(t)
+	identityOldEvent(t, f.logger)
+	initIdentity(t, f)
+	path := filepath.Join(filepath.Dir(f.record), AnchorRegistrationFileName)
+	injected := errors.New("original request directory fsync failed")
+	failed := false
+	var synced []string
+	f.logger.identitySync = func(file *os.File) error {
+		info, err := file.Stat()
+		if err != nil {
+			return err
+		}
+		synced = append(synced, filepath.Clean(file.Name()))
+		if info.IsDir() && !failed {
+			failed = true
+			return injected
+		}
+		return file.Sync()
+	}
+	calls := 0
+	_, err := f.logger.RegisterAnchorV2("fresh", nil, func(AnchorRegistrationRequest) (*AnchorV2, error) {
+		calls++
+		return nil, errors.New("must not send after failed request barrier")
+	})
+	var durability *ChainIdentityDurabilityError
+	if !errors.As(err, &durability) || !errors.Is(err, injected) || calls != 0 {
+		t.Fatalf("request failure: %v, calls=%d", err, calls)
+	}
+	original, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	id, err := f.logger.ReadChainIdentity()
+	if err != nil || id.RegistrationState != ChainRegistrationNone {
+		t.Fatalf("advanced before original request persisted: %+v, %v", id, err)
+	}
+	// Appending proves retry uses the retained original snapshot, not a freshly
+	// generated head/timestamp. The prior request file was synced before rename;
+	// the pending rewrite's directory barrier also persists its sibling entry.
+	identityOldEvent(t, f.logger)
+	synced = nil
+	root, err := config.AuditStateRoot()
+	if err != nil {
+		t.Fatal(err)
+	}
+	recordDir, err := filepath.EvalSymlinks(filepath.Dir(path))
+	if err != nil {
+		t.Fatal(err)
+	}
+	enrolled, err := f.logger.RegisterAnchorV2("fresh", nil, func(req AnchorRegistrationRequest) (*AnchorV2, error) {
+		calls++
+		if len(synced) != 4 || synced[1] != recordDir || synced[3] != root {
+			t.Fatalf("retry sent before shared directory barrier: %v", synced)
+		}
+		actual, err := os.ReadFile(path)
+		if err != nil || string(actual) != string(original) {
+			t.Fatalf("retry replaced original request: %v", err)
+		}
+		encoded, err := json.Marshal(&req)
+		if err != nil || strings.TrimSpace(string(original)) != string(encoded) || req.Anchor.RowCount != 1 {
+			t.Fatalf("retry did not send original snapshot: %+v, %v", req, err)
+		}
+		return req.Anchor, nil
+	})
+	if err != nil || calls != 1 || enrolled.RegistrationState != ChainRegistrationEnrolled {
+		t.Fatalf("retry enrollment: %+v, %v calls=%d", enrolled, err, calls)
 	}
 }
