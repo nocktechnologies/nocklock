@@ -58,6 +58,19 @@ jobs:
       - name: test
         run: go test ./... -count=1
 
+      - name: Landlock probe thread-affinity regression
+        run: |
+          for procs in 2 8 32; do
+            GOMAXPROCS="$procs" go test ./internal/fence/fs/landlock \
+              -run '^TestLandlock(AllowRWPaths|ChildCanMutateRootButNotRelocatedAudit|SocketOnlyPreservesCrossDirectoryOperations)$' \
+              -count=10 -v -timeout=3m
+          done
+
+      - name: deterministic cross-thread Landlock control
+        run: |
+          PYTHONDONTWRITEBYTECODE=1 python3 scripts/test_landlock_probe_thread_affinity.py
+          python3 scripts/test-landlock-probe-thread-affinity.py
+
       - name: concurrent proxy stop race regression
         run: go test -race -run '^TestProxyStopConcurrent$' -count=20 ./internal/fence/network
 
@@ -68,6 +81,22 @@ jobs:
         run: |
           make build-all
           bash scripts/test-init-default-linux.sh
+
+  unpinned-landlock-soak:
+    name: optional unpinned Landlock reproduction
+    if: github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    timeout-minutes: 12
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+      - name: attempt natural migration (inconclusive is not an enforcement pass)
+        run: python3 scripts/test-landlock-probe-thread-affinity.py --unpinned
 
   claude-code-preset:
     name: claude-code preset · Landlock enforcement (non-root)

@@ -8,6 +8,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"syscall"
 	"testing"
 
@@ -81,6 +82,9 @@ func TestLandlockSocketOnlyPreservesCrossDirectoryOperations(t *testing.T) {
 
 func runSocketOnlyReferProbe(t *testing.T) {
 	t.Helper()
+	// Keep the per-thread restriction through every operation. Go retires this
+	// permanently restricted thread when the disposable test goroutine exits.
+	runtime.LockOSThread()
 	socketPath := os.Getenv("NOCKLOCK_SOCKET_ONLY_REFER_PATH")
 	source := os.Getenv("NOCKLOCK_SOCKET_ONLY_REFER_SOURCE")
 	moved := os.Getenv("NOCKLOCK_SOCKET_ONLY_REFER_MOVED")
@@ -209,6 +213,8 @@ func TestLandlockChildCanMutateRootButNotRelocatedAudit(t *testing.T) {
 
 func runLandlockProbe(t *testing.T) {
 	t.Helper()
+	// Do not return the restricted thread to the runtime or migrate away from it.
+	runtime.LockOSThread()
 	root := os.Getenv("NOCKLOCK_LANDLOCK_ROOT")
 	readOnly := os.Getenv("NOCKLOCK_LANDLOCK_RO")
 	readWrite := os.Getenv("NOCKLOCK_LANDLOCK_RW")
