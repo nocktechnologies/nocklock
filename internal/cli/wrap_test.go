@@ -423,7 +423,7 @@ func TestWrapRootAuditRefusalVerifies(t *testing.T) {
 		t.Fatalf("verify --audit failed: %v\n%s", err, out.String())
 	}
 	out.Reset()
-	if err := runVerifyAgainstAnchor(&out, logging.DefaultAnchorPath(db), ""); err != nil {
+	if err := runVerifyAgainstAnchor(context.Background(), &out, logging.DefaultAnchorPath(db), ""); err != nil {
 		t.Fatalf("anchor verification failed: %v\n%s", err, out.String())
 	}
 }

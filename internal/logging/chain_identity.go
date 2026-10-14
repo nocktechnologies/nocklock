@@ -71,13 +71,19 @@ type ChainRegistrationConfirmation struct {
 // Repeating with an existing matching identity returns it unchanged; partial
 // creation or mismatched state fails closed and requires operator recovery.
 func (l *Logger) InitializeChainIdentity(legacyAnchorDigest string) (*ChainIdentity, error) {
+	return l.InitializeChainIdentityContext(context.Background(), legacyAnchorDigest)
+}
+
+// InitializeChainIdentityContext is InitializeChainIdentity with cancellable identity-lock acquisition.
+// Once a durable write starts, it completes synchronously before returning.
+func (l *Logger) InitializeChainIdentityContext(ctx context.Context, legacyAnchorDigest string) (*ChainIdentity, error) {
 	if l.signer == nil {
 		return nil, errors.New("initializing chain identity requires the audit signing key")
 	}
 	if _, err := anchorHex32("legacy_anchor_digest", legacyAnchorDigest); err != nil {
 		return nil, err
 	}
-	store, err := l.lockChainIdentityStore()
+	store, err := l.lockChainIdentityStoreContext(ctx)
 	if err != nil {
 		return nil, err
 	}
@@ -95,6 +101,9 @@ func (l *Logger) InitializeChainIdentity(legacyAnchorDigest string) (*ChainIdent
 	// Establish previously legacy-created ancestry before even the DB mirror
 	// changes. Unsupported directory durability must not poison a legacy chain.
 	if err := store.prepareWrite(); err != nil {
+		return nil, err
+	}
+	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
 	var randomID [32]byte
@@ -119,6 +128,11 @@ func (l *Logger) InitializeChainIdentity(legacyAnchorDigest string) (*ChainIdent
 // record never falls back to the DB's identity. Both absent returns
 // ErrChainIdentityMissing. V2 emit/push/verify callers must use this check.
 func (l *Logger) ReadChainIdentity() (*ChainIdentity, error) {
+	return l.ReadChainIdentityContext(context.Background())
+}
+
+// ReadChainIdentityContext is ReadChainIdentity with cancellable identity-lock acquisition.
+func (l *Logger) ReadChainIdentityContext(ctx context.Context) (*ChainIdentity, error) {
 	if l.projectRoot == "" {
 		mirror, err := l.readChainIdentityMirror()
 		if err != nil {
@@ -129,7 +143,7 @@ func (l *Logger) ReadChainIdentity() (*ChainIdentity, error) {
 		}
 		return nil, errors.New("chain identity requires the project root; follow docs/runbooks/chain-identity-move.md")
 	}
-	store, err := l.lockChainIdentityStore()
+	store, err := l.lockChainIdentityStoreContext(ctx)
 	if err != nil {
 		return nil, err
 	}
@@ -149,6 +163,11 @@ func (l *Logger) ReadChainIdentity() (*ChainIdentity, error) {
 // returns an empty path without creating state. logging.db cannot select or
 // bypass this directory; incomplete or mismatched identity state is an error.
 func (l *Logger) ChainIdentityDirectory() (string, error) {
+	return l.ChainIdentityDirectoryContext(context.Background())
+}
+
+// ChainIdentityDirectoryContext is ChainIdentityDirectory with cancellable identity-lock acquisition.
+func (l *Logger) ChainIdentityDirectoryContext(ctx context.Context) (string, error) {
 	mirror, err := l.readChainIdentityMirror()
 	if err != nil {
 		return "", err
@@ -170,7 +189,7 @@ func (l *Logger) ChainIdentityDirectory() (string, error) {
 	if err != nil && !errors.Is(err, os.ErrNotExist) {
 		return "", fmt.Errorf("cannot inspect trusted chain identity: %w", err)
 	}
-	if _, err := l.ReadChainIdentity(); err != nil {
+	if _, err := l.ReadChainIdentityContext(ctx); err != nil {
 		return "", err
 	}
 	return config.EnsureAuditStateDir(l.projectRoot)
@@ -185,10 +204,16 @@ func (l *Logger) ChainIdentityDirectory() (string, error) {
 // No network behavior is implemented here. The callback must not call identity
 // lifecycle methods or Prune on this chain (the shared lock is already held).
 func (l *Logger) RegisterChainIdentity(register func(ChainIdentity) (*ChainRegistrationConfirmation, error)) (*ChainIdentity, error) {
+	return l.RegisterChainIdentityContext(context.Background(), register)
+}
+
+// RegisterChainIdentityContext is RegisterChainIdentity with cancellable identity-lock acquisition.
+// Once a durable write starts, it completes synchronously before returning.
+func (l *Logger) RegisterChainIdentityContext(ctx context.Context, register func(ChainIdentity) (*ChainRegistrationConfirmation, error)) (*ChainIdentity, error) {
 	if register == nil {
 		return nil, errors.New("chain registration requires a confirmation callback")
 	}
-	store, err := l.lockChainIdentityStore()
+	store, err := l.lockChainIdentityStoreContext(ctx)
 	if err != nil {
 		return nil, err
 	}
@@ -200,10 +225,10 @@ func (l *Logger) RegisterChainIdentity(register func(ChainIdentity) (*ChainRegis
 	if identity == nil {
 		return nil, ErrChainIdentityMissing
 	}
-	return l.registerChainIdentityLocked(store, identity, register)
+	return l.registerChainIdentityLocked(ctx, store, identity, register)
 }
 
-func (l *Logger) registerChainIdentityLocked(store *chainIdentityStore, identity *ChainIdentity, register func(ChainIdentity) (*ChainRegistrationConfirmation, error)) (*ChainIdentity, error) {
+func (l *Logger) registerChainIdentityLocked(ctx context.Context, store *chainIdentityStore, identity *ChainIdentity, register func(ChainIdentity) (*ChainRegistrationConfirmation, error)) (*ChainIdentity, error) {
 	if identity.RegistrationState == ChainRegistrationEnrolled {
 		return identity, nil
 	}
@@ -213,6 +238,9 @@ func (l *Logger) registerChainIdentityLocked(store *chainIdentityStore, identity
 	identity.RegistrationState = ChainRegistrationPending
 	if err := store.write(identity); err != nil {
 		return nil, err
+	}
+	if err := ctx.Err(); err != nil {
+		return nil, err // pending is durable; cancellation never resets it
 	}
 	confirmation, err := register(*identity)
 	if err != nil {
@@ -396,6 +424,9 @@ func (l *Logger) lockChainIdentityStore() (*chainIdentityStore, error) {
 }
 
 func (l *Logger) lockChainIdentityStoreContext(ctx context.Context) (*chainIdentityStore, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
 	dir, syncRoot, err := l.trustedChainStateLocation()
 	if err != nil {
 		return nil, err

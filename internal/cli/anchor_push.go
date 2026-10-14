@@ -12,8 +12,8 @@ import (
 	"github.com/nocktechnologies/nocklock/internal/logging"
 )
 
-// anchorPushTimeout bounds the wrap-teardown push. A package var so tests can
-// shorten it; production is a hard 5 seconds.
+// anchorPushTimeout bounds identity-lock waits and HTTP during wrap teardown.
+// Synchronous filesystem and SQLite work is not interrupted. Tests shorten it.
 var anchorPushTimeout = 5 * time.Second
 
 // anchorEnvKeys are wrap's off-box anchor settings. They are removed from the
@@ -83,6 +83,8 @@ func runAnchorPush(ctx context.Context, w io.Writer, file string) error {
 // runVerifyAgainstRemoteAnchor uses only the trusted v2 pair. Missing identity,
 // unsupported routes and absent remote state fail closed without v1 fallback.
 func runVerifyAgainstRemoteAnchor(ctx context.Context, w io.Writer, pubFlag string) error {
+	fctx, cancel := context.WithTimeout(ctx, anchorCLITimeout)
+	defer cancel()
 	dbPath, projectRoot, err := resolveAuditDBPath()
 	if err != nil {
 		return err
@@ -103,17 +105,15 @@ func runVerifyAgainstRemoteAnchor(ctx context.Context, w io.Writer, pubFlag stri
 		return err
 	}
 	defer logger.Close()
-	id, err := logger.ReadChainIdentity()
+	id, err := logger.ReadChainIdentityContext(fctx)
 	if err != nil {
 		return writeAnchorVerifyResult(w, anchorUnavailable(err.Error()))
 	}
-	fctx, cancel := context.WithTimeout(ctx, anchorCLITimeout)
-	defer cancel()
 	a, err := anchorclient.FetchLatestV2(fctx, baseURL, token, id.AgentID, id.ChainID, pub)
 	if err != nil {
 		return writeAnchorVerifyResult(w, anchorUnavailable(err.Error()))
 	}
-	result, err := logger.VerifyAgainstAnchorV2(a, pub)
+	result, err := logger.VerifyAgainstAnchorV2Context(fctx, a, pub)
 	if err != nil {
 		return writeAnchorVerifyResult(w, anchorUnavailable(err.Error()))
 	}

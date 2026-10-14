@@ -200,7 +200,7 @@ var wrapCmd = &cobra.Command{
 		// V2's trusted record stays outside the project even when logging.db
 		// selects a legacy in-project location. Protect it separately and record
 		// any refusal in the signed audit trail before returning.
-		if err := protectChainIdentity(cfg, logger); err != nil {
+		if err := protectChainIdentity(cmd.Context(), cfg, logger); err != nil {
 			logErr := logger.Log(logging.Event{
 				Timestamp: time.Now(), EventType: logging.EventFileBlocked,
 				Category: "filesystem", Detail: "trusted chain identity protection refused: " + err.Error(),
@@ -1416,8 +1416,8 @@ func withManagedSigningKeyDeny(deny []string) ([]string, string, error) {
 	return append(append([]string(nil), deny...), keyDir), keyDir, nil
 }
 
-func protectChainIdentity(cfg *config.Config, logger *logging.Logger) error {
-	dir, err := logger.ChainIdentityDirectory()
+func protectChainIdentity(ctx context.Context, cfg *config.Config, logger *logging.Logger) error {
+	dir, err := logger.ChainIdentityDirectoryContext(ctx)
 	if err != nil {
 		return fmt.Errorf("cannot protect trusted chain identity; refusing to start: %w", err)
 	}

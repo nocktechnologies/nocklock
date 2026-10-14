@@ -27,7 +27,7 @@ var anchorEmitCmd = &cobra.Command{
 		"or re-signs an unsigned or stripped database. Use wrap to create a signed audit trail.",
 	RunE: func(cmd *cobra.Command, args []string) error {
 		out, _ := cmd.Flags().GetString("out")
-		return runAnchorEmit(cmd.OutOrStdout(), out)
+		return runAnchorEmit(cmd.Context(), cmd.OutOrStdout(), out)
 	},
 }
 
@@ -60,7 +60,9 @@ func init() {
 
 // runAnchorEmit verifies existing signing without adopting or repairing the
 // database, then emits the selected v1/v2 record to --out or stdout.
-func runAnchorEmit(w io.Writer, outPath string) error {
+func runAnchorEmit(ctx context.Context, w io.Writer, outPath string) error {
+	ctx, cancel := context.WithTimeout(ctx, anchorCLITimeout)
+	defer cancel()
 	dbPath, projectRoot, err := resolveAuditDBPath()
 	if err != nil {
 		return err
@@ -76,10 +78,10 @@ func runAnchorEmit(w io.Writer, outPath string) error {
 	}
 	defer logger.Close()
 
-	if dir, err := logger.ChainIdentityDirectory(); err != nil {
+	if dir, err := logger.ChainIdentityDirectoryContext(ctx); err != nil {
 		return err
 	} else if dir != "" {
-		anchor, err := logger.EmitAnchorV2()
+		anchor, err := logger.EmitAnchorV2Context(ctx)
 		if err != nil {
 			return err
 		}

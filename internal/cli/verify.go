@@ -86,7 +86,7 @@ var verifyCmd = &cobra.Command{
 			return runVerifyAgainstRemoteAnchor(ctx, cmd.OutOrStdout(), pubFlag)
 		}
 		if anchorFile != "" {
-			return runVerifyAgainstAnchor(cmd.OutOrStdout(), anchorFile, pubFlag)
+			return runVerifyAgainstAnchor(cmd.Context(), cmd.OutOrStdout(), anchorFile, pubFlag)
 		}
 		if asAudit {
 			return runAuditVerify(cmd.Context(), cmd.OutOrStdout(), pubFlag)
@@ -128,7 +128,9 @@ func init() {
 // The anchor's own signature is authenticated with the same key resolution as
 // verify --audit (an explicit --ed25519-pub, else the local managed key). The
 // log is opened READ-ONLY (no signing option): verifying never writes.
-func runVerifyAgainstAnchor(w io.Writer, anchorFile, pubFlag string) error {
+func runVerifyAgainstAnchor(ctx context.Context, w io.Writer, anchorFile, pubFlag string) error {
+	ctx, cancel := context.WithTimeout(ctx, anchorCLITimeout)
+	defer cancel()
 	dbPath, projectRoot, err := resolveAuditDBPath()
 	if err != nil {
 		return err
@@ -161,7 +163,7 @@ func runVerifyAgainstAnchor(w io.Writer, anchorFile, pubFlag string) error {
 		if err != nil {
 			return err
 		}
-		result, err := logger.VerifyAgainstAnchorV2(anchor, pub)
+		result, err := logger.VerifyAgainstAnchorV2Context(ctx, anchor, pub)
 		if err != nil {
 			return err
 		}

@@ -2,6 +2,7 @@ package logging
 
 import (
 	"bytes"
+	"context"
 	"crypto/ed25519"
 	"encoding/base64"
 	"encoding/json"
@@ -27,7 +28,13 @@ type AnchorV2VerifyResult struct {
 // EmitAnchorV2 signs a verified local head with the existing trusted identity.
 // It never initializes identity and refuses incomplete or mismatched stores.
 func (l *Logger) EmitAnchorV2() (*AnchorV2, error) {
-	store, err := l.lockChainIdentityStore()
+	return l.EmitAnchorV2Context(context.Background())
+}
+
+// EmitAnchorV2Context is EmitAnchorV2 with cancellable identity-lock acquisition.
+// Local verification remains synchronous.
+func (l *Logger) EmitAnchorV2Context(ctx context.Context) (*AnchorV2, error) {
+	store, err := l.lockChainIdentityStoreContext(ctx)
 	if err != nil {
 		return nil, err
 	}
@@ -70,7 +77,13 @@ func (l *Logger) emitAnchorV2Locked(id *ChainIdentity) (*AnchorV2, error) {
 // then verifies the local signed chain and head at the anchored count. It never
 // converts an unbounded remote uint64 count into a platform-sized int.
 func (l *Logger) VerifyAgainstAnchorV2(a *AnchorV2, pub ed25519.PublicKey) (*AnchorV2VerifyResult, error) {
-	store, err := l.lockChainIdentityStore()
+	return l.VerifyAgainstAnchorV2Context(context.Background(), a, pub)
+}
+
+// VerifyAgainstAnchorV2Context is VerifyAgainstAnchorV2 with cancellable identity-lock acquisition.
+// Local verification remains synchronous.
+func (l *Logger) VerifyAgainstAnchorV2Context(ctx context.Context, a *AnchorV2, pub ed25519.PublicKey) (*AnchorV2VerifyResult, error) {
+	store, err := l.lockChainIdentityStoreContext(ctx)
 	if err != nil {
 		return nil, err
 	}
@@ -181,10 +194,16 @@ type AnchorRegistrationRequest struct {
 // anchor. A verified matching local prefix is required before enrollment.
 // Neither send nor its callees may recursively take this chain's identity lock.
 func (l *Logger) RegisterAnchorV2(mode string, legacy *Anchor, send func(AnchorRegistrationRequest) (*AnchorV2, error)) (*ChainIdentity, error) {
+	return l.RegisterAnchorV2Context(context.Background(), mode, legacy, send)
+}
+
+// RegisterAnchorV2Context is RegisterAnchorV2 with cancellable identity-lock acquisition.
+// Local verification and durable writes remain synchronous; send must respect ctx.
+func (l *Logger) RegisterAnchorV2Context(ctx context.Context, mode string, legacy *Anchor, send func(AnchorRegistrationRequest) (*AnchorV2, error)) (*ChainIdentity, error) {
 	if l.signer == nil || send == nil {
 		return nil, errors.New("v2 registration requires the original signing key and a confirmation callback")
 	}
-	store, err := l.lockChainIdentityStore()
+	store, err := l.lockChainIdentityStoreContext(ctx)
 	if err != nil {
 		return nil, err
 	}
@@ -246,6 +265,9 @@ func (l *Logger) RegisterAnchorV2(mode string, legacy *Anchor, send func(AnchorR
 	if !result.OK {
 		return nil, fmt.Errorf("registration preflight refused: %s", result.Reason)
 	}
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
 	if data == nil {
 		encoded, err := json.Marshal(&request)
 		if err != nil {
@@ -259,7 +281,7 @@ func (l *Logger) RegisterAnchorV2(mode string, legacy *Anchor, send func(AnchorR
 	// its file data was already synced. On retry the pending rewrite below
 	// syncs their shared directory and ancestors before send, making the exact
 	// retained request entry durable without regenerating its signed snapshot.
-	return l.registerChainIdentityLocked(store, id, func(ChainIdentity) (*ChainRegistrationConfirmation, error) {
+	return l.registerChainIdentityLocked(ctx, store, id, func(ChainIdentity) (*ChainRegistrationConfirmation, error) {
 		stored, err := send(request)
 		if err != nil {
 			return nil, err

@@ -125,10 +125,10 @@ func runAnchorEnrollment(ctx context.Context, w io.Writer, mode string) error {
 			return fmt.Errorf("legacy migration preflight refused: %s", result.Reason)
 		}
 	}
-	if _, err := logger.InitializeChainIdentity(digest); err != nil {
+	if _, err := logger.InitializeChainIdentityContext(ctx, digest); err != nil {
 		return err
 	}
-	id, err := logger.RegisterAnchorV2(mode, legacy, func(request logging.AnchorRegistrationRequest) (*logging.AnchorV2, error) {
+	id, err := logger.RegisterAnchorV2Context(ctx, mode, legacy, func(request logging.AnchorRegistrationRequest) (*logging.AnchorV2, error) {
 		var result *anchorclient.V2Result
 		var err error
 		if request.Mode == "migrate" {
@@ -148,7 +148,7 @@ func runAnchorEnrollment(ctx context.Context, w io.Writer, mode string) error {
 	if err != nil {
 		return fmt.Errorf("registration is enrolled but remote verification is incomplete; retry verification before pushing: %w", err)
 	}
-	result, err := logger.VerifyAgainstAnchorV2(remote, pub)
+	result, err := logger.VerifyAgainstAnchorV2Context(ctx, remote, pub)
 	if err != nil {
 		return err
 	}
@@ -163,14 +163,14 @@ func runAnchorEnrollment(ctx context.Context, w io.Writer, mode string) error {
 }
 
 func pushAnchorV2(ctx context.Context, logger *logging.Logger, a *logging.AnchorV2, pub ed25519.PublicKey, baseURL, token string) error {
-	id, err := logger.ReadChainIdentity()
+	id, err := logger.ReadChainIdentityContext(ctx)
 	if err != nil {
 		return err
 	}
 	if id.RegistrationState != logging.ChainRegistrationEnrolled {
 		return errors.New("v2 chain is not enrolled; retry explicit anchor enroll or anchor migrate before push")
 	}
-	candidate, err := logger.VerifyAgainstAnchorV2(a, pub)
+	candidate, err := logger.VerifyAgainstAnchorV2Context(ctx, a, pub)
 	if err != nil {
 		return err
 	}
@@ -181,7 +181,7 @@ func pushAnchorV2(ctx context.Context, logger *logging.Logger, a *logging.Anchor
 	if err != nil {
 		return err
 	}
-	prefix, err := logger.VerifyAgainstAnchorV2(previous, pub)
+	prefix, err := logger.VerifyAgainstAnchorV2Context(ctx, previous, pub)
 	if err != nil {
 		return err
 	}
@@ -212,8 +212,10 @@ func writeAnchorV2VerifyResult(w io.Writer, result *logging.AnchorV2VerifyResult
 }
 
 func finishAnchorSession(w io.Writer, logger *logging.Logger, dbPath string) {
+	ctx, cancel := context.WithTimeout(context.Background(), anchorPushTimeout)
+	defer cancel()
 	path := logging.DefaultAnchorPath(dbPath)
-	dir, err := logger.ChainIdentityDirectory()
+	dir, err := logger.ChainIdentityDirectoryContext(ctx)
 	if err == nil && dir == "" {
 		a, emitErr := logger.EmitAnchor()
 		if emitErr == nil {
@@ -231,7 +233,7 @@ func finishAnchorSession(w io.Writer, logger *logging.Logger, dbPath string) {
 		fmt.Fprintf(w, "NockLock: warning: chain anchor not written: %v\n", err)
 		return
 	}
-	a, err := logger.EmitAnchorV2()
+	a, err := logger.EmitAnchorV2Context(ctx)
 	if err == nil {
 		err = logging.WriteAnchorV2(path, a)
 	}
@@ -243,8 +245,6 @@ func finishAnchorSession(w io.Writer, logger *logging.Logger, dbPath string) {
 	if baseURL == "" {
 		return
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), anchorPushTimeout)
-	defer cancel()
 	if err := pushAnchorV2(ctx, logger, a, logger.SigningPublicKey(), baseURL, token); err != nil {
 		fmt.Fprintf(w, "NockLock: warning: chain anchor NOT pushed off-box: %v\n", err)
 	}

@@ -15,6 +15,8 @@ All notable changes to NockLock will be documented in this file.
 
 ### Fixed
 
+- Anchor v2 identity-lock waits now honor command cancellation and share the existing HTTP deadline. Wrap teardown starts its five-second budget before reading identity; interactive anchor commands and verification use 30 seconds. Durable filesystem writes remain synchronous rather than being abandoned on timeout (N11745).
+
 - Harden trusted identity retries and pruning (N11744): every pending retry redoes file/directory durability barriers before registration; post-rename sync errors explicitly report a committed replacement with uncertain durability. Only trusted identity writes preflight the full state-root lineage before mutation; ordinary state resolution, reads and prune retain their no-fsync behavior. Post-rename barriers stop at the canonical state root, with a defensive filesystem-root stop. State directory and boundary come from one resolution. Prune requires project context after a database rollback and times out on the identity lock after five seconds. Filesystem-enabled wraps deny the future identity directory before enrollment, including custom DB locations and broad grant overlaps. Explicitly unfenced legacy behavior remains degraded; existing identities require enforcement.
 
 - Concurrent first-time chain identity initialization now creates its persistent lock exclusively, then opens the winning inode. This avoids a macOS `os.Root.OpenFile` creation race while retaining anchored path, ownership and symlink checks.
