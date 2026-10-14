@@ -32,6 +32,8 @@ Verified through the repository rules API on **2026-10-14 UTC**:
 
 Both rulesets block deletion and non-fast-forward updates. They do **not** enforce the one-card/one-PR convention, squash-only merging or the manual Gander/Mira gate; those remain workflow requirements. Re-read `gh api repos/nocktechnologies/nocklock/rules/branches/next` and the corresponding `/main` endpoint before changing gates. Rule changes are an owner action, not a way to clear a failed check.
 
+The active tag ruleset [release-tags-immutable](https://github.com/nocktechnologies/nocklock/rules/25049891) targets `refs/tags/v*`, has no bypass, and blocks updates, deletion and force-moves. Creating a new release tag is allowed. Re-check `gh api repos/nocktechnologies/nocklock/rulesets/25049891` when preparing a release; release tags remain immutable.
+
 | Workflow / proof | Runs when | Evidence needed |
 |---|---|---|
 | `test.yml`: build, vet, fmt, unit tests, Linux preset proof, fuzz smoke | Push to `main` or `next`; PR events; manual dispatch | Successful run for the reviewed head and post-merge batch |
@@ -42,4 +44,4 @@ The two macOS jobs have different scope and triggers. The push-running DNS/netwo
 
 ## Merge and release
 
-After the exact head passes the gate, Mira squash-merges the card PR into `next` and checks the resulting push CI. Do not tag or announce it as shipped yet. The release owner promotes the approved batch through **one `next` → `main` PR**, runs the same gate on its final head, and squash-merges it. Tagging, GitHub release creation, tap update and installation smoke follow the [release runbook](../../docs/runbooks/release.md). File the required session report even for docs-only work.
+After the exact head passes the gate, Mira squash-merges the card PR into `next` and checks the resulting push CI. Do not tag or announce it as shipped yet. The release owner promotes the approved batch through **one `next` → `main` PR**, runs the same gate on its final head, and squash-merges it. Tagging, GitHub release creation, tap update and installation smoke follow the [release runbook](../../docs/runbooks/release.md). After tagging and before new work lands in `next`, the release owner back-syncs `main` into `next` with a real merge commit whose tree equals released main. This single direct push uses the next ruleset's administrator bypass; it is never a squash, reset or force-push. File the required session report even for docs-only work.
