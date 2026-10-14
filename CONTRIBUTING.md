@@ -50,12 +50,15 @@ Some changes need a conversation first. Open an issue before building a new fenc
 
 ## How to contribute
 
-1. Fork the repo and create a branch from `main`.
-2. Write tests for any new functionality.
-3. Run the full test suite; `go test ./...` must pass.
-4. Follow the code style; `go fmt` and `go vet` must pass clean.
-5. Write a clear PR description: what it does, why, and how to test it.
-6. Keep each PR to one feature, so it stays focused and reviewable.
+1. Take one scoped Nock card and create a feature branch from current `next`. Open one PR for that card with **base `next`**, even though GitHub's default branch is `main`.
+2. Write tests for behavior changes, including an allowed-action control for each expected denial. Update the relevant docs and `CHANGELOG.md` under `[Unreleased]`.
+3. Run `go test ./... -v`, `go vet ./...`, and `go fmt ./...`; confirm `gofmt -l .` prints nothing. Self-review for secrets, path traversal, races and subprocess injection.
+4. Describe the problem, final behavior and validation in the PR. Mark it ready when it can be reviewed: the native macOS SBPL/full-suite job runs only on ready PRs.
+5. Record Gander's two-lens nock-review (Opus and Sol) against the exact PR head SHA. Wait for CodeRabbit, `claude-review` and all applicable CI, including the native macOS and root netns jobs. A skip is not an enforcement proof.
+6. Mira consolidates findings into one remediation-round spec on the PR. The same builder implements that spec and returns the new head with validation; review and checks must cover that head before Mira gates it. Unresolved findings remain blockers.
+7. Mira gates and squash-merges the card PR into `next`. Builders do not merge or push directly to `next` or `main`. A batch ships through one separately gated, squash-merged `next` → `main` release PR; a merge into `next` is not a release.
+
+See the [review pipeline](.claude/review/PIPELINE.md) for the live-check snapshot and the [release runbook](docs/runbooks/release.md) for promotion, tagging, GitHub release, tap update and installation smoke.
 
 ## Code standards
 
