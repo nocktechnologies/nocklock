@@ -50,21 +50,21 @@ All notable changes to NockLock will be documented in this file.
 
 - Concurrent first-time chain identity initialization now creates its persistent lock exclusively, then opens the winning inode. This avoids a macOS `os.Root.OpenFile` creation race while retaining anchored path, ownership and symlink checks.
 
-- Tests: pin three disposable Landlock probes to their OS threads so Go cannot move their checks away from the restricted thread. Production already pinned its launch thread; runtime behavior is unchanged. CI repeats the probes under scheduler variation and deterministically proves that a separate existing thread remains unrestricted. Natural unpinned reproduction is an optional manual soak (N11773).
-
-- CI: fail the scoped-sudoers artifact check when a blanket `NOPASSWD:ALL` grant is present or grep cannot read the file. Only grep's no-match exit code passes; the previous standalone negation could continue under Bash errexit (N11749).
-
 ### Testing
 
 - Linux CI coverage for post-exec child credentials under scheduler stress, full installed netns wrap credentials, and test-only cross-thread exec/proxy-group mutation controls (N11747). The red-team companion records real Unix-socket and io_uring controls separately; older Landlock ABIs and unavailable io_uring remain explicit coverage gaps, with no change to the main bench score or runtime behavior.
 
 - N11747 acceptance harnesses fail on every timeout, including earlier passing output; installed-wrap probes kill isolated process groups and bound output draining/reaping. Hanging-stub controls cover both harnesses. Hosted-only credential jobs check actual runner metadata, and a failed kernel companion stops the main bench and fails the job while preserving receipts.
 
+- Tests: pin three disposable Landlock probes to their OS threads so Go cannot move their checks away from the restricted thread. Production already pinned its launch thread; runtime behavior is unchanged. CI repeats the probes under scheduler variation and deterministically proves that a separate existing thread remains unrestricted. Natural unpinned reproduction is an optional manual soak (N11773).
+
+- CI: fail the scoped-sudoers artifact check when a blanket `NOPASSWD:ALL` grant is present or grep cannot read the file. Only grep's no-match exit code passes; the previous standalone negation could continue under Bash errexit (N11749).
+
 ### Upgrading from 0.9.3
 
-Remote anchor push and verify (`nocklock anchor push`, `nocklock verify --against-remote-anchor`) need `nocklock anchor enroll` or `nocklock anchor migrate` first. There is no fallback to the v1 key-only routes.
+Remote anchor push and verify (`nocklock anchor push`, `nocklock verify --against-remote-anchor`) need `nocklock anchor enroll` or `nocklock anchor migrate` first. There is no fallback to the v1 key-only routes. The NockCC anchor store you push to must run the v2 routes before enroll, migrate, push or verify will work.
 
-Pruning (`nocklock log --prune`) refuses a chain whose registration is pending or enrolled. To move that state to another machine or path, follow `docs/runbooks/chain-identity-move.md`.
+Pruning (`nocklock log --prune`) refuses a chain whose registration is pending, enrolled, or left incomplete by an interrupted enroll (any retained registration request). To move that state to another machine or path, follow `docs/runbooks/chain-identity-move.md`.
 
 `nocklock anchor emit` refuses an unsigned or stripped database. It needs existing signing adoption and the original key.
 
