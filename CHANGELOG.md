@@ -62,7 +62,7 @@ All notable changes to NockLock will be documented in this file.
 
 ### Upgrading from 0.9.3
 
-Remote anchor push and verify (`nocklock anchor push`, `nocklock verify --against-remote-anchor`) need `nocklock anchor enroll` or `nocklock anchor migrate` first. There is no fallback to the v1 key-only routes. The NockCC anchor store you push to must run the v2 routes before enroll, migrate, push or verify will work.
+Remote anchor push and verify (`nocklock anchor push`, `nocklock verify --against-remote-anchor`) need `nocklock anchor enroll` or `nocklock anchor migrate` first. There is no fallback to the v1 key-only routes. The anchor store at `NOCKLOCK_ANCHOR_URL` must be upgraded to v2 before enroll, migrate, push or verify will work.
 
 Pruning (`nocklock log --prune`) refuses a chain whose registration is pending, enrolled, or left incomplete by an interrupted enroll (any retained registration request). To move that state to another machine or path, follow `docs/runbooks/chain-identity-move.md`.
 
