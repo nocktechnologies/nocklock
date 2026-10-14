@@ -125,8 +125,6 @@ func TestAnchorV2EverySignedFieldBound(t *testing.T) {
 	fixture, pub := readAnchorV2Fixture(t)
 	original := fixture.Cases[0].Anchor
 	cases := map[string]func(*AnchorV2){
-		"version":              func(a *AnchorV2) { a.Version = 1 },
-		"agent_id":             func(a *AnchorV2) { a.AgentID = strings.Repeat("1", 64) },
 		"chain_id":             func(a *AnchorV2) { a.ChainID = strings.Repeat("1", 64) },
 		"head_hash":            func(a *AnchorV2) { a.HeadHash = strings.Repeat("1", 64) },
 		"row_count":            func(a *AnchorV2) { a.RowCount++ },
@@ -140,8 +138,8 @@ func TestAnchorV2EverySignedFieldBound(t *testing.T) {
 			a := original
 			mutate(&a)
 			// Even a caller trusting the altered IDs must reject the signature.
-			if err := VerifyAnchorV2(&a, pub, a.AgentID, a.ChainID); err == nil {
-				t.Fatal("modified signed record accepted")
+			if err := VerifyAnchorV2(&a, pub, a.AgentID, a.ChainID); err == nil || !strings.Contains(err.Error(), "signature does not verify") {
+				t.Fatalf("expected signature rejection, got %v", err)
 			}
 		})
 	}
@@ -343,13 +341,13 @@ func TestLegacyAnchorSnapshotRejectsInvalidWitness(t *testing.T) {
 	fixture, pub := readAnchorV2Fixture(t)
 	original := fixture.Legacy.Anchor
 	cases := map[string]func(*Anchor){
-		"version":        func(a *Anchor) { a.Version = 2 },
-		"agent":          func(a *Anchor) { a.AgentID = strings.Repeat("1", 64) },
-		"uppercase_hash": func(a *Anchor) { a.HeadHash = strings.ToUpper(a.HeadHash) },
-		"negative_count": func(a *Anchor) { a.RowCount = -1 },
-		"changed_count":  func(a *Anchor) { a.RowCount++ },
-		"invalid_time":   func(a *Anchor) { a.CreatedAt = "not-a-time" },
-		"bad_signature":  func(a *Anchor) { a.Sig = base64.StdEncoding.EncodeToString(make([]byte, 64)) },
+		"version":           func(a *Anchor) { a.Version = 2 },
+		"agent":             func(a *Anchor) { a.AgentID = strings.Repeat("1", 64) },
+		"uppercase_hash":    func(a *Anchor) { a.HeadHash = strings.ToUpper(a.HeadHash) },
+		"negative_count":    func(a *Anchor) { a.RowCount = -1 },
+		"changed_count":     func(a *Anchor) { a.RowCount++ },
+		"changed_timestamp": func(a *Anchor) { a.CreatedAt = "not-a-time" },
+		"bad_signature":     func(a *Anchor) { a.Sig = base64.StdEncoding.EncodeToString(make([]byte, 64)) },
 	}
 	for name, mutate := range cases {
 		t.Run(name, func(t *testing.T) {
@@ -411,4 +409,76 @@ func FuzzUnmarshalAnchorV2(f *testing.F) {
 			t.Fatal("canonical bytes changed after JSON round trip")
 		}
 	})
+}
+
+func TestAnchorV2VersionAndAgentIdentityChecks(t *testing.T) {
+	fixture, pub := readAnchorV2Fixture(t)
+	a := fixture.Cases[0].Anchor
+	a.Version = 1
+	if err := VerifyAnchorV2(&a, pub, a.AgentID, a.ChainID); err == nil || !strings.Contains(err.Error(), "unsupported anchor v2 version") {
+		t.Fatalf("expected version precheck rejection, got %v", err)
+	}
+	a = fixture.Cases[0].Anchor
+	a.AgentID = strings.Repeat("1", 64)
+	if err := VerifyAnchorV2(&a, pub, a.AgentID, a.ChainID); !errors.Is(err, ErrAnchorIdentityMismatch) {
+		t.Fatalf("expected key-fingerprint precheck rejection, got %v", err)
+	}
+	// Prove cryptographic binding separately, without the format/fingerprint
+	// prechecks masking a failure to sign these bytes.
+	a = fixture.Cases[0].Anchor
+	cb, err := AnchorV2CanonicalBytes(&a)
+	if err != nil {
+		t.Fatal(err)
+	}
+	sig, err := base64.StdEncoding.DecodeString(a.Sig)
+	if err != nil || !ed25519.Verify(pub, cb, sig) {
+		t.Fatalf("unaltered signature control failed: %v", err)
+	}
+	for name, offset := range map[string]int{"domain_version": 0, "agent_id": 5} {
+		t.Run(name, func(t *testing.T) {
+			mutated := bytes.Clone(cb)
+			mutated[offset] ^= 1
+			if ed25519.Verify(pub, mutated, sig) {
+				t.Fatal("signature did not bind the altered canonical bytes")
+			}
+		})
+	}
+}
+
+func TestLegacyAnchorSnapshotPreservesV1TimestampContract(t *testing.T) {
+	l, _, pub := newSigningLogger(t)
+	defer l.Close()
+	original := emitN(t, l, 1)
+	cases := []string{
+		"2026-10-13T12:34:56Z",
+		"2026-10-13T12:34:56.123456789Z",
+		"2026-10-13T12:34:56+00:00",
+		"2026-10-13T06:34:56-06:00",
+		"2026-10-13T12:34:56.1234567890Z",
+		"2026-10-13T12:34:56,123Z",
+		"", "opaque legacy timestamp",
+	}
+	for _, timestamp := range cases {
+		t.Run(timestamp, func(t *testing.T) {
+			a := *original
+			a.CreatedAt = timestamp
+			cb, err := anchorCanonicalBytes(&a)
+			if err != nil {
+				t.Fatal(err)
+			}
+			a.Sig = base64.StdEncoding.EncodeToString(ed25519.Sign(l.signer.priv, cb))
+			result, err := l.VerifyAgainstAnchor(&a, pub)
+			if err != nil || !result.OK {
+				t.Fatalf("existing v1 verifier control: %v, %v", result, err)
+			}
+			if digest, err := LegacyAnchorSnapshotDigest(&a, pub); err != nil || len(digest) != 64 {
+				t.Fatalf("authenticated v1 timestamp rejected as witness: %q, %v", digest, err)
+			}
+			// A changed spelling is still signed data, never normalized away.
+			a.CreatedAt += " "
+			if _, err := LegacyAnchorSnapshotDigest(&a, pub); err == nil {
+				t.Fatal("unsigned timestamp spelling change accepted")
+			}
+		})
+	}
 }

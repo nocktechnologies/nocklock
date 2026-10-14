@@ -71,8 +71,11 @@ Snapshot digests are SHA-256 over the ASCII domain string
 `nocklock-anchor-snapshot-v1` or `nocklock-anchor-snapshot-v2`, one NUL byte, that
 version's canonical signed bytes, and the 64 decoded signature bytes. Authenticate
 and validate the record before computing its digest. `LegacyAnchorSnapshotDigest`
-uses the unchanged v1 `0x05` signed layout and accepts canonical legacy records
-emitted by NockLock. It adds no project identity to v1.
+uses the unchanged v1 `0x05` signed layout, canonical lowercase IDs/hashes, and
+v1's verbatim `created_at` string contract. The v2 timestamp rule does not apply
+to a v1 witness: offset timestamps and other spellings already accepted by the
+v1 verifier remain valid when their original signatures verify. The timestamp
+is never normalized before hashing. This adds no project identity to v1.
 
 The existing v1 emitter, parser, verifier, CLI and network paths remain unchanged
 and default to v1. Record format support alone does not resolve the current
