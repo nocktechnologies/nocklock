@@ -201,8 +201,9 @@ func AnchorV2SnapshotDigest(a *AnchorV2, pub ed25519.PublicKey, expectedAgentID,
 
 // LegacyAnchorSnapshotDigest authenticates a v1 record and returns its migration
 // witness digest using the v1 snapshot domain and unchanged v1 signed encoding.
-// IDs and hashes must be canonical lowercase hex. It does not establish project
-// ownership or migrate a chain; callers must separately verify the chosen local
+// IDs and hashes must be canonical lowercase hex. CreatedAt retains v1's
+// verbatim-string contract; the v2 timestamp rule does not apply. This does not
+// establish project ownership or migrate a chain; callers must verify the local
 // chain reproduces this legacy head. Existing v1 readers/verifiers are unchanged.
 func LegacyAnchorSnapshotDigest(a *Anchor, pub ed25519.PublicKey) (string, error) {
 	if a == nil || a.Version != AnchorVersion {
@@ -212,9 +213,6 @@ func LegacyAnchorSnapshotDigest(a *Anchor, pub ed25519.PublicKey) (string, error
 		return "", err
 	}
 	if _, err := anchorHex32("head_hash", a.HeadHash); err != nil {
-		return "", err
-	}
-	if err := anchorTimestamp(a.CreatedAt); err != nil {
 		return "", err
 	}
 	cb, err := anchorCanonicalBytes(a)
