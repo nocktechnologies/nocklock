@@ -4,6 +4,10 @@ All notable changes to NockLock will be documented in this file.
 
 ## [Unreleased]
 
+### Changed
+
+- Document the card-to-`next` and batched `next`-to-`main` review/release workflow, verified ruleset checks and Mira's exact-head gate; run test and network-egress CI on pushes to `next` as well as `main`. Refresh the roadmap to v0.9.3 while retaining the unimplemented packaging and anchor-protocol limits (N11740).
+
 ### Added
 
 - Linux CI coverage for post-exec child credentials under scheduler stress, full installed netns wrap credentials, and test-only cross-thread exec/proxy-group mutation controls (N11747). The red-team companion records real Unix-socket and io_uring controls separately; older Landlock ABIs and unavailable io_uring remain explicit coverage gaps, with no change to the main bench score or runtime behavior.

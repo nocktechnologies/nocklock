@@ -22,7 +22,7 @@ name: network-egress
 
 on:
   push:
-    branches: [main]
+    branches: [main, next]
   pull_request:
 
 permissions:
