@@ -10,7 +10,7 @@ All notable changes to NockLock will be documented in this file.
 
 ### Added
 
-- Sign a versioned Linux interposer report detail containing separate child report and collector-observed connection peer sections. Linux `SO_PEERCRED` identifies the connector; executable paths are best-effort procfs observations with explicit unavailable statuses. This does not identify each action's writer or prove an action occurred; existing audit signatures and enforcement/ACK behavior are unchanged (N11762).
+- Sign a versioned Linux interposer report detail containing separate child report and collector-observed connection peer sections. Linux `SO_PEERCRED` identifies the connector; executable paths are best-effort procfs observations with explicit unavailable statuses. Capture runs before parsing in each connection's goroutine so it cannot stall the shared accept loop. The red-team bench matches legacy and version 1 report fields while preserving signed detail bytes. This does not identify each action's writer or prove an action occurred; existing audit signatures and enforcement/ACK behavior are unchanged (N11762).
 
 - Append `COVERAGE: LIMITED` to audit and local/remote anchor verification, including errors. The notice distinguishes verified recorded history from complete activity logging or past enforcement; verdicts, exit codes, protocol behavior and live-probe/JSON output remain unchanged (N11761).
 

@@ -6,7 +6,7 @@ import (
 	"strconv"
 )
 
-// connectionPeer is a value snapshot taken by the collector at accept. None of
+// connectionPeer is a value snapshot taken before parsing an accepted connection. None of
 // its fields can be filled from a report or mutated through a delivered event.
 type connectionPeer struct {
 	credentialsStatus string
@@ -53,8 +53,8 @@ func (e FenceEvent) Detail() string {
 	}
 	var credentials *peerCredentials
 	if e.peer.credentialsStatus == "captured" {
-		copy := e.peer.credentials
-		credentials = &copy
+		captured := e.peer.credentials
+		credentials = &captured
 	}
 	detail := struct {
 		Version int        `json:"version"`

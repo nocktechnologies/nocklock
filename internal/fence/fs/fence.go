@@ -134,6 +134,12 @@ func (f *Fence) EnvVars() []string {
 // A sync.WaitGroup ensures all connection handlers finish before the channel
 // is closed, preventing send-on-closed-channel panics.
 func (f *Fence) Listen(ctx context.Context) <-chan FenceEvent {
+	return f.listen(ctx, captureConnectionPeer)
+}
+
+// listen keeps the capture seam local to one listener invocation. Capture runs
+// before parsing but cannot hold the shared accept loop behind a slow procfs read.
+func (f *Fence) listen(ctx context.Context, capture func(net.Conn) connectionPeer) <-chan FenceEvent {
 	ch := make(chan FenceEvent, 64)
 	var wg sync.WaitGroup
 
@@ -155,10 +161,10 @@ func (f *Fence) Listen(ctx context.Context) <-chan FenceEvent {
 				// Listener was closed (context cancelled or Close called).
 				return
 			}
-			peer := captureConnectionPeer(conn)
 			wg.Add(1)
 			go func() {
 				defer wg.Done()
+				peer := capture(conn)
 				f.handleConn(ctx, conn, ch, peer)
 			}()
 		}

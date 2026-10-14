@@ -6,12 +6,14 @@ recording claim.
 
 ## Capture and trust boundary
 
-Immediately after the private interposer listener accepts a connection, it reads
-`SO_PEERCRED` inside `UnixConn.SyscallConn().Control`. No raw descriptor escapes
+At the start of each accepted connection's goroutine, before parsing frames,
+the collector reads `SO_PEERCRED` inside `UnixConn.SyscallConn().Control`. No raw descriptor escapes
 that callback. Linux reports credentials in effect at connection time; reading
 them after accept does not turn them into per-frame credentials. The collector
 then makes a separate, best-effort `/proc/<pid>/exe` read. It captures one value
 snapshot before starting the frame parser and reuses that snapshot on all frames.
+A slow capture delays only that connection, not the shared accept loop; the
+procfs read itself has no context deadline.
 
 The child controls the report, including operation, path, reason and timestamp.
 Private Go fields hold the collector snapshot outside the JSON decoding surface;
@@ -66,6 +68,15 @@ formatter. macOS kernel-denial and unrelated network detail formats are unchange
   race checks, plus Linux cross-vet/build. Cross-checking does not establish Linux
   runtime behavior; the normal hosted Linux test job must execute the real
   socket tests. No local root/kernel probe is needed for this change.
+- A portable listener test holds the first connection's capture until a second
+  connection is accepted, reported and acknowledged. It then releases the first
+  connection and proves it still works; all I/O and cleanup waits are bounded.
+- The red-team bench accepts legacy text and validated version 1 file reports,
+  matching reason/operation rules against their named report fields and path
+  matches against report.path. Collector fields never supply action proof, and
+  receipts retain the original signed detail bytes. Malformed/unsupported
+  envelopes and wrong-field spoof controls are rejected by the existing Python
+  unittest entry point; final hosted acceptance must confirm all four file rows.
 
 Security review focuses on the collector/report namespace boundary, fd lifetime,
 failure statuses, signed-detail integrity, retained legacy signatures and bounded

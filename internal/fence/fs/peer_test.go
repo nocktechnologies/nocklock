@@ -9,6 +9,8 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -23,6 +25,92 @@ func testConnectionPeer() connectionPeer {
 		credentials:       peerCredentials{PID: 123, UID: 0, GID: 456},
 		executable:        peerExecutable{Status: "observed", Path: "/collector/observed"},
 	}
+}
+
+func TestConnectionPeerSlowCaptureDoesNotBlockOtherConnections(t *testing.T) {
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	fence := &Fence{listener: listener, Config: &FenceConfig{WaitForAck: true}}
+	started, release := make(chan struct{}), make(chan struct{})
+	var once sync.Once
+	unblock := func() { once.Do(func() { close(release) }) }
+	var captures atomic.Int32
+	events := fence.listen(ctx, func(net.Conn) connectionPeer {
+		if captures.Add(1) == 1 {
+			close(started)
+			select {
+			case <-release:
+			case <-ctx.Done():
+			}
+		}
+		return testConnectionPeer()
+	})
+	var connections []net.Conn
+	t.Cleanup(func() {
+		unblock()
+		cancel()
+		listener.Close()
+		for _, conn := range connections {
+			conn.Close()
+		}
+		deadline := time.After(3 * time.Second)
+		for {
+			select {
+			case _, ok := <-events:
+				if !ok {
+					return
+				}
+			case <-deadline:
+				t.Error("slow-capture listener did not stop after release and connection cleanup")
+				return
+			}
+		}
+	})
+	dial := func() net.Conn {
+		conn, err := net.DialTimeout("tcp", listener.Addr().String(), 3*time.Second)
+		if err != nil {
+			t.Fatal(err)
+		}
+		connections = append(connections, conn)
+		return conn
+	}
+	first := dial()
+	select {
+	case <-started:
+	case <-time.After(3 * time.Second):
+		t.Fatal("first connection never entered peer capture")
+	}
+	exchange := func(conn net.Conn, name string) {
+		t.Helper()
+		if err := conn.SetDeadline(time.Now().Add(3 * time.Second)); err != nil {
+			t.Fatal(err)
+		}
+		frame := strings.Replace(spoofedPeerReport, "/private/key", "/"+name, 1)
+		if _, err := io.WriteString(conn, frame+"\n"); err != nil {
+			t.Fatal(err)
+		}
+		var ack [1]byte
+		if _, err := io.ReadFull(conn, ack[:]); err != nil || ack[0] != 1 {
+			t.Fatalf("%s connection stalled behind slow peer capture: ACK=%v err=%v", name, ack, err)
+		}
+		select {
+		case event := <-events:
+			if event.Path != "/"+name || !event.hasPeer || event.peer != testConnectionPeer() {
+				t.Fatalf("%s report lost its snapshot: %+v", name, event)
+			}
+		case <-time.After(3 * time.Second):
+			t.Fatalf("%s acknowledged without a delivered report", name)
+		}
+	}
+	exchange(dial(), "second") // Must finish while the first capture is still held.
+	if captures.Load() != 2 {
+		t.Fatalf("captured %d connections, want 2", captures.Load())
+	}
+	unblock()
+	exchange(first, "first") // The delayed connection remains usable after release.
 }
 
 // runPeerReport drives the real parser and either dispatch path without Linux

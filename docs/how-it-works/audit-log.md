@@ -33,8 +33,9 @@ attaches `connection_peer` independently; identity-looking child JSON fields
 cannot overwrite it. Both ordinary channel logging and synchronous look-back
 logging sign the same detail representation.
 
-The collector reads Linux `SO_PEERCRED` once after accept, before parsing any
-frames. `credentials_status: "captured"` accompanies numeric PID, UID and GID
+At the start of each accepted connection's goroutine, the collector reads Linux
+`SO_PEERCRED` once before parsing any frames. Slow capture on one connection
+does not block the shared accept loop. `credentials_status: "captured"` accompanies numeric PID, UID and GID
 (including legitimate zero UID/GID). If credentials cannot be obtained,
 `credentials_status: "unavailable"` omits the credentials object and retains the
 underlying report. These are the connecting process's credentials at connection
