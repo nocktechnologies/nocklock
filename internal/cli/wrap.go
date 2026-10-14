@@ -1171,7 +1171,7 @@ func loadWrapConfig(flags WrapFlags) (*config.Config, string, error) {
 }
 
 func fileBlockedDetail(ev fsfence.FenceEvent) string {
-	return fmt.Sprintf("op=%s path=%s reason=%s", ev.Operation, ev.Path, ev.Reason)
+	return ev.Detail()
 }
 
 func printProfiles(w io.Writer) {
