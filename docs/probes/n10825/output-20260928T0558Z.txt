@@ -1,5 +1,6 @@
 # First desktop run of run-probe.ps1 (script 30b25dfd), 2026-09-28 05:58Z, run_id aed59e49de2d4341b90a7cba9f9590b3.
-# Verbatim byte copies of the two files the run produced, in this order (SHA-256 of each source file):
+# Redacted copies: host, user and home fields use <host>, <user>, <home>.
+# Files in this order; SHA-256 values below identify the original unredacted files:
 # 1. output.txt                 0a96bbbc4f80e42f5e6c554ac4ac758704c8b78262e1ca866b4aca4b702fd640 (UTF-8 with BOM, CRLF)
 # 2. probe-20260928T0600Z.log   e1c605a500e87791c740865e57f2b197c04a559cd81f881766bc9ef6962c7cf7 (the transcript)
 

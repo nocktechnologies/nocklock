@@ -1,5 +1,5 @@
 # NockLock N10753 AF_INET-to-AF_UNIX Node/undici probe
-# Hostname redacted; technical probe results retained.
+# Redacted copy: host, user and home fields use <host>, <user>, <home>; technical probe results retained.
 date_utc=2026-09-27T16:25:55Z
 repo_head=5c1ba39
 kernel=Linux <host> 7.0.0-30-generic #30~24.04.1-Ubuntu SMP PREEMPT_DYNAMIC Fri Aug  7 13:27:52 UTC 2 x86_64 x86_64 x86_64 GNU/Linux

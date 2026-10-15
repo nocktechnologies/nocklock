@@ -54,8 +54,7 @@ database-assigned `id` is included so reordering changes the encoded row.
 `prev_hash` is decoded from its 64 lowercase hexadecimal characters to 32 bytes
 and appended separately by the chain formula below. Include a test that asserts
 the exact canonical byte string for a known row **independent of the hashing
-function** (a test that hashes `_canonical_bytes()` itself cannot catch drift,
-that was the #1902 lesson).
+function** (a test that hashes `_canonical_bytes()` itself cannot catch drift).
 
 **3. Chain construction.**
 Add two columns: `prev_hash TEXT NOT NULL` and `entry_hash TEXT NOT NULL`.

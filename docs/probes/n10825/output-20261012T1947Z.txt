@@ -1,5 +1,6 @@
 # Second desktop run of run-probe.ps1 (script 495f2b44), 2026-10-12 19:47Z, run_id 562bebd3b2f6420fbc5cec0f69c17a72.
-# Verbatim byte copies of the two files the run produced, in this order (SHA-256 of each source file):
+# Redacted copies: host, user and home fields use <host>, <user>, <home>.
+# Files in this order; SHA-256 values below identify the original unredacted files:
 # 1. output.txt                 01206e450440ead995dcd38413004e1bb48ca007f8d4f4b9ca967e3cd105558b (BEFORE state only: the SSH session dropped before the AFTER listing)
 # 2. probe-20261012T1947Z.log   ce4208d5e068cf7b2c4646a0f2037b424840785dabb63c4bcfcb336f0d2aed30 (the transcript, cut off at Probe 1's 9998 line)
 # Results and what the run does and does not show: RESULTS-20261012T1947Z.md

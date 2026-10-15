@@ -305,7 +305,7 @@ type LoggingConfig struct {
 	Level string `toml:"level"`
 }
 
-// CloudConfig configures optional remote anchor service dashboard sync.
+// CloudConfig configures optional cloud dashboard sync.
 type CloudConfig struct {
 	Enabled  bool   `toml:"enabled"`
 	APIKey   string `toml:"api_key"`
@@ -1104,7 +1104,7 @@ Your agent never knew the fence was there. You sleep better at night.
 
 ## Dashboard (Coming Soon)
 
-Connect to [remote anchor service](https://nocktechnologies.io) for cloud monitoring:
+Connect to the [Nock dashboard](https://nocktechnologies.io) for cloud monitoring:
 - See fence events across all your machines
 - Get Telegram/Slack alerts on blocked escape attempts
 - Team visibility: know what every developer's agents are doing

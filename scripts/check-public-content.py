@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Reject previously exposed internal identifiers in tracked public files."""
 
+import difflib
 import pathlib
 import re
 import subprocess
@@ -30,26 +31,35 @@ def contains_forbidden(content):
 
 
 def main():
-    """Check the classifier and scan tracked files, except release history."""
-    assert all(contains_forbidden("prefix " + term + " suffix") for term in FORBIDDEN)
-    assert all(contains_forbidden("prefix " + name + " suffix") for name in PERSONAL_NAMES)
-    assert not contains_forbidden("host=<host> user=<user> home=<home>")
-    assert not contains_forbidden("mar" + "athon and ad" + "mi" + "ration are ordinary words")
+    """Check the classifier and scan tracked files, except unchanged release history on next."""
+    if not all(contains_forbidden("prefix " + term + " suffix") for term in FORBIDDEN + PERSONAL_NAMES):
+        raise SystemExit("public-content control failed: retired identifier accepted")
+    if contains_forbidden("host=<host> user=<user> home=<home>") or contains_forbidden("mar" + "athon and ad" + "mi" + "ration are ordinary words"):
+        raise SystemExit("public-content control failed: allowed text rejected")
 
-    tracked = subprocess.check_output(("git", "ls-files", "-z")).split(b"\0")
+    root = pathlib.Path(subprocess.check_output(("git", "rev-parse", "--show-toplevel"), text=True).strip())
+    tracked = subprocess.check_output(("git", "ls-files", "-z"), cwd=root).split(b"\0")
+    history = subprocess.check_output(("git", "show", "origin/next:CHANGELOG.md"), cwd=root).decode("utf-8", errors="replace").splitlines()
     violations = []
     for raw_path in filter(None, tracked):
-        path = pathlib.Path(raw_path.decode())
-        if path.as_posix() == "CHANGELOG.md":
-            continue
+        relative = pathlib.Path(raw_path.decode())
+        path = root / relative
         if path.is_symlink():
             content = str(path.readlink()).encode()
         elif path.is_file():
             content = path.read_bytes()
         else:
             continue
-        if b"\0" not in content and contains_forbidden(content.decode("utf-8", errors="replace")):
-            violations.append(path.as_posix())
+        if b"\0" in content:
+            print(f"Public content: {relative.as_posix()}: NUL bytes present; scanning decoded content")
+        lines = content.decode("utf-8", errors="replace").splitlines()
+        exempt = set()
+        if relative.as_posix() == "CHANGELOG.md" and not path.is_symlink():
+            for block in difflib.SequenceMatcher(None, history, lines, autojunk=False).get_matching_blocks():
+                exempt.update(range(block.b, block.b + block.size))
+        for number, line in enumerate(lines):
+            if number not in exempt and contains_forbidden(line):
+                violations.append(f"{relative.as_posix()}:{number + 1}")
     if violations:
         print("Public content contains retired identifiers:", file=sys.stderr)
         print("\n".join(violations), file=sys.stderr)

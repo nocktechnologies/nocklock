@@ -2,7 +2,7 @@
 
 **Date:** 2026-09-27
 **Status:** Feasibility study — for decision, no product code
-**Nock:** [#10825](https://cc.nocktechnologies.io/nock/10825/)
+**Nock:** #10825
 
 Every factual claim below is tagged **SOURCED** (with a Microsoft docs link) or
 **UNVERIFIED** (needs a probe on a real Windows box). The UNVERIFIED claims are

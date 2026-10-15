@@ -23,6 +23,8 @@ All notable changes to NockLock will be documented in this file.
 
 ### Fixed
 
+- Public-content and fingerprint-baseline checks fail closed on malformed input; only unchanged changelog history is exempt from the content check. Clarify redacted probe provenance and contribution/release guidance (N11824).
+
 - Red-team proof matching now requires the `match` path sequence to align with path-component boundaries, so an unrelated blocked path cannot satisfy the proof row (N11798).
 
 - A project overlay can no longer loosen a `--profile` fence through unusual key or table-name spelling. Overlay restrictions are now decided by comparing the decoded overlay with the profile (N11810).

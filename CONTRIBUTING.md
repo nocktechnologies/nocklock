@@ -63,7 +63,7 @@ See the [release runbook](docs/runbooks/release.md) for promotion, tagging, GitH
 
 ## Review depth
 
-Use the highest applicable tier in the PR body; each tier includes the requirements below it. A maintainer arranges three independent simplification reviews for every tier and reviews the final head with applicable CI before merging.
+Use the highest applicable tier in the PR body; higher tiers include all requirements of lower tiers. A maintainer arranges three independent simplification reviews for every tier and reviews the final head with applicable CI before merging.
 
 - **Tier 1:** Default, including documentation changes. Resolve review findings before merge.
 - **Tier 2:** Changes to authentication, secrets, environment variables, subprocesses, file handling, networking, data deletion, dependencies, modules, fences, audit or signing, installation, or privilege code. Include a written scope and a security negative control; request adversarial review.
