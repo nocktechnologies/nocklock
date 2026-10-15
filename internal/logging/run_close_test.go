@@ -679,7 +679,7 @@ func TestVerifyRuns_ClassificationHonorsContext(t *testing.T) {
 	runs := map[string][]rawRunRow{
 		"s1": {{id: 1, eventType: EventSessionStart, detail: `command="x" lifecycle=1`}},
 	}
-	noOwner := func(int64) (string, bool) { return "", false }
+	noOwner := func(int64) (string, bool, error) { return "", false, nil }
 	if _, err := classifyRuns(ctx, order, runs, false, noOwner); !errors.Is(err, ErrVerifyInterrupted) {
 		t.Fatalf("classifyRuns on a cancelled context err = %v, want ErrVerifyInterrupted", err)
 	}
@@ -687,7 +687,7 @@ func TestVerifyRuns_ClassificationHonorsContext(t *testing.T) {
 	// recomputeRun must also stop on a cancelled context rather than fold a huge
 	// run's rows past the deadline.
 	nonClose := []rawRunRow{{id: 1}, {id: 2}}
-	if _, _, _, _, err := recomputeRun(ctx, "s1", nonClose); !errors.Is(err, ErrVerifyInterrupted) {
+	if _, _, _, err := recomputeRun(ctx, "s1", nonClose); !errors.Is(err, ErrVerifyInterrupted) {
 		t.Fatalf("recomputeRun on a cancelled context err = %v, want ErrVerifyInterrupted", err)
 	}
 }
@@ -708,12 +708,12 @@ func TestScanRuns_RetainsDetailOnlyForLifecycleRows(t *testing.T) {
 		t.Fatalf("CloseRun: %v", err)
 	}
 
-	conn, err := l.db.Conn(context.Background())
+	tx, err := l.db.BeginTx(context.Background(), nil)
 	if err != nil {
-		t.Fatalf("Conn: %v", err)
+		t.Fatalf("BeginTx: %v", err)
 	}
-	defer conn.Close()
-	_, runs, err := scanRuns(context.Background(), conn)
+	defer tx.Rollback()
+	_, runs, err := scanRuns(context.Background(), tx)
 	if err != nil {
 		t.Fatalf("scanRuns: %v", err)
 	}
@@ -737,7 +737,7 @@ func TestScanRuns_RetainsDetailOnlyForLifecycleRows(t *testing.T) {
 // with OR is defensive — one start per run is the only writer path — but a last-
 // writer-wins read would otherwise downgrade an owed close to legacy.
 func TestClassifyRun_OwesCloseIfAnyStartHasLifecycle(t *testing.T) {
-	noOwner := func(int64) (string, bool) { return "", false }
+	noOwner := func(int64) (string, bool, error) { return "", false, nil }
 	rrs := []rawRunRow{
 		{id: 1, eventType: EventSessionStart, detail: `command="a" lifecycle=1`},
 		{id: 2, eventType: EventSessionStart, detail: `command="b"`},
@@ -748,5 +748,22 @@ func TestClassifyRun_OwesCloseIfAnyStartHasLifecycle(t *testing.T) {
 	}
 	if st.Status != RunUnclosed {
 		t.Fatalf("status = %q (%s), want unclosed", st.Status, st.Reason)
+	}
+}
+
+// TestPostPruneConsistent_FailsClosedOnOwnerLookupError proves the post-prune
+// last_id ownership check never reads a lookup error (a dead context or a
+// transient read failure) as "row pruned away": it propagates the error so a
+// tamper the check exists to catch is not silently downgraded to neutral pruned.
+func TestPostPruneConsistent_FailsClosedOnOwnerLookupError(t *testing.T) {
+	boom := errors.New("db read failed")
+	lastIDOwner := func(int64) (string, bool, error) { return "", false, boom }
+	// survivingCount < rows so the check reaches the last_id lookup.
+	ok, err := postPruneConsistent("s", closeBinding{rows: 5, lastID: 42}, 2, lastIDOwner)
+	if ok {
+		t.Fatal("post-prune check passed despite an owner-lookup error; a tamper must not read as pruned")
+	}
+	if !errors.Is(err, boom) {
+		t.Fatalf("err = %v, want the lookup error propagated", err)
 	}
 }

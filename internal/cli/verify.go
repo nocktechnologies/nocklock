@@ -170,10 +170,12 @@ func sanitizeSessionID(id string) string {
 			b.WriteString("…")
 			break
 		}
-		if r < 0x20 || r == 0x7f || !unicode.IsPrint(r) {
-			b.WriteRune('?')
-		} else {
+		// unicode.IsPrint is false for every control rune (including <0x20 and
+		// 0x7f) and other non-graphic runes, so it covers newline/escape spoofs.
+		if unicode.IsPrint(r) {
 			b.WriteRune(r)
+		} else {
+			b.WriteRune('?')
 		}
 		n++
 	}

@@ -278,40 +278,39 @@ func (l *Logger) VerifyRuns(ctx context.Context) ([]RunStatus, error) {
 	if ctx == nil {
 		ctx = context.Background()
 	}
-	conn, err := l.db.Conn(ctx)
+	tx, err := l.db.BeginTx(ctx, nil)
 	if err != nil {
-		if ctx.Err() != nil {
-			return nil, ErrVerifyInterrupted
-		}
-		return nil, fmt.Errorf("failed to reserve run-verification connection: %w", err)
+		return nil, verifyInterrupted(ctx, fmt.Errorf("failed to open run-verification snapshot: %w", err))
 	}
-	defer conn.Close()
-	if _, err := conn.ExecContext(ctx, "BEGIN"); err != nil {
-		if ctx.Err() != nil {
-			return nil, ErrVerifyInterrupted
-		}
-		return nil, fmt.Errorf("failed to open run-verification snapshot: %w", err)
-	}
-	defer conn.ExecContext(context.Background(), "ROLLBACK") // read-only: nothing to commit
+	defer tx.Rollback() // read-only: nothing to commit
 
-	pruned, err := chainPruned(ctx, conn)
+	pruned, err := chainPruned(ctx, tx)
 	if err != nil {
-		return nil, err
+		// A deadline that expires during the prune-boundary read is a neutral
+		// interrupt, not a hard failure — same convention as the scan and BeginTx.
+		return nil, verifyInterrupted(ctx, err)
 	}
-	order, runs, err := scanRuns(ctx, conn)
+	order, runs, err := scanRuns(ctx, tx)
 	if err != nil {
 		return nil, err
 	}
 	// lastIDOwner resolves a single id's session on the same snapshot, used only
 	// for the post-prune last_id ownership check. A point lookup replaces an
 	// every-row id→session map, so verify does not retain a session-id string per
-	// row. A missing row (pruned away) returns ok=false and the check is skipped.
-	lastIDOwner := func(id int64) (string, bool) {
+	// row. A genuinely missing row (pruned away) returns ok=false so the check is
+	// skipped; any other error — a dead context or a transient read failure — is
+	// returned, never swallowed, so a tamper check that cannot complete is not
+	// silently downgraded to a neutral pass.
+	lastIDOwner := func(id int64) (string, bool, error) {
 		var sid string
-		if err := conn.QueryRowContext(ctx, "SELECT session_id FROM events WHERE id = ?", id).Scan(&sid); err != nil {
-			return "", false
+		err := tx.QueryRowContext(ctx, "SELECT session_id FROM events WHERE id = ?", id).Scan(&sid)
+		if errors.Is(err, sql.ErrNoRows) {
+			return "", false, nil
 		}
-		return sid, true
+		if err != nil {
+			return "", false, err
+		}
+		return sid, true, nil
 	}
 	return classifyRuns(ctx, order, runs, pruned, lastIDOwner)
 }
@@ -322,13 +321,10 @@ func (l *Logger) VerifyRuns(ctx context.Context) ([]RunStatus, error) {
 // rows, the only types whose detail the verifier parses, so a large store does
 // not hold every row's full detail text in memory. ctx is checked on the same
 // cadence as the chain walk.
-func scanRuns(ctx context.Context, conn *sql.Conn) (order []string, runs map[string][]rawRunRow, err error) {
-	rows, err := conn.QueryContext(ctx, "SELECT id, timestamp, event_type, category, detail, blocked, session_id FROM events ORDER BY id ASC")
+func scanRuns(ctx context.Context, tx *sql.Tx) (order []string, runs map[string][]rawRunRow, err error) {
+	rows, err := tx.QueryContext(ctx, "SELECT id, timestamp, event_type, category, detail, blocked, session_id FROM events ORDER BY id ASC")
 	if err != nil {
-		if ctx.Err() != nil {
-			return nil, nil, ErrVerifyInterrupted
-		}
-		return nil, nil, fmt.Errorf("failed to read events for run verification: %w", err)
+		return nil, nil, verifyInterrupted(ctx, fmt.Errorf("failed to read events for run verification: %w", err))
 	}
 	defer rows.Close()
 
@@ -336,8 +332,10 @@ func scanRuns(ctx context.Context, conn *sql.Conn) (order []string, runs map[str
 	seen := map[string]bool{}
 	scanned := 0
 	for rows.Next() {
-		if scanned%verifyRunsCtxInterval == 0 && ctx.Err() != nil {
-			return nil, nil, ErrVerifyInterrupted
+		if scanned%verifyRunsCtxInterval == 0 {
+			if err := walkInterrupted(ctx); err != nil {
+				return nil, nil, err
+			}
 		}
 		scanned++
 		var id int64
@@ -362,40 +360,46 @@ func scanRuns(ctx context.Context, conn *sql.Conn) (order []string, runs map[str
 		}
 	}
 	if err := rows.Err(); err != nil {
-		if ctx.Err() != nil {
-			return nil, nil, ErrVerifyInterrupted
-		}
-		return nil, nil, fmt.Errorf("error iterating events for run verification: %w", err)
+		return nil, nil, verifyInterrupted(ctx, fmt.Errorf("error iterating events for run verification: %w", err))
 	}
 	return order, runs, nil
 }
 
 // classifyRuns classifies every enumerated run in first-seen id order, checking
-// ctx between runs so --walk-timeout bounds this phase too (the SQL scan already
-// bounded its own phase). It returns ErrVerifyInterrupted with no statuses when
-// the context ends.
-func classifyRuns(ctx context.Context, order []string, runs map[string][]rawRunRow, pruned bool, lastIDOwner func(int64) (string, bool)) ([]RunStatus, error) {
+// ctx before each run and once more before returning so --walk-timeout bounds
+// this phase too (the SQL scan already bounded its own phase). Runs are far fewer
+// than rows, so the per-run check is cheap and need not be throttled. It returns
+// ErrVerifyInterrupted with no statuses when the context ends at any point —
+// including mid-classification, which the final check catches — so a deadline
+// never yields a partial or post-deadline verdict. A classification error that
+// coincides with a dead context is reported as the neutral interrupt; a genuine
+// read error with a live context stays a hard failure (a tamper check that cannot
+// complete is never treated as a pass).
+func classifyRuns(ctx context.Context, order []string, runs map[string][]rawRunRow, pruned bool, lastIDOwner func(int64) (string, bool, error)) ([]RunStatus, error) {
 	statuses := make([]RunStatus, 0, len(order))
-	for i, sid := range order {
-		if i%verifyRunsCtxInterval == 0 && ctx.Err() != nil {
-			return nil, ErrVerifyInterrupted
+	for _, sid := range order {
+		if err := walkInterrupted(ctx); err != nil {
+			return nil, err
 		}
 		st, ok, err := classifyRun(ctx, sid, runs[sid], pruned, lastIDOwner)
 		if err != nil {
-			return nil, err
+			return nil, verifyInterrupted(ctx, err)
 		}
 		if ok {
 			statuses = append(statuses, st)
 		}
 	}
+	if err := walkInterrupted(ctx); err != nil {
+		return nil, err
+	}
 	return statuses, nil
 }
 
 // chainPruned reports whether chain_head records a prune boundary (pruned_at set),
-// read on the caller's snapshot connection.
-func chainPruned(ctx context.Context, conn *sql.Conn) (bool, error) {
+// read on the caller's snapshot transaction.
+func chainPruned(ctx context.Context, tx *sql.Tx) (bool, error) {
 	var prunedAt sql.NullString
-	err := conn.QueryRowContext(ctx, "SELECT pruned_at FROM chain_head WHERE id = 1").Scan(&prunedAt)
+	err := tx.QueryRowContext(ctx, "SELECT pruned_at FROM chain_head WHERE id = 1").Scan(&prunedAt)
 	if errors.Is(err, sql.ErrNoRows) {
 		return false, nil
 	}
@@ -409,7 +413,7 @@ func chainPruned(ctx context.Context, conn *sql.Conn) (bool, error) {
 // is not an enumerable run (rows carrying a session_id but neither a
 // session_start nor a session_close — not a run, so no status describes it). It
 // returns ErrVerifyInterrupted if ctx ends while recomputing a large run's root.
-func classifyRun(ctx context.Context, sid string, rrs []rawRunRow, pruned bool, lastIDOwner func(int64) (string, bool)) (RunStatus, bool, error) {
+func classifyRun(ctx context.Context, sid string, rrs []rawRunRow, pruned bool, lastIDOwner func(int64) (string, bool, error)) (RunStatus, bool, error) {
 	var closeRows []rawRunRow
 	var nonClose []rawRunRow
 	sawStart := false
@@ -444,7 +448,10 @@ func classifyRun(ctx context.Context, sid string, rrs []rawRunRow, pruned bool, 
 			}
 		}
 		st, err := classifyClosedRun(ctx, sid, closeRows[0], nonClose, sawStart, startHasLifecycle, pruned, lastIDOwner)
-		return st, true, err
+		if err != nil {
+			return RunStatus{}, false, err
+		}
+		return st, true, nil
 	}
 
 	// No close row.
@@ -464,7 +471,7 @@ func classifyRun(ctx context.Context, sid string, rrs []rawRunRow, pruned bool, 
 // it. It recomputes the run's commitment from the surviving non-close rows and
 // compares it to the signed binding. It returns ErrVerifyInterrupted if ctx ends
 // during the recomputation.
-func classifyClosedRun(ctx context.Context, sid string, closeRow rawRunRow, nonClose []rawRunRow, sawStart, startHasLifecycle, pruned bool, lastIDOwner func(int64) (string, bool)) (RunStatus, error) {
+func classifyClosedRun(ctx context.Context, sid string, closeRow rawRunRow, nonClose []rawRunRow, sawStart, startHasLifecycle, pruned bool, lastIDOwner func(int64) (string, bool, error)) (RunStatus, error) {
 	binding, err := parseCloseDetail(closeRow.detail)
 	if err != nil {
 		return RunStatus{sid, RunCloseMismatch, "unparseable session_close detail: " + err.Error()}, nil
@@ -476,29 +483,38 @@ func classifyClosedRun(ctx context.Context, sid string, closeRow rawRunRow, nonC
 		return RunStatus{sid, RunCloseMismatch, "session_close present on a run whose session_start lacks lifecycle=1"}, nil
 	}
 
-	recRoot, recCount, recFirst, recLast, err := recomputeRun(ctx, sid, nonClose)
+	recRoot, recFirst, recLast, err := recomputeRun(ctx, sid, nonClose)
 	if err != nil {
 		return RunStatus{}, err
 	}
-	if recCount == binding.rows && recRoot == binding.root && recFirst == binding.firstID && recLast == binding.lastID {
+	if len(nonClose) == binding.rows && recRoot == binding.root && recFirst == binding.firstID && recLast == binding.lastID {
 		return RunStatus{sid, RunClosed, "recomputed rows and root equal the signed binding"}, nil
 	}
 
-	if pruned && postPruneConsistent(sid, binding, len(nonClose), lastIDOwner) {
-		return RunStatus{sid, RunPruned, "recomputed values differ under a recorded prune; post-prune checks pass"}, nil
+	if pruned {
+		consistent, err := postPruneConsistent(sid, binding, len(nonClose), lastIDOwner)
+		if err != nil {
+			return RunStatus{}, err
+		}
+		if consistent {
+			return RunStatus{sid, RunPruned, "recomputed values differ under a recorded prune; post-prune checks pass"}, nil
+		}
 	}
 	return RunStatus{sid, RunCloseMismatch, "recomputed rows or root differ from the signed binding with no prune to explain it"}, nil
 }
 
 // recomputeRun folds the surviving non-close rows of a run in id order, returning
-// the recomputed root, row count, first id and last id. The input is already in
-// ascending id order (scanRuns reads ORDER BY id ASC). ctx is checked on the same
-// cadence as the chain walk so a single very large run cannot outrun --walk-timeout.
-func recomputeRun(ctx context.Context, sid string, nonClose []rawRunRow) (root string, count int, firstID, lastID int64, err error) {
+// the recomputed root, first id and last id (the row count is just len(nonClose),
+// which the caller already has). The input is already in ascending id order
+// (scanRuns reads ORDER BY id ASC). ctx is checked on the same cadence as the
+// chain walk so a single very large run cannot outrun --walk-timeout.
+func recomputeRun(ctx context.Context, sid string, nonClose []rawRunRow) (root string, firstID, lastID int64, err error) {
 	acc := seedRunRoot(sid)
 	for i, r := range nonClose {
-		if i%verifyRunsCtxInterval == 0 && ctx.Err() != nil {
-			return "", 0, 0, 0, ErrVerifyInterrupted
+		if i%verifyRunsCtxInterval == 0 {
+			if err := walkInterrupted(ctx); err != nil {
+				return "", 0, 0, err
+			}
 		}
 		acc = advanceRunRootHashed(acc, r.rowHash)
 		if i == 0 {
@@ -506,29 +522,34 @@ func recomputeRun(ctx context.Context, sid string, nonClose []rawRunRow) (root s
 		}
 		lastID = r.id
 	}
-	return fmt.Sprintf("%x", acc[:]), len(nonClose), firstID, lastID, nil
+	return fmt.Sprintf("%x", acc[:]), firstID, lastID, nil
 }
 
 // postPruneConsistent runs the two narrower checks that a legitimate prune cannot
 // fail, used only when a recomputed value already differs and pruned_at is set.
 // See docs/design/run-lifecycle-contract.md ("Limits").
-func postPruneConsistent(sessionID string, binding closeBinding, survivingCount int, lastIDOwner func(int64) (string, bool)) bool {
+func postPruneConsistent(sessionID string, binding closeBinding, survivingCount int, lastIDOwner func(int64) (string, bool, error)) (bool, error) {
 	// Row-count check (always applies): a prune only ever removes rows, so the
 	// surviving non-close count cannot exceed the signed rows.
 	if survivingCount > binding.rows {
-		return false
+		return false, nil
 	}
 	// If the count is unchanged while a recomputed value still differs, a prune
 	// cannot explain it (a prune would have lowered the count) — this catches an
 	// edited, re-signed row that would otherwise read as a legitimate prune.
 	if survivingCount == binding.rows {
-		return false
+		return false, nil
 	}
 	// last_id check (conditional): if the row at the signed last_id still exists,
 	// it must still carry this run's session_id. If that row was itself pruned
-	// away, the check is skipped and the verdict rests on the row-count check.
-	if owner, ok := lastIDOwner(binding.lastID); ok && owner != sessionID {
-		return false
+	// away, the check is skipped and the verdict rests on the row-count check. A
+	// lookup error is propagated, never read as a skip, so the check fails closed.
+	owner, ok, err := lastIDOwner(binding.lastID)
+	if err != nil {
+		return false, err
 	}
-	return true
+	if ok && owner != sessionID {
+		return false, nil
+	}
+	return true, nil
 }
