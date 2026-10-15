@@ -216,7 +216,7 @@ func writeAnchorV2VerifyResult(w io.Writer, result *logging.AnchorV2VerifyResult
 func finishAnchorSession(w io.Writer, logger *logging.Logger, dbPath string) {
 	ctx, cancel := context.WithTimeout(context.Background(), anchorPushTimeout)
 	defer cancel()
-	walkCtx, cancelWalk := context.Background(), context.CancelFunc(func() {})
+	walkCtx, cancelWalk := context.WithCancel(context.Background())
 	if anchorWalkTimeout > 0 {
 		walkCtx, cancelWalk = context.WithTimeout(context.Background(), anchorWalkTimeout)
 	}

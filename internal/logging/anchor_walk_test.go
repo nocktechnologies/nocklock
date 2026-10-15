@@ -99,7 +99,7 @@ func TestVerifyWalkInterruptedAtExactRows(t *testing.T) {
 			}
 
 			// The next uninterrupted run completes with the same verdict.
-			verifyRowHook = nil
+			setWalkHook(t, nil)
 			res, err = l.VerifyChainSignedContext(context.Background(), pub, true)
 			if err != nil || !res.Intact || res.SigState != "authentic" || res.EntriesVerified != walkRows {
 				t.Fatalf("follow-up walk: %+v %v", res, err)
@@ -157,7 +157,6 @@ func TestEmitAnchorBoundedByDeadline(t *testing.T) {
 	}
 
 	// Control: the same stalls with room to spare complete and anchor.
-	reached = -1
 	ctx2, cancel2 := context.WithTimeout(context.Background(), time.Minute)
 	defer cancel2()
 	if a, err := l.EmitAnchorContext(ctx2); err != nil || a.RowCount != walkRows {
@@ -184,7 +183,7 @@ func TestAnchorCoversSnapshotUnderConcurrentAppend(t *testing.T) {
 	defer other.Close()
 	appended := false
 	setWalkHook(t, func(n int) {
-		if n == 10 && !appended {
+		if n == 10 {
 			appended = true
 			seedWalkChain(t, other, 5)
 		}
@@ -201,7 +200,7 @@ func TestAnchorCoversSnapshotUnderConcurrentAppend(t *testing.T) {
 	}
 
 	// Control: the appended rows are real, and the next anchor covers them.
-	verifyRowHook = nil
+	setWalkHook(t, nil)
 	next, err := l.EmitAnchorContext(context.Background())
 	if err != nil || next.RowCount != snapshot.EntriesVerified+5 {
 		t.Fatalf("next anchor: %+v, %v", next, err)

@@ -1726,6 +1726,11 @@ func verifyInterrupted(ctx context.Context, err error) error {
 	return err
 }
 
+// walkInterrupted returns ErrVerifyInterrupted once ctx has ended, else nil.
+func walkInterrupted(ctx context.Context) error {
+	return verifyInterrupted(ctx, nil)
+}
+
 // chainHeadRecord is the stored chain_head row: the tail anchor (hash and row
 // count), its signature, and the metadata the signature covers.
 type chainHeadRecord struct {
@@ -1860,8 +1865,8 @@ func verifyChainInTransaction(ctx context.Context, tx *sql.Tx, pub ed25519.Publi
 			verifyRowHook(result.EntriesVerified)
 		}
 		if result.EntriesVerified%verifyCtxCheckInterval == 0 {
-			if cause := ctx.Err(); cause != nil {
-				return nil, fmt.Errorf("%w: %w", ErrVerifyInterrupted, cause)
+			if err := walkInterrupted(ctx); err != nil {
+				return nil, err
 			}
 		}
 		var id int64
@@ -1935,8 +1940,8 @@ func verifyChainInTransaction(ctx context.Context, tx *sql.Tx, pub ed25519.Publi
 	}
 	// A deadline that lands after the last periodic check must not let the walk
 	// report a verdict it did not finish under.
-	if cause := ctx.Err(); cause != nil {
-		return nil, fmt.Errorf("%w: %w", ErrVerifyInterrupted, cause)
+	if err := walkInterrupted(ctx); err != nil {
+		return nil, err
 	}
 	if pub != nil && !adopted && (headSig != "" || publicKeyFingerprintHex != "" || result.SignedEntries > 0) {
 		// Signing artifacts remain but the adoption marker is gone — a genuine

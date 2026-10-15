@@ -57,11 +57,11 @@ func TestInterruptedWalkReleasesIdentityLockForPrune(t *testing.T) {
 	identityOldEvent(t, f.logger)
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	setWalkHook(t, func(n int) { cancel() })
+	setWalkHook(t, func(int) { cancel() })
 	if _, err := f.logger.EmitAnchorV2Walk(context.Background(), ctx); !errors.Is(err, ErrVerifyInterrupted) {
 		t.Fatalf("want ErrVerifyInterrupted, got %v", err)
 	}
-	verifyRowHook = nil
+	setWalkHook(t, nil)
 	start := time.Now()
 	n, err := other.Prune(24 * time.Hour)
 	if err != nil || n != 1 || time.Since(start) > time.Second {
