@@ -717,6 +717,11 @@ func TestScanRuns_RetainsDetailOnlyForLifecycleRows(t *testing.T) {
 	if err != nil {
 		t.Fatalf("scanRuns: %v", err)
 	}
+	// start, network row, close: assert the rows are there so the per-row checks
+	// below cannot pass vacuously on an empty scan.
+	if got := len(runs[sid]); got != 3 {
+		t.Fatalf("scanRuns returned %d rows for %s, want 3", got, sid)
+	}
 	for _, r := range runs[sid] {
 		switch r.eventType {
 		case EventSessionStart, EventSessionClose:

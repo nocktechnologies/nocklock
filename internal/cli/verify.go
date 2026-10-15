@@ -162,10 +162,23 @@ const maxListedUnclosedRuns = 20
 // the id is truncated — one run's entry stays on one line and carries no terminal
 // escape sequence.
 func sanitizeSessionID(id string) string {
-	const maxRunes = 64
+	if id == "" {
+		return "(empty)"
+	}
+	return sanitizeLine(id, 64)
+}
+
+// maxRunReasonRunes caps a RUN line's reason. Reasons can quote audit-row text
+// (a parse error on a session_close detail), so they are sanitized like ids.
+const maxRunReasonRunes = 256
+
+// sanitizeLine replaces every non-printable rune (control characters, newlines
+// and escapes included) with '?' and truncates to maxRunes, so attacker-shaped
+// text stays on one output line and carries no terminal escape sequence.
+func sanitizeLine(s string, maxRunes int) string {
 	var b strings.Builder
 	n := 0
-	for _, r := range id {
+	for _, r := range s {
 		if n >= maxRunes {
 			b.WriteString("…")
 			break
@@ -178,9 +191,6 @@ func sanitizeSessionID(id string) string {
 			b.WriteRune('?')
 		}
 		n++
-	}
-	if n == 0 {
-		return "(empty)"
 	}
 	return b.String()
 }
@@ -435,7 +445,7 @@ func writeRunLifecycleResult(w io.Writer, runs []logging.RunStatus) (failed bool
 		}
 		if r.Status.Failure() {
 			failures++
-			fmt.Fprintf(w, "RUN %s: %s — %s\n", sanitizeSessionID(r.SessionID), strings.ToUpper(string(r.Status)), r.Reason)
+			fmt.Fprintf(w, "RUN %s: %s — %s\n", sanitizeSessionID(r.SessionID), strings.ToUpper(string(r.Status)), sanitizeLine(r.Reason, maxRunReasonRunes))
 		}
 	}
 	fmt.Fprintf(w, "RUNS: %d closed, %d unclosed, %d pruned, %d legacy, %d integrity failure(s) across %d run(s)\n",

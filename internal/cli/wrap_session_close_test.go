@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"unicode"
 
 	"github.com/nocktechnologies/nocklock/internal/logging"
 )
@@ -179,6 +180,74 @@ func TestRunIntegrityFailurePrintsVerdictLine(t *testing.T) {
 	}
 	if !strings.Contains(out.String(), "RUN run-tampered: ROWS_AFTER_CLOSE") {
 		t.Fatalf("missing per-run failure line:\n%s", out.String())
+	}
+}
+
+// TestRunLineSanitizesCraftedCloseDetail writes a signed session_close whose
+// detail carries a newline and an ANSI escape, so the run reads close_mismatch
+// with a parse-error reason. The RUN line must stay one line with no control
+// characters.
+func TestRunLineSanitizesCraftedCloseDetail(t *testing.T) {
+	dbPath, keyPath := setupAnchorProject(t)
+	l, err := logging.NewLogger(dbPath, "", logging.WithSigning(keyPath))
+	if err != nil {
+		t.Fatalf("seed logger: %v", err)
+	}
+	sid := "run-crafted"
+	start := sessionStartDetail("agent", execFingerprint{Status: execUnresolved}, "")
+	if err := l.Log(logging.Event{EventType: logging.EventSessionStart, Category: "session", Detail: start, EgressLevel: "OFF", SessionID: sid}); err != nil {
+		t.Fatalf("seed session_start: %v", err)
+	}
+	crafted := "close=1 first_id=\x1b[31mX\nRUN forged: CLOSED last_id=1 rows=1"
+	if err := l.Log(logging.Event{EventType: logging.EventSessionClose, Category: "session", Detail: crafted, SessionID: sid}); err != nil {
+		t.Fatalf("seed crafted session_close: %v", err)
+	}
+	l.Close()
+
+	var out bytes.Buffer
+	_ = runAuditVerify(context.Background(), &out, "", false)
+	var runLines []string
+	for _, line := range strings.Split(out.String(), "\n") {
+		if strings.HasPrefix(line, "RUN ") {
+			runLines = append(runLines, line)
+		}
+	}
+	if len(runLines) != 1 || !strings.HasPrefix(runLines[0], "RUN run-crafted: CLOSE_MISMATCH") {
+		t.Fatalf("want exactly one RUN run-crafted: CLOSE_MISMATCH line, got %q\n%s", runLines, out.String())
+	}
+	assertNoControlRunes(t, runLines[0])
+}
+
+// TestRunLineSanitizesReason checks writeRunLifecycleResult itself: a reason
+// carrying raw control characters is neutralized on output, and a clean reason
+// prints unchanged.
+func TestRunLineSanitizesReason(t *testing.T) {
+	var out bytes.Buffer
+	writeRunLifecycleResult(&out, []logging.RunStatus{
+		{SessionID: "bad", Status: logging.RunCloseMismatch, Reason: "parse: \x1b[31mX\nRUN forged: CLOSED"},
+		{SessionID: "plain", Status: logging.RunCloseMismatch, Reason: "root differs"},
+	})
+	lines := strings.Split(strings.TrimSuffix(out.String(), "\n"), "\n")
+	if len(lines) != 3 { // two RUN lines and the RUNS summary
+		t.Fatalf("want 3 output lines, got %d:\n%s", len(lines), out.String())
+	}
+	if lines[0] != "RUN bad: CLOSE_MISMATCH — parse: ?[31mX?RUN forged: CLOSED" {
+		t.Fatalf("crafted reason not sanitized: %q", lines[0])
+	}
+	if lines[1] != "RUN plain: CLOSE_MISMATCH — root differs" {
+		t.Fatalf("clean reason altered: %q", lines[1])
+	}
+	for _, line := range lines {
+		assertNoControlRunes(t, line)
+	}
+}
+
+func assertNoControlRunes(t *testing.T, line string) {
+	t.Helper()
+	for _, r := range line {
+		if unicode.IsControl(r) {
+			t.Fatalf("output line carries control rune %U: %q", r, line)
+		}
 	}
 }
 

@@ -209,6 +209,42 @@ func TestWatchdogStopsOnContextCancel(t *testing.T) {
 	}
 }
 
+// TestWatchdogCancelDuringProbeReportsNoFailure proves a probe that fails only
+// because the watchdog was cancelled mid-flight (teardown's joinWatchdog) is not
+// reported as a proxy failure. The health handler parks until the probe's request
+// context dies, so the probe is pending exactly when cancel lands; with a
+// threshold of 1 a counted failure would fire onFailure.
+func TestWatchdogCancelDuringProbeReportsNoFailure(t *testing.T) {
+	entered := make(chan struct{}, 1)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		select {
+		case entered <- struct{}{}:
+		default:
+		}
+		<-r.Context().Done()
+	}))
+	defer server.Close()
+
+	var fired atomic.Bool
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	addr := strings.TrimPrefix(server.URL, "http://")
+	w := NewProxyWatchdog(addr, 10*time.Millisecond, 1, func() { fired.Store(true) })
+	w.Start(ctx)
+
+	select {
+	case <-entered:
+	case <-time.After(2 * time.Second):
+		t.Fatal("watchdog never probed the health endpoint")
+	}
+	cancel()
+	w.Wait()
+
+	if fired.Load() {
+		t.Fatal("watchdog reported a proxy failure caused only by its own cancellation")
+	}
+}
+
 func TestWatchdogProbeRejectsRedirect(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {

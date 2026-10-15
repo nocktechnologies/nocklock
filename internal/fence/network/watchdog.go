@@ -107,8 +107,17 @@ func (w *ProxyWatchdog) run(ctx context.Context) {
 		case <-ctx.Done():
 			return
 		case <-ticker.C:
+			// select picks randomly among ready cases, so a tick can win after
+			// cancel; and a probe in flight at cancel fails because its request
+			// context died. Neither is a proxy failure: once cancelled, report
+			// nothing.
+			if ctx.Err() != nil {
+				return
+			}
 			if w.probe(ctx) {
 				consecutive = 0
+			} else if ctx.Err() != nil {
+				return
 			} else {
 				consecutive++
 				if consecutive >= w.failThreshold {
