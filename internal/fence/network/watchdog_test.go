@@ -38,6 +38,49 @@ func TestWatchdogHealthyProxyDoesNotFire(t *testing.T) {
 	}
 }
 
+// TestWatchdogWaitJoinsInFlightFailure proves Wait blocks until the onFailure
+// callback (and any audit rows it would write) has fully completed, so a caller
+// can quiesce the watchdog before writing its own teardown rows.
+func TestWatchdogWaitJoinsInFlightFailure(t *testing.T) {
+	addr := boundUnlisteningTCP(t)
+
+	release := make(chan struct{})
+	var callbackDone atomic.Bool
+	onFailure := func() {
+		<-release // hold the callback open until the test releases it
+		callbackDone.Store(true)
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	w := NewProxyWatchdog(addr, 20*time.Millisecond, 2, onFailure)
+	w.Start(ctx)
+
+	// Wait for the callback to be in flight (it is blocked on release).
+	time.Sleep(200 * time.Millisecond)
+
+	waitReturned := make(chan struct{})
+	go func() {
+		w.Wait()
+		close(waitReturned)
+	}()
+	select {
+	case <-waitReturned:
+		t.Fatal("Wait returned while the onFailure callback was still running")
+	case <-time.After(100 * time.Millisecond):
+	}
+
+	close(release)
+	select {
+	case <-waitReturned:
+		if !callbackDone.Load() {
+			t.Fatal("Wait returned before the callback finished")
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("Wait did not return after the callback finished")
+	}
+}
+
 func TestWatchdogDetectsProxyFailure(t *testing.T) {
 	addr := boundUnlisteningTCP(t)
 
@@ -163,6 +206,45 @@ func TestWatchdogStopsOnContextCancel(t *testing.T) {
 
 	if fired.Load() {
 		t.Error("watchdog fired after context was cancelled")
+	}
+}
+
+// TestWatchdogCancelDuringProbeReportsNoFailure proves a probe that fails only
+// because the watchdog was cancelled mid-flight (teardown's joinWatchdog) is not
+// reported as a proxy failure. The health handler parks until the probe's request
+// context dies, so the probe is pending exactly when cancel lands; with a
+// threshold of 1 a counted failure would fire onFailure.
+func TestWatchdogCancelDuringProbeReportsNoFailure(t *testing.T) {
+	entered := make(chan struct{}, 1)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		select {
+		case entered <- struct{}{}:
+		default:
+		}
+		<-r.Context().Done()
+	}))
+	defer server.Close()
+
+	var fired atomic.Bool
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	addr := strings.TrimPrefix(server.URL, "http://")
+	w := NewProxyWatchdog(addr, 10*time.Millisecond, 1, func() { fired.Store(true) })
+	// Only cancel may end the parked probe; the 500ms client timeout would be a
+	// genuine failure on a slow runner.
+	w.client.Timeout = time.Minute
+	w.Start(ctx)
+
+	select {
+	case <-entered:
+	case <-time.After(2 * time.Second):
+		t.Fatal("watchdog never probed the health endpoint")
+	}
+	cancel()
+	w.Wait()
+
+	if fired.Load() {
+		t.Fatal("watchdog reported a proxy failure caused only by its own cancellation")
 	}
 }
 

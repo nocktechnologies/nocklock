@@ -18,6 +18,7 @@ import (
 	"runtime"
 	"strings"
 	"time"
+	"unicode"
 
 	"github.com/BurntSushi/toml"
 	"github.com/nocktechnologies/nocklock/internal/config"
@@ -90,7 +91,8 @@ var verifyCmd = &cobra.Command{
 			return runVerifyAgainstAnchor(cmd.Context(), cmd.OutOrStdout(), anchorFile, pubFlag)
 		}
 		if asAudit {
-			return runAuditVerify(cmd.Context(), cmd.OutOrStdout(), pubFlag)
+			requireClosed, _ := cmd.Flags().GetBool("require-closed")
+			return runAuditVerify(cmd.Context(), cmd.OutOrStdout(), pubFlag, requireClosed)
 		}
 		report, err := runVerify(cmd.Context(), currentDoctorCapabilities, currentProbeRunner)
 		if err != nil {
@@ -120,6 +122,7 @@ func init() {
 	verifyCmd.Flags().String("ed25519-pub", "", "trusted Ed25519 public key (base64 or hex); requires the audit log to be signed")
 	verifyCmd.Flags().String("against-anchor", "", "verify the local audit chain against an external anchor file (detects tail truncation and rollback)")
 	verifyCmd.Flags().Bool("against-remote-anchor", false, "verify the local audit chain against the latest anchor in the off-box store at $NOCKLOCK_ANCHOR_URL (absence fails)")
+	verifyCmd.Flags().Bool("require-closed", false, "with --audit, fail verification when a run has no signed session_close (a neutral unclosed run; close_mismatch and rows_after_close fail regardless)")
 	verifyCmd.Flags().Duration("walk-timeout", 0, walkTimeoutFlagUsage)
 	rootCmd.AddCommand(verifyCmd)
 }
@@ -127,11 +130,69 @@ func init() {
 // writeVerificationCoverage describes recording limits, not the current host
 // or historical enforcement. Public history-verification helpers defer it so
 // failures retain the same notice without changing their verdict or exit code.
-func writeVerificationCoverage(w io.Writer) {
+func writeVerificationCoverage(w io.Writer, unclosedRuns []string) {
 	fmt.Fprintln(w, "COVERAGE: LIMITED")
 	fmt.Fprintln(w, "Verification checks recorded events; it does not prove that every action was logged.")
 	fmt.Fprintln(w, "Individual allowed file accesses are not recorded. Some file denials, kernel-dropped packets, proxy bypasses and Linux CONFINED Unix-socket connections can leave no audit row.")
 	fmt.Fprintln(w, "This check does not establish past enforcement or recording coverage.")
+	if len(unclosedRuns) > 0 {
+		listed := unclosedRuns
+		suffix := ""
+		if len(listed) > maxListedUnclosedRuns {
+			suffix = fmt.Sprintf(", … and %d more", len(listed)-maxListedUnclosedRuns)
+			listed = listed[:maxListedUnclosedRuns]
+		}
+		safe := make([]string, len(listed))
+		for i, id := range listed {
+			safe[i] = sanitizeSessionID(id)
+		}
+		fmt.Fprintf(w, "%d run(s) have no signed session_close, so their recorded extent is unverified (an interrupted writer, crash, or failed close looks identical): %s%s\n",
+			len(unclosedRuns), strings.Join(safe, ", "), suffix)
+	}
+}
+
+// maxListedUnclosedRuns caps how many unclosed session ids the COVERAGE notice
+// names inline. The reported count is always exact; only the inline id list is
+// capped, so a chain with very many unclosed runs cannot emit an unbounded line.
+const maxListedUnclosedRuns = 20
+
+// sanitizeSessionID renders a session id safe to print on a single notice line.
+// Session ids are normally UUIDs, but the session_id column is attacker-shaped in
+// a tamper scenario, so control characters (newlines included) are replaced and
+// the id is truncated — one run's entry stays on one line and carries no terminal
+// escape sequence.
+func sanitizeSessionID(id string) string {
+	if id == "" {
+		return "(empty)"
+	}
+	return sanitizeLine(id, 64)
+}
+
+// maxRunReasonRunes caps a RUN line's reason. Reasons can quote audit-row text
+// (a parse error on a session_close detail), so they are sanitized like ids.
+const maxRunReasonRunes = 256
+
+// sanitizeLine replaces every non-printable rune (control characters, newlines
+// and escapes included) with '?' and truncates to maxRunes, so attacker-shaped
+// text stays on one output line and carries no terminal escape sequence.
+func sanitizeLine(s string, maxRunes int) string {
+	var b strings.Builder
+	n := 0
+	for _, r := range s {
+		if n >= maxRunes {
+			b.WriteString("…")
+			break
+		}
+		// unicode.IsPrint is false for every control rune (including <0x20 and
+		// 0x7f) and other non-graphic runes, so it covers newline/escape spoofs.
+		if unicode.IsPrint(r) {
+			b.WriteRune(r)
+		} else {
+			b.WriteRune('?')
+		}
+		n++
+	}
+	return b.String()
 }
 
 // runVerifyAgainstAnchor authenticates an external anchor and checks the local
@@ -141,7 +202,7 @@ func writeVerificationCoverage(w io.Writer) {
 // verify --audit (an explicit --ed25519-pub, else the local managed key). The
 // log is opened READ-ONLY (no signing option): verifying never writes.
 func runVerifyAgainstAnchor(ctx context.Context, w io.Writer, anchorFile, pubFlag string) error {
-	defer writeVerificationCoverage(w)
+	defer writeVerificationCoverage(w, nil)
 	// lockCtx bounds the identity-lock wait at anchorCLITimeout; walkCtx bounds only
 	// the verification walk (both derived from the same parent, so the walk never
 	// inherits the 30 s lock cap — the N11800 regression).
@@ -280,8 +341,12 @@ func resolveAuditDBPath() (dbPath, projectRoot string, err error) {
 	return dbPath, projectRoot, nil
 }
 
-func runAuditVerify(ctx context.Context, w io.Writer, pubFlag string) error {
-	defer writeVerificationCoverage(w)
+func runAuditVerify(ctx context.Context, w io.Writer, pubFlag string, requireClosed bool) error {
+	// unclosedRuns is populated once the run-lifecycle pass runs, so the deferred
+	// coverage notice (which may also fire on an early tamper return) can name any
+	// run missing its close. The closure reads it at return time, not defer time.
+	var unclosedRuns []string
+	defer func() { writeVerificationCoverage(w, unclosedRuns) }()
 	dbPath, projectRoot, err := resolveAuditDBPath()
 	if err != nil {
 		return err
@@ -323,7 +388,69 @@ func runAuditVerify(ctx context.Context, w io.Writer, pubFlag string) error {
 	if err := writeAuditVerifyResult(w, result); err != nil {
 		return err
 	}
-	return writeConfigDigestVerifyResult(w, history)
+	if err := writeConfigDigestVerifyResult(w, history); err != nil {
+		return err
+	}
+
+	// Run-lifecycle verification: report each run's observed lifecycle (closed,
+	// unclosed, pruned, close_mismatch, rows_after_close, legacy) over the same
+	// intact chain. close_mismatch and rows_after_close are tamper failures
+	// regardless of --require-closed; a neutral unclosed run fails only with it.
+	runs, err := logger.VerifyRuns(walkCtx)
+	if err != nil {
+		// Surface an interrupted walk raw, matching the anchor paths and the
+		// N11800 neutral-interrupt convention (no "failed" wording, no verdict).
+		if errors.Is(err, logging.ErrVerifyInterrupted) {
+			return err
+		}
+		return fmt.Errorf("run lifecycle verification failed: %w", err)
+	}
+	lifecycleFailed, unclosed := writeRunLifecycleResult(w, runs)
+	unclosedRuns = unclosed
+	if lifecycleFailed {
+		// A lifecycle tamper (close_mismatch or rows_after_close) is a hard
+		// failure even though the chain itself is authentic. Print an explicit
+		// AUDIT verdict line so a script reading the first AUDIT: line cannot
+		// mistake the earlier AUTHENTIC/CONSISTENT verdict for the overall result.
+		fmt.Fprintln(w, "AUDIT: RUN INTEGRITY FAILURE")
+		return &exitCodeError{code: 1}
+	}
+	if requireClosed && len(unclosed) > 0 {
+		fmt.Fprintf(w, "AUDIT: UNCLOSED — %d run(s) have no signed session_close and --require-closed was set\n", len(unclosed))
+		return &exitCodeError{code: 1}
+	}
+	return nil
+}
+
+// writeRunLifecycleResult prints the per-run lifecycle verdicts and a summary
+// line, returning whether any run reported a tamper failure (close_mismatch or
+// rows_after_close) and the session ids of runs that are merely unclosed. The
+// unclosed ids feed the COVERAGE: LIMITED notice; a clean overall verdict must
+// never appear next to runs missing their close without that notice naming them.
+func writeRunLifecycleResult(w io.Writer, runs []logging.RunStatus) (failed bool, unclosed []string) {
+	if len(runs) == 0 {
+		return false, nil
+	}
+	var closed, pruned, legacy, failures int
+	for _, r := range runs {
+		switch r.Status {
+		case logging.RunClosed:
+			closed++
+		case logging.RunPruned:
+			pruned++
+		case logging.RunLegacy:
+			legacy++
+		case logging.RunUnclosed:
+			unclosed = append(unclosed, r.SessionID)
+		}
+		if r.Status.Failure() {
+			failures++
+			fmt.Fprintf(w, "RUN %s: %s — %s\n", sanitizeSessionID(r.SessionID), strings.ToUpper(string(r.Status)), sanitizeLine(r.Reason, maxRunReasonRunes))
+		}
+	}
+	fmt.Fprintf(w, "RUNS: %d closed, %d unclosed, %d pruned, %d legacy, %d integrity failure(s) across %d run(s)\n",
+		closed, len(unclosed), pruned, legacy, failures, len(runs))
+	return failures > 0, unclosed
 }
 
 // resolveVerifyPublicKey returns the Ed25519 public key to verify against, or

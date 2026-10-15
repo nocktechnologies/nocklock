@@ -142,7 +142,7 @@ func runAnchorPush(ctx context.Context, w io.Writer, file string) error {
 // runVerifyAgainstRemoteAnchor uses only the trusted v2 pair. Missing identity,
 // unsupported routes and absent remote state fail closed without v1 fallback.
 func runVerifyAgainstRemoteAnchor(ctx context.Context, w io.Writer, pubFlag string) error {
-	defer writeVerificationCoverage(w)
+	defer writeVerificationCoverage(w, nil)
 	fctx, cancel := context.WithTimeout(ctx, anchorCLITimeout)
 	defer cancel()
 	dbPath, projectRoot, err := resolveAuditDBPath()
