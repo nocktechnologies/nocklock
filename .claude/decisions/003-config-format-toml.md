@@ -2,7 +2,6 @@
 
 **Status:** Accepted
 **Date:** 2026-04-05
-**Author:** Mara (AI architect)
 
 ## Context
 NockLock needs a per-project config file (`.nock/config.toml`) that developers edit by hand.

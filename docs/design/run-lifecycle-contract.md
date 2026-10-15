@@ -139,7 +139,7 @@ Each negative control carries its positive control.
 | 25 | Honest run closes normally (positive: control 1); its `session_start` is then re-signed by the key holder to drop `lifecycle=1` and its `session_close` deleted, chain re-signed | `closed` before the edit; `legacy` after — the same key-holder boundary as the rest of Limits, indistinguishable from data written before this contract |
 | 26 | Two producers A and B (e.g. the proxy and the decision-log scanner) append under the same `session_id`; A pauses between its commit and its fold while still holding the logger mutex, and B attempts an append in that window (positive: the same rows appended serially by one producer, control 1); a rolled-back append in the mix leaves the accumulator unchanged | B blocks until A's fold returns and does not complete inside A's locked section; `closed`; recomputed `rows`/`root` in id order equal the signed ones — never `close_mismatch` from fold order alone (control 5 interleaves two runs, not two producers on one) |
 
-## Decisions (Mira, round 1)
+## Decisions (review round 1)
 
 1. A failed close write is a loud stderr warning only; the exit code stays the child's.
 2. `unclosed` is neutral by default (opt-in `--require-closed`); `nocklock verify` lists it in `COVERAGE: LIMITED` too.

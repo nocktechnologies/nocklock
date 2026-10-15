@@ -4,6 +4,10 @@ All notable changes to NockLock will be documented in this file.
 
 ## [Unreleased]
 
+### Security
+
+- Remove internal drafts, private review instructions, server-specific acceptance material and personal identifiers from published probe records and design notes. Retain the technical probe verdicts with redacted host, account and home path. Add a public-content check to CI and store only exact historical finding fingerprints in the secret-scan baseline (N11824).
+
 ### Added
 
 - Design for the run lifecycle contract (N11764): `docs/design/run-lifecycle-contract.md` defines per-run vs global-chain semantics and an additive signed `session_close` row binding a run's row count and root, states that a missing close cannot tell a crash from a deliberate cut, the backward-compatibility rule, and how the close relates to the verification receipt and the v2 anchor. Documentation only; the writer and verifier are N11765.
@@ -18,6 +22,8 @@ All notable changes to NockLock will be documented in this file.
 - Anchor verification walks accept a context (Step 1 of the bounded-verification design, N11800). `VerifyChainSignedContext`, `EmitAnchorContext`, `EmitAnchorV2Walk` and `VerifyAgainstAnchorV2Walk` check it every 1,024 rows and return `ErrVerifyInterrupted` when it ends: never authentic, never tampering, no anchor written. `EmitAnchorV2Context` and `VerifyAgainstAnchorV2Context` now bound the walk by their context as well as the lock wait. `wrap` teardown gives the walk its own deadline and the off-box push a fresh budget after emission; the teardown walk stays unbounded by default, so no final anchor that is written today is lost.
 
 ### Fixed
+
+- Public-content and fingerprint-baseline checks fail closed on malformed input; only unchanged changelog history is exempt from the content check. Clarify redacted probe provenance and contribution/release guidance (N11824).
 
 - Red-team proof matching now requires the `match` path sequence to align with path-component boundaries, so an unrelated blocked path cannot satisfy the proof row (N11798).
 

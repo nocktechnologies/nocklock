@@ -264,7 +264,7 @@ func TestSigning_SignsSameCanonicalBytesAsHash(t *testing.T) {
 }
 
 // TestSigning_RowSignatureVerifiesOverByteLiteral pins the SIGNING contract
-// independently of the encoder — the NCC #1902 lesson applied to signing. The
+// independently of the encoder — the prior integration lesson applied to signing. The
 // test above proves the signature covers whatever canonicalBytes returns; this
 // one proves what those bytes ARE, by verifying the stored entry_sig of a known
 // row against a hardcoded byte string that never passes through canonicalBytes.

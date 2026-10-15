@@ -201,7 +201,7 @@ func TestVerifyRemoteAnchor_UnavailableExitsNonZero(t *testing.T) {
 		"unset URL":         "",
 		"no stored anchor":  notFound.URL,
 		"unreachable":       downURL,
-		"non-loopback http": "http://ncc.example.com",
+		"non-loopback http": "http://anchor.example.com",
 	}
 	for name, u := range cases {
 		t.Run(name, func(t *testing.T) {
@@ -371,7 +371,7 @@ func TestAnchorPushCLIRegressionIsError(t *testing.T) {
 func TestStripAnchorEnvRemovesURLAndToken(t *testing.T) {
 	env := []string{
 		"PATH=/bin",
-		anchorclient.EnvURL + "=https://ncc.example.com",
+		anchorclient.EnvURL + "=https://anchor.example.com",
 		anchorclient.EnvToken + "=" + remoteTestToken,
 		"NOCKLOCK_ANCHOR_TOKEN_EXTRA=keep",
 	}
