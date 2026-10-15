@@ -18,6 +18,7 @@ import (
 	"runtime"
 	"strings"
 	"time"
+	"unicode"
 
 	"github.com/BurntSushi/toml"
 	"github.com/nocktechnologies/nocklock/internal/config"
@@ -135,9 +136,51 @@ func writeVerificationCoverage(w io.Writer, unclosedRuns []string) {
 	fmt.Fprintln(w, "Individual allowed file accesses are not recorded. Some file denials, kernel-dropped packets, proxy bypasses and Linux CONFINED Unix-socket connections can leave no audit row.")
 	fmt.Fprintln(w, "This check does not establish past enforcement or recording coverage.")
 	if len(unclosedRuns) > 0 {
-		fmt.Fprintf(w, "%d run(s) have no signed session_close, so their recorded extent is unverified (an interrupted writer, crash, or failed close looks identical): %s\n",
-			len(unclosedRuns), strings.Join(unclosedRuns, ", "))
+		listed := unclosedRuns
+		suffix := ""
+		if len(listed) > maxListedUnclosedRuns {
+			suffix = fmt.Sprintf(", … and %d more", len(listed)-maxListedUnclosedRuns)
+			listed = listed[:maxListedUnclosedRuns]
+		}
+		safe := make([]string, len(listed))
+		for i, id := range listed {
+			safe[i] = sanitizeSessionID(id)
+		}
+		fmt.Fprintf(w, "%d run(s) have no signed session_close, so their recorded extent is unverified (an interrupted writer, crash, or failed close looks identical): %s%s\n",
+			len(unclosedRuns), strings.Join(safe, ", "), suffix)
 	}
+}
+
+// maxListedUnclosedRuns caps how many unclosed session ids the COVERAGE notice
+// names inline. The reported count is always exact; only the inline id list is
+// capped, so a chain with very many unclosed runs cannot emit an unbounded line.
+const maxListedUnclosedRuns = 20
+
+// sanitizeSessionID renders a session id safe to print on a single notice line.
+// Session ids are normally UUIDs, but the session_id column is attacker-shaped in
+// a tamper scenario, so control characters (newlines included) are replaced and
+// the id is truncated — one run's entry stays on one line and carries no terminal
+// escape sequence.
+func sanitizeSessionID(id string) string {
+	const maxRunes = 64
+	var b strings.Builder
+	n := 0
+	for _, r := range id {
+		if n >= maxRunes {
+			b.WriteString("…")
+			break
+		}
+		if r < 0x20 || r == 0x7f || !unicode.IsPrint(r) {
+			b.WriteRune('?')
+		} else {
+			b.WriteRune(r)
+		}
+		n++
+	}
+	if n == 0 {
+		return "(empty)"
+	}
+	return b.String()
 }
 
 // runVerifyAgainstAnchor authenticates an external anchor and checks the local
@@ -343,11 +386,21 @@ func runAuditVerify(ctx context.Context, w io.Writer, pubFlag string, requireClo
 	// regardless of --require-closed; a neutral unclosed run fails only with it.
 	runs, err := logger.VerifyRuns(walkCtx)
 	if err != nil {
+		// Surface an interrupted walk raw, matching the anchor paths and the
+		// N11800 neutral-interrupt convention (no "failed" wording, no verdict).
+		if errors.Is(err, logging.ErrVerifyInterrupted) {
+			return err
+		}
 		return fmt.Errorf("run lifecycle verification failed: %w", err)
 	}
 	lifecycleFailed, unclosed := writeRunLifecycleResult(w, runs)
 	unclosedRuns = unclosed
 	if lifecycleFailed {
+		// A lifecycle tamper (close_mismatch or rows_after_close) is a hard
+		// failure even though the chain itself is authentic. Print an explicit
+		// AUDIT verdict line so a script reading the first AUDIT: line cannot
+		// mistake the earlier AUTHENTIC/CONSISTENT verdict for the overall result.
+		fmt.Fprintln(w, "AUDIT: RUN INTEGRITY FAILURE")
 		return &exitCodeError{code: 1}
 	}
 	if requireClosed && len(unclosed) > 0 {
@@ -380,7 +433,7 @@ func writeRunLifecycleResult(w io.Writer, runs []logging.RunStatus) (failed bool
 		}
 		if r.Status.Failure() {
 			failures++
-			fmt.Fprintf(w, "RUN %s: %s — %s\n", r.SessionID, strings.ToUpper(string(r.Status)), r.Reason)
+			fmt.Fprintf(w, "RUN %s: %s — %s\n", sanitizeSessionID(r.SessionID), strings.ToUpper(string(r.Status)), r.Reason)
 		}
 	}
 	fmt.Fprintf(w, "RUNS: %d closed, %d unclosed, %d pruned, %d legacy, %d integrity failure(s) across %d run(s)\n",

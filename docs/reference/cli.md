@@ -77,9 +77,13 @@ on a `RUNS:` summary line plus a `RUN <id>:` line per integrity failure:
 | `legacy` | a `session_start` with no `lifecycle=1` and no close, written before this contract; never a failure |
 
 `close_mismatch` and `rows_after_close` fail verification (exit `1`) regardless of
-`--require-closed`. A neutral `unclosed` run fails only when `--require-closed` is
-set; by default it passes but is named in the `COVERAGE: LIMITED` notice, since a
-missing close cannot prove the run's recorded extent is complete.
+`--require-closed`, and the run output then ends with an explicit
+`AUDIT: RUN INTEGRITY FAILURE` verdict line — so the chain's own
+`AUDIT: AUTHENTIC` line, printed earlier, is never mistaken for the overall
+result. A neutral `unclosed` run fails only when `--require-closed` is set (then an
+`AUDIT: UNCLOSED` line is printed); by default it passes but is named in the
+`COVERAGE: LIMITED` notice, since a missing close cannot prove the run's recorded
+extent is complete.
 
 ## Exit codes
 Exit codes travel as `exitCodeError` and `Execute()` calls `os.Exit` once (`root.go`). Any other error prints to stderr and exits `1` (`root.go`).

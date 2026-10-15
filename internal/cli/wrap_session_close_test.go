@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"fmt"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -57,8 +58,9 @@ func TestWrapWritesSignedSessionCloseAfterSessionEnd(t *testing.T) {
 	}
 }
 
-// TestWrapRunVerifiesClosed confirms the verifier reports the wrapped run as
-// closed and still prints the limited-coverage notice.
+// TestWrapRunVerifiesClosed confirms VerifyRuns reports the wrapped run as
+// closed. The COVERAGE: LIMITED notice is asserted separately in
+// TestRequireClosedFailsUnclosedRun, which drives runAuditVerify's output.
 func TestWrapRunVerifiesClosed(t *testing.T) {
 	projectRoot := resolvedTempDir(t)
 	db := filepath.Join(projectRoot, "fresh", ".nock", "events.db")
@@ -158,6 +160,52 @@ func TestRequireClosedFailsUnclosedRun(t *testing.T) {
 	}
 }
 
+// TestRunIntegrityFailurePrintsVerdictLine confirms a lifecycle tamper
+// (rows_after_close) fails verify --audit with exit 1 and ends with an explicit
+// AUDIT: RUN INTEGRITY FAILURE line, so the earlier AUDIT: AUTHENTIC line (the
+// chain is genuinely intact) cannot be read as the overall verdict.
+func TestRunIntegrityFailurePrintsVerdictLine(t *testing.T) {
+	dbPath, keyPath := setupAnchorProject(t)
+	seedRowsAfterCloseRun(t, dbPath, keyPath, "run-tampered")
+
+	var out bytes.Buffer
+	err := runAuditVerify(context.Background(), &out, "", false)
+	var exit *exitCodeError
+	if !errors.As(err, &exit) || exit.code != 1 {
+		t.Fatalf("a rows_after_close run must fail verify with exit 1, got %v\n%s", err, out.String())
+	}
+	if !strings.Contains(out.String(), "AUDIT: RUN INTEGRITY FAILURE") {
+		t.Fatalf("missing AUDIT: RUN INTEGRITY FAILURE verdict line:\n%s", out.String())
+	}
+	if !strings.Contains(out.String(), "RUN run-tampered: ROWS_AFTER_CLOSE") {
+		t.Fatalf("missing per-run failure line:\n%s", out.String())
+	}
+}
+
+// seedRowsAfterCloseRun writes a signed closed run and then appends one more row
+// under the same session_id, so the run reads rows_after_close.
+func seedRowsAfterCloseRun(t *testing.T, dbPath, keyPath, sid string) {
+	t.Helper()
+	l, err := logging.NewLogger(dbPath, "", logging.WithSigning(keyPath))
+	if err != nil {
+		t.Fatalf("seed logger: %v", err)
+	}
+	defer l.Close()
+	start := sessionStartDetail("agent", execFingerprint{Status: execUnresolved}, "")
+	if err := l.Log(logging.Event{EventType: logging.EventSessionStart, Category: "session", Detail: start, EgressLevel: "OFF", SessionID: sid}); err != nil {
+		t.Fatalf("seed session_start: %v", err)
+	}
+	if err := l.Log(logging.Event{EventType: logging.EventSessionEnd, Category: "session", Detail: "exit_code=0", SessionID: sid}); err != nil {
+		t.Fatalf("seed session_end: %v", err)
+	}
+	if _, err := l.CloseRun(sid, "clean"); err != nil {
+		t.Fatalf("seed close: %v", err)
+	}
+	if err := l.Log(logging.Event{EventType: logging.EventNetworkPassed, Category: "network", Detail: "egress level=OFF", SessionID: sid}); err != nil {
+		t.Fatalf("seed post-close row: %v", err)
+	}
+}
+
 // seedUnclosedRun writes a signed lifecycle run (session_start with lifecycle=1,
 // a row, session_end) with no session_close, mirroring an interrupted writer.
 func seedUnclosedRun(t *testing.T, dbPath, keyPath, sid string) {
@@ -176,5 +224,43 @@ func seedUnclosedRun(t *testing.T, dbPath, keyPath, sid string) {
 	}
 	if err := l.Log(logging.Event{EventType: logging.EventSessionEnd, Category: "session", Detail: "exit_code=0", SessionID: sid}); err != nil {
 		t.Fatalf("seed session_end: %v", err)
+	}
+}
+
+// TestSanitizeSessionID checks a crafted session id cannot inject a newline or a
+// terminal escape into a notice line, and is truncated.
+func TestSanitizeSessionID(t *testing.T) {
+	cases := map[string]string{
+		"":                          "(empty)",
+		"550e8400-e29b-41d4-a716-0": "550e8400-e29b-41d4-a716-0",
+		"line1\nline2":              "line1?line2",
+		"esc\x1b[31mred":            "esc?[31mred",
+		strings.Repeat("x", 100):    strings.Repeat("x", 64) + "…",
+	}
+	for in, want := range cases {
+		if got := sanitizeSessionID(in); got != want {
+			t.Errorf("sanitizeSessionID(%q) = %q, want %q", in, got, want)
+		}
+	}
+}
+
+// TestCoverageNoticeCapsUnclosedList confirms the COVERAGE notice reports the
+// exact unclosed count but caps the inline id list.
+func TestCoverageNoticeCapsUnclosedList(t *testing.T) {
+	var ids []string
+	for i := 0; i < maxListedUnclosedRuns+5; i++ {
+		ids = append(ids, fmt.Sprintf("sid-%02d", i))
+	}
+	var out bytes.Buffer
+	writeVerificationCoverage(&out, ids)
+	s := out.String()
+	if !strings.Contains(s, fmt.Sprintf("%d run(s) have no signed session_close", len(ids))) {
+		t.Fatalf("exact unclosed count not reported:\n%s", s)
+	}
+	if !strings.Contains(s, "… and 5 more") {
+		t.Fatalf("inline id list not capped:\n%s", s)
+	}
+	if strings.Contains(s, "sid-24") {
+		t.Fatalf("capped id should not appear inline:\n%s", s)
 	}
 }

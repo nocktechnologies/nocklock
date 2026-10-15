@@ -31,7 +31,7 @@ func logOrFatal(t *testing.T, l *Logger, e Event) {
 	}
 }
 
-// appendClosedRun writes a lifecycle run (start, two ordinary rows, end) under sid
+// appendOpenRun writes a lifecycle run (start, two ordinary rows, end) under sid
 // and returns before the close so the caller can close it.
 func appendOpenRun(t *testing.T, l *Logger, sid string) {
 	t.Helper()
@@ -315,7 +315,6 @@ func TestRunClose_PreStartRowDeletedNoPruneIsCloseMismatch(t *testing.T) {
 func TestRunClose_PrunedStartSurvivesIsPruned(t *testing.T) {
 	l, _, _ := newSigningLogger(t)
 	defer l.Close()
-	dbPath := dbPathOf(t, l)
 	sid := "run-prune-prestart"
 	// Pre-start config-digest row is old; the start and the rest are recent.
 	digest := sampleEvent(EventConfigDigest, "session", "digest=old", false, sid)
@@ -331,7 +330,6 @@ func TestRunClose_PrunedStartSurvivesIsPruned(t *testing.T) {
 	// The run is found via its surviving start row; recomputed values differ under
 	// a recorded prune — pruned, not close_mismatch.
 	wantStatus(t, l, sid, RunPruned)
-	_ = dbPath
 }
 
 func TestRunClose_PrunedCloseOnlySurvivesIsPruned(t *testing.T) {
@@ -579,7 +577,11 @@ func TestRunClose_ConcurrentProducersReadClosed(t *testing.T) {
 	var inCritical atomic.Int32
 	var raced atomic.Bool
 	hookDir := t.TempDir()
-	key := hookDir + "/audit.key"
+	// Nest the key under a subdirectory the signing loader creates at 0700. The
+	// bare t.TempDir() is 0755 under CI's umask (022), which validateSigningKey-
+	// Directory refuses as group/world accessible; newSigningLogger uses the same
+	// keys/ nesting for the same reason.
+	key := hookDir + "/keys/audit.key"
 	t.Setenv("XDG_STATE_HOME", t.TempDir())
 	l, err := NewLogger(hookDir+"/events.db", hookDir, WithSigning(key), withAfterCommit(func() {
 		if inCritical.Add(1) != 1 {
@@ -624,5 +626,127 @@ func TestRunClose_ConcurrentProducersReadClosed(t *testing.T) {
 	if binding.rows != count || binding.root != root {
 		t.Fatalf("concurrent appends corrupted the accumulator: signed {rows:%d root:%s} != recomputed {rows:%d root:%s}",
 			binding.rows, binding.root, count, root)
+	}
+}
+
+// ---------- control: LogImmediate folds look-back rows into the run ----------
+
+// TestRunClose_LogImmediateRowIsFoldedAndClosed proves the fourth append path,
+// LogImmediate (the one the network proxy's look-back writes use), takes the
+// logger mutex and folds its row into the run accumulator like Log/LogBatch/
+// LogAfterLatest, so a row written through it inside a run still reads closed and
+// never a false close_mismatch. LogImmediate delegates to LogAfterLatest, which
+// holds l.mu across BEGIN IMMEDIATE, COMMIT and the fold.
+func TestRunClose_LogImmediateRowIsFoldedAndClosed(t *testing.T) {
+	l, _, _ := newSigningLogger(t)
+	defer l.Close()
+	sid := "run-logimmediate"
+	logOrFatal(t, l, lifecycleStart(sid))
+	// A look-back-style row written through the immediate path, under the run's id.
+	if err := l.LogImmediate(sampleEvent(EventNetworkBlocked, "network", "lookback=1", true, sid)); err != nil {
+		t.Fatalf("LogImmediate: %v", err)
+	}
+	logOrFatal(t, l, sampleEvent(EventSessionEnd, "session", "exit_code=0", false, sid))
+	if _, err := l.CloseRun(sid, "clean"); err != nil {
+		t.Fatalf("CloseRun: %v", err)
+	}
+	// Were the immediate row not folded, the signed count/root would skip it and
+	// the id-ordered recompute would read close_mismatch.
+	wantStatus(t, l, sid, RunClosed)
+
+	dbPath := dbPathOf(t, l)
+	binding := closeDetailOf(t, dbPath, sid)
+	root, count, _, _ := independentRunRoot(t, dbPath, sid)
+	if binding.rows != count || binding.root != root {
+		t.Fatalf("LogImmediate row not folded: signed {rows:%d root:%s} != recomputed {rows:%d root:%s}",
+			binding.rows, binding.root, count, root)
+	}
+}
+
+// ---------- control: run verification honors the walk deadline past the scan ----------
+
+// TestVerifyRuns_ClassificationHonorsContext proves the classification phase and
+// the per-run root recomputation check the context, not only the SQL scan: a
+// --walk-timeout that expires after the scan must still interrupt without a
+// verdict. Both guards are exercised white-box because the public VerifyRuns
+// cannot deterministically let the scan finish and then cancel only the classify
+// phase.
+func TestVerifyRuns_ClassificationHonorsContext(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	order := []string{"s1"}
+	runs := map[string][]rawRunRow{
+		"s1": {{id: 1, eventType: EventSessionStart, detail: `command="x" lifecycle=1`}},
+	}
+	noOwner := func(int64) (string, bool) { return "", false }
+	if _, err := classifyRuns(ctx, order, runs, false, noOwner); !errors.Is(err, ErrVerifyInterrupted) {
+		t.Fatalf("classifyRuns on a cancelled context err = %v, want ErrVerifyInterrupted", err)
+	}
+
+	// recomputeRun must also stop on a cancelled context rather than fold a huge
+	// run's rows past the deadline.
+	nonClose := []rawRunRow{{id: 1}, {id: 2}}
+	if _, _, _, _, err := recomputeRun(ctx, "s1", nonClose); !errors.Is(err, ErrVerifyInterrupted) {
+		t.Fatalf("recomputeRun on a cancelled context err = %v, want ErrVerifyInterrupted", err)
+	}
+}
+
+// ---------- control: scan keeps raw detail only for lifecycle rows ----------
+
+// TestScanRuns_RetainsDetailOnlyForLifecycleRows proves the verification scan
+// holds the full detail text only for session_start and session_close rows (the
+// only types whose detail it parses); every ordinary row keeps just its 32-byte
+// canonical hash, so a large store is not held in memory by its detail column.
+func TestScanRuns_RetainsDetailOnlyForLifecycleRows(t *testing.T) {
+	l, _, _ := newSigningLogger(t)
+	defer l.Close()
+	sid := "run-scan-detail"
+	logOrFatal(t, l, lifecycleStart(sid))
+	logOrFatal(t, l, sampleEvent(EventNetworkPassed, "network", "ordinary detail text that must not be retained", false, sid))
+	if _, err := l.CloseRun(sid, "clean"); err != nil {
+		t.Fatalf("CloseRun: %v", err)
+	}
+
+	conn, err := l.db.Conn(context.Background())
+	if err != nil {
+		t.Fatalf("Conn: %v", err)
+	}
+	defer conn.Close()
+	_, runs, err := scanRuns(context.Background(), conn)
+	if err != nil {
+		t.Fatalf("scanRuns: %v", err)
+	}
+	for _, r := range runs[sid] {
+		switch r.eventType {
+		case EventSessionStart, EventSessionClose:
+			if r.detail == "" {
+				t.Fatalf("row %d (%s): detail dropped, but the verifier parses it", r.id, r.eventType)
+			}
+		default:
+			if r.detail != "" {
+				t.Fatalf("row %d (%s): detail %q retained, want empty", r.id, r.eventType, r.detail)
+			}
+		}
+	}
+}
+
+// TestClassifyRun_OwesCloseIfAnyStartHasLifecycle proves that if any session_start
+// of a run owes a close (lifecycle=1), a later start lacking the marker cannot
+// clear the obligation: the run reads unclosed, not legacy. Folding across starts
+// with OR is defensive — one start per run is the only writer path — but a last-
+// writer-wins read would otherwise downgrade an owed close to legacy.
+func TestClassifyRun_OwesCloseIfAnyStartHasLifecycle(t *testing.T) {
+	noOwner := func(int64) (string, bool) { return "", false }
+	rrs := []rawRunRow{
+		{id: 1, eventType: EventSessionStart, detail: `command="a" lifecycle=1`},
+		{id: 2, eventType: EventSessionStart, detail: `command="b"`},
+	}
+	st, ok, err := classifyRun(context.Background(), "s", rrs, false, noOwner)
+	if err != nil || !ok {
+		t.Fatalf("classifyRun ok=%v err=%v", ok, err)
+	}
+	if st.Status != RunUnclosed {
+		t.Fatalf("status = %q (%s), want unclosed", st.Status, st.Reason)
 	}
 }
