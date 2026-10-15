@@ -1,6 +1,6 @@
 # Roadmap to 1.0
 
-Released baseline: `v0.10.0`. The four 1.0 bars are approved. This page tracks the code and tests that must support each claim.
+Released baseline: `v0.11.0`. The four 1.0 bars are approved. This page tracks the code and tests that must support each claim.
 
 ## The 1.0 bar
 
@@ -24,6 +24,7 @@ A gap is closed only when its fix is released from `main`, the red-team case run
 - **0.9.2 (released):** add signing-key posture to `doctor`, repair macOS `verify`, serialize proxy shutdown, improve onboarding and document signing-key replacement. The Linux packaging design landed; no installer or binary assets shipped with it.
 - **0.9.3 (released):** clear supplementary groups process-wide in Linux netns proxy sidecars, fix dead-port test reuse, and document the remote-anchor identity limitation and proposed v2 design. That released version uses v1 anchors; it does not contain the per-chain v2 implementation.
 - **0.10.0 (released):** per-chain remote v2 anchors are implemented. Explicit `anchor enroll` / `anchor migrate`, `anchor push`, and `verify --against-remote-anchor` work against an upgraded v2 anchor store, with durable retry, expected-pair verification and conditional remote updates; trusted external chain identity makes prune refuse pending, enrolled or incompletely registered chains; `anchor emit` refuses unsigned or stripped databases. Remote push/verify never fall back to v1, so projects must enroll or migrate first. Text verification output now carries a `COVERAGE: LIMITED` notice. Two security fixes also ship: Linux netns bridge allocation skips the `169.254.169.0/24` and `169.254.170.0/24` metadata ranges, and `wrap` resolves the command on the caller's PATH and refuses the current directory. See the [audit-log guide](how-it-works/audit-log.md). No Linux installer or release assets ship with this release.
+- **0.11.0 (released):** `wrap` ends each run with a signed close row and `verify --audit` reports per-run lifecycle states, with `--require-closed` for strict checks. A signed verification receipt lets repeat verification skip signatures it already checked, and `--walk-timeout` bounds long verification walks. The signed `session_start` row records the command's SHA-256. On Linux, `wrap` refuses an interposer library the project could control. No Linux installer or release assets ship with this release.
 - **1.0:** all four bars above are verified. `docs/reference/cli.md` becomes the compatibility contract for the public CLI, config schema, exit codes, egress levels and `verify --audit` states. Add contract tests and update `CONTRIBUTING.md` and `CLAUDE.md` when that promise takes effect.
 
 ## Outside this bar
