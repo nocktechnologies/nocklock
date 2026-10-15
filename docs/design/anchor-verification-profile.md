@@ -112,6 +112,9 @@ Three independently landable steps, in order.
 - `verifyChainInTransaction` gains a context. Row and prefix loops check `ctx.Err()` every 1,024 rows; queries use `QueryContext` so SQLite is interrupted too.
 - Interruption returns `ErrVerifyInterrupted` (distinct from `Intact=false`, `forged`, `tampered`). It is never converted to `authentic`, and never reported as tampering. `EmitAnchor`, `EmitAnchorV2Context`, `VerifyAgainstAnchorV2Context` and `finishAnchorSession` propagate it: no anchor is written, the existing warning path prints "chain anchor not written", and the process still exits normally.
 - Run the walk without holding the identity store lock where the lock is not needed for the snapshot; at minimum, release on interruption promptly (the lock is already released by `defer store.close()`).
+- `EmitAnchor` has no context today and the v1 teardown path calls it directly, so Step 1 adds a context-taking variant (for example `EmitAnchorContext`) and moves `finishAnchorSession` to it.
+- The walk gets its own deadline, separate from the 5 s identity-lock and push budget in `finishAnchorSession`. One shared context would let a 4.8 s walk leave the push no time and silently drop off-box delivery, where today the push gets a fresh budget.
+- Default for a Step 1 only release: teardown keeps today's unbounded walk unless the operator opts into a bound, because a bound without Step 2 turns today's slow-but-successful final anchor into a missing one for stores above roughly 125,000 rows (this host). The interruption path exists for periodic ticks and explicit budgets first.
 - Alone this satisfies "bounded", at the cost of a missing final anchor for stores too large for the budget. Steps 2 and 3 remove that cost.
 
 ### Step 2: signed verification receipt (option C)
@@ -156,7 +159,7 @@ where `D` is the rolling digest `D_i = SHA-256(D_{i-1} || entry_hash_i || entry_
 | Chain identity (`chain_id`, registration state) | Not in the receipt. Identity is read from trusted state on every emission and is unaffected |
 | Corrupt, unknown version, deleted | Ignored, full walk |
 
-**Cost after Step 2.** Warm, no new rows: about 0.17 to 0.18 s per 100,000 rows (measured with the prototype loop, a lower bound) plus one Ed25519 verify and sign. Each new row adds about 40 µs. The linear term shrinks from about 40 µs to about 1.7 µs per row, so the teardown budget on this host stretches from roughly 125,000 to roughly 2,500,000 rows of already-verified prefix (extrapolated, not measured). A first run on a large store without a receipt still pays the full walk, bounded by Step 1.
+**Cost after Step 2.** Warm, no new rows: about 0.17 to 0.18 s per 100,000 rows (measured with the prototype loop, a lower bound) plus one Ed25519 verify and sign. Each new row adds about 40 µs. The linear term shrinks from about 40 µs to about 1.7 µs per row, so the teardown budget on this host stretches from roughly 125,000 to roughly 2,500,000 rows of already-verified prefix (extrapolated, not measured, and based on the prototype rescan, which skips the read transaction, receipt check and head checks; the real figure is lower). A first run on a large store without a receipt still pays the full walk, bounded by Step 1.
 
 ### Step 3: pacing with N11766 periodic checkpoints
 
@@ -190,6 +193,10 @@ Each negative control has a positive control that proves the allowed case still 
 | 18 | Differential property test: random sequences of {append, edit, re-chain, strip, delete, prune, key swap, receipt add/stale/drop} on small chains, many seeds | receipt verdict equals full verdict in every case |
 | 19 | Mutation check: temporarily skip the `D` comparison | Cases 2, 3, 5 and 18 must fail, proving the controls bite |
 
+Add to the oracle the `SignedEntries`, `UnsignedEntries` and `SigVerified` counters that `nocklock verify` prints (`internal/cli/verify.go`). Under a receipt, prefix counts must be reported as attested by the receipt (restored from it or worded that way), never as verified in this run, to keep the "say only what is enforced" invariant.
+
+Step 2 also needs a contention case: a verifier receipt write racing a live `Logger` append must neither fail nor delay the append (use a zero or very short busy timeout on the verifier and skip the write on `SQLITE_BUSY`). Only a caller holding the signing key writes receipts; a public-key-only `anchor verify` reads and uses them but never writes.
+
 Step 1 alone needs rows 14 and 17 plus a bounded-time test using the injected hook (EmitAnchor returns `ErrVerifyInterrupted` at the deadline instead of finishing the walk).
 
 ## Decisions requested from Mira
@@ -200,4 +207,4 @@ Step 1 alone needs rows 14 and 17 plus a bounded-time test using the injected ho
 
 ## Limits of this evidence
 
-Single host and single run set; cold OS page cache not measured; 1,000,000-row and teardown-budget figures are extrapolations; parallel verification speed-up is an estimate; the macOS figures are quoted from the Nock, not reproduced.
+The profile's scan-only phase materializes all rows while the rescan phase streams, so the 3% scan share carries some allocation and GC cost and the two are not strictly comparable; single host and single run set; cold OS page cache not measured; 1,000,000-row and teardown-budget figures are extrapolations; parallel verification speed-up is an estimate; the macOS figures are quoted from the Nock, not reproduced.
