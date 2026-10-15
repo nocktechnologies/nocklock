@@ -21,7 +21,7 @@ All notable changes to NockLock will be documented in this file.
 
 - Red-team proof matching now requires the `match` path sequence to align with path-component boundaries, so an unrelated blocked path cannot satisfy the proof row (N11798).
 
-- A project overlay can no longer loosen a `--profile` fence by spelling keys with Unicode case-fold characters such as U+017F (long s) (N11810). Every overlay field is now restricted by comparing the decoded overlay with the profile, so key spelling decides nothing, and the overlay file is read once. Tests cover a plain and a folded spelling for each restricted `secrets`, `syscall` and `filesystem` field.
+- A project overlay can no longer loosen a `--profile` fence through unusual key or table-name spelling. Overlay restrictions are now decided by comparing the decoded overlay with the profile (N11810).
 
 - Anchor off-box delivery no longer loses the push budget to its own preflight walks (N11800). `pushAnchorV2` now takes a per-step context factory: the identity read, both preflight-walk lock waits, `FetchLatestV2` and `PushV2` each get a fresh budget created immediately before the step, so a slow verification walk can no longer leave `FetchLatestV2`/`PushV2` on an expired context and silently drop off-box delivery. `wrap` teardown parents each step on `context.Background()` with `anchorPushTimeout`; interactive `anchor push` parents on the caller's context with `anchorCLITimeout`.
 
