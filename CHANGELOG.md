@@ -21,6 +21,8 @@ All notable changes to NockLock will be documented in this file.
 
 - Red-team proof matching now requires the `match` path sequence to align with path-component boundaries, so an unrelated blocked path cannot satisfy the proof row (N11798).
 
+- A project overlay can no longer loosen a `--profile` fence through unusual key or table-name spelling. Overlay restrictions are now decided by comparing the decoded overlay with the profile (N11810).
+
 - Anchor off-box delivery no longer loses the push budget to its own preflight walks (N11800). `pushAnchorV2` now takes a per-step context factory: the identity read, both preflight-walk lock waits, `FetchLatestV2` and `PushV2` each get a fresh budget created immediately before the step, so a slow verification walk can no longer leave `FetchLatestV2`/`PushV2` on an expired context and silently drop off-box delivery. `wrap` teardown parents each step on `context.Background()` with `anchorPushTimeout`; interactive `anchor push` parents on the caller's context with `anchorCLITimeout`.
 
 - `anchor enroll` / `anchor migrate` no longer skip the local anchor write when the post-enrollment verify is cut off by the CLI budget earlier walks spent (N11800). The enrolled remote pin is durable, so the post-enrollment fetch now runs on its own fresh budget and the verify walk runs unbounded (lock wait bounded separately); an interrupted or refused verify still writes nothing false. `ErrVerifyInterrupted` text is now neutral ("the chain was not judged"); "no anchor was written" is stated only at emission call sites.
