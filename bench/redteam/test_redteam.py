@@ -193,6 +193,16 @@ class NockLockProofTest(unittest.TestCase):
         self.assertIsNone(self.proof(json.dumps(self.envelope()), blocked=0))
         self.assertIsNone(self.proof(json.dumps(self.envelope()), event_type="network_blocked"))
 
+    def test_match_requires_path_component_boundaries(self):
+        for path, expected in (("/tmp/xcanary.txt", False), ("/tmp/canary.txt.bak", False),
+                               ("/tmp/canary.txt", True), ("canary.txt", True)):
+            envelope = self.envelope()
+            envelope["report"]["path"] = path
+            details = (json.dumps(envelope), f"op=open path={path} reason=outside allowed directory")
+            for detail in details:
+                with self.subTest(path=path, detail=detail[:20]):
+                    self.assertEqual(self.proof(detail) is not None, expected)
+
     def test_all_four_existing_file_rules_match_both_formats(self):
         attacks = tomllib.loads(Path(redteam.__file__).with_name("attacks.toml").read_text())["attack"]
         files = [attack for attack in attacks if attack.get("event") == "file_blocked"]
