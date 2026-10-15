@@ -528,13 +528,13 @@ func verifyNoSignerPair(t *testing.T, dbPath string, pub ed25519.PublicKey) (ful
 	return full, rec
 }
 
-// restoreReceipt rewrites the single verify_receipt row to r, re-encoding the
-// digest exactly as the production writer does. Restoring the saved row (sig
-// included, which covers only its own fields) leaves a valid receipt.
+// restoreReceipt rewrites the single verify_receipt row to r through the same
+// upsert the production writer uses (verifyReceiptUpsertSQL), so the two cannot
+// drift. Restoring the saved row (sig included, which covers only its own
+// fields) leaves a valid receipt.
 func restoreReceipt(t *testing.T, dbPath string, r *verifyReceipt) {
 	t.Helper()
-	rawExec(t, dbPath,
-		"INSERT OR REPLACE INTO verify_receipt (id, version, key_fingerprint, signed_genesis_at, unsigned_through_id, through_id, through_count, through_head_hash, digest, sig) VALUES (1, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+	rawExec(t, dbPath, verifyReceiptUpsertSQL,
 		r.Version, r.KeyFingerprint, r.SignedGenesisAt, r.UnsignedThroughID, r.ThroughID, r.ThroughCount, r.ThroughHeadHash, hex.EncodeToString(r.Digest), r.Sig)
 }
 

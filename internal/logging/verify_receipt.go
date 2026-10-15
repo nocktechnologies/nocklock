@@ -232,6 +232,12 @@ func (p *verifyProgress) advanceTo(id, count int64, headHash string, digest []by
 	p.digest = digest
 }
 
+// verifyReceiptUpsertSQL writes (or replaces) the single verify_receipt row. It
+// is the one source of truth for the row's column order, shared by the
+// production writer and the test receipt-restore helper so a schema change
+// cannot drift between them. The digest is hex-encoded before binding.
+const verifyReceiptUpsertSQL = "INSERT OR REPLACE INTO verify_receipt (id, version, key_fingerprint, signed_genesis_at, unsigned_through_id, through_id, through_count, through_head_hash, digest, sig) VALUES (1, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
+
 // writeVerifyReceipt records prog as a signed verify_receipt, best-effort. It is
 // a no-op unless this Logger holds the signing key whose public half is pub, so a
 // public-key-only verifier never writes. The write uses its own short,
@@ -289,8 +295,7 @@ func (l *Logger) writeVerifyReceipt(pub ed25519.PublicKey, prog *verifyProgress)
 	if err != nil {
 		return
 	}
-	if _, err := tx.ExecContext(ctx,
-		"INSERT OR REPLACE INTO verify_receipt (id, version, key_fingerprint, signed_genesis_at, unsigned_through_id, through_id, through_count, through_head_hash, digest, sig) VALUES (1, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+	if _, err := tx.ExecContext(ctx, verifyReceiptUpsertSQL,
 		r.Version, r.KeyFingerprint, r.SignedGenesisAt, r.UnsignedThroughID, r.ThroughID, r.ThroughCount, r.ThroughHeadHash, hex.EncodeToString(r.Digest), r.Sig,
 	); err != nil {
 		_ = tx.Rollback()
