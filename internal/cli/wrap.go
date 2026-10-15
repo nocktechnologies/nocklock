@@ -872,12 +872,21 @@ var wrapCmd = &cobra.Command{
 			childEnv = append(removeEnvVars(childEnv, landlockRulesEnv), landlockRulesEnv+"="+encoded)
 		}
 
+		// Resolve the requested command once, before any kernel-fence shim or
+		// netns helper receives it (their execve calls do not search the
+		// caller's PATH), and reuse that single resolution both to fingerprint
+		// the command below and to build childArgv further down — never
+		// resolve args[0] a second time, or the two resolutions could pick
+		// different files.
+		resolved, resolveErr := resolveChildArgv(args)
+		fp := execFingerprint{Status: execUnresolved}
+		if resolveErr == nil {
+			fp = fingerprintExecutable(resolved[0])
+		}
+
 		// Record the effective egress level in the signed session-start row only
 		// after the configured bridge and network fence have initialized.
-		sessionDetail := args[0]
-		if unixSocketReason != "" {
-			sessionDetail += " unix_sockets=reachable reason=" + unixSocketReason
-		}
+		sessionDetail := sessionStartDetail(args[0], fp, unixSocketReason)
 		if err := logger.Log(logging.Event{
 			Timestamp:   time.Now(),
 			EventType:   logging.EventSessionStart,
@@ -891,16 +900,13 @@ var wrapCmd = &cobra.Command{
 			cmd.SilenceErrors = true
 			return &exitCodeError{code: 2}
 		}
-
-		// Resolve the requested command before any kernel-fence shim or netns
-		// helper receives it; their execve calls do not search the caller's PATH.
-		childArgv, err := resolveChildArgv(args, landlockPrefix, fsSandboxPrefix)
-		if err != nil {
+		if resolveErr != nil {
 			logEvent(logging.EventSessionEnd, "session", "exit_code=1", false)
 			cmd.SilenceErrors = true
 			cmd.SilenceUsage = true
-			return err
+			return resolveErr
 		}
+		childArgv := composeChildArgv(resolved, landlockPrefix, fsSandboxPrefix)
 		// Export this run's session id to the child (N10647) so a co-located tool
 		// can stamp the SAME id. Done here, after every other env mutation and
 		// immediately before the single point where childEnv is consumed, so it
@@ -1201,6 +1207,19 @@ func resolvedNetworkFenceMode(flags WrapFlags) string {
 		return "netns"
 	}
 	return "proxy"
+}
+
+// sessionStartDetail renders the signed session_start detail: the requested
+// command, quoted (Go's %q, via strconv.Quote) so its value can never be
+// mistaken for one of the key=value fields that follow it. An unquoted
+// command containing, say, " exec_sha256=deadbeef" would otherwise plant a
+// second exec_sha256-looking field ahead of the real one.
+func sessionStartDetail(command string, fp execFingerprint, unixSocketReason string) string {
+	detail := "command=" + strconv.Quote(command) + fp.Detail()
+	if unixSocketReason != "" {
+		detail += " unix_sockets=reachable reason=" + unixSocketReason
+	}
+	return detail
 }
 
 func composeChildArgv(args []string, prefixes ...[]string) []string {

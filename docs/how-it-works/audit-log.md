@@ -24,6 +24,22 @@ An early input or availability error still returns its original error without
 inventing an audit verdict. Exporting a public key, anchor enrollment/push, and
 live fence-probe output do not acquire this history-verification notice.
 
+### Executable fingerprint on the start row
+
+The signed `session_start` detail is `command=<quoted-command> exec_status=<status> [exec_path="<path>"] [exec_sha256=<hex>] [exec_kind=<kind>] [unix_sockets=reachable reason=<reason>]`. The trailing `unix_sockets`/`reason` fields appear only when a reachable Unix socket was detected (`internal/cli/wrap.go`); they are unrelated to the fingerprint. The command is quoted with Go's `%q` so its value can never be read as one of the trailing key=value fields — an unquoted command containing, say, ` exec_sha256=<hex>` could otherwise appear to plant a second `exec_sha256` field. NockLock resolves the requested command on the caller's `PATH` once (as the launch does) and hashes that same resolved file's bytes (`internal/cli/exec_fingerprint.go`); the launch never resolves the command a second time, so the fingerprinted path and the exec'd path cannot diverge. Plain, netns, Landlock and Seatbelt launches all fingerprint the requested command, never NockLock's own binary, `sandbox-exec` or the netns helper placed in front of it.
+
+| `exec_status` | Meaning |
+|---|---|
+| `hashed` | Regular file, read in full, digest recorded |
+| `unresolved` | Not found on `PATH`; the launch then fails |
+| `unreadable` | Found but could not be opened or read; no digest |
+| `not_regular` | FIFO, device or similar; never read |
+| `oversized` | Over 256 MiB; never hashed |
+
+`exec_kind=script` means the file starts with `#!`: the digest covers that script file only, not its interpreter. `exec_kind=launcher` means the basename is a known launcher (`sudo`, `nohup`, `timeout`, `xargs`, `npx`, `uvx`, and similar): the digest identifies the launcher, not the agent it starts. Treat both as "this file", never "the agent".
+
+Limits: the hash is taken before exec, so a file swapped between the hash and the exec is not detected (time-of-check/time-of-use). Not covered: what a script's interpreter, shared libraries, language modules or plugins later load; programs a launcher or script goes on to exec; the launcher list is a fixed heuristic, so an unlisted wrapper is not labelled. A symlink is followed, so the digest is of its target. The row records what NockLock observed, not that the binary is safe or approved; nothing is blocked on a digest.
+
 ### Linux interposer connection provenance
 
 New Linux interposer `file_blocked` rows use a version 1 JSON detail envelope
@@ -233,4 +249,4 @@ The scratch directory is only a verification workspace: never run `wrap`, `log -
   `verify` prints a `NOTE`. V2 local pending/enrolled state or a retained original registration request refuses prune, including state none after an interrupted write.
 
 ## Tests
-`internal/logging/*_test.go`, `internal/cli/verify_test.go`, `verify_signing_test.go`, `audit_state_*_test.go`, `anchor_*_test.go`, `internal/anchorclient/client*_test.go`, `pkg/receipt/*_test.go`.
+`internal/logging/*_test.go`, `internal/cli/exec_fingerprint_test.go`, `internal/cli/verify_test.go`, `verify_signing_test.go`, `audit_state_*_test.go`, `anchor_*_test.go`, `internal/anchorclient/client*_test.go`, `pkg/receipt/*_test.go`.
