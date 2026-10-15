@@ -6,7 +6,7 @@ All notable changes to NockLock will be documented in this file.
 
 ### Added
 
-- Add a profiling recipe and design for bounded anchor verification (N11775): `docs/design/anchor-verification-profile.md`, an env-gated `TestProfileAnchorVerification`, and a negative control showing a signed-head-only check misses a laundered tamper. Documentation and tests only; no runtime change.
+- Add a profiling recipe and design for bounded anchor verification: `docs/design/anchor-verification-profile.md`, an env-gated `TestProfileAnchorVerification`, and a negative control showing a signed-head-only check misses a laundered tamper. Documentation and tests only; no runtime change.
 
 ### Fixed
 
