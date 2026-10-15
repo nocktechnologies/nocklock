@@ -12,9 +12,9 @@ Registered in `internal/cli/` (one file per command). `README.md` "Commands" has
 | `validate [config-path]` | | `validate.go` |
 | `config` | | `config.go` |
 | `doctor [--json]` | | `doctor.go` |
-| `verify [--json]` | `--audit`, `--export-pubkey`, `--ed25519-pub <key>`, `--against-anchor <file>`, `--against-remote-anchor` (the last two are mutually exclusive) | `verify.go` |
+| `verify [--json]` | `--audit`, `--export-pubkey`, `--ed25519-pub <key>`, `--against-anchor <file>`, `--against-remote-anchor` (the last two are mutually exclusive), `--walk-timeout <dur>` | `verify.go` |
 | `scan [path ...]` | `--env`, `--json` | `scan.go` |
-| `anchor emit [--out <file>]`, `anchor push [--file <file>]` | | `anchor.go` |
+| `anchor emit [--out <file>]`, `anchor push [--file <file>]` | `--walk-timeout <dur>` | `anchor.go` |
 | `anchor enroll`, `anchor migrate` | enroll: `--acknowledge-no-legacy-history` | `anchor_v2.go` |
 | `log` | `--session`, `--blocked`, `--since`, `--json`, `--stats`, `--prune <age>` | `log.go` |
 | `status`, `version` | | `status.go`, `version.go` |
@@ -45,6 +45,8 @@ Preserve incomplete or moved state and follow the
 `anchor enroll` explicitly creates a random trusted identity and a new remote v2 pin after checking the signed local chain and retained legacy history. `--acknowledge-no-legacy-history` confirms this project has no claim to a legacy pin belonging to another project. `anchor migrate` selects the owning local project, verifies the legacy prefix, and conditionally migrates its exact signed witness. Both require successful remote verification before reporting completion. Back up the DB, legacy anchor and trusted directory before migration. A retry uses the original request and mode; errors never clear pending.
 
 `anchor emit` verifies an existing signed log and original key without adopting or re-signing its database. It emits v2 when trusted identity exists, otherwise a local v1 file. `verify --against-anchor` supports explicit v1 and v2 files; v2 requires local expected identity agreement. `anchor push [--file <file>]` accepts v2 only, requires enrollment, and validates both candidate and previous remote prefixes before compare-and-swap. An absent remote pin cannot be recreated by push.
+
+`--walk-timeout <dur>` (on `anchor emit`, `anchor push`, `verify --against-anchor` (v1 and v2 files), `verify --audit` and `verify --against-remote-anchor`) bounds only the local chain-verification walk; its default is `0` (unbounded), so these commands complete on a large store, and a signed verification receipt keeps the walk short on an unchanged prefix (`docs/how-it-works/audit-log.md`). The identity-lock waits and network steps keep their own 30 s budget. Set a positive duration (e.g. `--walk-timeout=30s`) to cap the walk.
 
 `verify --against-remote-anchor` fetches only the trusted signed pair, authenticates it before any row-count verdict, and exits non-zero for missing/unreachable anchors, absent identity, unsupported v2 routes, malformed records or mismatches. Projects sharing a managed key have separate random chain IDs. No remote command falls back to v1; upgrade the store first. After v2 registration the store freezes ordinary v1 access, retaining legacy history for explicit migration.
 

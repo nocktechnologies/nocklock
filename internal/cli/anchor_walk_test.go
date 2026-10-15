@@ -4,7 +4,10 @@ package cli
 
 import (
 	"bytes"
+	"context"
+	"errors"
 	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -54,6 +57,55 @@ func TestFinishAnchorSessionWalkDeadline(t *testing.T) {
 			}
 			if _, err := os.Stat(path); err != nil {
 				t.Fatalf("unbounded teardown wrote no anchor: %v", err)
+			}
+		})
+	}
+}
+
+// TestVerifyAgainstAnchorWalkTimeout: the interactive `verify --against-anchor`
+// handler honors --walk-timeout (anchorCLIWalkTimeout) for BOTH a v1 anchor file
+// and a v2 one. An already-expired walk budget stops the local chain walk with
+// ErrVerifyInterrupted — the v1 regression was that the v1 path ignored the walk
+// context entirely — while the default (unbounded) budget completes.
+func TestVerifyAgainstAnchorWalkTimeout(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		v2   bool
+	}{{"v1", false}, {"v2", true}} {
+		t.Run(tc.name, func(t *testing.T) {
+			dbPath, keyPath := setupAnchorProject(t)
+			seedSignedChain(t, dbPath, keyPath, 3)
+			path := filepath.Join(t.TempDir(), "chain-anchor.json")
+			if tc.v2 {
+				if err := logging.WriteAnchorV2(path, emitRemoteAnchorNow(t, dbPath, keyPath)); err != nil {
+					t.Fatal(err)
+				}
+			} else {
+				if err := logging.WriteAnchor(path, emitAnchorNow(t, dbPath, keyPath)); err != nil {
+					t.Fatal(err)
+				}
+			}
+			t.Setenv(anchorclient.EnvURL, "")
+
+			orig := anchorCLIWalkTimeout
+			t.Cleanup(func() { anchorCLIWalkTimeout = orig })
+
+			// An already-expired walk budget interrupts the local walk; the identity
+			// lock wait keeps its own (unexpired) 30 s budget.
+			anchorCLIWalkTimeout = time.Nanosecond
+			var out bytes.Buffer
+			if err := runVerifyAgainstAnchor(context.Background(), &out, path, ""); !errors.Is(err, logging.ErrVerifyInterrupted) {
+				t.Fatalf("bounded walk did not interrupt: err=%v out=%q", err, out.String())
+			}
+
+			// Control: the default budget leaves the walk unbounded and verifies OK.
+			anchorCLIWalkTimeout = 0
+			out.Reset()
+			if err := runVerifyAgainstAnchor(context.Background(), &out, path, ""); err != nil {
+				t.Fatalf("unbounded walk failed: err=%v out=%q", err, out.String())
+			}
+			if !strings.Contains(out.String(), "ANCHOR: OK") {
+				t.Fatalf("unbounded walk did not verify OK: %q", out.String())
 			}
 		})
 	}

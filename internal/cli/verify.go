@@ -66,6 +66,7 @@ var verifyCmd = &cobra.Command{
 		"dial invalid/example hosts, check a canary " +
 		"environment variable is absent, and attempt one side-effect-free denied syscall.",
 	RunE: func(cmd *cobra.Command, args []string) error {
+		applyWalkTimeoutFlag(cmd)
 		asJSON, _ := cmd.Flags().GetBool("json")
 		asAudit, _ := cmd.Flags().GetBool("audit")
 		exportPub, _ := cmd.Flags().GetBool("export-pubkey")
@@ -119,6 +120,7 @@ func init() {
 	verifyCmd.Flags().String("ed25519-pub", "", "trusted Ed25519 public key (base64 or hex); requires the audit log to be signed")
 	verifyCmd.Flags().String("against-anchor", "", "verify the local audit chain against an external anchor file (detects tail truncation and rollback)")
 	verifyCmd.Flags().Bool("against-remote-anchor", false, "verify the local audit chain against the latest anchor in the off-box store at $NOCKLOCK_ANCHOR_URL (absence fails)")
+	verifyCmd.Flags().Duration("walk-timeout", 0, walkTimeoutFlagUsage)
 	rootCmd.AddCommand(verifyCmd)
 }
 
@@ -140,7 +142,10 @@ func writeVerificationCoverage(w io.Writer) {
 // log is opened READ-ONLY (no signing option): verifying never writes.
 func runVerifyAgainstAnchor(ctx context.Context, w io.Writer, anchorFile, pubFlag string) error {
 	defer writeVerificationCoverage(w)
-	ctx, cancel := context.WithTimeout(ctx, anchorCLITimeout)
+	// lockCtx bounds the identity-lock wait at anchorCLITimeout; walkCtx bounds only
+	// the verification walk (both derived from the same parent, so the walk never
+	// inherits the 30 s lock cap — the N11800 regression).
+	lockCtx, walkCtx, cancel := anchorCLIContexts(ctx)
 	defer cancel()
 	dbPath, projectRoot, err := resolveAuditDBPath()
 	if err != nil {
@@ -174,7 +179,7 @@ func runVerifyAgainstAnchor(ctx context.Context, w io.Writer, anchorFile, pubFla
 		if err != nil {
 			return err
 		}
-		result, err := logger.VerifyAgainstAnchorV2Context(ctx, anchor, pub)
+		result, err := logger.VerifyAgainstAnchorV2Walk(lockCtx, walkCtx, anchor, pub)
 		if err != nil {
 			return err
 		}
@@ -185,8 +190,14 @@ func runVerifyAgainstAnchor(ctx context.Context, w io.Writer, anchorFile, pubFla
 		return err
 	}
 
-	result, err := logger.VerifyAgainstAnchor(anchor, pub)
+	// Pass walkCtx so --walk-timeout bounds the v1 walk exactly as the v2 path
+	// above. An interrupted walk surfaces ErrVerifyInterrupted raw (the v2 branch
+	// returns it unwrapped too), keeping the neutral interrupt text from N11800.
+	result, err := logger.VerifyAgainstAnchorContext(walkCtx, anchor, pub)
 	if err != nil {
+		if errors.Is(err, logging.ErrVerifyInterrupted) {
+			return err
+		}
 		return fmt.Errorf("anchor verification failed: %w", err)
 	}
 	return writeAnchorVerifyResult(w, result)
@@ -291,8 +302,15 @@ func runAuditVerify(ctx context.Context, w io.Writer, pubFlag string) error {
 	}
 	defer logger.Close()
 
-	// Verify the chain (signature-aware when a key is available).
-	result, err := logger.VerifyChainSigned(pub, pubFlag != "")
+	// Verify the chain (signature-aware when a key is available), bounding only the
+	// walk by the operator's --walk-timeout (unbounded by default) so the flag
+	// advertised on `verify` means the same thing in every mode.
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	walkCtx, cancelWalk := anchorCLIWalkContext(ctx)
+	defer cancelWalk()
+	result, err := logger.VerifyChainSignedContext(walkCtx, pub, pubFlag != "")
 	if err != nil {
 		return fmt.Errorf("verification failed: %w", err)
 	}
@@ -394,7 +412,14 @@ func writeAuditVerifyResult(w io.Writer, result *logging.ChainVerifyResult) erro
 	}
 
 	if result.SigState == "authentic" {
-		fmt.Fprintf(w, "AUDIT: AUTHENTIC — %d entries verified, %d Ed25519-signed and valid, chain_head signature valid\n", result.EntriesVerified, result.SigVerified)
+		if result.SigAttested > 0 {
+			// A signed verify_receipt attested a byte-identical prefix, so its
+			// signatures were re-proven unchanged, not re-verified in this run. Say
+			// exactly that ("say only what is enforced").
+			fmt.Fprintf(w, "AUDIT: AUTHENTIC — %d entries verified, %d Ed25519 signatures verified this run and %d attested by a prior signed verify_receipt (prefix re-proven byte-identical, not re-verified), chain_head signature valid\n", result.EntriesVerified, result.SigVerified, result.SigAttested)
+		} else {
+			fmt.Fprintf(w, "AUDIT: AUTHENTIC — %d entries verified, %d Ed25519-signed and valid, chain_head signature valid\n", result.EntriesVerified, result.SigVerified)
+		}
 		if result.SignedGenesisAt != nil && result.UnsignedEntries > 0 {
 			fmt.Fprintf(w, "NOTE: entries 1..%d predate signing adoption (%s); consistent but unsigned, not authenticated.\n", result.UnsignedThroughID, result.SignedGenesisAt.Format(time.RFC3339))
 		}
