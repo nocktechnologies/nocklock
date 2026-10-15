@@ -60,20 +60,24 @@ Its `detail` is `key=value` fields in the same quoted style as the `session_star
 
 ## Verification
 
-For each run found in the chain (`session_start` rows with `lifecycle=1`), the verifier reports one of the statuses in the table below. A run is discovered, and the `unclosed` test applies, only once its `session_start` row exists; `first_id` is a separate notion — the earliest row carrying the run's `session_id`, which can precede `session_start` (the config-digest row at `internal/cli/wrap.go:197` and the secret-preflight row at `internal/cli/wrap.go:288` both predate `session_start` at `internal/cli/wrap.go:892`). `rows` and `root` cover every row with that `session_id` from `first_id` through `last_id`, close excluded:
+For each run found in the chain, the verifier reports one of the statuses in the table below. A run is found two ways: by its `session_start` row (`lifecycle=1`), and — because a prune can delete that row while the run's close survives — by any `session_close` row whose `session_id` has no surviving start row. The `unclosed` test applies only to a run found by a start row with no close; a close found with no start is never `unclosed` (it is `pruned` or `close_mismatch`, below). `first_id` is a separate notion — the earliest row carrying the run's `session_id`, which can precede `session_start` (the config-digest row at `internal/cli/wrap.go:197` and the secret-preflight row at `internal/cli/wrap.go:288` both predate `session_start` at `internal/cli/wrap.go:892`). `rows` and `root` cover every row with that `session_id` from `first_id` through `last_id`, close excluded.
+
+**The prune boundary.** `Prune` (`internal/logging/logger.go:1134`) deletes rows older than a cutoff and re-chains the survivors; the `chain_head` update this requires anyway (`entry_hash`, `row_count`, `head_sig`) carries, as prune metadata, only `pruned_at` and `pruned_count` (full-prune path at `internal/logging/logger.go:1199`, partial-prune path at `internal/logging/logger.go:1275`; columns declared at `internal/logging/logger.go:256-257`) — no id boundary. This design adds no column to carry one; none is needed. The boundary a verifier uses is read fresh at verify time, the same as any other row: `chain_head.pruned_at` set (a prune happened at all) together with the lowest surviving row id in `events` (a plain `MIN(id)`, no stored value). A start-less close is judged against both facts together, since `pruned_at` alone does not say *this* run's early rows were the ones removed.
+
+**Order of checks for a start-less close.** The prune test runs before the `rows`/`root` recomputation, not after. A legitimately pruned run's recomputed `rows` and `root` will not match the signed values — its early rows are gone, by design — so testing recomputation first would misroute it to `close_mismatch`, reintroducing the defect this round closes. The rule: if a close has no surviving start row, check `chain_head.pruned_at` set and the close's `first_id` below the lowest surviving row id first; a match reports `pruned` and skips the recomputation. A start-less close that fails that test reports `close_mismatch` instead. The `rows`/`root` recomputation in `closed` and in `close_mismatch`'s other branch (a surviving start, a row of it edited, removed or inserted) is unchanged: it still runs whenever the start row survives.
 
 | Status | Condition | Severity |
 | --- | --- | --- |
-| `closed` | one `session_close`; recomputed `rows`, `root`, `first_id`, `last_id` equal the signed values; no later row has the run's `session_id` | ok |
-| `close_mismatch` | close present, any recomputed value differs (a run row edited, removed or inserted yet re-signed) | failure (tampered) |
+| `closed` | start present; one `session_close`; recomputed `rows`, `root`, `first_id`, `last_id` equal the signed values; no later row has the run's `session_id` | ok |
+| `pruned` | checked first, before recomputation, for any close found with no start row: `chain_head.pruned_at` set and the close's `first_id` below the lowest surviving row id in `events` | neutral, reported |
+| `close_mismatch` | start present, any recomputed value differs (a run row edited, removed or inserted yet re-signed); or a close found with no start row that fails the `pruned` test above (`pruned_at` unset, or `first_id` at or above the lowest surviving row id) | failure (tampered) |
 | `rows_after_close` | a row with this `session_id` after its close, or two closes | failure |
 | `unclosed` | start present, no close | neutral (see above) |
-| `pruned` | run's rows partly gone below the prune boundary recorded in `chain_head` metadata | neutral, reported |
 | `legacy` | no `lifecycle=1` on the start row (written before this contract) | neutral, never a failure |
 
 `session_end` rows with no start (early refusals) are not runs and need no close.
 
-**Downgrade resistance.** Whether a run owes a close is decided by `lifecycle=1` in its signed `session_start` detail. A writer that never emits `lifecycle=1` never owes one; an attacker cannot strip a signed field without breaking that row's signature, and removing the start row removes the run from view, which is the same cut attack as above.
+**Downgrade resistance.** Whether a run owes a close is decided by `lifecycle=1` in its signed `session_start` detail. A writer that never emits `lifecycle=1` never owes one; an attacker cannot strip a signed field without breaking that row's signature. Removing just the start row and re-chaining does not remove the run from view: the run's `session_close` row still carries its `session_id`, so the verifier still finds it and reports `close_mismatch` — unless `chain_head.pruned_at` is set and the close's `first_id` falls below the lowest surviving row id, the signature of a legitimate prune rather than a selective cut, in which case it reports `pruned` instead. A run with neither a surviving start nor a surviving close is invisible, the same cut attack as above, but that is the whole run gone, not one row removed from it.
 
 ## Relation to the verification receipt (#224)
 
@@ -118,13 +122,14 @@ Each negative control carries its positive control.
 | 8 | Tail (including close) truncated and re-chained | chain intact, `unclosed`; local anchor or v2 pin reports `TRUNCATION` |
 | 9 | Old chain with no `lifecycle=1` | `legacy`, verify exit unchanged |
 | 10 | Chain with close rows through the receipt path (`verify_receipt` present) | same verdicts as the full walk (differential); suffix-run and prefix-run both checked |
-| 11 | Prune removes an older run, a later run survives | surviving run still `closed`; partly pruned run `pruned` |
+| 11 | Prune deletes an older run's pre-close rows, including its `session_start`, under a cutoff that falls before the run's `session_close` is written (the close postdates the cutoff and survives); a later run's rows all survive | older run found by its close alone: `chain_head.pruned_at` set, close's `first_id` below the lowest surviving row id — `pruned`; later run still `closed` |
 | 12 | `session_start` with `lifecycle=1` stripped | row signature fails |
 | 13 | A producer (proxy, look-back rule, denial tailer) still writing when teardown begins | its rows land before `session_end`; run still `closed`, no `rows_after_close` |
 | 14 | Full real `wrap` teardown against a live proxy and child | run ends `closed` |
 | 15 | `session_end` write forced to fail | no close attempted; loud stderr; verifier says `unclosed` |
 | 16 | Proxy shutdown exceeds its 5s drain deadline with a handler still writing | close skipped; run `unclosed`; never `rows_after_close` |
 | 17 | Honest run with a config-digest row before `session_start` (`first_id` precedes the start row), then that pre-start row deleted and the chain re-signed | verifies `closed` before the deletion; `close_mismatch` after |
+| 18 | Only the `session_start` row removed and the chain re-signed; no prune (`chain_head.pruned_at` unset) | close found with no start, not explained by `pruned_at`: `close_mismatch` |
 
 ## Decisions (Mira, round 1)
 
@@ -136,6 +141,6 @@ Each negative control carries its positive control.
 
 - A key holder can write a false close; the close defends against an unsigned or partial writer, not a stolen key.
 - It cannot tell crash from cut (above).
-- A run that never wrote a start (`lifecycle=1`) is invisible to it.
+- A run that never wrote a start (`lifecycle=1`) is invisible to it — but a run whose start row was later pruned is not: it is still found via its surviving `session_close` (see Verification, above).
 - Rows of a run committed after its close are detected only while that `session_id` is not reused; IDs are UUIDs minted per process.
-- `first_id` is simply the earliest row carrying the `session_id` in the chain, not a fixed step of `wrap`'s startup; if a process exits before ever writing `session_start` (e.g. `recordConfigDigest` succeeds but `protectChainIdentity` then refuses), the config-digest and secret-preflight rows it left behind are not part of any run — there is no `session_start` to make one exist — the same as a `session_end` row with no start.
+- `first_id` is simply the earliest row carrying the `session_id` in the chain, not a fixed step of `wrap`'s startup; if a process exits before ever writing `session_start` (e.g. `recordConfigDigest` succeeds but `protectChainIdentity` then refuses), the config-digest and secret-preflight rows it left behind are not part of any run — there is neither a start nor a close to make one exist — the same as a `session_end` row with no start.
