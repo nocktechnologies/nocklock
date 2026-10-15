@@ -728,7 +728,21 @@ func runProbeUnderWrap(ctx context.Context, cfg *config.Config, configPath, fenc
 	// installed executable would conflict with a deny that contains it and can
 	// also widen the policy being verified.
 	probeBin := filepath.Join(tmp, "bin")
-	if err := os.Mkdir(probeBin, 0o755); err != nil {
+	if runtime.GOOS == "linux" && cfgCopy.Filesystem.Root != "" {
+		// The state/canary scratch may be under /var/tmp or /dev/shm, whose
+		// shared writable ancestors cannot be trusted for an LD_PRELOAD file.
+		// Put the executable pair in private scratch outside the same grants
+		// and denies, then validate its complete ancestry before using it.
+		home, _ := os.UserHomeDir()
+		state, _ := config.AuditStateDir(projectRoot)
+		var cleanupBin func()
+		var ok bool
+		probeBin, cleanupBin, ok = createTrustedScratchOutsideBases(forbidden, []string{home, state})
+		if !ok {
+			return probeResult{Fence: fence}, errors.New("cannot create trusted verification executable scratch outside filesystem grants and denies; provide a safe home or audit-state directory")
+		}
+		defer cleanupBin()
+	} else if err := os.Mkdir(probeBin, 0o755); err != nil {
 		return probeResult{Fence: fence}, err
 	}
 	probeExe := filepath.Join(probeBin, "nocklock-probe")
@@ -741,6 +755,9 @@ func runProbeUnderWrap(ctx context.Context, cfg *config.Config, configPath, fenc
 	}
 	cfgCopy.Filesystem.Allow = append(cfgCopy.Filesystem.Allow, probeBin)
 	if runtime.GOOS == "linux" && cfgCopy.Filesystem.Root != "" {
+		if _, err := trustedInterposerPath(probeExe); err != nil {
+			return probeResult{Fence: fence}, fmt.Errorf("unsafe verification executable scratch: %w", err)
+		}
 		libPath, err := verifyFilesystemBackend()
 		if err != nil {
 			return probeResult{Fence: fence}, err
@@ -869,7 +886,11 @@ var verifyScratchBases = []string{"/var/tmp", "/dev/shm", os.TempDir()}
 var verifyWriteFile = os.WriteFile
 
 func createScratchOutside(roots []string) (string, func(), bool) {
-	for _, base := range verifyScratchBases {
+	return createScratchOutsideBases(roots, verifyScratchBases)
+}
+
+func createScratchOutsideBases(roots, bases []string) (string, func(), bool) {
+	for _, base := range bases {
 		if base == "" || pathWithinAny(base, roots) {
 			continue
 		}
@@ -882,6 +903,29 @@ func createScratchOutside(roots []string) (string, func(), bool) {
 			continue
 		}
 		return dir, func() { os.RemoveAll(dir) }, true
+	}
+	return "", nil, false
+}
+
+// createTrustedScratchOutsideBases tries every safe base before refusing. Check
+// ancestry before copying executable bytes, including when HOME is unsafe but
+// the audit-state directory is safe. Recheck the created directory as well.
+func createTrustedScratchOutsideBases(roots, bases []string) (string, func(), bool) {
+	for _, base := range bases {
+		base, err := trustedInterposerDirectory(base)
+		if err != nil {
+			continue
+		}
+		dir, cleanup, ok := createScratchOutsideBases(roots, []string{base})
+		if !ok {
+			continue
+		}
+		canonical, err := trustedInterposerDirectory(dir)
+		if err != nil || pathWithinAny(canonical, roots) {
+			cleanup()
+			continue
+		}
+		return canonical, cleanup, true
 	}
 	return "", nil, false
 }

@@ -4,6 +4,10 @@ All notable changes to NockLock will be documented in this file.
 
 ## [Unreleased]
 
+### Security
+
+- Validate Linux interposer ownership, permissions and symlink paths before launch; report unsafe installations in `doctor` (N11769).
+
 ### Added
 
 - Signed verification receipt with prefix rescan (Step 2 of the bounded-verification design, N11801). A single-row `verify_receipt` table in `events.db`, key-signed under a new domain byte `0x07`, caches one complete signed verification as an attested *verified prefix*: `version || key_fingerprint || signed_genesis_at || unsigned_through_id || through_id || through_count || through_head_hash || D`, with `D` the rolling `SHA-256` over `entry_hash||entry_sig`. A later verification re-proves the prefix byte-identical (linkage, hash and `D`) and skips only its signatures, verifying signatures for the suffix and always re-checking the head — about 97% of the per-row cost gone on an unchanged prefix. Detection is unchanged: any prefix edit, signature change/strip, reorder, deletion, key or adoption-metadata change discards the receipt and runs the full walk with identical diagnostics. `nocklock verify` reports prefix signatures as attested by the receipt, never as verified in this run (`SigAttested`). Only a key holder writes a receipt, in a short separate transaction skipped under append contention or on a read-only database; a public-key-only verifier reads but never writes; `Prune` drops it; a consistent older database still verifies authentic (the A2 rollback limit is unchanged). `internal/logging/verify_receipt.go`, negative controls 1-19 incl. the differential property and the `D`-comparison mutation check in `verify_receipt_test.go`.

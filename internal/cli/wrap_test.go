@@ -548,7 +548,12 @@ func TestFindTrustedLibFenceFSRejectsProjectRelativeLibrary(t *testing.T) {
 		filepath.Join(t.TempDir(), "nocklock"),
 		projectRoot,
 		[]string{projectLib},
-		func(path string) (bool, error) { return path == projectLib, nil },
+		func(path string) (string, error) {
+			if path == projectLib {
+				return path, nil
+			}
+			return "", os.ErrNotExist
+		},
 	)
 	if err == nil {
 		t.Fatalf("expected project-relative libfence_fs.so to be rejected, got %q", got)
@@ -563,7 +568,7 @@ func TestFindTrustedLibFenceFSFailsClosedWhenNoTrustedLibraryExists(t *testing.T
 		filepath.Join(t.TempDir(), "nocklock"),
 		t.TempDir(),
 		nil,
-		func(string) (bool, error) { return false, nil },
+		func(string) (string, error) { return "", os.ErrNotExist },
 	)
 	if err == nil {
 		t.Fatalf("expected fail-closed error when no trusted libfence_fs.so exists, got %q", got)
@@ -587,7 +592,12 @@ func TestFindTrustedLibFenceFSSelectsInstalledPath(t *testing.T) {
 		filepath.Join(t.TempDir(), "nocklock"),
 		t.TempDir(),
 		[]string{installed},
-		func(path string) (bool, error) { return path == installed, nil },
+		func(path string) (string, error) {
+			if path == installed {
+				return path, nil
+			}
+			return "", os.ErrNotExist
+		},
 	)
 	if err != nil {
 		t.Fatalf("expected installed trusted path to be selected: %v", err)
@@ -603,7 +613,12 @@ func TestFindTrustedLibFenceFSAcceptsSystemPathFromRootWorkingDir(t *testing.T) 
 		filepath.Join(t.TempDir(), "nocklock"),
 		string(os.PathSeparator),
 		nil,
-		func(path string) (bool, error) { return path == systemLib, nil },
+		func(path string) (string, error) {
+			if path == systemLib {
+				return path, nil
+			}
+			return "", os.ErrNotExist
+		},
 	)
 	if err != nil {
 		t.Fatalf("expected system libfence_fs.so to be accepted when cwd is filesystem root: %v", err)
@@ -619,7 +634,7 @@ func TestFindTrustedLibFenceFSSurfacesStatErrors(t *testing.T) {
 		"",
 		t.TempDir(),
 		[]string{filepath.Join(t.TempDir(), "libfence_fs.so")},
-		func(string) (bool, error) { return false, statErr },
+		func(string) (string, error) { return "", statErr },
 	)
 	if err == nil {
 		t.Fatalf("expected stat error to fail closed, got %q", got)

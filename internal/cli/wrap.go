@@ -412,6 +412,7 @@ var wrapCmd = &cobra.Command{
 					// Look for the shared library next to the nocklock binary or in standard paths.
 					libPath, err := findLibFenceFS()
 					if err != nil {
+						logEvent(logging.EventFileBlocked, "filesystem", err.Error(), true)
 						return err
 					}
 
@@ -1555,7 +1556,7 @@ func findLibFenceFS() (string, error) {
 	if err != nil {
 		return "", fmt.Errorf("cannot resolve current working directory for filesystem fence library trust check: %w", err)
 	}
-	return findTrustedLibFenceFS(exePath, cwd, nil, fileExists)
+	return findTrustedLibFenceFS(exePath, cwd, nil, nil)
 }
 
 // networkFloorDetail renders the Seatbelt network-floor state for the signed
@@ -1644,9 +1645,9 @@ func validateUnixProxySocketPath(path string) error {
 	return nil
 }
 
-func findTrustedLibFenceFS(exePath, workingDir string, extraCandidates []string, exists func(string) (bool, error)) (string, error) {
-	if exists == nil {
-		exists = fileExists
+func findTrustedLibFenceFS(exePath, workingDir string, extraCandidates []string, inspect func(string) (string, error)) (string, error) {
+	if inspect == nil {
+		inspect = trustedInterposerPath
 	}
 
 	candidates := make([]string, 0, len(extraCandidates)+3)
@@ -1664,31 +1665,23 @@ func findTrustedLibFenceFS(exePath, workingDir string, extraCandidates []string,
 		if err != nil {
 			continue
 		}
-		ok, err := exists(abs)
-		if err != nil {
-			return "", fmt.Errorf("cannot inspect trusted filesystem fence library candidate %q: %w", abs, err)
-		}
-		if !ok {
-			continue
-		}
 		if pathIsWithinDir(abs, workingDir) {
 			continue
 		}
-		return abs, nil
+		canonical, err := inspect(abs)
+		if errors.Is(err, os.ErrNotExist) {
+			continue
+		}
+		if err != nil {
+			return "", fmt.Errorf("cannot inspect trusted filesystem fence library candidate %q: %w; refusing to launch with an unsafe LD_PRELOAD path", abs, err)
+		}
+		if pathIsWithinDir(canonical, workingDir) {
+			continue
+		}
+		return canonical, nil
 	}
 
 	return "", fmt.Errorf("trusted filesystem fence library not found. Install libfence_fs.so next to the nocklock binary, at /usr/local/lib/nocklock/libfence_fs.so, or at /usr/lib/nocklock/libfence_fs.so; refusing to launch with an untrusted LD_PRELOAD path")
-}
-
-func fileExists(path string) (bool, error) {
-	_, err := os.Stat(path)
-	if err == nil {
-		return true, nil
-	}
-	if errors.Is(err, os.ErrNotExist) {
-		return false, nil
-	}
-	return false, err
 }
 
 func pathIsWithinDir(path, dir string) bool {

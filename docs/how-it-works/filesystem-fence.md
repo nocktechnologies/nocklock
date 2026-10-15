@@ -11,6 +11,14 @@ Citations name source files at `origin/main` 89c02fa (no line numbers, so they d
 
 **Limits**: Landlock is inode-bound. Where Landlock is engaged, the kernel denies static binaries and children that clear `LD_PRELOAD`. Landlock is off with `linux_enforcement = "off"` and can be degraded or missing with `"preferred"` on a kernel without it, and then those opens are not denied. They bypass the interposer, so they produce no `file_blocked` event and cannot trip a look-back rule. A path under a granted directory cannot be excluded, which is why the audit log lives outside the project (`audit-log.md`). Grandchildren do not get their own `/proc/self` reads: `.claude/decisions/005-grandchild-procfs-self-limitation.md`.
 
+### Linux interposer installation trust
+
+Before loading `libfence_fs.so`, `wrap` checks the candidate file and every ancestor: each must be owned by root or the invoking real UID and must have no group/world write bits. A sticky writable directory such as `/tmp` is not an exception. The library must be a regular file. Symlinks remain supported for safe source and Homebrew layouts; their owners, original ancestors, targets and target ancestors are checked. Symlink permission bits themselves do not control replacement on Unix.
+
+An unsafe existing candidate causes refusal instead of silently trying another location. Install the library beside the executable or in the documented system library directory with those permissions; do not use a shared writable prefix. `doctor` uses the same resolver and reports a missing or unsafe backend as `GAPS FOUND` (exit 2) when the filesystem fence is configured.
+
+The resolver returns the canonical path and rechecks inode, device, owner, mode and symlink target observations before returning. This detects observed path changes during validation. It does not pin an open library descriptor for the child's lifetime or prevent root/the invoking user from changing a trusted file afterward. The invoking UID is a trust principal; this check does not separate hostile processes already running as that UID.
+
 ## macOS: Seatbelt write boundary
 - The SBPL profile (`internal/fence/fs/sbpl.go`) keeps `(allow default)`, applies `(deny file-write*)`, then allows writes to the canonical `filesystem.root`, `.nock`, `/private/tmp`, the user's temp and cache paths and required `/dev` pseudo-devices. `filesystem.mode = "read-only"` drops the root write allow (`sbpl.go`).
 - Built-in sensitive paths (`internal/fence/fs/seatbelt.go`: `~/.ssh`, `~/.aws`, `~/.config`, `~/.gnupg`, `~/Library/Keychains`) and `filesystem.deny` are denied for reads and writes.

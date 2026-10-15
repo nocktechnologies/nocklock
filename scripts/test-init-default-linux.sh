@@ -15,12 +15,16 @@ scratch=$(mktemp -d "${HOME}/nocklock-init-default.XXXXXX")
 read_only=$(mktemp -d /tmp/nocklock-init-read-only.XXXXXX)
 
 mkdir -p "$scratch/home" "$scratch/project" "$scratch/outside"
-cp "$repo/nocklock" "$read_only/nocklock"
-cp "$repo/internal/fence/fs/interposer/libfence_fs.so" "$read_only/libfence_fs.so"
+# The interposer must not have /tmp's world-writable ancestor. ~/.claude
+# already has a default read-only grant; retain /tmp for its separate deny test.
+probe_bin="$scratch/home/.claude/nocklock-test"
+mkdir -p "$probe_bin"
+cp "$repo/nocklock" "$probe_bin/nocklock"
+cp "$repo/internal/fence/fs/interposer/libfence_fs.so" "$probe_bin/libfence_fs.so"
 
 run_fenced() {
     (cd "$scratch/project" && env -i HOME="$scratch/home" PATH=/usr/bin:/bin USER=nocklock-test \
-        "$read_only/nocklock" "$@")
+        "$probe_bin/nocklock" "$@")
 }
 
 run_fenced init
@@ -66,4 +70,15 @@ for denied in "$scratch/outside/blocked" "$read_only/blocked"; do
     }
 done
 
-echo "PASS: init wraps /bin/sh; project write succeeds; Landlock denies sibling and read-only /tmp writes"
+# Verify must stage its own Linux executable pair under trusted ancestors too.
+# A skipped filesystem probe would hide the original /var/tmp staging regression.
+run_fenced verify --json > "$scratch/verify.json"
+python3 - "$scratch/verify.json" <<'PYVERIFY'
+import json, sys
+with open(sys.argv[1]) as report:
+    checks = json.load(report)["checks"]
+filesystem = [check for check in checks if check["fence"] == "filesystem"]
+assert len(filesystem) == 1 and filesystem[0]["result"] == "PASS", checks
+PYVERIFY
+
+echo "PASS: init wraps /bin/sh; project write succeeds; Landlock denies sibling and read-only /tmp writes; verify filesystem PASS"
