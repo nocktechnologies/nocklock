@@ -1707,7 +1707,7 @@ func (l *Logger) VerifyChainSignedContext(ctx context.Context, pub ed25519.Publi
 // deadline reached) before it finished. It is distinct from Intact=false and
 // from every signature state: the chain was neither authenticated nor shown to
 // be tampered with, so callers must emit no anchor and claim no verdict.
-var ErrVerifyInterrupted = errors.New("chain verification interrupted before completion; no anchor was written and the chain was not judged (the walk deadline or context ended first, so retry with a longer one)")
+var ErrVerifyInterrupted = errors.New("chain verification interrupted before completion; the chain was not judged (the walk deadline or context ended first, so retry with a longer one)")
 
 // verifyCtxCheckInterval is how many rows the walk verifies between context
 // checks.

@@ -144,46 +144,77 @@ func runAnchorEnrollment(ctx context.Context, w io.Writer, mode string) error {
 	if err != nil {
 		return err
 	}
-	remote, err := anchorclient.FetchLatestV2(ctx, baseURL, token, id.AgentID, id.ChainID, pub)
+	// Enrollment is durable at the remote once RegisterAnchorV2Context returns, so
+	// neither the fetch nor the verify below may run on the CLI budget the
+	// pre-enrollment walks already spent. The fetch gets its own fresh budget so
+	// the verify stays reachable even after slow registration walks.
+	fetchCtx, cancelFetch := context.WithTimeout(context.Background(), anchorCLITimeout)
+	remote, err := anchorclient.FetchLatestV2(fetchCtx, baseURL, token, id.AgentID, id.ChainID, pub)
+	cancelFetch()
 	if err != nil {
 		return fmt.Errorf("registration is enrolled but remote verification is incomplete; retry verification before pushing: %w", err)
 	}
-	result, err := logger.VerifyAgainstAnchorV2Context(ctx, remote, pub)
-	if err != nil {
-		return err
-	}
-	if err := writeAnchorV2VerifyResult(w, result); err != nil {
-		return err
-	}
-	if err := logging.WriteAnchorV2(logging.DefaultAnchorPath(dbPath), remote); err != nil {
+	if err := verifyAndRecordEnrollment(w, logger, remote, pub, logging.DefaultAnchorPath(dbPath)); err != nil {
 		return err
 	}
 	fmt.Fprintf(w, "anchor %s complete (agent_id=%s, chain_id=%s); remote v2 pin verified\n", mode, id.AgentID, id.ChainID)
 	return nil
 }
 
-// pushAnchorV2 pushes a: ctx bounds lock waits and HTTP, walkCtx bounds the
-// local verification walks of its preflight.
-func pushAnchorV2(ctx, walkCtx context.Context, logger *logging.Logger, a *logging.AnchorV2, pub ed25519.PublicKey, baseURL, token string) error {
-	id, err := logger.ReadChainIdentityContext(ctx)
+// verifyAndRecordEnrollment runs the post-enrollment verify and, on success,
+// writes the local v2 anchor. The remote pin is already enrolled, so this verify
+// must not be cut off by the CLI budget the pre-enrollment walks spent: the
+// verification walk runs unbounded on context.Background(), and only the
+// identity-lock wait is bounded, by its own fresh budget. An interrupted or
+// refused verify writes no anchor, so an incomplete local verify never leaves a
+// false record: rerun enrollment and it completes against the enrolled pin.
+func verifyAndRecordEnrollment(w io.Writer, logger *logging.Logger, remote *logging.AnchorV2, pub ed25519.PublicKey, anchorPath string) error {
+	lockCtx, cancel := context.WithTimeout(context.Background(), anchorCLITimeout)
+	defer cancel()
+	result, err := logger.VerifyAgainstAnchorV2Walk(lockCtx, context.Background(), remote, pub)
+	if err != nil {
+		return err
+	}
+	if err := writeAnchorV2VerifyResult(w, result); err != nil {
+		return err
+	}
+	return logging.WriteAnchorV2(anchorPath, remote)
+}
+
+// pushAnchorV2 pushes a. newStep makes a fresh deadline for each lock wait and
+// each network step, created immediately before that step, so a slow preflight
+// walk cannot spend the budget a later FetchLatestV2 or PushV2 needs. The step
+// label names the step for callers that log or vary budgets by step. walkCtx
+// bounds the local verification walks themselves (in wrap teardown that is
+// anchorWalkTimeout, unbounded by default).
+func pushAnchorV2(newStep func(step string) (context.Context, context.CancelFunc), walkCtx context.Context, logger *logging.Logger, a *logging.AnchorV2, pub ed25519.PublicKey, baseURL, token string) error {
+	idCtx, cancel := newStep("read-identity")
+	id, err := logger.ReadChainIdentityContext(idCtx)
+	cancel()
 	if err != nil {
 		return err
 	}
 	if id.RegistrationState != logging.ChainRegistrationEnrolled {
 		return errors.New("v2 chain is not enrolled; retry explicit anchor enroll or anchor migrate before push")
 	}
-	candidate, err := logger.VerifyAgainstAnchorV2Walk(ctx, walkCtx, a, pub)
+	candLockCtx, cancel := newStep("candidate-walk-lock")
+	candidate, err := logger.VerifyAgainstAnchorV2Walk(candLockCtx, walkCtx, a, pub)
+	cancel()
 	if err != nil {
 		return err
 	}
 	if !candidate.OK {
 		return fmt.Errorf("candidate anchor preflight refused: %s", candidate.Reason)
 	}
-	previous, err := anchorclient.FetchLatestV2(ctx, baseURL, token, id.AgentID, id.ChainID, pub)
+	fetchCtx, cancel := newStep("fetch-latest")
+	previous, err := anchorclient.FetchLatestV2(fetchCtx, baseURL, token, id.AgentID, id.ChainID, pub)
+	cancel()
 	if err != nil {
 		return err
 	}
-	prefix, err := logger.VerifyAgainstAnchorV2Walk(ctx, walkCtx, previous, pub)
+	prefixLockCtx, cancel := newStep("prefix-walk-lock")
+	prefix, err := logger.VerifyAgainstAnchorV2Walk(prefixLockCtx, walkCtx, previous, pub)
+	cancel()
 	if err != nil {
 		return err
 	}
@@ -197,7 +228,9 @@ func pushAnchorV2(ctx, walkCtx context.Context, logger *logging.Logger, a *loggi
 	if err != nil {
 		return err
 	}
-	_, err = anchorclient.PushV2(ctx, baseURL, token, a, pub, digest)
+	pushCtx, cancel := newStep("push")
+	defer cancel()
+	_, err = anchorclient.PushV2(pushCtx, baseURL, token, a, pub, digest)
 	return err
 }
 
@@ -255,11 +288,14 @@ func finishAnchorSession(w io.Writer, logger *logging.Logger, dbPath string) {
 	if baseURL == "" {
 		return
 	}
-	// The push gets its own budget, started after emission, so a long walk does
-	// not leave it no time.
-	pushCtx, cancelPush := context.WithTimeout(context.Background(), anchorPushTimeout)
-	defer cancelPush()
-	if err := pushAnchorV2(pushCtx, walkCtx, logger, a, logger.SigningPublicKey(), baseURL, token); err != nil {
+	// Every lock wait and network step in the push gets its own fresh budget,
+	// created right before it, so the preflight walks (unbounded by walkCtx here)
+	// cannot spend the budget FetchLatestV2 and PushV2 need. There is no caller
+	// waiting on a session exit, so each step parents on context.Background().
+	newStep := func(string) (context.Context, context.CancelFunc) {
+		return context.WithTimeout(context.Background(), anchorPushTimeout)
+	}
+	if err := pushAnchorV2(newStep, walkCtx, logger, a, logger.SigningPublicKey(), baseURL, token); err != nil {
 		fmt.Fprintf(w, "NockLock: warning: chain anchor NOT pushed off-box: %v\n", err)
 	}
 }

@@ -12,6 +12,10 @@ All notable changes to NockLock will be documented in this file.
 
 ### Fixed
 
+- Anchor off-box delivery no longer loses the push budget to its own preflight walks (N11800). `pushAnchorV2` now takes a per-step context factory: the identity read, both preflight-walk lock waits, `FetchLatestV2` and `PushV2` each get a fresh budget created immediately before the step, so a slow verification walk can no longer leave `FetchLatestV2`/`PushV2` on an expired context and silently drop off-box delivery. `wrap` teardown parents each step on `context.Background()` with `anchorPushTimeout`; interactive `anchor push` parents on the caller's context with `anchorCLITimeout`.
+
+- `anchor enroll` / `anchor migrate` no longer skip the local anchor write when the post-enrollment verify is cut off by the CLI budget earlier walks spent (N11800). The enrolled remote pin is durable, so the post-enrollment fetch now runs on its own fresh budget and the verify walk runs unbounded (lock wait bounded separately); an interrupted or refused verify still writes nothing false. `ErrVerifyInterrupted` text is now neutral ("the chain was not judged"); "no anchor was written" is stated only at emission call sites.
+
 - The red-team bench now matches a `path=` rule against the whole report path or a path-component suffix, so a bare filename rule works and `xcanary.txt` does not match `canary.txt`. The kernel companion report now prints cleanup failures after an interrupt, and its tests restore the SIGTERM handler.
 
 ## [0.10.0] - 2026-10-14

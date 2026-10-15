@@ -79,9 +79,16 @@ func runAnchorPush(ctx context.Context, w io.Writer, file string) error {
 		return err
 	}
 	defer logger.Close()
-	pctx, cancel := context.WithTimeout(ctx, anchorCLITimeout)
-	defer cancel()
-	if err := pushAnchorV2(pctx, pctx, logger, anchor, pub, baseURL, token); err != nil {
+	// Interactive push: a person is waiting, so every lock wait and network step
+	// is bounded, each on its own fresh budget derived from the caller's context
+	// so a slow preflight walk cannot spend a later step's budget. The walk itself
+	// shares one budget off the same caller context.
+	walkCtx, cancelWalk := context.WithTimeout(ctx, anchorCLITimeout)
+	defer cancelWalk()
+	newStep := func(string) (context.Context, context.CancelFunc) {
+		return context.WithTimeout(ctx, anchorCLITimeout)
+	}
+	if err := pushAnchorV2(newStep, walkCtx, logger, anchor, pub, baseURL, token); err != nil {
 		return fmt.Errorf("anchor push failed: %w", err)
 	}
 	fmt.Fprintf(w, "anchor pushed off-box (agent_id=%s, chain_id=%s, row_count=%d, head=%s)\n", anchor.AgentID, anchor.ChainID, anchor.RowCount, anchor.HeadHash)
