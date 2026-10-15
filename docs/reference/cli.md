@@ -12,7 +12,7 @@ Registered in `internal/cli/` (one file per command). `README.md` "Commands" has
 | `validate [config-path]` | | `validate.go` |
 | `config` | | `config.go` |
 | `doctor [--json]` | | `doctor.go` |
-| `verify [--json]` | `--audit`, `--export-pubkey`, `--ed25519-pub <key>`, `--against-anchor <file>`, `--against-remote-anchor` (the last two are mutually exclusive), `--walk-timeout <dur>` | `verify.go` |
+| `verify [--json]` | `--audit`, `--export-pubkey`, `--ed25519-pub <key>`, `--against-anchor <file>`, `--against-remote-anchor` (the last two are mutually exclusive), `--require-closed`, `--walk-timeout <dur>` | `verify.go` |
 | `scan [path ...]` | `--env`, `--json` | `scan.go` |
 | `anchor emit [--out <file>]`, `anchor push [--file <file>]` | `--walk-timeout <dur>` | `anchor.go` |
 | `anchor enroll`, `anchor migrate` | enroll: `--acknowledge-no-legacy-history` | `anchor_v2.go` |
@@ -62,6 +62,24 @@ see [audit recording limits](../how-it-works/audit-log.md#what-is-recorded).
 The original verdict and exit code remain unchanged. This adds no aggregate grade,
 host probe or audit JSON format; `--json` remains the live fence-probe format.
 Public-key export and anchor enrollment/push output are unchanged.
+
+`verify --audit` also reports each run's observed lifecycle over the intact chain
+(`internal/logging/run_close.go`, design `docs/design/run-lifecycle-contract.md`),
+on a `RUNS:` summary line plus a `RUN <id>:` line per integrity failure:
+
+| Status | Meaning |
+|---|---|
+| `closed` | one signed `session_close`, recomputed row count and root equal the signed binding, no later row under the run's `session_id` |
+| `unclosed` | the run's signed `session_start` owes a close (`lifecycle=1`) but none is present — a crash, kill, or failed close are indistinguishable; neutral |
+| `pruned` | a recomputed value differs under a recorded prune, and the post-prune checks pass; neutral |
+| `close_mismatch` | a recomputed value differs with no prune to explain it; a failure |
+| `rows_after_close` | a row carries the run's `session_id` after its close, or a second close; a failure |
+| `legacy` | a `session_start` with no `lifecycle=1` and no close, written before this contract; never a failure |
+
+`close_mismatch` and `rows_after_close` fail verification (exit `1`) regardless of
+`--require-closed`. A neutral `unclosed` run fails only when `--require-closed` is
+set; by default it passes but is named in the `COVERAGE: LIMITED` notice, since a
+missing close cannot prove the run's recorded extent is complete.
 
 ## Exit codes
 Exit codes travel as `exitCodeError` and `Execute()` calls `os.Exit` once (`root.go`). Any other error prints to stderr and exits `1` (`root.go`).

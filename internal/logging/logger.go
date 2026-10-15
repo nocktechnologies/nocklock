@@ -16,6 +16,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"time"
 
 	_ "modernc.org/sqlite"
@@ -39,6 +40,7 @@ const (
 	EventNetworkError         EventType = "network_error"
 	EventSessionStart         EventType = "session_start"
 	EventSessionEnd           EventType = "session_end"
+	EventSessionClose         EventType = "session_close"
 	EventConfigLoaded         EventType = "config_loaded"
 	EventConfigDigest         EventType = "config.digest"
 )
@@ -134,6 +136,25 @@ type Logger struct {
 	projectRoot      string               // canonical project root for the external trusted identity
 	identitySync     func(*os.File) error // per-instance record durability fault injection for tests
 	identityRootSync func(*os.File) error // per-instance root-establishment fault injection
+
+	// mu serializes each append from BEGIN through COMMIT and the run-accumulator
+	// fold that follows it, and the CloseRun read of the accumulator. It is logger-
+	// wide, not per-session: appends already serialize through the single database
+	// connection (SetMaxOpenConns(1)), so this adds no new cross-session contention,
+	// but it must be acquired BEFORE the transaction or connection in every append
+	// path so a connection held before the mutex cannot deadlock against that single
+	// connection. Held only for one append-plus-fold or one close read, never across
+	// a whole run. See docs/design/run-lifecycle-contract.md ("Requirements for N11765").
+	mu sync.Mutex
+	// accumulators holds, per session_id, the rolling run-close commitment (a row
+	// counter and a 32-byte root) advanced under mu as each row for that session
+	// commits. CloseRun reads and signs these values; the entry is dropped once its
+	// close is written. Bounded to a counter and a root, never raw row bytes.
+	accumulators map[string]*runAccumulator
+	// afterCommit is an unexported test seam invoked under mu after a successful
+	// COMMIT and before the accumulator fold, so a test can observe or stall the
+	// window the mutex protects. Never set in production. See withAfterCommit.
+	afterCommit func()
 }
 
 // eventTransaction is the common database/sql operation set shared by a
@@ -152,6 +173,7 @@ type loggerConfig struct {
 	signingKeyPath      string
 	onCommit            func(Event, string)
 	afterValidate       func() // test seam, see withAfterValidate
+	afterCommit         func() // test seam, see withAfterCommit
 }
 
 // WithEventCommitted observes an event and its audit-chain entry hash only
@@ -188,6 +210,14 @@ func WithExistingSigning(keyPath string) Option {
 // the path-based open (N10717). Unexported: never set in production.
 func withAfterValidate(fn func()) Option {
 	return func(c *loggerConfig) { c.afterValidate = fn }
+}
+
+// withAfterCommit lets a test stall or observe an append inside the logger mutex,
+// between a successful COMMIT and the run-accumulator fold, so the single-critical-
+// section guarantee can be exercised against a concurrent producer. Unexported:
+// never set in production.
+func withAfterCommit(fn func()) Option {
+	return func(c *loggerConfig) { c.afterCommit = fn }
 }
 
 // ChainVerifyResult holds the outcome of a chain verification.
@@ -550,7 +580,7 @@ func NewLogger(dbPath string, projectRoot string, opts ...Option) (*Logger, erro
 		db.Close()
 		return nil, fmt.Errorf("failed to initialize chain identity metadata: %w", err)
 	}
-	l := &Logger{db: db, writeDSN: writeDSN, onCommit: lc.onCommit, projectRoot: canonicalRoot}
+	l := &Logger{db: db, writeDSN: writeDSN, onCommit: lc.onCommit, projectRoot: canonicalRoot, accumulators: make(map[string]*runAccumulator), afterCommit: lc.afterCommit}
 
 	if lc.signingEnabled {
 		adopted, err := signingAlreadyAdopted(db)
@@ -623,7 +653,7 @@ func openExistingSignedLogger(db *sql.DB, projectRoot string, lc loggerConfig) (
 	if err := tx.Commit(); err != nil {
 		return nil, err
 	}
-	return &Logger{db: db, signer: s, onCommit: lc.onCommit, projectRoot: projectRoot}, nil
+	return &Logger{db: db, signer: s, onCommit: lc.onCommit, projectRoot: projectRoot, accumulators: make(map[string]*runAccumulator), afterCommit: lc.afterCommit}, nil
 }
 
 func validateAdoptedSigningHead(tx *sql.Tx, s *signer, fingerprint string) error {
@@ -648,24 +678,45 @@ func validateAdoptedSigningHead(tx *sql.Tx, s *signer, fingerprint string) error
 	return nil
 }
 
-// Log records a single event with hash chain. Thread-safe (SQLite WAL handles locking).
+// Log records a single event with hash chain. Thread-safe: the logger mutex is
+// held from BEGIN through COMMIT and the run-accumulator fold, then released
+// before the observer callback runs.
 func (l *Logger) Log(event Event) error {
-	tx, err := l.db.Begin()
+	l.mu.Lock()
+	hash, err := l.appendLocked(&event)
+	l.mu.Unlock()
 	if err != nil {
-		return fmt.Errorf("failed to begin log transaction: %w", err)
-	}
-	defer tx.Rollback()
-	var hash string
-	if err := l.logInTransaction(tx, &event, &hash); err != nil {
 		return err
-	}
-	if err := tx.Commit(); err != nil {
-		return fmt.Errorf("failed to commit log transaction: %w", err)
 	}
 	if l.onCommit != nil {
 		l.onCommit(event, hash)
 	}
 	return nil
+}
+
+// appendLocked performs one event append — BEGIN, insert, COMMIT, and the
+// run-accumulator fold — assuming the caller already holds l.mu. It never
+// invokes the observer callback (that runs after the mutex is released) so the
+// same helper can write the session_close row inside CloseRun's critical section.
+func (l *Logger) appendLocked(event *Event) (string, error) {
+	tx, err := l.db.Begin()
+	if err != nil {
+		return "", fmt.Errorf("failed to begin log transaction: %w", err)
+	}
+	defer tx.Rollback()
+	var hash string
+	var cb []byte
+	if err := l.logInTransaction(tx, event, &hash, &cb); err != nil {
+		return "", err
+	}
+	if err := tx.Commit(); err != nil {
+		return "", fmt.Errorf("failed to commit log transaction: %w", err)
+	}
+	if l.afterCommit != nil {
+		l.afterCommit()
+	}
+	l.foldRun(event.SessionID, event.EventType, event.ID, cb)
+	return hash, nil
 }
 
 // LogAfterLatest records an event built from the latest event of eventType and
@@ -677,14 +728,35 @@ func (l *Logger) LogAfterLatest(eventType EventType, build func(*Event) (Event, 
 		return nil, errors.New("log event builder is required")
 	}
 
+	// Acquire the logger mutex BEFORE reserving the single pooled connection.
+	// Taking the connection first (as earlier revisions did) could deadlock a
+	// concurrent append against SetMaxOpenConns(1); mutex-first keeps the order
+	// uniform across Log, LogBatch and LogAfterLatest.
+	l.mu.Lock()
+	previous, event, hash, err := l.appendAfterLatestLocked(eventType, build)
+	l.mu.Unlock()
+	if err != nil {
+		return nil, err
+	}
+	if l.onCommit != nil {
+		l.onCommit(event, hash)
+	}
+	return previous, nil
+}
+
+// appendAfterLatestLocked runs the look-up-and-append under l.mu, reserving the
+// connection only after the mutex is held and releasing it (deferred Close)
+// before the caller unlocks. The accumulator fold runs after COMMIT, in the same
+// critical section.
+func (l *Logger) appendAfterLatestLocked(eventType EventType, build func(*Event) (Event, error)) (*Event, Event, string, error) {
 	ctx := context.Background()
 	conn, err := l.db.Conn(ctx)
 	if err != nil {
-		return nil, fmt.Errorf("failed to reserve log connection: %w", err)
+		return nil, Event{}, "", fmt.Errorf("failed to reserve log connection: %w", err)
 	}
 	defer conn.Close()
 	if _, err := conn.ExecContext(ctx, "BEGIN IMMEDIATE"); err != nil {
-		return nil, fmt.Errorf("failed to begin immediate log transaction: %w", err)
+		return nil, Event{}, "", fmt.Errorf("failed to begin immediate log transaction: %w", err)
 	}
 	committed := false
 	defer func() {
@@ -695,24 +767,26 @@ func (l *Logger) LogAfterLatest(eventType EventType, build func(*Event) (Event, 
 
 	previous, err := latestEvent(ctx, conn, eventType)
 	if err != nil {
-		return nil, err
+		return nil, Event{}, "", err
 	}
 	event, err := build(previous)
 	if err != nil {
-		return nil, err
+		return nil, Event{}, "", err
 	}
 	var hash string
-	if err := l.logInTransaction(conn, &event, &hash); err != nil {
-		return nil, err
+	var cb []byte
+	if err := l.logInTransaction(conn, &event, &hash, &cb); err != nil {
+		return nil, Event{}, "", err
 	}
 	if _, err := conn.ExecContext(ctx, "COMMIT"); err != nil {
-		return nil, fmt.Errorf("failed to commit immediate log transaction: %w", err)
+		return nil, Event{}, "", fmt.Errorf("failed to commit immediate log transaction: %w", err)
 	}
 	committed = true
-	if l.onCommit != nil {
-		l.onCommit(event, hash)
+	if l.afterCommit != nil {
+		l.afterCommit()
 	}
-	return previous, nil
+	l.foldRun(event.SessionID, event.EventType, event.ID, cb)
+	return previous, event, hash, nil
 }
 
 // LogImmediate records an event like Log, but opens a BEGIN IMMEDIATE
@@ -774,7 +848,7 @@ func latestEvent(ctx context.Context, tx eventTransaction, eventType EventType) 
 	return &event, nil
 }
 
-func (l *Logger) logInTransaction(tx eventTransaction, event *Event, hash *string) error {
+func (l *Logger) logInTransaction(tx eventTransaction, event *Event, hash *string, canonical *[]byte) error {
 	ts := formatTimestampForChain(event.Timestamp)
 	storedDetail := encodeEventDetail(event.EventType, event.Detail, event.EgressLevel)
 	blocked := 0
@@ -813,6 +887,9 @@ func (l *Logger) logInTransaction(tx eventTransaction, event *Event, hash *strin
 	entryHash, err := chainEntryFromCanonical(cb, prevHashHex)
 	if err != nil {
 		return fmt.Errorf("failed to compute chain: %w", err)
+	}
+	if canonical != nil {
+		*canonical = cb
 	}
 
 	// Sign over the SAME canonical bytes the hash covers (v1.1). Empty when
@@ -857,24 +934,43 @@ func (l *Logger) logInTransaction(tx eventTransaction, event *Event, hash *strin
 }
 
 // LogBatch records multiple events in a single transaction for efficiency, with chain.
-// Thread-safe. Use this when logging multiple events at once (e.g., blocked vars).
+// Thread-safe: the logger mutex is held from BEGIN through COMMIT and the
+// run-accumulator fold of every row, then released before the observer callbacks.
 func (l *Logger) LogBatch(events []Event) error {
 	if len(events) == 0 {
 		return nil
 	}
+	l.mu.Lock()
+	committedEvents, hashes, err := l.appendBatchLocked(events)
+	l.mu.Unlock()
+	if err != nil {
+		return err
+	}
+	if l.onCommit != nil {
+		for i, event := range committedEvents {
+			l.onCommit(event, hashes[i])
+		}
+	}
+	return nil
+}
 
+// appendBatchLocked inserts every event in one transaction and folds each
+// committed row into its run accumulator, assuming the caller holds l.mu. It
+// returns the committed events and their entry hashes for the observer callbacks
+// the public wrapper runs after releasing the mutex.
+func (l *Logger) appendBatchLocked(events []Event) ([]Event, []string, error) {
 	tx, err := l.db.Begin()
 	if err != nil {
-		return fmt.Errorf("failed to begin batch transaction: %w", err)
+		return nil, nil, fmt.Errorf("failed to begin batch transaction: %w", err)
 	}
 	defer tx.Rollback()
 
 	// Initialize chain_head if needed
 	if err := initChainHeadIfNeeded(tx); err != nil {
-		return fmt.Errorf("failed to initialize chain_head: %w", err)
+		return nil, nil, fmt.Errorf("failed to initialize chain_head: %w", err)
 	}
 	if err := l.ensureWritableSignerState(tx); err != nil {
-		return err
+		return nil, nil, err
 	}
 
 	// Get current head
@@ -887,6 +983,7 @@ func (l *Logger) LogBatch(events []Event) error {
 	prevHashHex := currentHeadHash
 	hashes := make([]string, 0, len(events))
 	committedEvents := make([]Event, 0, len(events))
+	canonicals := make([][]byte, 0, len(events))
 
 	// Insert all events with chaining
 	for i := range events {
@@ -904,19 +1001,19 @@ func (l *Logger) LogBatch(events []Event) error {
 			ts, string(event.EventType), event.Category, storedDetail, blocked, event.SessionID, prevHashHex, "",
 		)
 		if err != nil {
-			return fmt.Errorf("failed to insert event in batch: %w", err)
+			return nil, nil, fmt.Errorf("failed to insert event in batch: %w", err)
 		}
 
 		eventID, err := result.LastInsertId()
 		if err != nil {
-			return fmt.Errorf("failed to get event ID: %w", err)
+			return nil, nil, fmt.Errorf("failed to get event ID: %w", err)
 		}
 
 		// Compute hash and sign the same canonical bytes.
 		cb := canonicalBytes(eventID, ts, event.EventType, event.Category, storedDetail, event.Blocked, event.SessionID)
 		entryHash, err := chainEntryFromCanonical(cb, prevHashHex)
 		if err != nil {
-			return fmt.Errorf("failed to compute chain for event %d: %w", eventID, err)
+			return nil, nil, fmt.Errorf("failed to compute chain for event %d: %w", eventID, err)
 		}
 		entrySig := ""
 		if l.signer != nil {
@@ -929,46 +1026,48 @@ func (l *Logger) LogBatch(events []Event) error {
 			entryHash, entrySig, eventID,
 		)
 		if err != nil {
-			return fmt.Errorf("failed to update event hash: %w", err)
+			return nil, nil, fmt.Errorf("failed to update event hash: %w", err)
 		}
 
 		prevHashHex = entryHash
 		event.ID = eventID
 		committedEvents = append(committedEvents, event)
 		hashes = append(hashes, entryHash)
+		canonicals = append(canonicals, cb)
 	}
 
 	// Update chain_head with final state
 	count, err := countEvents(tx)
 	if err != nil {
-		return fmt.Errorf("failed to count events: %w", err)
+		return nil, nil, fmt.Errorf("failed to count events: %w", err)
 	}
 
 	headMeta, err := readHeadSignatureMetadata(tx)
 	if err != nil {
-		return fmt.Errorf("failed to read chain head signing metadata: %w", err)
+		return nil, nil, fmt.Errorf("failed to read chain head signing metadata: %w", err)
 	}
 	headSig, err := signHead(l.signer, prevHashHex, count, headMeta)
 	if err != nil {
-		return fmt.Errorf("failed to sign chain head: %w", err)
+		return nil, nil, fmt.Errorf("failed to sign chain head: %w", err)
 	}
 	_, err = tx.Exec(
 		"UPDATE chain_head SET entry_hash = ?, row_count = ?, head_sig = ? WHERE id = 1",
 		prevHashHex, count, headSig,
 	)
 	if err != nil {
-		return fmt.Errorf("failed to update chain_head: %w", err)
+		return nil, nil, fmt.Errorf("failed to update chain_head: %w", err)
 	}
 
 	if err := tx.Commit(); err != nil {
-		return fmt.Errorf("failed to commit batch transaction: %w", err)
+		return nil, nil, fmt.Errorf("failed to commit batch transaction: %w", err)
 	}
-	if l.onCommit != nil {
-		for i, event := range committedEvents {
-			l.onCommit(event, hashes[i])
-		}
+	if l.afterCommit != nil {
+		l.afterCommit()
 	}
-	return nil
+	for i := range committedEvents {
+		l.foldRun(committedEvents[i].SessionID, committedEvents[i].EventType, committedEvents[i].ID, canonicals[i])
+	}
+	return committedEvents, hashes, nil
 }
 
 // Query returns events matching the given filters.

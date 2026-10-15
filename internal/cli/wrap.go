@@ -221,6 +221,72 @@ var wrapCmd = &cobra.Command{
 				SessionID: sessionID,
 			})
 		}
+
+		// Run-lifecycle teardown state (docs/design/run-lifecycle-contract.md). A run
+		// that writes a lifecycle=1 session_start owes exactly one signed
+		// session_close, after its last ordinary row. These flags record whether the
+		// end row landed and why the run ended, so the deferred close below fires once
+		// and only when the run is eligible.
+		var (
+			runSessionStarted     bool
+			runSessionEnded       bool
+			runSessionEndFailed   bool
+			runEndReason          string
+			runProxyDrainExceeded bool
+			stopProxyOnce         sync.Once
+			proxyStopErr          error
+			stopProxyFn           func() error // set when a network proxy is created
+		)
+
+		// endSession writes the run's session_end, capturing the write error loudly
+		// instead of discarding it: a dropped end row would otherwise leave the run
+		// looking like a crash. reason is the writer's own close reason (clean,
+		// child_exit, refused, audit_failed). A failed end row means no close is
+		// attempted — the close's last_id is only meaningful once session_end is the
+		// run's last ordinary row — and the run reads unclosed.
+		endSession := func(detail string, blocked bool, reason string) {
+			runEndReason = reason
+			if err := logger.Log(logging.Event{
+				Timestamp: time.Now(),
+				EventType: logging.EventSessionEnd,
+				Category:  "session",
+				Detail:    detail,
+				Blocked:   blocked,
+				SessionID: sessionID,
+			}); err != nil {
+				runSessionEndFailed = true
+				fmt.Fprintf(cmd.ErrOrStderr(), "NockLock: warning: failed to record session_end for run %s: %v — the run will read unclosed\n", sessionID, err)
+				return
+			}
+			runSessionEnded = true
+		}
+
+		// Write the run's signed close last. Deferred here, after the anchor and
+		// logger.Close defers, so LIFO runs it BEFORE them and the emitted anchor
+		// covers the close row. It joins any producer that can still write under the
+		// run's session_id (the network proxy), then writes the close only if the
+		// drain succeeded and session_end landed. Otherwise the run is left unclosed,
+		// which is neutral; the loud warning at the failure site already explains why.
+		defer func() {
+			if !runSessionStarted {
+				return
+			}
+			// Join the proxy before the close even on early-return paths that never
+			// reached the inline stop; idempotent via sync.Once.
+			if stopProxyFn != nil && !runProxyDrainExceeded {
+				if err := stopProxyFn(); err != nil {
+					runProxyDrainExceeded = true
+					fmt.Fprintf(cmd.ErrOrStderr(), "NockLock: warning: network proxy drain exceeded its deadline; run %s left unclosed: %v\n", sessionID, err)
+				}
+			}
+			if !closeRunEligible(runSessionStarted, runProxyDrainExceeded, runSessionEndFailed, runSessionEnded) {
+				return
+			}
+			covered, err := logger.CloseRun(sessionID, runEndReason)
+			if err != nil {
+				fmt.Fprintf(cmd.ErrOrStderr(), "NockLock: warning: failed to write signed session close for run %s (%d rows covered): %v — the run will read unclosed\n", sessionID, covered, err)
+			}
+		}()
 		// macOS filesystem-fence state is an enforcement prerequisite, unlike
 		// ordinary best-effort access telemetry: the child must not run unless
 		// ENGAGED or the explicit filesystem.root = "" DEGRADED state is durably recorded.
@@ -818,7 +884,17 @@ var wrapCmd = &cobra.Command{
 					}
 					logEvent(logging.EventNetworkPassed, "network", "Landlock Unix-socket isolation rules staged for the pre-exec shim", false)
 				}
-				defer proxy.Stop()
+				// Join the proxy's stop through a once-guarded closure so the run's
+				// teardown can drain it BEFORE writing session_end (run-lifecycle
+				// contract: Teardown ordering), while this defer still guarantees a
+				// stop on every early-return path. proxy.Stop reports the http.Server
+				// drain-deadline error, which the close path reads to decide whether
+				// to skip the close.
+				stopProxyFn = func() error {
+					stopProxyOnce.Do(func() { proxyStopErr = proxy.Stop() })
+					return proxyStopErr
+				}
+				defer func() { _ = stopProxyFn() }()
 
 				// Launch watchdog: if proxy crashes mid-session, cancel childCtx to kill the child.
 				watchdogCtx, watchdogCancel := context.WithCancel(cmd.Context())
@@ -900,8 +976,10 @@ var wrapCmd = &cobra.Command{
 			cmd.SilenceErrors = true
 			return &exitCodeError{code: 2}
 		}
+		// The run now owes a signed close; the deferred close writes it at teardown.
+		runSessionStarted = true
 		if resolveErr != nil {
-			logEvent(logging.EventSessionEnd, "session", "exit_code=1", false)
+			endSession("exit_code=1", false, "refused")
 			cmd.SilenceErrors = true
 			cmd.SilenceUsage = true
 			return resolveErr
@@ -1096,6 +1174,19 @@ var wrapCmd = &cobra.Command{
 		}
 		eventsWg.Wait()
 
+		// Join the network proxy — including any in-flight look-back write — before
+		// writing session_end, so the signed close is the run's last row (not a
+		// trailing defer, as earlier revisions left it). An exceeded drain deadline
+		// leaves the run unclosed rather than risk a false rows_after_close on an
+		// honestly slow request. Idempotent, so the deferred close's own join is a
+		// no-op after this.
+		if stopProxyFn != nil {
+			if err := stopProxyFn(); err != nil {
+				runProxyDrainExceeded = true
+				fmt.Fprintf(cmd.ErrOrStderr(), "NockLock: warning: network proxy drain exceeded its deadline; run %s left unclosed: %v\n", sessionID, err)
+			}
+		}
+
 		// FAIL CLOSED on any egress-audit failure: an allowed/denied decision that
 		// could not be signed (or a decision-log that could not be read) means the
 		// audit trail is incomplete, so the session must not report success — even
@@ -1103,7 +1194,7 @@ var wrapCmd = &cobra.Command{
 		// verdict wins. The reader goroutine has finished (Wait above), establishing
 		// happens-before for decisionFailErr.
 		if decisionFailed.Load() {
-			logEvent(logging.EventSessionEnd, "session", fmt.Sprintf("exit_code=2 decision_audit_failed=true err=%v", decisionFailErr), true)
+			endSession(fmt.Sprintf("exit_code=2 decision_audit_failed=true err=%v", decisionFailErr), true, "audit_failed")
 			cmd.SilenceErrors = true
 			cmd.SilenceUsage = true
 			return &exitCodeError{code: 2}
@@ -1111,7 +1202,7 @@ var wrapCmd = &cobra.Command{
 
 		if childErr != nil {
 			if proxyFailed.Load() {
-				logEvent(logging.EventSessionEnd, "session", "exit_code=2 proxy_failed=true", true)
+				endSession("exit_code=2 proxy_failed=true", true, "refused")
 				cmd.SilenceErrors = true
 				cmd.SilenceUsage = true
 				return &exitCodeError{code: 2}
@@ -1123,27 +1214,38 @@ var wrapCmd = &cobra.Command{
 					// Fall back to 1 for cross-platform safety.
 					code = 1
 				}
-				logEvent(logging.EventSessionEnd, "session", fmt.Sprintf("exit_code=%d", code), false)
+				endSession(fmt.Sprintf("exit_code=%d", code), false, "child_exit")
 				cmd.SilenceErrors = true
 				cmd.SilenceUsage = true
 				return &exitCodeError{code: code}
 			}
-			logEvent(logging.EventSessionEnd, "session", "exit_code=1", false)
+			endSession("exit_code=1", false, "child_exit")
 			cmd.SilenceErrors = true
 			cmd.SilenceUsage = true
 			return fmt.Errorf("failed to run %q: %w", args[0], childErr)
 		}
 
 		if proxyFailed.Load() {
-			logEvent(logging.EventSessionEnd, "session", "exit_code=2 proxy_failed=true", true)
+			endSession("exit_code=2 proxy_failed=true", true, "refused")
 			cmd.SilenceErrors = true
 			cmd.SilenceUsage = true
 			return &exitCodeError{code: 2}
 		}
 
-		logEvent(logging.EventSessionEnd, "session", "exit_code=0", false)
+		endSession("exit_code=0", false, "clean")
 		return nil
 	},
+}
+
+// closeRunEligible reports whether a run that has started should receive its
+// signed session_close at teardown. The close is skipped — leaving the run
+// neutral-unclosed — in three cases: the network proxy's drain deadline was
+// exceeded (a handler may still write a row under the run's session_id, risking a
+// false rows_after_close); the session_end append failed; or no session_end
+// landed. The close's last_id is only meaningful once session_end is the run's
+// last ordinary row, so a run missing its end row must never be reported closed.
+func closeRunEligible(started, proxyDrainExceeded, sessionEndFailed, sessionEnded bool) bool {
+	return started && !proxyDrainExceeded && !sessionEndFailed && sessionEnded
 }
 
 func init() {
@@ -1219,6 +1321,11 @@ func sessionStartDetail(command string, fp execFingerprint, unixSocketReason str
 	if unixSocketReason != "" {
 		detail += " unix_sockets=reachable reason=" + unixSocketReason
 	}
+	// lifecycle=1 marks a run that owes a signed session_close at teardown. The
+	// verifier reads it from this signed detail; without the signing key it cannot
+	// be stripped without breaking this row's signature. See
+	// docs/design/run-lifecycle-contract.md ("Downgrade resistance").
+	detail += " lifecycle=1"
 	return detail
 }
 

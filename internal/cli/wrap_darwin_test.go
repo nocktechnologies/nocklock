@@ -216,7 +216,7 @@ exit "$status"`
 	// This is the handler behind `nocklock verify --audit`; it checks both the
 	// hash chain and the local managed signing key.
 	var verifyOut bytes.Buffer
-	if err := runAuditVerify(context.Background(), &verifyOut, ""); err != nil {
+	if err := runAuditVerify(context.Background(), &verifyOut, "", false); err != nil {
 		t.Fatalf("nocklock verify --audit did not pass after wrapped session: %v\n%s", err, verifyOut.String())
 	}
 
@@ -400,7 +400,7 @@ func TestWrapMacOSDenialLogRecordsFileBlockedRow(t *testing.T) {
 	}
 
 	var verifyOut bytes.Buffer
-	if err := runAuditVerify(context.Background(), &verifyOut, ""); err != nil {
+	if err := runAuditVerify(context.Background(), &verifyOut, "", false); err != nil {
 		t.Fatalf("audit chain with denial row does not verify: %v\n%s", err, verifyOut.String())
 	}
 }

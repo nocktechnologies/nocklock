@@ -419,7 +419,7 @@ func TestWrapRootAuditRefusalVerifies(t *testing.T) {
 		t.Fatalf("expected refusal-only session: %+v", rows)
 	}
 	var out bytes.Buffer
-	if err := runAuditVerify(context.Background(), &out, ""); err != nil {
+	if err := runAuditVerify(context.Background(), &out, "", false); err != nil {
 		t.Fatalf("verify --audit failed: %v\n%s", err, out.String())
 	}
 	out.Reset()
