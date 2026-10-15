@@ -13,8 +13,16 @@ import (
 )
 
 // anchorPushTimeout bounds identity-lock waits and HTTP during wrap teardown.
-// Synchronous filesystem and SQLite work is not interrupted. Tests shorten it.
+// It does not bound the verification walk (anchorWalkTimeout does). Tests
+// shorten it.
 var anchorPushTimeout = 5 * time.Second
+
+// anchorWalkTimeout bounds every chain verification walk during wrap teardown,
+// separately from anchorPushTimeout. Zero, the default, leaves the walk
+// unbounded, as before: a bound without the verified-prefix receipt (Step 2 of
+// docs/design/anchor-verification-profile.md) would turn a slow but successful
+// final anchor into a missing one on large stores. Tests set it.
+var anchorWalkTimeout time.Duration
 
 // anchorEnvKeys are wrap's off-box anchor settings. They are removed from the
 // fenced child's environment so the agent can neither read the bearer token
@@ -71,9 +79,16 @@ func runAnchorPush(ctx context.Context, w io.Writer, file string) error {
 		return err
 	}
 	defer logger.Close()
-	pctx, cancel := context.WithTimeout(ctx, anchorCLITimeout)
-	defer cancel()
-	if err := pushAnchorV2(pctx, logger, anchor, pub, baseURL, token); err != nil {
+	// Interactive push: a person is waiting, so every lock wait and network step
+	// is bounded, each on its own fresh budget derived from the caller's context
+	// so a slow preflight walk cannot spend a later step's budget. The walk itself
+	// shares one budget off the same caller context.
+	walkCtx, cancelWalk := context.WithTimeout(ctx, anchorCLITimeout)
+	defer cancelWalk()
+	newStep := func(string) (context.Context, context.CancelFunc) {
+		return context.WithTimeout(ctx, anchorCLITimeout)
+	}
+	if err := pushAnchorV2(newStep, walkCtx, logger, anchor, pub, baseURL, token); err != nil {
 		return fmt.Errorf("anchor push failed: %w", err)
 	}
 	fmt.Fprintf(w, "anchor pushed off-box (agent_id=%s, chain_id=%s, row_count=%d, head=%s)\n", anchor.AgentID, anchor.ChainID, anchor.RowCount, anchor.HeadHash)

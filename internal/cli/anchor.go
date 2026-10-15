@@ -2,6 +2,7 @@ package cli
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 
@@ -86,6 +87,12 @@ func runAnchorEmit(ctx context.Context, w io.Writer, outPath string) error {
 	} else if dir != "" {
 		anchor, err := logger.EmitAnchorV2Context(ctx)
 		if err != nil {
+			// Emission site: an interrupted verification walk signs nothing, so
+			// say so here. ErrVerifyInterrupted itself stays neutral because it
+			// is also raised by verify-only paths that write no anchor regardless.
+			if errors.Is(err, logging.ErrVerifyInterrupted) {
+				return fmt.Errorf("no anchor was written: %w", err)
+			}
 			return err
 		}
 		if outPath != "" {

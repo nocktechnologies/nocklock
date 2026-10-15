@@ -8,7 +8,13 @@ All notable changes to NockLock will be documented in this file.
 
 - Add a profiling recipe and design for bounded anchor verification: `docs/design/anchor-verification-profile.md`, an env-gated `TestProfileAnchorVerification`, and a negative control showing a signed-head-only check misses a laundered tamper. Documentation and tests only; no runtime change.
 
+- Anchor verification walks accept a context (Step 1 of the bounded-verification design, N11800). `VerifyChainSignedContext`, `EmitAnchorContext`, `EmitAnchorV2Walk` and `VerifyAgainstAnchorV2Walk` check it every 1,024 rows and return `ErrVerifyInterrupted` when it ends: never authentic, never tampering, no anchor written. `EmitAnchorV2Context` and `VerifyAgainstAnchorV2Context` now bound the walk by their context as well as the lock wait. `wrap` teardown gives the walk its own deadline and the off-box push a fresh budget after emission; the teardown walk stays unbounded by default, so no final anchor that is written today is lost.
+
 ### Fixed
+
+- Anchor off-box delivery no longer loses the push budget to its own preflight walks (N11800). `pushAnchorV2` now takes a per-step context factory: the identity read, both preflight-walk lock waits, `FetchLatestV2` and `PushV2` each get a fresh budget created immediately before the step, so a slow verification walk can no longer leave `FetchLatestV2`/`PushV2` on an expired context and silently drop off-box delivery. `wrap` teardown parents each step on `context.Background()` with `anchorPushTimeout`; interactive `anchor push` parents on the caller's context with `anchorCLITimeout`.
+
+- `anchor enroll` / `anchor migrate` no longer skip the local anchor write when the post-enrollment verify is cut off by the CLI budget earlier walks spent (N11800). The enrolled remote pin is durable, so the post-enrollment fetch now runs on its own fresh budget and the verify walk runs unbounded (lock wait bounded separately); an interrupted or refused verify still writes nothing false. `ErrVerifyInterrupted` text is now neutral ("the chain was not judged"); "no anchor was written" is stated only at emission call sites.
 
 - The red-team bench now matches a `path=` rule against the whole report path or a path-component suffix, so a bare filename rule works and `xcanary.txt` does not match `canary.txt`. The kernel companion report now prints cleanup failures after an interrupt, and its tests restore the SIGTERM handler.
 

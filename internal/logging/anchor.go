@@ -24,6 +24,7 @@
 package logging
 
 import (
+	"context"
 	"crypto/ed25519"
 	"database/sql"
 	"encoding/base64"
@@ -139,11 +140,17 @@ func anchorAppendLP(buf []byte, s string) []byte {
 // produce an authenticatable anchor, so this fails closed rather than emitting
 // an unsigned record that verify could never trust.
 func (l *Logger) EmitAnchor() (*Anchor, error) {
+	return l.EmitAnchorContext(context.Background())
+}
+
+// EmitAnchorContext is EmitAnchor with the verification walk bounded by ctx.
+// When ctx ends mid-walk it returns ErrVerifyInterrupted and signs nothing.
+func (l *Logger) EmitAnchorContext(ctx context.Context) (*Anchor, error) {
 	if l.signer == nil {
 		return nil, errors.New("anchor emission requires a signing key: open the audit log with signing enabled")
 	}
 
-	verified, err := l.VerifyChainSigned(l.signer.pub, true)
+	verified, err := l.VerifyChainSignedContext(ctx, l.signer.pub, true)
 	if err != nil {
 		return nil, err
 	}

@@ -31,10 +31,19 @@ func (l *Logger) EmitAnchorV2() (*AnchorV2, error) {
 	return l.EmitAnchorV2Context(context.Background())
 }
 
-// EmitAnchorV2Context is EmitAnchorV2 with cancellable identity-lock acquisition.
-// Local verification remains synchronous.
+// EmitAnchorV2Context is EmitAnchorV2 with ctx bounding both identity-lock
+// acquisition and the verification walk.
 func (l *Logger) EmitAnchorV2Context(ctx context.Context) (*AnchorV2, error) {
-	store, err := l.lockChainIdentityStoreContext(ctx)
+	return l.EmitAnchorV2Walk(ctx, ctx)
+}
+
+// EmitAnchorV2Walk is EmitAnchorV2 with separate deadlines: lockCtx bounds
+// identity-lock acquisition and walkCtx bounds the verification walk. The
+// identity lock is held for the whole walk (Prune and registration take the
+// same lock); an interrupted walk returns ErrVerifyInterrupted and releases it
+// on return.
+func (l *Logger) EmitAnchorV2Walk(lockCtx, walkCtx context.Context) (*AnchorV2, error) {
+	store, err := l.lockChainIdentityStoreContext(lockCtx)
 	if err != nil {
 		return nil, err
 	}
@@ -46,14 +55,14 @@ func (l *Logger) EmitAnchorV2Context(ctx context.Context) (*AnchorV2, error) {
 	if id == nil {
 		return nil, ErrChainIdentityMissing
 	}
-	return l.emitAnchorV2Locked(id)
+	return l.emitAnchorV2Locked(walkCtx, id)
 }
 
-func (l *Logger) emitAnchorV2Locked(id *ChainIdentity) (*AnchorV2, error) {
+func (l *Logger) emitAnchorV2Locked(ctx context.Context, id *ChainIdentity) (*AnchorV2, error) {
 	if l.signer == nil {
 		return nil, errors.New("v2 anchor emission requires the original audit signing key")
 	}
-	verified, err := l.VerifyChainSigned(l.signer.pub, true)
+	verified, err := l.VerifyChainSignedContext(ctx, l.signer.pub, true)
 	if err != nil {
 		return nil, err
 	}
@@ -80,10 +89,17 @@ func (l *Logger) VerifyAgainstAnchorV2(a *AnchorV2, pub ed25519.PublicKey) (*Anc
 	return l.VerifyAgainstAnchorV2Context(context.Background(), a, pub)
 }
 
-// VerifyAgainstAnchorV2Context is VerifyAgainstAnchorV2 with cancellable identity-lock acquisition.
-// Local verification remains synchronous.
+// VerifyAgainstAnchorV2Context is VerifyAgainstAnchorV2 with ctx bounding both
+// identity-lock acquisition and the verification walk.
 func (l *Logger) VerifyAgainstAnchorV2Context(ctx context.Context, a *AnchorV2, pub ed25519.PublicKey) (*AnchorV2VerifyResult, error) {
-	store, err := l.lockChainIdentityStoreContext(ctx)
+	return l.VerifyAgainstAnchorV2Walk(ctx, ctx, a, pub)
+}
+
+// VerifyAgainstAnchorV2Walk is VerifyAgainstAnchorV2 with separate deadlines for
+// identity-lock acquisition (lockCtx) and the verification walk (walkCtx). An
+// interrupted walk returns ErrVerifyInterrupted, never a classification.
+func (l *Logger) VerifyAgainstAnchorV2Walk(lockCtx, walkCtx context.Context, a *AnchorV2, pub ed25519.PublicKey) (*AnchorV2VerifyResult, error) {
+	store, err := l.lockChainIdentityStoreContext(lockCtx)
 	if err != nil {
 		return nil, err
 	}
@@ -95,10 +111,10 @@ func (l *Logger) VerifyAgainstAnchorV2Context(ctx context.Context, a *AnchorV2, 
 	if id == nil {
 		return nil, ErrChainIdentityMissing
 	}
-	return l.verifyAgainstAnchorV2Locked(a, pub, id)
+	return l.verifyAgainstAnchorV2Locked(walkCtx, a, pub, id)
 }
 
-func (l *Logger) verifyAgainstAnchorV2Locked(a *AnchorV2, pub ed25519.PublicKey, id *ChainIdentity) (*AnchorV2VerifyResult, error) {
+func (l *Logger) verifyAgainstAnchorV2Locked(ctx context.Context, a *AnchorV2, pub ed25519.PublicKey, id *ChainIdentity) (*AnchorV2VerifyResult, error) {
 	r := &AnchorV2VerifyResult{}
 	if a != nil {
 		r.AnchorRowCount, r.AnchorHeadHash = a.RowCount, a.HeadHash
@@ -133,7 +149,7 @@ func (l *Logger) verifyAgainstAnchorV2Locked(a *AnchorV2, pub ed25519.PublicKey,
 		r.Classification, r.Reason = "truncation", fmt.Sprintf("truncation detected: anchor attests %d rows, local has %d", a.RowCount, actual)
 		return r, nil
 	}
-	verified, err := verifyChainInTransaction(tx, pub, true)
+	verified, err := verifyChainInTransaction(ctx, tx, pub, true)
 	if err != nil {
 		return nil, err
 	}
@@ -203,7 +219,9 @@ func (l *Logger) RegisterAnchorV2(mode string, legacy *Anchor, send func(AnchorR
 }
 
 // RegisterAnchorV2Context is RegisterAnchorV2 with cancellable identity-lock acquisition.
-// Local verification and durable writes remain synchronous; send must respect ctx.
+// Local verification and durable writes remain synchronous and unbounded: an
+// interruption after the remote accepted the pin would leave enrollment pending
+// for a pin that exists, so ctx bounds only the lock wait and send, which must respect it.
 func (l *Logger) RegisterAnchorV2Context(ctx context.Context, mode string, legacy *Anchor, send func(AnchorRegistrationRequest) (*AnchorV2, error)) (*ChainIdentity, error) {
 	if l.signer == nil || send == nil {
 		return nil, errors.New("v2 registration requires the original signing key and a confirmation callback")
@@ -235,7 +253,7 @@ func (l *Logger) RegisterAnchorV2Context(ctx context.Context, mode string, legac
 		if id.RegistrationState != ChainRegistrationNone {
 			return nil, errors.New("pending registration has lost its original request; restore trusted state, never regenerate it or clear the remote pin")
 		}
-		anchor, err := l.emitAnchorV2Locked(id)
+		anchor, err := l.emitAnchorV2Locked(context.Background(), id)
 		if err != nil {
 			return nil, err
 		}
@@ -263,7 +281,7 @@ func (l *Logger) RegisterAnchorV2Context(ctx context.Context, mode string, legac
 	}
 	// Verify inside the same lock as prune, on every retry. A prior candidate
 	// cannot be pinned after a none-state prune rewrote its signed chain.
-	result, err := l.verifyAgainstAnchorV2Locked(request.Anchor, l.signer.pub, id)
+	result, err := l.verifyAgainstAnchorV2Locked(context.Background(), request.Anchor, l.signer.pub, id)
 	if err != nil {
 		return nil, err
 	}
@@ -294,7 +312,7 @@ func (l *Logger) RegisterAnchorV2Context(ctx context.Context, mode string, legac
 		if stored == nil || stored.RowCount < request.Anchor.RowCount || (stored.RowCount == request.Anchor.RowCount && stored.HeadHash != request.Anchor.HeadHash) {
 			return nil, errors.New("registration confirmation is older than or conflicts with the original signed request")
 		}
-		checked, err := l.verifyAgainstAnchorV2Locked(stored, l.signer.pub, id)
+		checked, err := l.verifyAgainstAnchorV2Locked(context.Background(), stored, l.signer.pub, id)
 		if err != nil {
 			return nil, err
 		}
