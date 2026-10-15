@@ -233,8 +233,6 @@ var wrapCmd = &cobra.Command{
 			runSessionEndFailed   bool
 			runEndReason          string
 			runProxyDrainExceeded bool
-			stopProxyOnce         sync.Once
-			proxyStopErr          error
 			stopProxyFn           func() error // set when a network proxy is created
 		)
 
@@ -261,6 +259,23 @@ var wrapCmd = &cobra.Command{
 			runSessionEnded = true
 		}
 
+		// drainProxy joins any producer that can still write under the run's
+		// session_id (the network proxy) before the signed close, recording a
+		// deadline overrun so the close is skipped. It reads stopProxyFn at call
+		// time (set only once a proxy starts) and is a no-op once the drain has
+		// already exceeded its deadline, so the inline call before session_end and
+		// the deferred close's own join never warn twice. stopProxyFn is
+		// sync.Once-idempotent, so a repeat call returns the first drain's result.
+		drainProxy := func() {
+			if stopProxyFn == nil || runProxyDrainExceeded {
+				return
+			}
+			if err := stopProxyFn(); err != nil {
+				runProxyDrainExceeded = true
+				fmt.Fprintf(cmd.ErrOrStderr(), "NockLock: warning: network proxy drain exceeded its deadline; run %s left unclosed: %v\n", sessionID, err)
+			}
+		}
+
 		// Write the run's signed close last. Deferred here, after the anchor and
 		// logger.Close defers, so LIFO runs it BEFORE them and the emitted anchor
 		// covers the close row. It joins any producer that can still write under the
@@ -273,12 +288,7 @@ var wrapCmd = &cobra.Command{
 			}
 			// Join the proxy before the close even on early-return paths that never
 			// reached the inline stop; idempotent via sync.Once.
-			if stopProxyFn != nil && !runProxyDrainExceeded {
-				if err := stopProxyFn(); err != nil {
-					runProxyDrainExceeded = true
-					fmt.Fprintf(cmd.ErrOrStderr(), "NockLock: warning: network proxy drain exceeded its deadline; run %s left unclosed: %v\n", sessionID, err)
-				}
-			}
+			drainProxy()
 			if !closeRunEligible(runSessionStarted, runProxyDrainExceeded, runSessionEndFailed, runSessionEnded) {
 				return
 			}
@@ -890,6 +900,8 @@ var wrapCmd = &cobra.Command{
 				// stop on every early-return path. proxy.Stop reports the http.Server
 				// drain-deadline error, which the close path reads to decide whether
 				// to skip the close.
+				var stopProxyOnce sync.Once
+				var proxyStopErr error
 				stopProxyFn = func() error {
 					stopProxyOnce.Do(func() { proxyStopErr = proxy.Stop() })
 					return proxyStopErr
@@ -1180,12 +1192,7 @@ var wrapCmd = &cobra.Command{
 		// leaves the run unclosed rather than risk a false rows_after_close on an
 		// honestly slow request. Idempotent, so the deferred close's own join is a
 		// no-op after this.
-		if stopProxyFn != nil {
-			if err := stopProxyFn(); err != nil {
-				runProxyDrainExceeded = true
-				fmt.Fprintf(cmd.ErrOrStderr(), "NockLock: warning: network proxy drain exceeded its deadline; run %s left unclosed: %v\n", sessionID, err)
-			}
-		}
+		drainProxy()
 
 		// FAIL CLOSED on any egress-audit failure: an allowed/denied decision that
 		// could not be signed (or a decision-log that could not be read) means the
