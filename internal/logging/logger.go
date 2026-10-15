@@ -1681,7 +1681,7 @@ func migrateToChain(db *sql.DB) error {
 // signatures present but does not check them. Use VerifyChainSigned to verify
 // authenticity against a public key.
 func (l *Logger) VerifyChain() (*ChainVerifyResult, error) {
-	return l.verifyChain(nil, false)
+	return l.verifyChain(context.Background(), nil, false)
 }
 
 // VerifyChainSigned walks the hash chain and, using the supplied Ed25519 public
@@ -1693,7 +1693,37 @@ func (l *Logger) VerifyChain() (*ChainVerifyResult, error) {
 // The three states — AUTHENTIC, CONSISTENT/UNSIGNED, FORGED/TAMPERED — are kept
 // distinct in the result and never conflated.
 func (l *Logger) VerifyChainSigned(pub ed25519.PublicKey, requireSigned bool) (*ChainVerifyResult, error) {
-	return l.verifyChain(pub, requireSigned)
+	return l.verifyChain(context.Background(), pub, requireSigned)
+}
+
+// VerifyChainSignedContext is VerifyChainSigned bounded by ctx. When ctx ends
+// before the walk completes it returns ErrVerifyInterrupted and no result: a
+// partial walk is never reported as authentic or as tampering.
+func (l *Logger) VerifyChainSignedContext(ctx context.Context, pub ed25519.PublicKey, requireSigned bool) (*ChainVerifyResult, error) {
+	return l.verifyChain(ctx, pub, requireSigned)
+}
+
+// ErrVerifyInterrupted reports that a chain walk stopped (context cancelled or
+// deadline reached) before it finished. It is distinct from Intact=false and
+// from every signature state: the chain was neither authenticated nor shown to
+// be tampered with, so callers must emit no anchor and claim no verdict.
+var ErrVerifyInterrupted = errors.New("chain verification interrupted before completion")
+
+// verifyCtxCheckInterval is how many rows the walk verifies between context
+// checks.
+const verifyCtxCheckInterval = 1024
+
+// verifyRowHook, when set by a test, runs before each row with the number of
+// rows already verified. It lets tests cancel at an exact row, not a wall clock.
+var verifyRowHook func(rowsVerified int)
+
+// verifyInterrupted maps an error raised while ctx is done to
+// ErrVerifyInterrupted, keeping the context cause matchable.
+func verifyInterrupted(ctx context.Context, err error) error {
+	if cause := ctx.Err(); cause != nil {
+		return fmt.Errorf("%w: %w", ErrVerifyInterrupted, cause)
+	}
+	return err
 }
 
 // chainHeadRecord is the stored chain_head row: the tail anchor (hash and row
@@ -1721,18 +1751,20 @@ func readChainHeadRecord(tx *sql.Tx) (chainHeadRecord, error) {
 	return h, nil
 }
 
-func (l *Logger) verifyChain(pub ed25519.PublicKey, requireSigned bool) (*ChainVerifyResult, error) {
+func (l *Logger) verifyChain(ctx context.Context, pub ed25519.PublicKey, requireSigned bool) (*ChainVerifyResult, error) {
 	tx, err := l.db.Begin()
 	if err != nil {
 		return nil, fmt.Errorf("failed to begin chain verification transaction: %w", err)
 	}
 	defer tx.Rollback()
-	return verifyChainInTransaction(tx, pub, requireSigned)
+	return verifyChainInTransaction(ctx, tx, pub, requireSigned)
 }
 
 // verifyChainInTransaction lets anchor preflight authenticate the head and its
 // prefix in the same SQLite snapshot without weakening ordinary verification.
-func verifyChainInTransaction(tx *sql.Tx, pub ed25519.PublicKey, requireSigned bool) (*ChainVerifyResult, error) {
+// The walk checks ctx every verifyCtxCheckInterval rows and once more after the
+// last row, and returns ErrVerifyInterrupted instead of a result when ctx ends.
+func verifyChainInTransaction(ctx context.Context, tx *sql.Tx, pub ed25519.PublicKey, requireSigned bool) (*ChainVerifyResult, error) {
 	result := &ChainVerifyResult{PubKeyProvided: pub != nil}
 
 	// Get chain_head state
@@ -1803,11 +1835,11 @@ func verifyChainInTransaction(tx *sql.Tx, pub ed25519.PublicKey, requireSigned b
 		result.UnsignedThroughID = *unsignedThroughID
 	}
 	// Get all events in order
-	rows, err := tx.Query(
+	rows, err := tx.QueryContext(ctx,
 		"SELECT id, timestamp, event_type, category, detail, blocked, session_id, prev_hash, entry_hash, entry_sig FROM events ORDER BY id ASC",
 	)
 	if err != nil {
-		return nil, fmt.Errorf("failed to query events for verification: %w", err)
+		return nil, verifyInterrupted(ctx, fmt.Errorf("failed to query events for verification: %w", err))
 	}
 	defer rows.Close()
 
@@ -1824,11 +1856,19 @@ func verifyChainInTransaction(tx *sql.Tx, pub ed25519.PublicKey, requireSigned b
 	}
 	prevHashHex := chainGenesisHashHex
 	for rows.Next() {
+		if verifyRowHook != nil {
+			verifyRowHook(result.EntriesVerified)
+		}
+		if result.EntriesVerified%verifyCtxCheckInterval == 0 {
+			if cause := ctx.Err(); cause != nil {
+				return nil, fmt.Errorf("%w: %w", ErrVerifyInterrupted, cause)
+			}
+		}
 		var id int64
 		var ts, et, cat, detail, sid, storedPrevHash, storedEntryHash, storedSig string
 		var blocked int
 		if err := rows.Scan(&id, &ts, &et, &cat, &detail, &blocked, &sid, &storedPrevHash, &storedEntryHash, &storedSig); err != nil {
-			return nil, fmt.Errorf("failed to scan event row: %w", err)
+			return nil, verifyInterrupted(ctx, fmt.Errorf("failed to scan event row: %w", err))
 		}
 
 		// Check for non-genesis prev_hash on first row (indicates pruning)
@@ -1891,7 +1931,12 @@ func verifyChainInTransaction(tx *sql.Tx, pub ed25519.PublicKey, requireSigned b
 		result.EntriesVerified++
 	}
 	if err := rows.Err(); err != nil {
-		return nil, fmt.Errorf("error iterating events during verification: %w", err)
+		return nil, verifyInterrupted(ctx, fmt.Errorf("error iterating events during verification: %w", err))
+	}
+	// A deadline that lands after the last periodic check must not let the walk
+	// report a verdict it did not finish under.
+	if cause := ctx.Err(); cause != nil {
+		return nil, fmt.Errorf("%w: %w", ErrVerifyInterrupted, cause)
 	}
 	if pub != nil && !adopted && (headSig != "" || publicKeyFingerprintHex != "" || result.SignedEntries > 0) {
 		// Signing artifacts remain but the adoption marker is gone — a genuine

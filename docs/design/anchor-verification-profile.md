@@ -109,6 +109,8 @@ Three independently landable steps, in order.
 
 ### Step 1: context-bounded, fail-closed walk (prerequisite, no cache)
 
+Implemented in N11800. Locks: the walk still runs under the chain-identity store lock (`chain-identity.lock`, flock; the same lock `Prune`, registration and enrollment take) for v2 emission and `VerifyAgainstAnchorV2`, as before; it is now bounded by its own context, and an interrupted walk releases the lock on return (`defer store.close()`), so `Prune` is not blocked behind it. The v1 `EmitAnchorContext` path takes no identity lock. The walk's own SQLite read transaction is unchanged. Teardown's walk deadline is `anchorWalkTimeout` (zero, unbounded, by default; no operator-facing knob yet).
+
 - `verifyChainInTransaction` gains a context. Row and prefix loops check `ctx.Err()` every 1,024 rows; queries use `QueryContext` so SQLite is interrupted too.
 - Interruption returns `ErrVerifyInterrupted` (distinct from `Intact=false`, `forged`, `tampered`). It is never converted to `authentic`, and never reported as tampering. `EmitAnchor`, `EmitAnchorV2Context`, `VerifyAgainstAnchorV2Context` and `finishAnchorSession` propagate it: no anchor is written, the existing warning path prints "chain anchor not written", and the process still exits normally.
 - Run the walk without holding the identity store lock where the lock is not needed for the snapshot; at minimum, release on interruption promptly (the lock is already released by `defer store.close()`).

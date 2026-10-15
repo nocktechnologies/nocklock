@@ -162,7 +162,9 @@ func runAnchorEnrollment(ctx context.Context, w io.Writer, mode string) error {
 	return nil
 }
 
-func pushAnchorV2(ctx context.Context, logger *logging.Logger, a *logging.AnchorV2, pub ed25519.PublicKey, baseURL, token string) error {
+// pushAnchorV2 pushes a: ctx bounds lock waits and HTTP, walkCtx bounds the
+// local verification walks of its preflight.
+func pushAnchorV2(ctx, walkCtx context.Context, logger *logging.Logger, a *logging.AnchorV2, pub ed25519.PublicKey, baseURL, token string) error {
 	id, err := logger.ReadChainIdentityContext(ctx)
 	if err != nil {
 		return err
@@ -170,7 +172,7 @@ func pushAnchorV2(ctx context.Context, logger *logging.Logger, a *logging.Anchor
 	if id.RegistrationState != logging.ChainRegistrationEnrolled {
 		return errors.New("v2 chain is not enrolled; retry explicit anchor enroll or anchor migrate before push")
 	}
-	candidate, err := logger.VerifyAgainstAnchorV2Context(ctx, a, pub)
+	candidate, err := logger.VerifyAgainstAnchorV2Walk(ctx, walkCtx, a, pub)
 	if err != nil {
 		return err
 	}
@@ -181,7 +183,7 @@ func pushAnchorV2(ctx context.Context, logger *logging.Logger, a *logging.Anchor
 	if err != nil {
 		return err
 	}
-	prefix, err := logger.VerifyAgainstAnchorV2Context(ctx, previous, pub)
+	prefix, err := logger.VerifyAgainstAnchorV2Walk(ctx, walkCtx, previous, pub)
 	if err != nil {
 		return err
 	}
@@ -214,10 +216,15 @@ func writeAnchorV2VerifyResult(w io.Writer, result *logging.AnchorV2VerifyResult
 func finishAnchorSession(w io.Writer, logger *logging.Logger, dbPath string) {
 	ctx, cancel := context.WithTimeout(context.Background(), anchorPushTimeout)
 	defer cancel()
+	walkCtx, cancelWalk := context.Background(), context.CancelFunc(func() {})
+	if anchorWalkTimeout > 0 {
+		walkCtx, cancelWalk = context.WithTimeout(context.Background(), anchorWalkTimeout)
+	}
+	defer cancelWalk()
 	path := logging.DefaultAnchorPath(dbPath)
 	dir, err := logger.ChainIdentityDirectoryContext(ctx)
 	if err == nil && dir == "" {
-		a, emitErr := logger.EmitAnchor()
+		a, emitErr := logger.EmitAnchorContext(walkCtx)
 		if emitErr == nil {
 			emitErr = logging.WriteAnchor(path, a)
 		}
@@ -233,7 +240,7 @@ func finishAnchorSession(w io.Writer, logger *logging.Logger, dbPath string) {
 		fmt.Fprintf(w, "NockLock: warning: chain anchor not written: %v\n", err)
 		return
 	}
-	a, err := logger.EmitAnchorV2Context(ctx)
+	a, err := logger.EmitAnchorV2Walk(ctx, walkCtx)
 	if err == nil {
 		err = logging.WriteAnchorV2(path, a)
 	}
@@ -245,7 +252,11 @@ func finishAnchorSession(w io.Writer, logger *logging.Logger, dbPath string) {
 	if baseURL == "" {
 		return
 	}
-	if err := pushAnchorV2(ctx, logger, a, logger.SigningPublicKey(), baseURL, token); err != nil {
+	// The push gets its own budget, started after emission, so a long walk does
+	// not leave it no time.
+	pushCtx, cancelPush := context.WithTimeout(context.Background(), anchorPushTimeout)
+	defer cancelPush()
+	if err := pushAnchorV2(pushCtx, walkCtx, logger, a, logger.SigningPublicKey(), baseURL, token); err != nil {
 		fmt.Fprintf(w, "NockLock: warning: chain anchor NOT pushed off-box: %v\n", err)
 	}
 }
