@@ -564,10 +564,6 @@ func defaultEgressHelperState() egressHelperState {
 	return st
 }
 
-// egressHelperDoctorCheck reports whether the privileged Linux network-egress
-// helper is installed and reachable. It is a warning (not critical) when the
-// helper is absent or unreachable: the netns egress fence still fails closed at
-// runtime, so this is host-install ergonomics, not a live gap.
 // libFenceTrustDoctorCheck reports interposer library candidates that wrap
 // would refuse for unsafe ownership or permissions. It stays silent when none
 // are unsafe, so a host without the library keeps its current report.
@@ -589,6 +585,10 @@ func libFenceTrustDoctorCheck(caps doctorCapabilities) (doctorCheck, bool) {
 	}, true
 }
 
+// egressHelperDoctorCheck reports whether the privileged Linux network-egress
+// helper is installed and reachable. It is a warning (not critical) when the
+// helper is absent or unreachable: the netns egress fence still fails closed at
+// runtime, so this is host-install ergonomics, not a live gap.
 func egressHelperDoctorCheck(caps doctorCapabilities) doctorCheck {
 	if caps.goos != "linux" {
 		return doctorCheck{

@@ -22,9 +22,9 @@ func verifyLibFenceTrust(path string) error {
 // (StrictModes-style). Symlinks are checked twice: every component of the
 // path as given (the link itself must be trustworthy, so a swapped link in a
 // writable directory is refused) and every component of the fully resolved
-// target. Ancestors at or above trustedFrom (when non-empty) are skipped: a
-// test seam, since t.TempDir sits under a sticky world-writable /tmp. Ownership comes from Lstat, so tests drive it through a trustedOwner
-// seam instead of chown.
+// target. Two test seams: trustedOwner replaces the uid check, since tests
+// cannot chown; and ancestors at or above trustedFrom (when non-empty) are
+// skipped, since t.TempDir sits under a sticky world-writable /tmp.
 func checkLibFenceTrust(path, trustedFrom string, trustedOwner func(uint32) bool) error {
 	if err := checkPathChainTrust(path, trustedFrom, trustedOwner); err != nil {
 		return err
@@ -76,23 +76,20 @@ func checkPathChainTrust(path, trustedFrom string, trustedOwner func(uint32) boo
 	return nil
 }
 
-// unsafeLibFenceCandidates returns one message per installed library candidate
-// that the resolver would refuse, for doctor to report.
+// unsafeLibFenceCandidates returns one message per library candidate the
+// resolver refuses, for doctor to report. An error scanning is reported as
+// an unsafe entry so doctor never hides it.
 func unsafeLibFenceCandidates() []string {
-	var exePath string
-	if exe, err := os.Executable(); err == nil {
-		exePath = exe
+	exePath, _ := os.Executable()
+	cwd, err := os.Getwd()
+	if err != nil {
+		return []string{fmt.Sprintf("cannot resolve current working directory: %v", err)}
 	}
-	var unsafe []string
-	for _, c := range libFenceCandidatePaths(exePath, nil) {
-		if ok, _ := fileExists(c); !ok {
-			continue
-		}
-		if err := verifyLibFenceTrust(c); err != nil {
-			unsafe = append(unsafe, fmt.Sprintf("%s: %v", c, err))
-		}
+	_, refused, err := scanLibFenceCandidates(exePath, cwd, nil, fileExists, verifyLibFenceTrust)
+	if err != nil {
+		refused = append(refused, err.Error())
 	}
-	return unsafe
+	return refused
 }
 
 // sameOrAncestor reports whether dir is path or one of its ancestors.

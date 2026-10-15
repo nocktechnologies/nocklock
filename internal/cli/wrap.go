@@ -1649,44 +1649,51 @@ func validateUnixProxySocketPath(path string) error {
 // ancestors). Unsafe candidates are skipped, never used, and named in the
 // error when nothing safe remains.
 func findTrustedLibFenceFS(exePath, workingDir string, extraCandidates []string, exists func(string) (bool, error), verify func(string) error) (string, error) {
-	if exists == nil {
-		exists = fileExists
+	path, refused, err := scanLibFenceCandidates(exePath, workingDir, extraCandidates, exists, verify)
+	if err != nil {
+		return "", err
 	}
-	var refused []string
-
-	candidates := libFenceCandidatePaths(exePath, extraCandidates)
-
-	for _, candidate := range candidates {
-		abs, err := filepath.Abs(candidate)
-		if err != nil {
-			continue
-		}
-		ok, err := exists(abs)
-		if err != nil {
-			return "", fmt.Errorf("cannot inspect trusted filesystem fence library candidate %q: %w", abs, err)
-		}
-		if !ok {
-			continue
-		}
-		if pathIsWithinDir(abs, workingDir) {
-			continue
-		}
-		if err := verify(abs); err != nil {
-			refused = append(refused, fmt.Sprintf("%s: %v", abs, err))
-			continue
-		}
-		return abs, nil
+	if path != "" {
+		return path, nil
 	}
-
 	if len(refused) > 0 {
 		return "", fmt.Errorf("refusing unsafe filesystem fence library candidate(s): %s. Make the library and every parent directory owned by root or the invoking user and not group/world-writable, then retry; refusing to launch with an untrusted LD_PRELOAD path", strings.Join(refused, "; "))
 	}
 	return "", fmt.Errorf("trusted filesystem fence library not found. Install libfence_fs.so next to the nocklock binary, at /usr/local/lib/nocklock/libfence_fs.so, or at /usr/lib/nocklock/libfence_fs.so; refusing to launch with an untrusted LD_PRELOAD path")
 }
 
+// scanLibFenceCandidates walks the candidates in order and returns the first
+// that exists outside workingDir and passes verify, plus a message for every
+// existing candidate verify refused before it. Doctor shares it so both
+// report the same decisions.
+func scanLibFenceCandidates(exePath, workingDir string, extraCandidates []string, exists func(string) (bool, error), verify func(string) error) (path string, refused []string, err error) {
+	if exists == nil {
+		exists = fileExists
+	}
+	for _, candidate := range libFenceCandidatePaths(exePath, extraCandidates) {
+		abs, absErr := filepath.Abs(candidate)
+		if absErr != nil {
+			continue
+		}
+		ok, existsErr := exists(abs)
+		if existsErr != nil {
+			return "", nil, fmt.Errorf("cannot inspect trusted filesystem fence library candidate %q: %w", abs, existsErr)
+		}
+		if !ok || pathIsWithinDir(abs, workingDir) {
+			continue
+		}
+		if verr := verify(abs); verr != nil {
+			refused = append(refused, fmt.Sprintf("%s: %v", abs, verr))
+			continue
+		}
+		return abs, refused, nil
+	}
+	return "", refused, nil
+}
+
 // libFenceCandidatePaths lists, in preference order, where the filesystem
 // fence library may be installed: next to the nocklock binary, then the two
-// system prefixes. Doctor shares it so both report the same candidates.
+// system prefixes.
 func libFenceCandidatePaths(exePath string, extra []string) []string {
 	candidates := make([]string, 0, len(extra)+3)
 	if exePath != "" {
