@@ -2,7 +2,6 @@
 
 **Date:** 2026-06-04
 **Status:** Draft (awaiting approval)
-**Author:** Mira (CEO, Consumer/Product)
 **Branch:** `docs/macos-fs-fence-spec`
 
 ---
@@ -132,7 +131,7 @@ Phase 3, Endpoint Security system extension (separate epic), restores strict all
 
 ---
 
-## Decisions (made 2026-06-04: Kevin delegated "it's your project, take it and run")
+## Decisions (made 2026-06-04: product scope delegated)
 
 1. **Ship interim on the deprecated `sandbox-exec`?** YES, present + functional on macOS 26.5, widely relied on; the alternative is no macOS fence. Pin + CI-test per OS version.
 2. **Event logging:** accept partial parity for v1. Enforcement is the security guarantee; logging follows in P2/P3.

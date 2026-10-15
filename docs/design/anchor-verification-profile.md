@@ -1,6 +1,6 @@
 # Bounded anchor verification: profile and design
 
-Status: profiling and design for Nock #11775. Nothing here changes runtime behavior; the only code added is a profiling recipe and one negative-control test (`internal/logging/anchor_verify_profile_test.go`, `anchor_head_only_test.go`). Implementation is a separate PR after Mira reviews this design. It sequences before N11766 (opt-in periodic committed-head v2 checkpoints).
+Status: profiling and design for Nock #11775. Nothing here changes runtime behavior; the only code added is a profiling recipe and one negative-control test (`internal/logging/anchor_verify_profile_test.go`, `anchor_head_only_test.go`). Implementation is a separate PR after maintainer review. It sequences before N11766 (opt-in periodic committed-head v2 checkpoints).
 
 ## Problem
 
@@ -201,7 +201,7 @@ Step 2 also needs a contention case: a verifier receipt write racing a live `Log
 
 Step 1 alone needs rows 14 and 17 plus a bounded-time test using the injected hook (EmitAnchor returns `ErrVerifyInterrupted` at the deadline instead of finishing the walk).
 
-## Decisions requested from Mira
+## Decisions requested from maintainers
 
 1. Receipt location: `events.db` table (recommended: moves, backs up and rolls back with the data it describes; costs a short writer transaction) versus a sidecar file in the audit state directory (no DB schema change, but a separate file to relocate). Integrity does not depend on the choice.
 2. Whether Step 1 ships as its own PR ahead of Step 2.

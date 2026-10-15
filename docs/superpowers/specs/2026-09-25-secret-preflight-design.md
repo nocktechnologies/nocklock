@@ -1,6 +1,6 @@
 # Secret preflight scanning
 
-Kevin approved starting the promised-feature plan on September 25, 2026.
+The project owner approved starting the promised-feature plan on September 25, 2026.
 This first increment adds local detection and a prelaunch gate. It does not
 rewrite reads, monitor agent context, or promise detection of arbitrary secrets.
 

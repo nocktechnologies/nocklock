@@ -2,7 +2,6 @@
 
 **Status:** Accepted
 **Date:** 2026-09-27
-**Author:** Beck (AI builder), N10764
 
 ## Context
 #10757 gave a wrapped Node agent its own procfs reads under the hardened

@@ -37,7 +37,7 @@
 - [ ] **Step 1: Create feature branch**
 
 ```bash
-cd /Users/kevin/Dev/nocklock
+cd /home/example/Dev/nocklock
 git checkout main
 git pull origin main
 git checkout -b feature/sqlite-logging
@@ -46,7 +46,7 @@ git checkout -b feature/sqlite-logging
 - [ ] **Step 2: Add dependencies**
 
 ```bash
-cd /Users/kevin/Dev/nocklock
+cd /home/example/Dev/nocklock
 go get modernc.org/sqlite
 go get github.com/google/uuid
 ```
@@ -54,7 +54,7 @@ go get github.com/google/uuid
 - [ ] **Step 3: Verify dependencies resolve**
 
 ```bash
-cd /Users/kevin/Dev/nocklock
+cd /home/example/Dev/nocklock
 go mod tidy
 go build ./cmd/nocklock
 ```
@@ -345,7 +345,7 @@ func TestLogEmptyDetail(t *testing.T) {
 - [ ] **Step 2: Run tests to verify they fail**
 
 ```bash
-cd /Users/kevin/Dev/nocklock
+cd /home/example/Dev/nocklock
 go test ./internal/logging/ -v -count=1
 ```
 
@@ -691,7 +691,7 @@ func (l *Logger) Close() error {
 - [ ] **Step 4: Run tests to verify they pass**
 
 ```bash
-cd /Users/kevin/Dev/nocklock
+cd /home/example/Dev/nocklock
 go test ./internal/logging/ -v -count=1
 ```
 
@@ -904,7 +904,7 @@ func TestQueryEmptyResult(t *testing.T) {
 - [ ] **Step 2: Run tests**
 
 ```bash
-cd /Users/kevin/Dev/nocklock
+cd /home/example/Dev/nocklock
 go test ./internal/logging/ -v -count=1
 ```
 
@@ -1085,7 +1085,7 @@ func TestPruneReturnsCorrectCount(t *testing.T) {
 - [ ] **Step 2: Run tests**
 
 ```bash
-cd /Users/kevin/Dev/nocklock
+cd /home/example/Dev/nocklock
 go test ./internal/logging/ -v -count=1
 ```
 
@@ -1266,7 +1266,7 @@ func TestConcurrentLogAndQuery(t *testing.T) {
 - [ ] **Step 2: Run tests**
 
 ```bash
-cd /Users/kevin/Dev/nocklock
+cd /home/example/Dev/nocklock
 go test ./internal/logging/ -v -count=1 -race
 ```
 
@@ -1466,7 +1466,7 @@ func init() {
 - [ ] **Step 2: Build and run existing tests**
 
 ```bash
-cd /Users/kevin/Dev/nocklock
+cd /home/example/Dev/nocklock
 go build ./cmd/nocklock
 go test ./... -v -count=1
 ```
@@ -1746,7 +1746,7 @@ func init() {
 - [ ] **Step 2: Build and test**
 
 ```bash
-cd /Users/kevin/Dev/nocklock
+cd /home/example/Dev/nocklock
 go build ./cmd/nocklock
 go vet ./...
 ```
@@ -1853,7 +1853,7 @@ func init() {
 - [ ] **Step 2: Build and run all tests**
 
 ```bash
-cd /Users/kevin/Dev/nocklock
+cd /home/example/Dev/nocklock
 go build ./cmd/nocklock
 go test ./... -v -count=1
 go vet ./...
@@ -1876,7 +1876,7 @@ git commit -m "feat: update nocklock status with event log info"
 - [ ] **Step 1: Run full test suite with race detector**
 
 ```bash
-cd /Users/kevin/Dev/nocklock
+cd /home/example/Dev/nocklock
 go test ./... -v -count=1 -race
 ```
 
@@ -1885,7 +1885,7 @@ Expected: all tests PASS, no race conditions.
 - [ ] **Step 2: Run vet and format**
 
 ```bash
-cd /Users/kevin/Dev/nocklock
+cd /home/example/Dev/nocklock
 go vet ./...
 go fmt ./...
 ```
