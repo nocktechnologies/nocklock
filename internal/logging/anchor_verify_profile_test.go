@@ -30,11 +30,11 @@ func TestProfileAnchorVerification(t *testing.T) {
 	if err != nil || rows < 1 {
 		t.Fatalf("NOCKLOCK_PROFILE_ROWS=%q: want a positive integer", raw)
 	}
-	reps := 3
+	const reps = 3
 
 	l, keyPath, pub := newSigningLogger(t)
 	defer l.Close()
-	dbPath := profileDBPath(t, l)
+	dbPath := dbPathOf(t, l)
 
 	// Genuinely signed rows through the normal append path (row + head signature each).
 	start := time.Now()
@@ -56,8 +56,7 @@ func TestProfileAnchorVerification(t *testing.T) {
 		name string
 		fn   func() error
 	}
-	var rowsData []profileRow
-	rowsData = loadProfileRows(t, l.db)
+	rowsData := loadProfileRows(t, l.db)
 
 	phases := []phase{
 		{"sqlite scan only (SELECT + Scan, no crypto)", func() error { _ = loadProfileRows(t, l.db); return nil }},
@@ -82,13 +81,14 @@ func TestProfileAnchorVerification(t *testing.T) {
 			}
 			return nil
 		}},
-		{"prefix rescan: SQLite scan + hash chain + sig-inclusive SHA-256 digest, no sig verify (design option C)", func() error {
+		{"prefix rescan: SQLite scan + hash chain + sig-inclusive SHA-256 digest, no sig verify (design option C, prototype loop)", func() error {
 			rs, err := l.db.Query("SELECT id, timestamp, event_type, category, detail, blocked, session_id, prev_hash, entry_hash, entry_sig FROM events ORDER BY id ASC")
 			if err != nil {
 				return err
 			}
 			defer rs.Close()
-			prev, digest := chainGenesisHashHex, [sha256.Size]byte{}
+			prev, digest := chainGenesisHashHex, make([]byte, 0, sha256.Size)
+			h256 := sha256.New()
 			for rs.Next() {
 				var r profileRow
 				if err := rs.Scan(&r.id, &r.ts, &r.et, &r.cat, &r.detail, &r.blocked, &r.sid, &r.prev, &r.hash, &r.sig); err != nil {
@@ -99,8 +99,15 @@ func TestProfileAnchorVerification(t *testing.T) {
 				if err != nil || h != r.hash || r.prev != prev {
 					return fmt.Errorf("row %d: chain mismatch (%v)", r.id, err)
 				}
-				digest = sha256.Sum256(append(append(digest[:], r.hash...), r.sig...))
+				h256.Reset()
+				h256.Write(digest)
+				h256.Write([]byte(r.hash))
+				h256.Write([]byte(r.sig))
+				digest = h256.Sum(digest[:0])
 				prev = h
+			}
+			if len(digest) != sha256.Size {
+				return fmt.Errorf("digest not computed")
 			}
 			return rs.Err()
 		}},
@@ -126,11 +133,14 @@ func TestProfileAnchorVerification(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	cb, _ := anchorCanonicalBytes(anchor)
+	anchorCB, err := anchorCanonicalBytes(anchor)
+	if err != nil {
+		t.Fatal(err)
+	}
 	_, priv, _ := ed25519.GenerateKey(nil)
 	anchorPath := filepath.Join(t.TempDir(), "chain-anchor.json")
 	phases = append(phases,
-		phase{"ed25519.Sign of one anchor (isolated)", func() error { _ = ed25519.Sign(priv, cb); return nil }},
+		phase{"ed25519.Sign of one anchor (isolated)", func() error { _ = ed25519.Sign(priv, anchorCB); return nil }},
 		phase{"WriteAnchor temp file + rename (isolated)", func() error { return WriteAnchor(anchorPath, anchor) }},
 	)
 
@@ -166,7 +176,7 @@ func TestProfileAnchorVerification(t *testing.T) {
 	if _, err := l2.EmitAnchor(); err != nil {
 		t.Fatal(err)
 	}
-	t.Logf("cold-open (new process-equivalent connection, warm OS page cache) EmitAnchor: %s", time.Since(s))
+	t.Logf("cold-open (new Logger and connection pool; warm OS page cache and Go heap) EmitAnchor: %s", time.Since(s))
 	t.Logf("db size: %d bytes", fileSize(dbPath))
 }
 
@@ -196,16 +206,6 @@ func loadProfileRows(t *testing.T, db *sql.DB) []profileRow {
 		t.Fatal(err)
 	}
 	return out
-}
-
-func profileDBPath(t *testing.T, l *Logger) string {
-	t.Helper()
-	var seq int
-	var name, file string
-	if err := l.db.QueryRow("PRAGMA database_list").Scan(&seq, &name, &file); err != nil {
-		t.Fatal(err)
-	}
-	return file
 }
 
 func fileSize(path string) int64 {

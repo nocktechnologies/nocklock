@@ -28,7 +28,7 @@ On a host with umask `002` run `umask 022` first, or the logging tests that chec
 | Host | linux/amd64, AMD Ryzen 9 PRO 8945HS, 16 CPU, Linux 7.0.0, go1.26.4 |
 | Commit | `4284341` (`origin/next`) plus the two test files in this PR |
 | Warm | In-process repeats after the first populate; OS page cache warm |
-| "Cold-open" | A new `Logger`/connection pool in the same process, OS page cache still warm. A truly cold page cache needs root (`drop_caches`) and was not measured |
+| "Cold-open" | A new `Logger` and connection pool in the same process; OS page cache and Go heap still warm. A truly cold page cache needs root (`drop_caches`) and was not measured |
 | Remote | Disabled. No phase touches the network; push, enroll and remote verify are out of scope of every number below |
 
 100,000 rows, 43.3 MB database, median of three warm runs:
@@ -37,16 +37,16 @@ On a host with umask `002` run `umask 022` first, or the logging tests that chec
 | --- | --- | --- |
 | `VerifyChainSigned` (full authentication) | 4.048 s | 100% |
 | `EmitAnchor` (`VerifyChainSigned` + one signature) | 3.994 s (runs: 4.044, 3.949, 4.205) | n/a |
-| Ed25519 row-signature verification only (rows in memory) | 3.910 s | 96.6% |
-| SQLite `SELECT` + `Scan` only | 0.119 s | 2.9% |
-| Hash recompute only (rows in memory) | 0.033 s | 0.8% |
-| `VerifyChain` (hash only, no key) | 0.162 s | 4.0% |
-| Prefix rescan: scan + hash chain + sig-inclusive SHA-256 digest, no signature verify (option C below) | 0.171 s | 4.2% |
+| Ed25519 row-signature verification only (rows in memory) | 3.910 s | about 97% |
+| SQLite `SELECT` + `Scan` only | 0.119 s | about 3% |
+| Hash recompute only (rows in memory) | 0.033 s | about 1% |
+| `VerifyChain` (hash only, no key) | 0.162 s | about 4% |
+| Prefix rescan prototype: scan + hash chain + sig-inclusive SHA-256 digest, no signature verify (option C below). A lower bound: the real step adds a read transaction, receipt and head checks | 0.17 to 0.18 s (two runs of three) | about 4% |
 | `ed25519.Sign` of one anchor | 0.020 ms | <0.001% |
 | `WriteAnchor` (temp file + rename) | 0.09 to 0.42 ms | <0.01% |
 | Cold-open `EmitAnchor` | 4.150 s | n/a |
 
-10,000 rows (4.3 MB) for scaling: `VerifyChainSigned` 0.393 s, signatures 0.377 s, scan 12.8 ms, hash 3.6 ms, prefix rescan 18.2 ms. Everything scales about 10x for 10x rows, as expected for a linear walk. The phases are additive (3.910 + 0.119 + 0.033 is about 4.06 s against 4.05 s measured).
+10,000 rows (4.3 MB) for scaling: `VerifyChainSigned` 0.393 s, signatures 0.377 s, scan 12.8 ms, hash 3.6 ms, prefix rescan 18.2 ms. Everything scales about 10x for 10x rows, as expected for a linear walk. Repeat spread is up to about 10% on this host (three hand-timed repeats, no GC control), so read the shares as approximate. The phases are additive (3.910 + 0.119 + 0.033 is about 4.06 s against 4.05 s measured).
 
 Findings:
 
@@ -156,7 +156,7 @@ where `D` is the rolling digest `D_i = SHA-256(D_{i-1} || entry_hash_i || entry_
 | Chain identity (`chain_id`, registration state) | Not in the receipt. Identity is read from trusted state on every emission and is unaffected |
 | Corrupt, unknown version, deleted | Ignored, full walk |
 
-**Cost after Step 2.** Warm, no new rows: about 0.17 s per 100,000 rows (measured prefix rescan) plus one Ed25519 verify and sign. Each new row adds about 40 µs. The linear term shrinks from about 40 µs to about 1.7 µs per row, so the teardown budget on this host stretches from roughly 125,000 to roughly 2,500,000 rows of already-verified prefix (extrapolated, not measured). A first run on a large store without a receipt still pays the full walk, bounded by Step 1.
+**Cost after Step 2.** Warm, no new rows: about 0.17 to 0.18 s per 100,000 rows (measured with the prototype loop, a lower bound) plus one Ed25519 verify and sign. Each new row adds about 40 µs. The linear term shrinks from about 40 µs to about 1.7 µs per row, so the teardown budget on this host stretches from roughly 125,000 to roughly 2,500,000 rows of already-verified prefix (extrapolated, not measured). A first run on a large store without a receipt still pays the full walk, bounded by Step 1.
 
 ### Step 3: pacing with N11766 periodic checkpoints
 

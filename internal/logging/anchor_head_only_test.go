@@ -44,7 +44,7 @@ func headOnlyCheck(t *testing.T, l *Logger, pub ed25519.PublicKey) bool {
 func TestHeadOnlyVerificationMissesLaunderedTamper(t *testing.T) {
 	l, _, pub := newSigningLogger(t)
 	defer l.Close()
-	for i := 0; i < 5; i++ {
+	for range 5 {
 		if err := l.Log(Event{Timestamp: time.Now(), EventType: EventType("t"), Category: "c", Detail: "original", SessionID: "s"}); err != nil {
 			t.Fatal(err)
 		}
@@ -56,26 +56,9 @@ func TestHeadOnlyVerificationMissesLaunderedTamper(t *testing.T) {
 		t.Fatalf("control: full verification must pass on an untouched chain: %+v %v", res, err)
 	}
 
-	// Keyless tamper: rewrite row 3 and re-chain rows 3..5 plus chain_head.
-	rows := loadProfileRows(t, l.db)
-	prev := rows[1].hash
-	for i := 2; i < len(rows); i++ {
-		r := rows[i]
-		if i == 2 {
-			r.detail = "tampered"
-		}
-		h, err := chainEntryFromCanonical(canonicalBytes(r.id, r.ts, EventType(r.et), r.cat, r.detail, r.blocked != 0, r.sid), prev)
-		if err != nil {
-			t.Fatal(err)
-		}
-		if _, err := l.db.Exec("UPDATE events SET detail = ?, prev_hash = ?, entry_hash = ? WHERE id = ?", r.detail, prev, h, r.id); err != nil {
-			t.Fatal(err)
-		}
-		prev = h
-	}
-	if _, err := l.db.Exec("UPDATE chain_head SET entry_hash = ? WHERE id = 1", prev); err != nil {
-		t.Fatal(err)
-	}
+	// Keyless tamper: rewrite row 3, re-chain rows 3..5 and chain_head (the
+	// head signature is now stale).
+	tamperRowAndRechain(t, dbPathOf(t, l), 3, "tampered")
 	// The unlaundered tamper is caught by the head signature alone.
 	if headOnlyCheck(t, l, pub) {
 		t.Fatal("head-only check must fail while the head signature is stale")
