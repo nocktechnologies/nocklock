@@ -230,6 +230,9 @@ func TestWatchdogCancelDuringProbeReportsNoFailure(t *testing.T) {
 	defer cancel()
 	addr := strings.TrimPrefix(server.URL, "http://")
 	w := NewProxyWatchdog(addr, 10*time.Millisecond, 1, func() { fired.Store(true) })
+	// Only cancel may end the parked probe; the 500ms client timeout would be a
+	// genuine failure on a slow runner.
+	w.client.Timeout = time.Minute
 	w.Start(ctx)
 
 	select {
