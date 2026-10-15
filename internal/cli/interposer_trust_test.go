@@ -185,8 +185,8 @@ func TestInterposerTrustRejectsObservedReplacement(t *testing.T) {
 func TestInterposerResolverDoesNotFallBackAfterUnsafeCandidate(t *testing.T) {
 	f := newInterposerFixture()
 	f.add("/safe/bin/libfence_fs.so", 0o666, 1000)
-	got, err := findTrustedLibFenceFS("/safe/bin/nocklock", "/project", []string{"/safe/cellar/nocklock/1.0/lib/libfence_fs.so"}, func(path string) (string, error) {
-		return inspectInterposerPath(path, f.fs)
+	got, err := findTrustedLibFenceFS("/safe/bin/nocklock", "/project", []string{"/safe/cellar/nocklock/1.0/lib/libfence_fs.so"}, func(path string, projectDirs []string) (string, error) {
+		return inspectTrustedPath(path, f.fs, 0, projectDirs)
 	})
 	if err == nil || got != "" || !strings.Contains(err.Error(), "refusing to launch") {
 		t.Fatalf("unsafe candidate bypassed: path=%q err=%v", got, err)
@@ -264,8 +264,8 @@ func TestInterposerResolverOnlyInitialAbsencePermitsFallback(t *testing.T) {
 				f.add(candidate, os.ModeSymlink|0o777, 1000)
 				f.links[candidate] = "/safe/missing"
 			}
-			got, err := findTrustedLibFenceFS("/safe/bin/nocklock", "/project", []string{fallback}, func(path string) (string, error) {
-				return inspectInterposerPath(path, f.fs)
+			got, err := findTrustedLibFenceFS("/safe/bin/nocklock", "/project", []string{fallback}, func(path string, projectDirs []string) (string, error) {
+				return inspectTrustedPath(path, f.fs, 0, projectDirs)
 			})
 			if broken {
 				if err == nil || got != "" || !strings.Contains(err.Error(), "refusing to launch") {
@@ -337,157 +337,117 @@ func TestTrustedVerificationScratchFallsBack(t *testing.T) {
 	}
 }
 
-func TestInterposerResolverSkipsLibraryInsideSymlinkedWorkingDirectory(t *testing.T) {
-	base := t.TempDir()
-	real := filepath.Join(base, "real")
-	other := filepath.Join(base, "other")
-	for _, dir := range []string{real, other} {
-		if err := os.Mkdir(dir, 0o755); err != nil {
-			t.Fatal(err)
-		}
-	}
-	link := filepath.Join(base, "link")
-	if err := os.Symlink(real, link); err != nil {
-		t.Fatal(err)
-	}
-	for _, dir := range []string{real, other} {
-		if err := os.WriteFile(filepath.Join(dir, "libfence_fs.so"), []byte("inert; never loaded"), 0o644); err != nil {
-			t.Fatal(err)
-		}
-	}
-	// Report only the fixture libraries as present so host /usr/lib paths do not
-	// influence the result; canonicalization matches the production resolver.
-	inspect := func(path string) (string, error) {
-		if !strings.HasPrefix(path, base) {
-			return "", os.ErrNotExist
-		}
-		return filepath.EvalSymlinks(path)
-	}
-	for _, tc := range []struct {
-		name, workingDir, candidate string
-		want                        string
-	}{
-		{"cwd spelled through symlink", link, filepath.Join(real, "libfence_fs.so"), ""},
-		{"candidate spelled through symlink", real, filepath.Join(link, "libfence_fs.so"), ""},
-		{"negative control: library outside cwd", link, filepath.Join(other, "libfence_fs.so"), filepath.Join(other, "libfence_fs.so")},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
-			got, err := findTrustedLibFenceFS("", tc.workingDir, []string{tc.candidate}, inspect)
-			if tc.want == "" {
-				if err == nil || got != "" {
-					t.Fatalf("library inside the working directory was accepted: %q", got)
-				}
-				return
-			}
-			want, _ := filepath.EvalSymlinks(tc.want)
-			if err != nil || got != want {
-				t.Fatalf("safe library outside cwd rejected: got %q err %v; want %q", got, err, want)
-			}
-		})
-	}
-}
-
-// TestQueueProjectLibrarySymlinkCannotChooseOutsideTarget covers the Gander
-// MAJOR: a project-owned pointer (project/libfence_fs.so) that is itself a
-// symlink to a trusted library outside the project must be refused, because the
-// pointer the resolver found sits inside the project — whatever it targets. The
-// earlier symlinked-cwd test only exercised an in-project pointer to an
-// in-project target; it never covered a pointer that escapes outward, which the
-// resolve-both exclusion lets through because it canonicalizes the candidate
-// before the containment check.
+// TestResolverRefusesProjectOwnedLibraryPaths pins the one rule that guards the
+// trust walk: during the walk, every path it visits — the original spelling,
+// every ancestor, every symlink and every symlink-target hop — is compared
+// against the project by its raw and canonical spelling against both working
+// directory spellings, and any in-project hit refuses that candidate. The table
+// covers every shape found so far, each refused for the project reason and not a
+// permission one — proven by the positive controls in the same tree resolving.
 //
-// It also covers the ancestor-symlink shape (Gander round 5): a candidate
-// spelled OUTSIDE the project whose PARENT directory is a symlink INTO the
-// project, with the project file itself a symlink escaping outward. The lexical
-// arm sees an outside spelling and the resolved exclusions canonicalize the
-// candidate outward, so only the parent-directory resolution refuses it.
+// It drives the real production walk (inspectTrustedPath on real files) so a
+// middle hop through a project-owned symlink is actually visited; a stub that
+// only returns the final canonical path never sees the hop. The fixture lives
+// under $HOME, whose ancestors are not group/world-writable, so the ownership
+// checks pass; t.TempDir() sits under world-writable /tmp and would refuse every
+// row for the wrong reason.
 //
-// The positive controls prove a trusted installed or Homebrew-style link that
-// lives outside the project still resolves.
-func TestQueueProjectLibrarySymlinkCannotChooseOutsideTarget(t *testing.T) {
-	base := resolvedTempDir(t)
+// Fail-before was measured by two behavioral reconstructions of this table (the
+// new table cannot compile against the historical SHAs, whose inspectTrustedPath
+// had no projectDirs parameter):
+//   - ee90e6b0's logic (the three per-candidate arms restored, this walk rule
+//     off): only the middle-hop row is accepted — that is the round-6 gap.
+//   - both the arms and this rule removed: every negative row is accepted, and
+//     the group-writable row hard-fails the launch (the permission error fires
+//     with no project check to skip the candidate first) — proving the rule is
+//     load-bearing for every shape and that the project check must precede the
+//     permission check (confirmed by moving it after fsys.inspect: the
+//     group-writable row then hard-fails).
+//
+// Read from git history, not measured here: the in-project-spelling,
+// project-file-outward and symlinked-cwd shapes were first refused in 305843d and
+// the ancestor-symlink shape in ee90e6b0. All rows pass on this change.
+func TestResolverRefusesProjectOwnedLibraryPaths(t *testing.T) {
+	base := homeResolvedTempDir(t)
 	proj := filepath.Join(base, "proj") // the project (working directory)
 	installed := filepath.Join(base, "installed")
 	cellar := filepath.Join(base, "cellar")
 	opt := filepath.Join(base, "opt")
-	for _, dir := range []string{proj, installed, cellar, opt} {
+	outerInstall := filepath.Join(base, "outer-install")
+	projInside := filepath.Join(proj, "inside") // holds an in-project regular file
+	projGW := filepath.Join(proj, "gw")         // holds a group-writable in-project file
+	projLibDir := filepath.Join(proj, "libdir") // reached through an ancestor symlink
+	for _, dir := range []string{proj, installed, cellar, opt, outerInstall, projInside, projGW, projLibDir} {
 		if err := os.Mkdir(dir, 0o755); err != nil {
 			t.Fatal(err)
 		}
 	}
+	// Real trusted libraries, all OUTSIDE the project.
+	for _, dir := range []string{installed, cellar, outerInstall} {
+		if err := os.WriteFile(filepath.Join(dir, "libfence_fs.so"), []byte("inert; never loaded"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	installedLib := filepath.Join(installed, "libfence_fs.so")
+
 	// A symlinked spelling of the project root, so raw and canonical cwd differ.
 	projLink := filepath.Join(base, "projlink")
 	if err := os.Symlink(proj, projLink); err != nil {
 		t.Skipf("symlinks unavailable: %v", err)
 	}
-	// Real trusted libraries, all OUTSIDE the project.
-	for _, dir := range []string{installed, cellar} {
-		if err := os.WriteFile(filepath.Join(dir, "libfence_fs.so"), []byte("inert; never loaded"), 0o644); err != nil {
-			t.Fatal(err)
-		}
+	// Shape: a plain regular library spelled inside the project.
+	insideLib := filepath.Join(projInside, "libfence_fs.so")
+	if err := os.WriteFile(insideLib, []byte("inert; never loaded"), 0o644); err != nil {
+		t.Fatal(err)
 	}
-	// Project-owned pointer that escapes outward: proj/libfence_fs.so -> installed.
+	// Shape: a group-writable regular library inside the project. The project
+	// check must refuse it BEFORE the permission check, so the resolver falls back
+	// to the next (trusted) candidate instead of hard-failing the launch.
+	gwLib := filepath.Join(projGW, "libfence_fs.so")
+	if err := os.WriteFile(gwLib, []byte("inert; never loaded"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	// Chmod after creation: os.WriteFile's mode is masked by umask, so an explicit
+	// chmod is what actually makes the file group-writable (the permission the
+	// ordering control depends on).
+	if err := os.Chmod(gwLib, 0o664); err != nil {
+		t.Fatal(err)
+	}
+	// Shape: a project file linking outward: proj/libfence_fs.so -> installed.
 	projPointer := filepath.Join(proj, "libfence_fs.so")
-	if err := os.Symlink(filepath.Join(installed, "libfence_fs.so"), projPointer); err != nil {
+	if err := os.Symlink(installedLib, projPointer); err != nil {
 		t.Fatal(err)
 	}
-	// Trusted links that live outside the project and target outside it: a safe
-	// installed-style link and a Homebrew-style link into a Cellar.
-	installedLink := filepath.Join(base, "usr-local-libfence_fs.so")
-	if err := os.Symlink(filepath.Join(installed, "libfence_fs.so"), installedLink); err != nil {
-		t.Fatal(err)
-	}
-	brewLink := filepath.Join(opt, "libfence_fs.so")
-	if err := os.Symlink(filepath.Join(cellar, "libfence_fs.so"), brewLink); err != nil {
-		t.Fatal(err)
-	}
-
-	// Ancestor-symlink shape: a directory inside the project holds an
-	// outward-escaping pointer, reached through a symlink that is spelled
-	// OUTSIDE the project but points INTO it. The candidate's own spelling is
-	// outside the project (the lexical arm misses it) and its final link
-	// resolves outward (the resolved exclusions miss it); only resolving the
-	// parent directory catches that the pointer physically lives in the project.
-	projLibDir := filepath.Join(proj, "libdir")
-	if err := os.Mkdir(projLibDir, 0o755); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.Symlink(filepath.Join(installed, "libfence_fs.so"), filepath.Join(projLibDir, "libfence_fs.so")); err != nil {
+	// Shape: ancestor dir symlinked into the project. The candidate is spelled
+	// OUTSIDE the project, its parent is a symlink INTO it, and the project file
+	// it finds escapes outward — only a visited middle path lands in the project.
+	if err := os.Symlink(installedLib, filepath.Join(projLibDir, "libfence_fs.so")); err != nil {
 		t.Fatal(err)
 	}
 	ancestorLink := filepath.Join(base, "ancestor-into-proj")
 	if err := os.Symlink(projLibDir, ancestorLink); err != nil {
 		t.Fatal(err)
 	}
-
-	// In-project spelling whose parent directory itself escapes outward: the
-	// candidate proj/vendor/libfence_fs.so is spelled inside the project, but
-	// proj/vendor is a symlink to a directory OUTSIDE it. The parent resolves out
-	// (the parent-resolved rule misses it) and the file resolves out (the
-	// resolved exclusions miss it), so only the lexical arm, reading the spelling
-	// before resolution, refuses it. This is the distinguishing negative control
-	// for the lexical arm now that the parent-resolved rule precedes it.
-	vendorTarget := filepath.Join(base, "vendor-outside")
-	if err := os.Mkdir(vendorTarget, 0o755); err != nil {
+	// Shape: a middle hop through a project-owned symlink. The candidate is
+	// spelled OUTSIDE the project and resolves to a library OUTSIDE it, but the
+	// walk passes through proj/mid.so on the way — the hop ee90e6b0 never checked.
+	projMid := filepath.Join(proj, "mid.so")
+	if err := os.Symlink(installedLib, projMid); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.Symlink(filepath.Join(installed, "libfence_fs.so"), filepath.Join(vendorTarget, "libfence_fs.so")); err != nil {
+	middleEntry := filepath.Join(base, "entry.so")
+	if err := os.Symlink(projMid, middleEntry); err != nil {
 		t.Fatal(err)
 	}
-	vendorLink := filepath.Join(proj, "vendor")
-	if err := os.Symlink(vendorTarget, vendorLink); err != nil {
+	// Trusted links that live outside the project: an installed-style link, a
+	// Homebrew-style link into a Cellar, and an install reached through a parent
+	// directory that is a symlink pointing OUTSIDE the project.
+	installedLink := filepath.Join(base, "usr-local-libfence_fs.so")
+	if err := os.Symlink(installedLib, installedLink); err != nil {
 		t.Fatal(err)
 	}
-
-	// Positive control for the parent-resolved rule's allow side: a real install
-	// reached through a parent directory that is a symlink pointing OUTSIDE the
-	// project must still resolve. The parent resolves out, so the rule must
-	// resolve the parent (not compare it lexically) to let this through.
-	outerInstall := filepath.Join(base, "outer-install")
-	if err := os.Mkdir(outerInstall, 0o755); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(filepath.Join(outerInstall, "libfence_fs.so"), []byte("inert; never loaded"), 0o644); err != nil {
+	brewLink := filepath.Join(opt, "libfence_fs.so")
+	if err := os.Symlink(filepath.Join(cellar, "libfence_fs.so"), brewLink); err != nil {
 		t.Fatal(err)
 	}
 	outerAlias := filepath.Join(base, "outer-alias")
@@ -495,61 +455,69 @@ func TestQueueProjectLibrarySymlinkCannotChooseOutsideTarget(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	// Report only the fixture libraries as present so host /usr/lib paths do not
-	// influence the result; canonicalization matches the production resolver.
-	inspect := func(path string) (string, error) {
-		if !strings.HasPrefix(path, base) {
+	// Gate candidates to the fixture so the host /usr/local install does not
+	// resolve, but run the REAL production entry point for those that are: that is
+	// what visits the middle hop and applies the one rule to every visited path.
+	inspect := func(path string, projectDirs []string) (string, error) {
+		if !strings.HasPrefix(path, base+string(os.PathSeparator)) {
 			return "", os.ErrNotExist
 		}
-		return filepath.EvalSymlinks(path)
+		return trustedInterposerPathInProject(path, projectDirs)
 	}
 
 	for _, tc := range []struct {
-		name, workingDir, candidate string
-		want                        string
+		name       string
+		workingDir string
+		candidates []string
+		want       string // "" means refuse (no candidate selected)
 	}{
-		// The reviewer's reproduction: project-owned pointer inside a symlinked
-		// cwd, spelled through the cwd symlink, escaping outward.
-		{"regression: symlinked cwd, project pointer escapes outward", projLink, filepath.Join(projLink, "libfence_fs.so"), ""},
-		// Project-owned outward pointer, raw cwd spelling, raw candidate.
-		{"negative: raw cwd, project pointer escapes outward", proj, projPointer, ""},
-		// Project-owned outward pointer, symlinked cwd, candidate spelled
-		// canonically through the raw project path. The parent-resolved rule
-		// refuses it (proj resolves to itself, inside the symlinked cwd); the
-		// lexical arm's canonical-cwd clause is the backstop.
-		{"negative: canonical cwd, project pointer escapes outward", projLink, projPointer, ""},
-		// Ancestor symlink: candidate spelled OUTSIDE the project, but its parent
-		// directory is a symlink into the project and the project file escapes
-		// outward. Only the parent-resolved rule catches it; this case is
-		// accepted on 305843d (the lexical and resolved arms both miss it).
-		{"negative: ancestor dir symlinked into project, pointer escapes outward", proj, filepath.Join(ancestorLink, "libfence_fs.so"), ""},
-		// In-project spelling whose parent symlinks outward: only the lexical arm
-		// catches it (parent and full path both resolve out). Distinguishing
-		// negative control for the lexical arm — removing that arm accepts this.
-		{"negative: in-project spelling, parent dir symlinks outward", proj, filepath.Join(vendorLink, "libfence_fs.so"), ""},
-		// Positive controls: trusted links that live outside the project resolve.
-		{"positive: safe installed link outside project", proj, installedLink, filepath.Join(installed, "libfence_fs.so")},
-		{"positive: Homebrew-style link outside project", proj, brewLink, filepath.Join(cellar, "libfence_fs.so")},
-		// Positive control for the parent-resolved rule's allow side: a real
-		// install whose parent directory is a symlink pointing OUTSIDE the project
-		// still resolves (the rule resolves the parent, it does not compare it
-		// lexically).
-		{"positive: install via parent dir symlinked outside project", proj, filepath.Join(outerAlias, "libfence_fs.so"), filepath.Join(outerInstall, "libfence_fs.so")},
+		// Negatives — every shape found so far, each refused for the project reason.
+		{"candidate spelled inside the project", proj, []string{insideLib}, ""},
+		{"project file linking outward", proj, []string{projPointer}, ""},
+		{"parent dir symlinked into the project", proj, []string{filepath.Join(ancestorLink, "libfence_fs.so")}, ""},
+		{"middle hop through a project-owned symlink", proj, []string{middleEntry}, ""},
+		{"symlinked cwd, project pointer escapes outward", projLink, []string{filepath.Join(projLink, "libfence_fs.so")}, ""},
+		// Ordering control: the in-project candidate is also group-writable. The
+		// project check must precede the permission check, so this is SKIPPED and
+		// the next (trusted) candidate is selected rather than failing the launch.
+		{"group-writable in-project candidate is skipped, next selected", proj, []string{gwLib, installedLib}, installedLib},
+		// Positive controls in the same tree: trusted links outside the project
+		// resolve, proving permissions are not what refuses the negatives.
+		{"installed link outside project resolves", proj, []string{installedLink}, installedLib},
+		{"Homebrew-style link outside project resolves", proj, []string{brewLink}, filepath.Join(cellar, "libfence_fs.so")},
+		{"install via parent dir symlinked outside project resolves", proj, []string{filepath.Join(outerAlias, "libfence_fs.so")}, filepath.Join(outerInstall, "libfence_fs.so")},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			got, err := findTrustedLibFenceFS("", tc.workingDir, []string{tc.candidate}, inspect)
+			got, err := findTrustedLibFenceFS("", tc.workingDir, tc.candidates, inspect)
 			if tc.want == "" {
 				if err == nil || got != "" {
-					t.Fatalf("project-owned pointer that escapes outward was accepted: %q", got)
+					t.Fatalf("project-owned library path was accepted: got %q err %v", got, err)
 				}
 				return
 			}
-			want, _ := filepath.EvalSymlinks(tc.want)
-			if err != nil || got != want {
-				t.Fatalf("trusted library outside cwd rejected: got %q err %v; want %q", got, err, want)
+			if err != nil || got != tc.want {
+				t.Fatalf("trusted library outside the project rejected: got %q err %v; want %q", got, err, tc.want)
 			}
 		})
 	}
+}
+
+// homeResolvedTempDir returns a canonical temp directory under $HOME. The real
+// trust walk checks that no ancestor is group/world-writable, which /tmp (mode
+// 1777) is; $HOME and its ancestors are not, so fixtures placed here let the
+// production walk run without a stubbed inspector.
+func homeResolvedTempDir(t *testing.T) string {
+	t.Helper()
+	dir, err := os.MkdirTemp(mustHome(t), ".nocklock-interposer-trust-*")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { os.RemoveAll(dir) })
+	resolved, err := filepath.EvalSymlinks(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return resolved
 }
 
 func TestVerificationScratchStateFallbackKeepsLandlockRulesValid(t *testing.T) {

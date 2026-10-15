@@ -6,7 +6,7 @@ All notable changes to NockLock will be documented in this file.
 
 ### Security
 
-- Validate Linux interposer ownership, permissions and symlink paths before launch; report unsafe installations in `doctor`. A library candidate whose containing directory resolves inside the project is refused — that is where the pointer physically lives, whatever its final link targets — and a candidate whose own path is spelled inside the project is refused as well. A project-owned pointer therefore cannot select a trusted library outside the project, even one reached through a directory symlinked into the project (N11769).
+- Validate Linux interposer ownership, permissions and symlink paths before launch; report unsafe installations in `doctor`. One rule guards project ownership: during the trust walk, every path the walk visits — the original spelling, every ancestor, every symlink and every symlink-target hop — is compared against the project by its raw and canonical spelling against both the raw and canonical working directory, and any visited path inside the project refuses that candidate. This covers a candidate spelled inside the project, a parent directory symlinked into it, a project file linking outward, and a middle hop through a project-owned symlink, so a project-owned pointer cannot select a trusted library. The check is bounded (at most 40 symlinks) and has the same TOCTOU window as the rest of the walk; it says nothing about paths outside the candidate's walk (N11769).
 
 ### Added
 

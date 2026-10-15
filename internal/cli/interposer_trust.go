@@ -19,16 +19,28 @@ type interposerFilesystem struct {
 	uid      uint32
 }
 
+// realInterposerFilesystem is the production ownership view: the invoking
+// process's real UID, never SUDO_UID (see the interposerFilesystem comment).
+// Every production trust-walk entry point builds the filesystem the same way, so
+// the real-UID invariant is written once.
+func realInterposerFilesystem() interposerFilesystem {
+	return interposerFilesystem{lstat: os.Lstat, readlink: os.Readlink, uid: uint32(os.Getuid())}
+}
+
 func trustedInterposerPath(path string) (string, error) {
-	return inspectInterposerPath(path, interposerFilesystem{
-		lstat: os.Lstat, readlink: os.Readlink, uid: uint32(os.Getuid()),
-	})
+	return inspectInterposerPath(path, realInterposerFilesystem())
 }
 
 func trustedInterposerDirectory(path string) (string, error) {
-	return inspectTrustedPath(path, interposerFilesystem{
-		lstat: os.Lstat, readlink: os.Readlink, uid: uint32(os.Getuid()),
-	}, os.ModeDir)
+	return inspectTrustedPath(path, realInterposerFilesystem(), os.ModeDir, nil)
+}
+
+// trustedInterposerPathInProject is the production trust walk the library
+// resolver uses: it inspects a candidate file and, during the walk, refuses it
+// if any visited path lies inside the project (projectDirs). The resolver treats
+// that refusal as a reason to try the next candidate, not to fail the launch.
+func trustedInterposerPathInProject(path string, projectDirs []string) (string, error) {
+	return inspectTrustedPath(path, realInterposerFilesystem(), 0, projectDirs)
 }
 
 type interposerNode struct {
@@ -74,12 +86,21 @@ func (fsys interposerFilesystem) inspect(path string, info os.FileInfo) (interpo
 // This is bounded StrictModes-style validation, not lifetime FD pinning: root or
 // the invoking UID can still change a trusted file after validation returns.
 func inspectInterposerPath(path string, fsys interposerFilesystem) (string, error) {
-	return inspectTrustedPath(path, fsys, 0)
+	return inspectTrustedPath(path, fsys, 0, nil)
 }
 
 // inspectTrustedPath also validates directory ancestry before verification copies
 // an executable or library there. The library entry point still requires a file.
-func inspectTrustedPath(path string, fsys interposerFilesystem, wantType fs.FileMode) (string, error) {
+//
+// When projectDirs is non-empty (the library resolver passes the raw and
+// canonical working directory), the walk additionally refuses any candidate for
+// which a visited path — the original spelling, every ancestor, every symlink
+// and every symlink-target hop — lies inside the project, by its raw or canonical
+// spelling against either working-directory spelling. The refusal is the sentinel
+// errTrustedPathWithinProject so the resolver can skip the candidate. This is a
+// bounded check (at most 40 symlinks) with the same TOCTOU window as the rest of
+// the walk; it says nothing about paths outside this candidate's walk.
+func inspectTrustedPath(path string, fsys interposerFilesystem, wantType fs.FileMode, projectDirs []string) (string, error) {
 	if !filepath.IsAbs(path) {
 		return "", fmt.Errorf("filesystem fence library path must be absolute: %q", path)
 	}
@@ -91,6 +112,13 @@ func inspectTrustedPath(path string, fsys interposerFilesystem, wantType fs.File
 	nodes := make([]interposerNode, 0, 16)
 	seen := make(map[string]interposerNode)
 	observe := func(path string, info os.FileInfo) (interposerNode, error) {
+		// The project check runs before ownership, permission and dedup checks so
+		// that a project-owned candidate is always reported as such (and skipped by
+		// the resolver), never masked by a permission error that would fail closed
+		// on the whole launch instead of falling back to the next candidate.
+		if visitedPathWithinProject(path, projectDirs) {
+			return interposerNode{}, fmt.Errorf("%w: %q", errTrustedPathWithinProject, path)
+		}
 		node, err := fsys.inspect(path, info)
 		if err != nil {
 			return interposerNode{}, err

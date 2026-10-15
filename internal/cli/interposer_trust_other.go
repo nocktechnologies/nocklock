@@ -11,3 +11,7 @@ func trustedInterposerPath(string) (string, error) {
 func trustedInterposerDirectory(string) (string, error) {
 	return "", errors.New("filesystem interposer ownership checks require Linux or macOS; refusing executable scratch")
 }
+
+func trustedInterposerPathInProject(string, []string) (string, error) {
+	return "", errors.New("filesystem interposer ownership checks require Linux or macOS; refusing to load a library")
+}
