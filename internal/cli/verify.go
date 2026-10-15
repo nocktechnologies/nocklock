@@ -380,13 +380,12 @@ func writeRunLifecycleResult(w io.Writer, runs []logging.RunStatus) (failed bool
 		}
 		if r.Status.Failure() {
 			failures++
-			failed = true
 			fmt.Fprintf(w, "RUN %s: %s — %s\n", r.SessionID, strings.ToUpper(string(r.Status)), r.Reason)
 		}
 	}
 	fmt.Fprintf(w, "RUNS: %d closed, %d unclosed, %d pruned, %d legacy, %d integrity failure(s) across %d run(s)\n",
 		closed, len(unclosed), pruned, legacy, failures, len(runs))
-	return failed, unclosed
+	return failures > 0, unclosed
 }
 
 // resolveVerifyPublicKey returns the Ed25519 public key to verify against, or
