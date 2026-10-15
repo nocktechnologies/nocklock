@@ -1,6 +1,7 @@
 package logging
 
 import (
+	"context"
 	"crypto/sha256"
 	"database/sql"
 	"errors"
@@ -45,7 +46,13 @@ func seedRunRoot(sessionID string) [32]byte {
 
 // advanceRunRoot computes R_i = SHA-256(R_{i-1} || SHA-256(canonical_bytes_i)).
 func advanceRunRoot(prev [32]byte, canonical []byte) [32]byte {
-	rowHash := sha256.Sum256(canonical)
+	return advanceRunRootHashed(prev, sha256.Sum256(canonical))
+}
+
+// advanceRunRootHashed folds a row whose canonical-bytes hash is already known,
+// so the verifier can keep one 32-byte digest per row instead of the full
+// canonical bytes.
+func advanceRunRootHashed(prev, rowHash [32]byte) [32]byte {
 	h := sha256.New()
 	h.Write(prev[:])
 	h.Write(rowHash[:])
@@ -225,29 +232,42 @@ type RunStatus struct {
 	Reason    string // human-readable explanation, for operator output
 }
 
-// rawRunRow is a surviving row of a run, carrying the canonical bytes needed to
-// recompute the run's root from stored data (not the decoded detail).
+// rawRunRow is a surviving row of a run, carrying the hash of its canonical bytes
+// (bounded to 32 bytes, not the full row) needed to recompute the run's root from
+// stored data, plus the raw detail for session_start/session_close inspection.
 type rawRunRow struct {
 	id        int64
 	eventType EventType
-	detail    string // raw stored detail column
-	canonical []byte
+	detail    string   // raw stored detail column
+	rowHash   [32]byte // SHA-256 of the row's canonical bytes
 }
+
+// verifyRunsCtxInterval bounds how often VerifyRuns checks its context, matching
+// the chain walk's 1,024-row cadence.
+const verifyRunsCtxInterval = 1024
 
 // VerifyRuns enumerates every run in the chain and reports its lifecycle status.
 // A run is found by a session_start row (whose signed detail is inspected for
 // lifecycle=1) or by a session_close row whose session has no surviving start.
-// Statuses are returned in each run's first-seen id order. The recompute reads
-// the raw detail column (never the decoded envelope) so the per-run root matches
-// what the writer folded at append time.
-func (l *Logger) VerifyRuns() ([]RunStatus, error) {
+// Statuses are returned in each run's first-seen id order. The scan reads the raw
+// detail column (never the decoded envelope) so the per-run root matches what the
+// writer folded at append time. ctx bounds the scan the same way --walk-timeout
+// bounds the chain walk; when it ends the scan returns ErrVerifyInterrupted and
+// no statuses, never a verdict.
+func (l *Logger) VerifyRuns(ctx context.Context) ([]RunStatus, error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
 	pruned, err := l.chainPruned()
 	if err != nil {
 		return nil, err
 	}
 
-	rows, err := l.db.Query("SELECT id, timestamp, event_type, category, detail, blocked, session_id FROM events ORDER BY id ASC")
+	rows, err := l.db.QueryContext(ctx, "SELECT id, timestamp, event_type, category, detail, blocked, session_id FROM events ORDER BY id ASC")
 	if err != nil {
+		if ctx.Err() != nil {
+			return nil, ErrVerifyInterrupted
+		}
 		return nil, fmt.Errorf("failed to read events for run verification: %w", err)
 	}
 	defer rows.Close()
@@ -257,7 +277,12 @@ func (l *Logger) VerifyRuns() ([]RunStatus, error) {
 	seen := map[string]bool{}
 	idToSession := map[int64]string{}
 
+	scanned := 0
 	for rows.Next() {
+		if scanned%verifyRunsCtxInterval == 0 && ctx.Err() != nil {
+			return nil, ErrVerifyInterrupted
+		}
+		scanned++
 		var id int64
 		var ts, etStr, cat, detail, sid string
 		var blocked int
@@ -270,13 +295,16 @@ func (l *Logger) VerifyRuns() ([]RunStatus, error) {
 		}
 		et := EventType(etStr)
 		cb := canonicalBytes(id, ts, et, cat, detail, blocked != 0, sid)
-		runs[sid] = append(runs[sid], rawRunRow{id: id, eventType: et, detail: detail, canonical: cb})
+		runs[sid] = append(runs[sid], rawRunRow{id: id, eventType: et, detail: detail, rowHash: sha256.Sum256(cb)})
 		if !seen[sid] {
 			seen[sid] = true
 			order = append(order, sid)
 		}
 	}
 	if err := rows.Err(); err != nil {
+		if ctx.Err() != nil {
+			return nil, ErrVerifyInterrupted
+		}
 		return nil, fmt.Errorf("error iterating events for run verification: %w", err)
 	}
 
@@ -384,7 +412,7 @@ func classifyClosedRun(sid string, closeRow rawRunRow, nonClose []rawRunRow, saw
 func recomputeRun(sid string, nonClose []rawRunRow) (root string, count int, firstID, lastID int64) {
 	acc := seedRunRoot(sid)
 	for i, r := range nonClose {
-		acc = advanceRunRoot(acc, r.canonical)
+		acc = advanceRunRootHashed(acc, r.rowHash)
 		if i == 0 {
 			firstID = r.id
 		}

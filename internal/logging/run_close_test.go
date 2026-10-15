@@ -1,6 +1,7 @@
 package logging
 
 import (
+	"context"
 	"crypto/sha256"
 	"database/sql"
 	"encoding/hex"
@@ -43,7 +44,7 @@ func appendOpenRun(t *testing.T, l *Logger, sid string) {
 // runStatusFor returns the lifecycle verdict for one session, failing if absent.
 func runStatusFor(t *testing.T, l *Logger, sid string) RunStatus {
 	t.Helper()
-	runs, err := l.VerifyRuns()
+	runs, err := l.VerifyRuns(context.Background())
 	if err != nil {
 		t.Fatalf("VerifyRuns: %v", err)
 	}
@@ -550,6 +551,23 @@ func TestRunClose_CloseRunOnceThenNotTracked(t *testing.T) {
 	// A session the logger never saw is also not tracked.
 	if _, err := l.CloseRun("never", "clean"); !errors.Is(err, ErrRunNotTracked) {
 		t.Fatalf("unknown-run CloseRun err = %v, want ErrRunNotTracked", err)
+	}
+}
+
+// ---------- VerifyRuns honours its context ----------
+
+func TestRunClose_VerifyRunsHonoursContext(t *testing.T) {
+	l, _, _ := newSigningLogger(t)
+	defer l.Close()
+	sid := "run-ctx"
+	appendOpenRun(t, l, sid)
+	if _, err := l.CloseRun(sid, "clean"); err != nil {
+		t.Fatalf("CloseRun: %v", err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	if _, err := l.VerifyRuns(ctx); !errors.Is(err, ErrVerifyInterrupted) {
+		t.Fatalf("VerifyRuns on a cancelled context err = %v, want ErrVerifyInterrupted", err)
 	}
 }
 

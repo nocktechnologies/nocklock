@@ -234,6 +234,7 @@ var wrapCmd = &cobra.Command{
 			runEndReason          string
 			runProxyDrainExceeded bool
 			stopProxyFn           func() error // set when a network proxy is created
+			joinWatchdog          func()       // set when a proxy watchdog is started
 		)
 
 		// endSession writes the run's session_end, capturing the write error loudly
@@ -269,6 +270,14 @@ var wrapCmd = &cobra.Command{
 		drainProxy := func() {
 			if stopProxyFn == nil || runProxyDrainExceeded {
 				return
+			}
+			// Join the proxy watchdog first: its onFailure callback writes
+			// network_error rows under this run's session_id (ProxyServer.MarkDegraded
+			// and the watchdog's own logEvent), so it is a second producer that must be
+			// quiesced before the close or those rows could land after session_close and
+			// read as a false rows_after_close.
+			if joinWatchdog != nil {
+				joinWatchdog()
 			}
 			if err := stopProxyFn(); err != nil {
 				runProxyDrainExceeded = true
@@ -925,6 +934,13 @@ var wrapCmd = &cobra.Command{
 					watchdog = network.NewProxyWatchdog(addr, 5*time.Second, 2, onProxyFailure)
 				}
 				watchdog.Start(watchdogCtx)
+				// Expose a teardown join: cancel the watchdog and wait for its
+				// goroutine (and any in-flight onProxyFailure writes) to finish before
+				// the run's close.
+				joinWatchdog = func() {
+					watchdogCancel()
+					watchdog.Wait()
+				}
 
 				proxyURL := "http://" + addr
 				childEnv = removeEnvVars(childEnv,
@@ -991,6 +1007,9 @@ var wrapCmd = &cobra.Command{
 		// The run now owes a signed close; the deferred close writes it at teardown.
 		runSessionStarted = true
 		if resolveErr != nil {
+			// The child never launched, but the proxy and its watchdog did; join them
+			// before session_end so it stays the run's last ordinary row on this path.
+			drainProxy()
 			endSession("exit_code=1", false, "refused")
 			cmd.SilenceErrors = true
 			cmd.SilenceUsage = true

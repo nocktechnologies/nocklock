@@ -38,6 +38,49 @@ func TestWatchdogHealthyProxyDoesNotFire(t *testing.T) {
 	}
 }
 
+// TestWatchdogWaitJoinsInFlightFailure proves Wait blocks until the onFailure
+// callback (and any audit rows it would write) has fully completed, so a caller
+// can quiesce the watchdog before writing its own teardown rows.
+func TestWatchdogWaitJoinsInFlightFailure(t *testing.T) {
+	addr := boundUnlisteningTCP(t)
+
+	release := make(chan struct{})
+	var callbackDone atomic.Bool
+	onFailure := func() {
+		<-release // hold the callback open until the test releases it
+		callbackDone.Store(true)
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	w := NewProxyWatchdog(addr, 20*time.Millisecond, 2, onFailure)
+	w.Start(ctx)
+
+	// Wait for the callback to be in flight (it is blocked on release).
+	time.Sleep(200 * time.Millisecond)
+
+	waitReturned := make(chan struct{})
+	go func() {
+		w.Wait()
+		close(waitReturned)
+	}()
+	select {
+	case <-waitReturned:
+		t.Fatal("Wait returned while the onFailure callback was still running")
+	case <-time.After(100 * time.Millisecond):
+	}
+
+	close(release)
+	select {
+	case <-waitReturned:
+		if !callbackDone.Load() {
+			t.Fatal("Wait returned before the callback finished")
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("Wait did not return after the callback finished")
+	}
+}
+
 func TestWatchdogDetectsProxyFailure(t *testing.T) {
 	addr := boundUnlisteningTCP(t)
 

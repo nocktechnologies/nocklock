@@ -19,6 +19,7 @@ type ProxyWatchdog struct {
 	onFailure     func()
 	transport     *http.Transport
 	client        *http.Client
+	done          chan struct{} // closed when the watchdog goroutine returns
 }
 
 // NewProxyWatchdog creates a watchdog for the given proxy address.
@@ -37,6 +38,7 @@ func NewProxyWatchdog(addr string, interval time.Duration, failThreshold int, on
 		failThreshold: failThreshold,
 		onFailure:     onFailure,
 		transport:     transport,
+		done:          make(chan struct{}),
 		client: &http.Client{
 			Transport: transport,
 			Timeout:   500 * time.Millisecond,
@@ -66,6 +68,7 @@ func NewUnixProxyWatchdog(socketPath string, interval time.Duration, failThresho
 		failThreshold: failThreshold,
 		onFailure:     onFailure,
 		transport:     transport,
+		done:          make(chan struct{}),
 		client: &http.Client{
 			Transport: transport,
 			Timeout:   500 * time.Millisecond,
@@ -77,14 +80,25 @@ func NewUnixProxyWatchdog(socketPath string, interval time.Duration, failThresho
 }
 
 // Start launches the watchdog goroutine. It returns immediately; the goroutine
-// runs until ctx is cancelled.
+// runs until ctx is cancelled or onFailure fires, then closes the Wait channel.
 func (w *ProxyWatchdog) Start(ctx context.Context) {
 	go w.run(ctx)
+}
+
+// Wait blocks until the watchdog goroutine has returned — after any in-flight
+// onFailure callback (and the audit rows it writes) has fully completed. A caller
+// that has cancelled the watchdog context uses this to join the goroutine before
+// writing the run's own teardown rows, so a late onFailure cannot append after
+// them. It is safe to call more than once, but only after Start: done is closed
+// solely by the goroutine, so a Wait without a preceding Start blocks forever.
+func (w *ProxyWatchdog) Wait() {
+	<-w.done
 }
 
 func (w *ProxyWatchdog) run(ctx context.Context) {
 	consecutive := 0
 	ticker := time.NewTicker(w.interval)
+	defer close(w.done)
 	defer ticker.Stop()
 	defer w.transport.CloseIdleConnections()
 

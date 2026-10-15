@@ -341,7 +341,7 @@ func runAuditVerify(ctx context.Context, w io.Writer, pubFlag string, requireClo
 	// unclosed, pruned, close_mismatch, rows_after_close, legacy) over the same
 	// intact chain. close_mismatch and rows_after_close are tamper failures
 	// regardless of --require-closed; a neutral unclosed run fails only with it.
-	runs, err := logger.VerifyRuns()
+	runs, err := logger.VerifyRuns(walkCtx)
 	if err != nil {
 		return fmt.Errorf("run lifecycle verification failed: %w", err)
 	}

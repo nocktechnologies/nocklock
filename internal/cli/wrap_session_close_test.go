@@ -70,7 +70,7 @@ func TestWrapRunVerifiesClosed(t *testing.T) {
 		t.Fatalf("open audit log: %v", err)
 	}
 	defer logger.Close()
-	runs, err := logger.VerifyRuns()
+	runs, err := logger.VerifyRuns(context.Background())
 	if err != nil {
 		t.Fatalf("VerifyRuns: %v", err)
 	}
