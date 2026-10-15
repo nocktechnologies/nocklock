@@ -549,6 +549,7 @@ func TestFindTrustedLibFenceFSRejectsProjectRelativeLibrary(t *testing.T) {
 		projectRoot,
 		[]string{projectLib},
 		func(path string) (bool, error) { return path == projectLib, nil },
+		trustAllLibFence,
 	)
 	if err == nil {
 		t.Fatalf("expected project-relative libfence_fs.so to be rejected, got %q", got)
@@ -564,6 +565,7 @@ func TestFindTrustedLibFenceFSFailsClosedWhenNoTrustedLibraryExists(t *testing.T
 		t.TempDir(),
 		nil,
 		func(string) (bool, error) { return false, nil },
+		trustAllLibFence,
 	)
 	if err == nil {
 		t.Fatalf("expected fail-closed error when no trusted libfence_fs.so exists, got %q", got)
@@ -588,6 +590,7 @@ func TestFindTrustedLibFenceFSSelectsInstalledPath(t *testing.T) {
 		t.TempDir(),
 		[]string{installed},
 		func(path string) (bool, error) { return path == installed, nil },
+		trustAllLibFence,
 	)
 	if err != nil {
 		t.Fatalf("expected installed trusted path to be selected: %v", err)
@@ -604,6 +607,7 @@ func TestFindTrustedLibFenceFSAcceptsSystemPathFromRootWorkingDir(t *testing.T) 
 		string(os.PathSeparator),
 		nil,
 		func(path string) (bool, error) { return path == systemLib, nil },
+		trustAllLibFence,
 	)
 	if err != nil {
 		t.Fatalf("expected system libfence_fs.so to be accepted when cwd is filesystem root: %v", err)
@@ -620,6 +624,7 @@ func TestFindTrustedLibFenceFSSurfacesStatErrors(t *testing.T) {
 		t.TempDir(),
 		[]string{filepath.Join(t.TempDir(), "libfence_fs.so")},
 		func(string) (bool, error) { return false, statErr },
+		trustAllLibFence,
 	)
 	if err == nil {
 		t.Fatalf("expected stat error to fail closed, got %q", got)
@@ -973,3 +978,5 @@ func TestResolveAuditDirectory(t *testing.T) {
 		}
 	}
 }
+
+func trustAllLibFence(string) error { return nil }

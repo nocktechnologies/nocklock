@@ -121,6 +121,7 @@ type doctorCapabilities struct {
 	networkBackend func() error
 	sandboxExec    func() error
 	egressHelper   func() egressHelperState
+	unsafeLibFence func() []string
 	now            func() time.Time
 }
 
@@ -132,6 +133,7 @@ var currentDoctorCapabilities = doctorCapabilities{
 	networkBackend: localProxyBackendAvailable,
 	sandboxExec:    fsfence.EnsureSandboxExecAvailable,
 	egressHelper:   defaultEgressHelperState,
+	unsafeLibFence: unsafeLibFenceCandidates,
 	now:            time.Now,
 }
 
@@ -222,6 +224,9 @@ func runDoctor(caps doctorCapabilities) doctorReport {
 	checks = append(checks, networkDoctorCheck(cfg, caps))
 	checks = append(checks, secretDoctorCheck(cfg))
 	checks = append(checks, egressHelperDoctorCheck(caps))
+	if check, ok := libFenceTrustDoctorCheck(caps); ok {
+		checks = append(checks, check)
+	}
 	checks = append(checks, sanityDoctorChecks(cfg, configPath, caps)...)
 
 	activity := doctorActivityCheck(cfg, configPath, caps.now())
@@ -563,6 +568,27 @@ func defaultEgressHelperState() egressHelperState {
 // helper is installed and reachable. It is a warning (not critical) when the
 // helper is absent or unreachable: the netns egress fence still fails closed at
 // runtime, so this is host-install ergonomics, not a live gap.
+// libFenceTrustDoctorCheck reports interposer library candidates that wrap
+// would refuse for unsafe ownership or permissions. It stays silent when none
+// are unsafe, so a host without the library keeps its current report.
+func libFenceTrustDoctorCheck(caps doctorCapabilities) (doctorCheck, bool) {
+	if caps.goos != "linux" || caps.unsafeLibFence == nil {
+		return doctorCheck{}, false
+	}
+	unsafe := caps.unsafeLibFence()
+	if len(unsafe) == 0 {
+		return doctorCheck{}, false
+	}
+	return doctorCheck{
+		Group:    "Fences",
+		Name:     "interposer-library-trust",
+		Severity: doctorWarning,
+		Status:   "unsafe-library",
+		Message:  "wrap refuses filesystem fence library candidate(s) that are not owned by root or the invoking user, or are group/world-writable: " + strings.Join(unsafe, "; "),
+		Fix:      "chown the library and its parent directories to root or your user and remove group/world write (chmod go-w), or reinstall nocklock",
+	}, true
+}
+
 func egressHelperDoctorCheck(caps doctorCapabilities) doctorCheck {
 	if caps.goos != "linux" {
 		return doctorCheck{

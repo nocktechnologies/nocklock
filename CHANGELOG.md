@@ -6,6 +6,8 @@ All notable changes to NockLock will be documented in this file.
 
 ### Security
 
+- The Linux filesystem fence library resolver (`findTrustedLibFenceFS`) now requires the candidate file and every ancestor directory to be owned by root or the invoking user and not group/world-writable, with symlinks checked at the link and at the target. Unsafe candidates are skipped, named in the refusal error, and reported by `nocklock doctor` as `interposer-library-trust`. The source-checkout, `/usr/local/lib/nocklock` and `/usr/lib/nocklock` layouts keep working where they are safe (N11769).
+
 - Remove internal drafts, private review instructions, server-specific acceptance material and personal identifiers from published probe records and design notes. Retain the technical probe verdicts with redacted host, account and home path. Add a public-content check to CI and store only exact historical finding fingerprints in the secret-scan baseline (N11824).
 
 ### Added
