@@ -14,6 +14,8 @@ import (
 	"time"
 
 	"github.com/nocktechnologies/nocklock/internal/config"
+	fsfence "github.com/nocktechnologies/nocklock/internal/fence/fs"
+	"github.com/nocktechnologies/nocklock/internal/fence/fs/landlock"
 )
 
 type interposerTestInfo struct {
@@ -333,4 +335,124 @@ func TestTrustedVerificationScratchFallsBack(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestInterposerResolverSkipsLibraryInsideSymlinkedWorkingDirectory(t *testing.T) {
+	base := t.TempDir()
+	real := filepath.Join(base, "real")
+	other := filepath.Join(base, "other")
+	for _, dir := range []string{real, other} {
+		if err := os.Mkdir(dir, 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	link := filepath.Join(base, "link")
+	if err := os.Symlink(real, link); err != nil {
+		t.Fatal(err)
+	}
+	for _, dir := range []string{real, other} {
+		if err := os.WriteFile(filepath.Join(dir, "libfence_fs.so"), []byte("inert; never loaded"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	// Report only the fixture libraries as present so host /usr/lib paths do not
+	// influence the result; canonicalization matches the production resolver.
+	inspect := func(path string) (string, error) {
+		if !strings.HasPrefix(path, base) {
+			return "", os.ErrNotExist
+		}
+		return filepath.EvalSymlinks(path)
+	}
+	for _, tc := range []struct {
+		name, workingDir, candidate string
+		want                        string
+	}{
+		{"cwd spelled through symlink", link, filepath.Join(real, "libfence_fs.so"), ""},
+		{"candidate spelled through symlink", real, filepath.Join(link, "libfence_fs.so"), ""},
+		{"negative control: library outside cwd", link, filepath.Join(other, "libfence_fs.so"), filepath.Join(other, "libfence_fs.so")},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			got, err := findTrustedLibFenceFS("", tc.workingDir, []string{tc.candidate}, inspect)
+			if tc.want == "" {
+				if err == nil || got != "" {
+					t.Fatalf("library inside the working directory was accepted: %q", got)
+				}
+				return
+			}
+			want, _ := filepath.EvalSymlinks(tc.want)
+			if err != nil || got != want {
+				t.Fatalf("safe library outside cwd rejected: got %q err %v; want %q", got, err, want)
+			}
+		})
+	}
+}
+
+func TestVerificationScratchStateFallbackKeepsLandlockRulesValid(t *testing.T) {
+	fixture, err := os.MkdirTemp(mustHome(t), ".nocklock-state-fallback-*")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { os.RemoveAll(fixture) })
+	project := filepath.Join(fixture, "project")
+	unsafeHome := filepath.Join(fixture, "home")
+	stateHome := filepath.Join(fixture, "state")
+	for _, dir := range []string{project, unsafeHome, stateHome} {
+		if err := os.Mkdir(dir, 0o700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := os.Chmod(unsafeHome, 0o777); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("XDG_STATE_HOME", stateHome)
+	state, err := config.AuditStateDir(project)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(state, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	// The same exclusion set runProbeUnderWrap builds: the audit state wrap
+	// denies to the child, in canonical form.
+	forbidden := []string{resolveExistingPrefix(state)}
+	if canonical, _ := filepath.EvalSymlinks(state); forbidden[0] != canonical {
+		t.Fatalf("audit state exclusion %q is not canonical %q", forbidden[0], canonical)
+	}
+	stateRoot := filepath.Dir(filepath.Dir(state))
+
+	probeBin, cleanup, ok := createTrustedScratchOutsideBases(forbidden, []string{unsafeHome, stateRoot})
+	if !ok {
+		t.Fatal("state fallback was not chosen")
+	}
+	defer cleanup()
+	if pathWithinAny(probeBin, forbidden) || !pathWithinAny(probeBin, []string{stateRoot}) {
+		t.Fatalf("scratch %q is not under the state root and outside the denied audit directory", probeBin)
+	}
+	cfg := &fsfence.FenceConfig{Root: project, AllowPaths: []string{probeBin}, DenyPaths: []string{state}}
+	if _, err := landlock.RulesFromConfig(cfg, nil, 7); err != nil {
+		t.Fatalf("Landlock rule generation failed for the chosen fallback: %v", err)
+	}
+
+	// Negative control: the audit directory itself is never a usable base, and
+	// a grant inside it is the overlap Landlock cannot enforce.
+	if dir, cleanup, ok := createTrustedScratchOutsideBases(forbidden, []string{state}); ok {
+		cleanup()
+		t.Fatalf("scratch %q was created inside the denied audit directory", dir)
+	}
+	bad := &fsfence.FenceConfig{Root: project, AllowPaths: []string{filepath.Join(state, "bin")}, DenyPaths: []string{state}}
+	if err := os.Mkdir(filepath.Join(state, "bin"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := landlock.RulesFromConfig(bad, nil, 7); err == nil {
+		t.Fatal("Landlock accepted a grant inside the denied audit directory")
+	}
+}
+
+func mustHome(t *testing.T) string {
+	t.Helper()
+	home, err := os.UserHomeDir()
+	if err != nil {
+		t.Fatal(err)
+	}
+	return home
 }

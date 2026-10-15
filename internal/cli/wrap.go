@@ -1684,16 +1684,28 @@ func findTrustedLibFenceFS(exePath, workingDir string, extraCandidates []string,
 	return "", fmt.Errorf("trusted filesystem fence library not found. Install libfence_fs.so next to the nocklock binary, at /usr/local/lib/nocklock/libfence_fs.so, or at /usr/lib/nocklock/libfence_fs.so; refusing to launch with an untrusted LD_PRELOAD path")
 }
 
+// pathIsWithinDir reports whether path is inside dir. It compares both the raw
+// and the symlink-resolved spelling of each side, so a symlinked working
+// directory cannot hide a path that is inside it.
 func pathIsWithinDir(path, dir string) bool {
 	if dir == "" {
 		return false
 	}
-	resolvedPath := resolvePathBestEffort(path)
-	resolvedDir := resolvePathBestEffort(dir)
-	if resolvedDir == filepath.Dir(resolvedDir) {
+	for _, p := range []string{filepath.Clean(path), resolvePathBestEffort(path)} {
+		for _, d := range []string{filepath.Clean(dir), resolvePathBestEffort(dir)} {
+			if pathWithinResolved(p, d) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+func pathWithinResolved(path, dir string) bool {
+	if dir == filepath.Dir(dir) {
 		return false
 	}
-	rel, err := filepath.Rel(resolvedDir, resolvedPath)
+	rel, err := filepath.Rel(dir, path)
 	if err != nil {
 		return false
 	}

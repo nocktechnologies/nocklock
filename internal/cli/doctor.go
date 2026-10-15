@@ -442,7 +442,7 @@ func filesystemDoctorCheck(cfg *config.Config, caps doctorCapabilities) doctorCh
 		if err := filesystemBackendErr(caps); err != nil {
 			return doctorCriticalCheck("Fences", "filesystem", "configured-but-backend-missing",
 				fmt.Sprintf("Filesystem fence configured, but userspace backend is unavailable: %v", err),
-				"install the filesystem fence library with safe ownership and no group/world-writable file or ancestors; wrap will otherwise refuse to start")
+				"install the filesystem fence library with safe ownership and no group/world-writable file or ancestors (for example, run chmod g-w on a group-writable /usr/local/lib); wrap will otherwise refuse to start")
 		}
 		if linuxEnforcementMode(cfg.Filesystem.LinuxEnforcement) != linuxEnforcementOff {
 			abi, err := caps.landlockABI()

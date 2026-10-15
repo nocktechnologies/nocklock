@@ -692,6 +692,10 @@ func runProbeUnderWrap(ctx context.Context, cfg *config.Config, configPath, fenc
 	for _, deny := range cfg.Filesystem.Deny {
 		forbidden = append(forbidden, absConfigPath(projectRoot, deny))
 	}
+	// wrap denies the project's audit-state directory to the child, and Landlock
+	// cannot carve a deny out of a grant, so no scratch or grant may sit in it.
+	state, _ := config.AuditStateDir(projectRoot)
+	forbidden = append(forbidden, resolveExistingPrefix(state))
 	tmp, cleanup, ok := createScratchOutside(forbidden)
 	if !ok {
 		return probeResult{Fence: fence}, fmt.Errorf("could not create verification scratch directory outside configured filesystem grants")
@@ -733,11 +737,13 @@ func runProbeUnderWrap(ctx context.Context, cfg *config.Config, configPath, fenc
 		// shared writable ancestors cannot be trusted for an LD_PRELOAD file.
 		// Put the executable pair in private scratch outside the same grants
 		// and denies, then validate its complete ancestry before using it.
+		// The state fallback is the state root (the parent of nocklock/<key>),
+		// never the denied audit directory itself.
 		home, _ := os.UserHomeDir()
-		state, _ := config.AuditStateDir(projectRoot)
+		stateRoot := filepath.Dir(filepath.Dir(state))
 		var cleanupBin func()
 		var ok bool
-		probeBin, cleanupBin, ok = createTrustedScratchOutsideBases(forbidden, []string{home, state})
+		probeBin, cleanupBin, ok = createTrustedScratchOutsideBases(forbidden, []string{home, stateRoot})
 		if !ok {
 			return probeResult{Fence: fence}, errors.New("cannot create trusted verification executable scratch outside filesystem grants and denies; provide a safe home or audit-state directory")
 		}
