@@ -164,6 +164,11 @@ func TestProfileAnchorVerification(t *testing.T) {
 
 	// Cold-open: fresh connection pool and prepared state, OS page cache still
 	// warm (dropping it needs root, which this recipe never uses).
+	//
+	// This explicit close and the deferred l.Close() above both run on the
+	// success path. That is safe: Logger.Close only delegates to *sql.DB.Close
+	// (internal/logging/logger.go:1259-1261), which is idempotent (database/sql
+	// returns nil on an already-closed DB, guarded by "if db.closed").
 	if err := l.Close(); err != nil {
 		t.Fatal(err)
 	}

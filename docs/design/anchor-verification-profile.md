@@ -36,7 +36,7 @@ On a host with umask `002` run `umask 022` first, or the logging tests that chec
 | Phase | Median | Share of `VerifyChainSigned` |
 | --- | --- | --- |
 | `VerifyChainSigned` (full authentication) | 4.048 s | 100% |
-| `EmitAnchor` (`VerifyChainSigned` + one signature) | 3.994 s (runs: 4.044, 3.949, 4.205) | n/a |
+| `EmitAnchor` (`VerifyChainSigned` + one signature) | 4.044 s (runs: 4.044, 3.949, 4.205) | n/a |
 | Ed25519 row-signature verification only (rows in memory) | 3.910 s | about 97% |
 | SQLite `SELECT` + `Scan` only | 0.119 s | about 3% |
 | Hash recompute only (rows in memory) | 0.033 s | about 1% |
@@ -113,7 +113,7 @@ Three independently landable steps, in order.
 - Interruption returns `ErrVerifyInterrupted` (distinct from `Intact=false`, `forged`, `tampered`). It is never converted to `authentic`, and never reported as tampering. `EmitAnchor`, `EmitAnchorV2Context`, `VerifyAgainstAnchorV2Context` and `finishAnchorSession` propagate it: no anchor is written, the existing warning path prints "chain anchor not written", and the process still exits normally.
 - Run the walk without holding the identity store lock where the lock is not needed for the snapshot; at minimum, release on interruption promptly (the lock is already released by `defer store.close()`).
 - `EmitAnchor` has no context today and the v1 teardown path calls it directly, so Step 1 adds a context-taking variant (for example `EmitAnchorContext`) and moves `finishAnchorSession` to it.
-- The walk gets its own deadline, separate from the 5 s identity-lock and push budget in `finishAnchorSession`. One shared context would let a 4.8 s walk leave the push no time and silently drop off-box delivery, where today the push gets a fresh budget.
+- The walk gets its own deadline, separate from the 5 s identity-lock and push budget in `finishAnchorSession`. Today that budget is a single `anchorPushTimeout` context (5 s, `internal/cli/anchor_push.go:15`) opened before the identity read and shared by the identity-lock wait, the walk and the push (`internal/cli/anchor_v2.go:215`, pushed at `:248`). The v2 walk is synchronous and never checks that context (`EmitAnchorV2Context`, `internal/logging/anchor_chain.go:36`, delegating to the synchronous `VerifyChainSigned`), but the wall-clock it spends still comes out of the same 5 s, so a 4.8 s walk already leaves the push almost no time and can silently drop off-box delivery. A separate walk deadline stops a bounded walk from competing with the push for that one budget.
 - Default for a Step 1 only release: teardown keeps today's unbounded walk unless the operator opts into a bound, because a bound without Step 2 turns today's slow-but-successful final anchor into a missing one for stores above roughly 125,000 rows (this host). The interruption path exists for periodic ticks and explicit budgets first.
 - Alone this satisfies "bounded", at the cost of a missing final anchor for stores too large for the budget. Steps 2 and 3 remove that cost.
 
@@ -139,7 +139,7 @@ where `D` is the rolling digest `D_i = SHA-256(D_{i-1} || entry_hash_i || entry_
 **Write path.**
 
 - Written only when the verified-prefix precondition above holds and a signing key is present; it needs no `Intact`/`authentic` whole-chain result. A chain that fails at row j may still leave a receipt for rows before j, since those rows did pass. Writes use a separate short transaction after the read snapshot ends, with a bounded busy timeout.
-- It advances to the highest row verified in this run. A deadline mid-suffix (`ErrVerifyInterrupted`) therefore advances the receipt to the last verified boundary, and the anchor is emitted only if the walk reaches the snapshot head.
+- It advances to the highest row verified in this run. A deadline mid-suffix (`ErrVerifyInterrupted`) therefore advances the receipt to the last verified boundary, and the anchor is emitted only if the walk reaches the snapshot head. After an interruption the walk's context is already cancelled, so the receipt write runs on its own short bounded context (the separate transaction above), never the walk's cancelled one; an interrupted run still records the prefix it proved.
 - **Monotonicity:** a receipt can only shrink the set of rows whose signatures are skipped; it never extends trust past bytes the key holder already attested. Restoring an older or stale receipt causes more verification, not less.
 - Verification becomes a database writer in this step. A receipt write is not a fence decision, so the audit-row invariant in `CLAUDE.md` does not apply. On a read-only copy, mount or forensic image the write is skipped, which is expected and not an error; the verdict is unchanged.
 - `INSERT OR REPLACE` of one row is atomic in SQLite: a crash leaves the old receipt or none, never a torn one.
