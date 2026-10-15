@@ -447,16 +447,10 @@ func LoadOverlay(base Config, path string) (*Config, error) {
 	overlay := cloneConfig(base)
 	// Decoding into a seeded slice would merge field by field into base's rules.
 	overlay.Network.Lookback = nil
-	fields, err := overlayDefinedFields(path)
-	if err != nil {
+	if _, err := loadIntoWithMetadata(&overlay, path); err != nil {
 		return nil, err
 	}
-	md, err := loadIntoWithMetadata(&overlay, path)
-	if err != nil {
-		return nil, err
-	}
-	addMetadataFields(fields, md)
-	cfg := restrictOverlay(baseCopy, overlay, fields)
+	cfg := restrictOverlay(baseCopy, overlay)
 	if errs := validateLookback(cfg.Network.Lookback); len(errs) > 0 {
 		return nil, fmt.Errorf("invalid config at %s: %s", path, errs[0].Error())
 	}

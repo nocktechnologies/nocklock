@@ -23,6 +23,8 @@ All notable changes to NockLock will be documented in this file.
 
 - The red-team bench now matches a `path=` rule against the whole report path or a path-component suffix, so a bare filename rule works and `xcanary.txt` does not match `canary.txt`. The kernel companion report now prints cleanup failures after an interrupt, and its tests restore the SIGTERM handler.
 
+- A project overlay can no longer loosen a `--profile` fence by spelling keys or table names with Unicode characters the TOML decoder case-folds (for example `ſ` for `s`). Overlay restrictions are now decided by comparing the decoded overlay with the profile, not by key spelling, and the overlay file is read once (N11810).
+
 ## [0.10.0] - 2026-10-14
 
 v0.10.0 gives each project its own remote audit chain: anchor v2 requires explicit `nocklock anchor enroll` or `anchor migrate` before remote push and verify, and prune and `anchor emit` now refuse unsafe states. It fixes two security issues: cloud metadata addresses in Linux netns bridge allocation, and current-directory lookup in `nocklock wrap`. Text output of audit and anchor verification now ends with a `COVERAGE: LIMITED` notice that states what recorded history does and does not prove.
