@@ -3,13 +3,12 @@ package logging
 import (
 	"context"
 	"crypto/ed25519"
-	"crypto/rand"
 	"database/sql"
 	"encoding/base64"
 	"encoding/hex"
 	"errors"
 	"fmt"
-	"math/big"
+	"math/rand/v2"
 	"strings"
 	"testing"
 	"time"
@@ -77,6 +76,23 @@ func rawExec(t *testing.T, dbPath, query string, args ...any) {
 func receiptPresent(t *testing.T, dbPath string) bool {
 	t.Helper()
 	return readReceiptRaw(t, dbPath) != nil
+}
+
+// verifyReceiptTableExists reports whether the verify_receipt table is present.
+// It tolerates the table being absent (control 15 drops it to inject a write
+// failure), which readReceiptRaw cannot.
+func verifyReceiptTableExists(t *testing.T, dbPath string) bool {
+	t.Helper()
+	db, err := sql.Open("sqlite", dbPath)
+	if err != nil {
+		t.Fatalf("open raw: %v", err)
+	}
+	defer db.Close()
+	var n int
+	if err := db.QueryRow("SELECT count(*) FROM sqlite_master WHERE type='table' AND name='verify_receipt'").Scan(&n); err != nil {
+		t.Fatalf("query sqlite_master: %v", err)
+	}
+	return n > 0
 }
 
 // verifyNoSigner opens a read-only-style (no signing key) logger and verifies,
@@ -463,6 +479,27 @@ func TestReceiptControl12_CrossDBAndCrossKey(t *testing.T) {
 	if rec2.SigAttested != 0 {
 		t.Fatalf("a wrong-key receipt must attest nothing, got %d", rec2.SigAttested)
 	}
+
+	// Same-key, different content: the cross-DB and cross-key cases above are both
+	// caught by the fingerprint check in validVerifyReceiptFor, so the rolling
+	// digest `D` — the only receipt field that binds entry_sig, which the hash chain
+	// does not cover — is never the deciding check. Isolate it: in a single DB,
+	// strip a prefix row's entry_sig AFTER recording the receipt. The receipt row is
+	// untouched, so the fingerprint and bound adoption metadata still match and
+	// validVerifyReceiptFor admits it; at the boundary the through_id, through_count
+	// and through_head_hash all still reproduce (entry_sig is not hashed), so ONLY
+	// the digest comparison differs — the receipt is discarded on D alone and the
+	// walk falls back to the full, forged verdict.
+	lc, _, pubC := newSigningLogger(t)
+	seedSigned(t, lc, 10)
+	recordReceipt(t, lc, pubC)
+	dbC := dbPathOf(t, lc)
+	lc.Close()
+	rawExec(t, dbC, "UPDATE events SET entry_sig = '' WHERE id = 5")
+	full3, rec3 := assertReceiptEquivFull(t, dbC, pubC)
+	if full3.SigState != "forged" || rec3.SigAttested != 0 {
+		t.Fatalf("digest-binding case must discard the receipt and read forged: full=%q attested=%d", full3.SigState, rec3.SigAttested)
+	}
 }
 
 // Control 13: changing adoption metadata the receipt binds (unsigned_through_id)
@@ -491,6 +528,16 @@ func verifyNoSignerPair(t *testing.T, dbPath string, pub ed25519.PublicKey) (ful
 	return full, rec
 }
 
+// restoreReceipt rewrites the single verify_receipt row to r, re-encoding the
+// digest exactly as the production writer does. Restoring the saved row (sig
+// included, which covers only its own fields) leaves a valid receipt.
+func restoreReceipt(t *testing.T, dbPath string, r *verifyReceipt) {
+	t.Helper()
+	rawExec(t, dbPath,
+		"INSERT OR REPLACE INTO verify_receipt (id, version, key_fingerprint, signed_genesis_at, unsigned_through_id, through_id, through_count, through_head_hash, digest, sig) VALUES (1, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+		r.Version, r.KeyFingerprint, r.SignedGenesisAt, r.UnsignedThroughID, r.ThroughID, r.ThroughCount, r.ThroughHeadHash, hex.EncodeToString(r.Digest), r.Sig)
+}
+
 // Control 14: cancellation at row 0, mid-prefix, mid-suffix and the last row,
 // injected by row count with a receipt present, never reads as authentic or
 // tampered, and the next uninterrupted run completes with the identical verdict.
@@ -499,12 +546,19 @@ func TestReceiptControl14_InterruptionWithReceipt(t *testing.T) {
 	defer l.Close()
 	const prefix = 2 * verifyCtxCheckInterval
 	seedSigned(t, l, prefix)
-	recordReceipt(t, l, pub)
+	r0 := recordReceipt(t, l, pub) // attests through-prefix (id == prefix)
+	dbPath := dbPathOf(t, l)
 	seedSigned(t, l, 60) // suffix
 	total := prefix + 60
 
 	for _, cancelAt := range []int{0, verifyCtxCheckInterval, prefix + 10, total - 1} {
 		t.Run(fmt.Sprintf("cancel@%d", cancelAt), func(t *testing.T) {
+			// Reset the receipt to its through-prefix state before each subtest: the
+			// previous subtest's follow-up full verify advanced it to `total`, which
+			// would collapse the prefix/suffix boundary and stop the prefix+10 subtest
+			// from cancelling mid-suffix (every row would be prefix).
+			restoreReceipt(t, dbPath, r0)
+
 			ctx, cancel := context.WithCancel(context.Background())
 			defer cancel()
 			setWalkHook(t, func(n int) {
@@ -519,6 +573,14 @@ func TestReceiptControl14_InterruptionWithReceipt(t *testing.T) {
 			if res != nil {
 				t.Fatalf("interrupted walk returned a verdict: %+v", res)
 			}
+			// A cancel mid-prefix (before the receipt boundary at `prefix`) advances no
+			// attestable progress, so the interrupted walk writes no receipt and the
+			// restored through-prefix receipt is untouched — never shrunk or laundered.
+			if cancelAt == verifyCtxCheckInterval {
+				if got := readReceiptRaw(t, dbPath); got == nil || got.ThroughID != prefix {
+					t.Fatalf("mid-prefix interruption must leave the receipt at through-%d, got %+v", prefix, got)
+				}
+			}
 			setWalkHook(t, nil)
 			res, err = l.VerifyChainSigned(pub, true)
 			if err != nil || !res.Intact || res.SigState != "authentic" || res.EntriesVerified != total {
@@ -528,22 +590,45 @@ func TestReceiptControl14_InterruptionWithReceipt(t *testing.T) {
 	}
 }
 
-// Control 15: a receipt write that fails (read-only DB) leaves the verdict
-// unchanged and writes nothing, and the next run is correct.
+// Control 15: a receipt write that fails leaves the verdict unchanged and writes
+// nothing — proven two ways: a public-key-only verifier that never writes, and a
+// key holder whose write hits a real failure (the verify_receipt table missing).
 func TestReceiptControl15_WriteFailureIsHarmless(t *testing.T) {
-	l, _, pub := newSigningLogger(t)
+	l, keyPath, pub := newSigningLogger(t)
 	seedSigned(t, l, 10)
 	dbPath := dbPathOf(t, l)
 	l.Close()
 
-	// Reopen read-only-ish: a plain no-signer logger never writes a receipt, so a
-	// verify here must still be authentic and leave no receipt behind.
+	// (a) A plain no-signer logger never writes a receipt, so a verify here must
+	// still be authentic and leave no receipt behind.
 	res, err := verifyNoSigner(t, dbPath, pub, true)
 	if err != nil || !res.Intact || res.SigState != "authentic" {
 		t.Fatalf("no-signer verify must be authentic: %+v %v", res, err)
 	}
 	if receiptPresent(t, dbPath) {
 		t.Fatal("a public-key-only verifier must never write a receipt")
+	}
+
+	// (b) Inject a REAL write failure: a key holder verifies while verify_receipt
+	// is missing, so the receipt INSERT fails ("no such table"). The write is
+	// best-effort, so the verdict stays authentic and nothing is written (a failed
+	// INSERT cannot recreate the table). The table is dropped on a separate
+	// connection AFTER the signer is open, because a Logger recreates it at open.
+	signer, err := NewLogger(dbPath, "", WithExistingSigning(keyPath))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer signer.Close()
+	rawExec(t, dbPath, "DROP TABLE verify_receipt")
+	if verifyReceiptTableExists(t, dbPath) {
+		t.Fatal("precondition: the verify_receipt table should be dropped")
+	}
+	res, err = signer.VerifyChainSigned(pub, true)
+	if err != nil || !res.Intact || res.SigState != "authentic" {
+		t.Fatalf("a failed receipt write must not change the verdict: %+v %v", res, err)
+	}
+	if verifyReceiptTableExists(t, dbPath) {
+		t.Fatal("a failed receipt write must not recreate the verify_receipt table")
 	}
 }
 
@@ -559,8 +644,10 @@ func TestReceiptControl16_BrokenChainReceiptBounded(t *testing.T) {
 	// Break row 12 (sig strip): rows 1..11 remain good.
 	rawExec(t, dbPath, "UPDATE events SET entry_sig = '' WHERE id = 12")
 
-	// A key holder re-verifies: the chain is forged, so no new receipt is written;
-	// the old receipt still attests only a good prefix (<= its through_id).
+	// A key holder re-verifies: the chain is forged, so verifyChain records a NEW
+	// receipt bounded at prog's last fully-verified row — exactly row 11, the row
+	// before the break — overwriting the stale through-20 receipt. The receipt is
+	// re-proven on every use, so it can never attest past the last good row.
 	signer, err := NewLogger(dbPath, "", WithExistingSigning(keyPath))
 	if err != nil {
 		t.Fatal(err)
@@ -571,8 +658,8 @@ func TestReceiptControl16_BrokenChainReceiptBounded(t *testing.T) {
 		t.Fatalf("want forged at row 12: %+v %v", res, err)
 	}
 	r := readReceiptRaw(t, dbPath)
-	if r == nil || r.ThroughID >= 12 {
-		t.Fatalf("receipt must not cover the break; through_id=%v", r)
+	if r == nil || r.ThroughID != 11 {
+		t.Fatalf("receipt must be bounded at exactly row 11 (last good before the break); through_id=%v", r)
 	}
 
 	// A public-key-only verifier on the broken chain writes nothing new.
@@ -627,16 +714,6 @@ func TestReceiptControl17_AppendDuringVerificationSnapshot(t *testing.T) {
 	}
 }
 
-// randInt returns a crypto-random int in [0,n) for the differential test.
-func randInt(t *testing.T, n int) int {
-	t.Helper()
-	v, err := rand.Int(rand.Reader, big.NewInt(int64(n)))
-	if err != nil {
-		t.Fatal(err)
-	}
-	return int(v.Int64())
-}
-
 // Control 9: a restored older complete database (its receipt included) is still
 // authentic locally — the documented A2 limit — and the receipt, which moves and
 // rolls back with the data, does not make the rollback any less detectable.
@@ -682,10 +759,13 @@ func TestReceiptControl18_DifferentialProperty(t *testing.T) {
 	mutations := []string{"noop", "append", "edit_rechain", "strip_sig", "delete_mid", "drop_receipt", "prune", "key_swap"}
 	for seed := 0; seed < 60; seed++ {
 		t.Run(fmt.Sprintf("seed%02d", seed), func(t *testing.T) {
+			// A PCG stream seeded by the subtest number: a failure names its seed,
+			// and re-running that seed replays the identical chain and mutation.
+			rng := rand.New(rand.NewPCG(uint64(seed), 0))
 			l, _, pub := newSigningLogger(t)
-			n := 4 + randInt(t, 30)
+			n := 4 + rng.IntN(30)
 			// Some old rows so a prune has something to remove.
-			oldN := randInt(t, n)
+			oldN := rng.IntN(n)
 			for i := 0; i < oldN; i++ {
 				if err := l.Log(Event{Timestamp: time.Now().Add(-72 * time.Hour), EventType: EventType("walk"), Category: "test", Detail: fmt.Sprintf("old-%d", i), SessionID: "s"}); err != nil {
 					t.Fatal(err)
@@ -696,12 +776,12 @@ func TestReceiptControl18_DifferentialProperty(t *testing.T) {
 			dbPath := dbPathOf(t, l)
 
 			verifyKey := pub
-			mut := mutations[randInt(t, len(mutations))]
+			mut := mutations[rng.IntN(len(mutations))]
 			switch mut {
 			case "noop":
 				l.Close()
 			case "append":
-				seedSigned(t, l, 1+randInt(t, 8))
+				seedSigned(t, l, 1+rng.IntN(8))
 				l.Close()
 			case "prune":
 				if _, err := l.Prune(24 * time.Hour); err != nil {
@@ -717,14 +797,14 @@ func TestReceiptControl18_DifferentialProperty(t *testing.T) {
 				verifyKey = p2
 			case "edit_rechain":
 				l.Close()
-				tamperRowAndRechain(t, dbPath, int64(1+randInt(t, n)), "mut")
+				tamperRowAndRechain(t, dbPath, int64(1+rng.IntN(n)), "mut")
 			case "strip_sig":
 				l.Close()
-				rawExec(t, dbPath, "UPDATE events SET entry_sig = '' WHERE id = ?", int64(1+randInt(t, n)))
+				rawExec(t, dbPath, "UPDATE events SET entry_sig = '' WHERE id = ?", int64(1+rng.IntN(n)))
 			case "delete_mid":
 				l.Close()
 				if n >= 3 {
-					rawExec(t, dbPath, "DELETE FROM events WHERE id = ?", int64(2+randInt(t, n-2)))
+					rawExec(t, dbPath, "DELETE FROM events WHERE id = ?", int64(2+rng.IntN(n-2)))
 				}
 			case "drop_receipt":
 				l.Close()
@@ -733,6 +813,37 @@ func TestReceiptControl18_DifferentialProperty(t *testing.T) {
 			assertReceiptEquivFull(t, dbPath, verifyKey)
 		})
 	}
+
+	// A single random mutation never combines a detectable prefix signature break
+	// with a LATER prefix link break, so the 60-seed sweep above cannot exercise the
+	// bug where an early hash/link failure inside the attested prefix returns the
+	// receipt walk's diagnostics instead of re-walking: strip_sig alone diverges only
+	// at the boundary digest check, and delete_mid alone leaves SigBrokenID==0 on both
+	// sides. This deterministic case builds the combination: row 4's signature is
+	// stripped (the full walk records SigBrokenID=4; the receipt walk, skipping prefix
+	// signatures, would not) and row 8's content is edited without re-chaining (an
+	// entry_hash break that fires BEFORE the receipt boundary). Without the inPrefix
+	// re-walk guards in walkEvents, the receipt verdict keeps FirstBrokenID=8 but
+	// SigBrokenID=0, diverging from the full walk — assertReceiptEquivFull catches it.
+	t.Run("sig_strip_then_link_break_in_prefix", func(t *testing.T) {
+		l, _, pub := newSigningLogger(t)
+		seedSigned(t, l, 12)
+		recordReceipt(t, l, pub) // attests the whole 12-row prefix
+		dbPath := dbPathOf(t, l)
+		l.Close()
+		rawExec(t, dbPath, "UPDATE events SET entry_sig = '' WHERE id = 4")      // prefix signature break
+		rawExec(t, dbPath, "UPDATE events SET detail = 'tampered' WHERE id = 8") // later prefix hash break, no re-chain
+		full, rec := assertReceiptEquivFull(t, dbPath, pub)
+		// Guard the construction: the full walk must actually see both breaks, so the
+		// equivalence above is non-vacuous (a later entry_hash verdict over an earlier
+		// stripped signature).
+		if full.FirstBrokenID != 8 || full.SigBrokenID != 4 {
+			t.Fatalf("construction no longer exercises the combined break: FirstBrokenID=%d SigBrokenID=%d", full.FirstBrokenID, full.SigBrokenID)
+		}
+		if rec.FirstBrokenID != full.FirstBrokenID || rec.SigBrokenID != full.SigBrokenID {
+			t.Fatalf("receipt diagnostics diverged: full=%+v rec=%+v", full, rec)
+		}
+	})
 }
 
 // Control 19: the mutation check. With the digest/integrity re-verification of the
@@ -775,7 +886,10 @@ func TestReceiptControl19_MutationBreaksControls(t *testing.T) {
 			full, _ := verifyNoSigner(t, dbPath, pub, false)
 
 			// Seam ON: the prefix is trusted blindly, so the tamper is missed and the
-			// verdict diverges from the full walk (the control bites).
+			// verdict diverges from the full walk (the control bites). Reset via
+			// t.Cleanup so a t.Fatalf inside the verify below cannot leak the global
+			// seam into other tests.
+			t.Cleanup(func() { verifyReceiptSkipDigestCheck = false })
 			verifyReceiptSkipDigestCheck = true
 			mutated, _ := verifyNoSigner(t, dbPath, pub, true)
 			verifyReceiptSkipDigestCheck = false

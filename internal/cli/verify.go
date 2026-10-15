@@ -190,8 +190,14 @@ func runVerifyAgainstAnchor(ctx context.Context, w io.Writer, anchorFile, pubFla
 		return err
 	}
 
-	result, err := logger.VerifyAgainstAnchor(anchor, pub)
+	// Pass walkCtx so --walk-timeout bounds the v1 walk exactly as the v2 path
+	// above. An interrupted walk surfaces ErrVerifyInterrupted raw (the v2 branch
+	// returns it unwrapped too), keeping the neutral interrupt text from N11800.
+	result, err := logger.VerifyAgainstAnchorContext(walkCtx, anchor, pub)
 	if err != nil {
+		if errors.Is(err, logging.ErrVerifyInterrupted) {
+			return err
+		}
 		return fmt.Errorf("anchor verification failed: %w", err)
 	}
 	return writeAnchorVerifyResult(w, result)

@@ -2011,6 +2011,14 @@ func walkEvents(ctx context.Context, tx *sql.Tx, pub ed25519.PublicKey, requireS
 
 		// Check for non-genesis prev_hash on first row (indicates pruning)
 		if result.EntriesVerified == 0 && storedPrevHash != chainGenesisHashHex {
+			// A link break inside the attested prefix discards the receipt and re-runs
+			// the full, receipt-free walk (mismatch=true), so the verdict AND its
+			// diagnostics (FirstBrokenID, SigBrokenID, reasons, counts) are identical
+			// to verification without a receipt. Returning here would keep the verdict
+			// but skip the prefix's per-row signature accounting, diverging the counts.
+			if inPrefix {
+				return nil, prog, true, nil
+			}
 			result.Intact = false
 			result.FirstBrokenID = id
 			result.BrokenReason = fmt.Sprintf("first row id=%d has non-genesis prev_hash; earlier rows removed", id)
@@ -2019,6 +2027,9 @@ func walkEvents(ctx context.Context, tx *sql.Tx, pub ed25519.PublicKey, requireS
 
 		// Check prev_hash link
 		if storedPrevHash != prevHashHex {
+			if inPrefix { // see the first-row branch: re-walk for identical diagnostics.
+				return nil, prog, true, nil
+			}
 			result.Intact = false
 			result.FirstBrokenID = id
 			result.BrokenReason = fmt.Sprintf("entry %d: prev_hash mismatch (expected %s, got %s)", id, prevHashHex, storedPrevHash)
@@ -2034,12 +2045,18 @@ func walkEvents(ctx context.Context, tx *sql.Tx, pub ed25519.PublicKey, requireS
 			cb = canonicalBytes(id, ts, EventType(et), cat, detail, blocked != 0, sid)
 			expectedHash, hErr := chainEntryFromCanonical(cb, prevHashHex)
 			if hErr != nil {
+				if inPrefix { // see the first-row branch: re-walk for identical diagnostics.
+					return nil, prog, true, nil
+				}
 				result.Intact = false
 				result.FirstBrokenID = id
 				result.BrokenReason = fmt.Sprintf("entry %d: failed to compute hash: %v", id, hErr)
 				return result, prog, false, nil
 			}
 			if storedEntryHash != expectedHash {
+				if inPrefix { // see the first-row branch: re-walk for identical diagnostics.
+					return nil, prog, true, nil
+				}
 				result.Intact = false
 				result.FirstBrokenID = id
 				result.BrokenReason = fmt.Sprintf("entry %d: entry_hash mismatch (expected %s, got %s)", id, expectedHash, storedEntryHash)

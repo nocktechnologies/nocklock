@@ -287,6 +287,16 @@ func (l *Logger) SigningPublicKey() ed25519.PublicKey {
 // A local chain that has GROWN past the anchor (more rows, anchored head
 // reproduced at the anchored count) is OK.
 func (l *Logger) VerifyAgainstAnchor(a *Anchor, pub ed25519.PublicKey) (*AnchorVerifyResult, error) {
+	return l.VerifyAgainstAnchorContext(context.Background(), a, pub)
+}
+
+// VerifyAgainstAnchorContext is VerifyAgainstAnchor with ctx bounding the local
+// chain-verification walk: it is checked every verifyCtxCheckInterval rows and
+// once more after the last row, and an interrupted walk returns
+// ErrVerifyInterrupted and no classification (never a truncation/tamper verdict
+// it did not finish proving). This lets the interactive `verify --against-anchor`
+// honor --walk-timeout on a v1 anchor file just as the v2 path does.
+func (l *Logger) VerifyAgainstAnchorContext(ctx context.Context, a *Anchor, pub ed25519.PublicKey) (*AnchorVerifyResult, error) {
 	res := &AnchorVerifyResult{
 		AnchorRowCount: a.RowCount,
 		AnchorHeadHash: a.HeadHash,
@@ -367,11 +377,16 @@ func (l *Logger) VerifyAgainstAnchor(a *Anchor, pub ed25519.PublicKey) (*AnchorV
 	}
 	total := 0
 	for rows.Next() {
+		if total%verifyCtxCheckInterval == 0 {
+			if err := walkInterrupted(ctx); err != nil {
+				return nil, err
+			}
+		}
 		var id int64
 		var ts, et, cat, detail, sid string
 		var blocked int
 		if err := rows.Scan(&id, &ts, &et, &cat, &detail, &blocked, &sid); err != nil {
-			return nil, fmt.Errorf("failed to scan event row: %w", err)
+			return nil, verifyInterrupted(ctx, fmt.Errorf("failed to scan event row: %w", err))
 		}
 		entryHash, err := chainEntry(id, ts, EventType(et), cat, detail, blocked != 0, sid, prevHashHex)
 		if err != nil {
@@ -384,7 +399,12 @@ func (l *Logger) VerifyAgainstAnchor(a *Anchor, pub ed25519.PublicKey) (*AnchorV
 		}
 	}
 	if err := rows.Err(); err != nil {
-		return nil, fmt.Errorf("error iterating events during anchor verification: %w", err)
+		return nil, verifyInterrupted(ctx, fmt.Errorf("error iterating events during anchor verification: %w", err))
+	}
+	// A deadline that lands after the last periodic check must not let the walk
+	// report a classification it did not finish under.
+	if err := walkInterrupted(ctx); err != nil {
+		return nil, err
 	}
 	res.LocalRowCount = total
 	res.LocalHeadAtAnchor = headAtAnchor

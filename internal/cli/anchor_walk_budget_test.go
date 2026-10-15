@@ -52,8 +52,9 @@ func TestAnchorCLIContextsWalkNotCappedByLock(t *testing.T) {
 		t.Fatal("default walk context must have no deadline (would re-introduce the 30s cap)")
 	}
 
-	// A positive walk budget shorter than the lock budget still bounds the walk by
-	// the walk budget, not the lock budget.
+	// A positive walk budget longer than the lock budget still bounds the walk by
+	// the walk budget (90s), not the 30s lock budget — the walk is never capped at
+	// the lock deadline.
 	anchorCLIWalkTimeout = 90 * time.Second
 	_, walkCtx2, cancel2 := anchorCLIContexts(context.Background())
 	defer cancel2()
