@@ -55,18 +55,16 @@ func (f execFingerprint) Detail() string {
 	return d
 }
 
-// fingerprintExecutable resolves command with the launch's own resolver
-// (resolveChildArgv: exec.LookPath on the caller's PATH) and hashes that file's bytes. It always describes the
-// requested command, never a NockLock shim, sandbox-exec or netns helper placed
-// in front of it. It reads at most maxFingerprintBytes from a regular file and
-// never blocks on a FIFO or device. It cannot fail the launch: every outcome is
-// a status. The hash is taken before exec, so the file can change in between.
-func fingerprintExecutable(command string) execFingerprint {
-	argv, err := resolveChildArgv([]string{command})
-	if err != nil {
-		return execFingerprint{Status: execUnresolved}
-	}
-	path := argv[0]
+// fingerprintExecutable hashes the already-resolved executable at path. The
+// caller resolves the requested command (e.g. via resolveChildArgv) once and
+// passes that same path here, so the file fingerprinted is always the file
+// that gets exec'd — this function does not re-resolve or search PATH. It
+// always describes the requested command, never a NockLock shim, sandbox-exec
+// or netns helper placed in front of it. It reads at most maxFingerprintBytes
+// from a regular file and never blocks on a FIFO or device. It cannot fail the
+// launch: every outcome is a status. The hash is taken before exec, so the
+// file can change in between.
+func fingerprintExecutable(path string) execFingerprint {
 	fp := execFingerprint{Path: path}
 	if launcherNames[filepath.Base(path)] {
 		fp.Kind = "launcher"

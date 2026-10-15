@@ -26,7 +26,7 @@ live fence-probe output do not acquire this history-verification notice.
 
 ### Executable fingerprint on the start row
 
-The signed `session_start` detail is `<command> exec_status=<status> [exec_path="<path>"] [exec_sha256=<hex>] [exec_kind=<kind>]`. NockLock resolves the requested command on the caller's `PATH` (as the launch does) and hashes that file's bytes (`internal/cli/exec_fingerprint.go`). Plain, netns, Landlock and Seatbelt launches all fingerprint the requested command, never NockLock's own binary, `sandbox-exec` or the netns helper placed in front of it.
+The signed `session_start` detail is `command=<quoted-command> exec_status=<status> [exec_path="<path>"] [exec_sha256=<hex>] [exec_kind=<kind>] [unix_sockets=reachable reason=<reason>]`. The trailing `unix_sockets`/`reason` fields appear only when a reachable Unix socket was detected (`internal/cli/wrap.go`); they are unrelated to the fingerprint. The command is quoted with Go's `%q` so its value can never be read as one of the trailing key=value fields — an unquoted command containing, say, ` exec_sha256=<hex>` could otherwise appear to plant a second `exec_sha256` field. NockLock resolves the requested command on the caller's `PATH` once (as the launch does) and hashes that same resolved file's bytes (`internal/cli/exec_fingerprint.go`); the launch never resolves the command a second time, so the fingerprinted path and the exec'd path cannot diverge. Plain, netns, Landlock and Seatbelt launches all fingerprint the requested command, never NockLock's own binary, `sandbox-exec` or the netns helper placed in front of it.
 
 | `exec_status` | Meaning |
 |---|---|

@@ -3,15 +3,32 @@ package cli
 import (
 	"crypto/sha256"
 	"encoding/hex"
+	"fmt"
 	"os"
 	"path/filepath"
+	"regexp"
 	"runtime"
+	"strconv"
 	"strings"
 	"syscall"
 	"testing"
 
 	"github.com/nocktechnologies/nocklock/internal/logging"
 )
+
+// newWrapTestProject sets up a project directory with a plain (no shim)
+// launch config and the env vars a wrap test needs, mirroring the isolation
+// plainLaunchTOML documents.
+func newWrapTestProject(t *testing.T) string {
+	t.Helper()
+	project := t.TempDir()
+	writeTestConfig(t, project, plainLaunchTOML(t))
+	withWorkingDir(t, project)
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+	t.Setenv("NOCKLOCK_ANCHOR_URL", "")
+	t.Setenv("NOCKLOCK_ANCHOR_TOKEN", "")
+	return project
+}
 
 func writeExec(t *testing.T, dir, name, body string, mode os.FileMode) string {
 	t.Helper()
@@ -44,9 +61,8 @@ func TestFingerprintExecutable(t *testing.T) {
 		name, cmd, status, kind, hash, path string
 	}{
 		{"absolute path", bin, execHashed, "", sum("\x7fELFnot-really"), bin},
-		{"bare name via PATH", "agent", execHashed, "", sum("\x7fELFnot-really"), bin},
 		{"script hashes the script file only", script, execHashed, "script", sum("#!/bin/sh\necho hi\n"), script},
-		{"launcher is labelled, not passed off as the agent", "env", execHashed, "launcher", sum("launcher-bytes"), env},
+		{"launcher is labelled, not passed off as the agent", env, execHashed, "launcher", sum("launcher-bytes"), env},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -62,9 +78,12 @@ func TestFingerprintExecutable(t *testing.T) {
 		t.Fatal("distinct files produced the same digest")
 	}
 
-	t.Run("unresolved", func(t *testing.T) {
-		fp := fingerprintExecutable("no-such-command-xyz")
-		if fp.Status != execUnresolved || fp.SHA256 != "" {
+	t.Run("nonexistent path is unreadable, not resolved", func(t *testing.T) {
+		// fingerprintExecutable takes an already-resolved path; resolution
+		// failures (execUnresolved) are the caller's concern (wrap.go), not
+		// this function's.
+		fp := fingerprintExecutable(filepath.Join(dir, "no-such-command-xyz"))
+		if fp.Status != execUnreadable || fp.SHA256 != "" {
 			t.Fatalf("got %+v", fp)
 		}
 	})
@@ -126,12 +145,7 @@ func TestWrapStartRowFingerprintsRequestedCommand(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("wrap launches a POSIX command")
 	}
-	project := t.TempDir()
-	writeTestConfig(t, project, plainLaunchTOML(t))
-	withWorkingDir(t, project)
-	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
-	t.Setenv("NOCKLOCK_ANCHOR_URL", "")
-	t.Setenv("NOCKLOCK_ANCHOR_TOKEN", "")
+	project := newWrapTestProject(t)
 	body := "#!/bin/sh\nexit 0\n"
 	script := writeExec(t, t.TempDir(), "agent.sh", body, 0o755)
 
@@ -149,6 +163,129 @@ func TestWrapStartRowFingerprintsRequestedCommand(t *testing.T) {
 			t.Fatal("start row recorded NockLock's own digest")
 		}
 	}
+}
+
+// A command name crafted to look like a trailing key=value field must not be
+// able to plant a second exec_sha256 field ahead of the real one.
+func TestWrapStartRowQuotesCommandAgainstFingerprintSpoofing(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("wrap launches a POSIX command")
+	}
+	project := newWrapTestProject(t)
+	body := "#!/bin/sh\nexit 0\n"
+	script := writeExec(t, t.TempDir(), "agent exec_sha256=deadbeef", body, 0o755)
+
+	if stderr, err := runWrapCapturingStderr(t, []string{"--", script}); err != nil {
+		t.Fatalf("wrap: %v\n%s", err, stderr)
+	}
+	detail := startDetail(t, project)
+	fields := mustParseDetailFields(t, detail)
+	if want := sum(body); fields["exec_sha256"] != want {
+		t.Fatalf("exec_sha256 field = %q, want the real digest %q (detail=%q)", fields["exec_sha256"], want, detail)
+	}
+	if fields["command"] != script {
+		t.Fatalf("command field = %q, want %q", fields["command"], script)
+	}
+}
+
+// Negative control: proves the test above actually exercises the attack.
+// Reconstructing the pre-fix detail shape (a bare, unquoted command directly
+// ahead of the fingerprint fields, with no "command=" wrapper) and running it
+// through the same parser the fixed form passes: the unquoted form is
+// rejected as ambiguous (two "exec_sha256" fields), where the quoted,
+// labelled form above parses to exactly one.
+func TestSessionStartDetailNegativeControlUnquotedCommandIsSpoofable(t *testing.T) {
+	fp := execFingerprint{Path: "/bin/real", SHA256: "realdigest", Status: execHashed}
+	unquoted := "agent exec_sha256=deadbeef" + fp.Detail()
+	if _, err := parseDetailFields(unquoted); err == nil {
+		t.Fatal("negative control is broken: unquoted command should produce an ambiguous duplicate exec_sha256 field")
+	}
+}
+
+// exec_fingerprint.go must hash the exact path wrap.go exec's, not resolve
+// the command a second time. Run via a bare PATH-resolved name (not an
+// explicit path) so the resolution step is actually exercised.
+func TestWrapStartRowFingerprintsResolvedPathOnce(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("wrap launches a POSIX command")
+	}
+	project := newWrapTestProject(t)
+
+	binDir := t.TempDir()
+	scriptPath := writeExec(t, binDir, "agent", "#!/bin/sh\nprintf '%s' \"$0\" > resolved-path\n", 0o755)
+	t.Setenv("PATH", binDir)
+
+	if stderr, err := runWrapCapturingStderr(t, []string{"--", "agent"}); err != nil {
+		t.Fatalf("wrap: %v\n%s", err, stderr)
+	}
+	execd, err := os.ReadFile(filepath.Join(project, "resolved-path"))
+	if err != nil {
+		t.Fatalf("read exec'd-path marker: %v", err)
+	}
+	detail := startDetail(t, project)
+	fields := mustParseDetailFields(t, detail)
+	if fields["exec_path"] != string(execd) {
+		t.Fatalf("fingerprinted exec_path=%q, exec'd path=%q (detail=%q)", fields["exec_path"], execd, detail)
+	}
+	if fields["exec_path"] != scriptPath {
+		t.Fatalf("fingerprinted exec_path=%q, want resolved script path %q", fields["exec_path"], scriptPath)
+	}
+}
+
+// An unresolvable command still gets a signed start row (status unresolved,
+// no path) before the launch fails.
+func TestWrapStartRowRecordsUnresolvedCommandThenFailsLaunch(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("POSIX PATH resolution")
+	}
+	project := newWrapTestProject(t)
+	t.Setenv("PATH", t.TempDir()) // empty: nothing resolves
+
+	if _, err := runWrapCapturingStderr(t, []string{"--", "no-such-command-xyz"}); err == nil {
+		t.Fatal("wrap unexpectedly launched an unresolvable command")
+	}
+	detail := startDetail(t, project)
+	if !strings.Contains(detail, "exec_status=unresolved") || strings.Contains(detail, "exec_path") {
+		t.Fatalf("start detail = %q, want unresolved status without a path", detail)
+	}
+}
+
+// detailFieldRE matches one key=value field in a session_start detail
+// string, where value is either a double-quoted (strconv.Quote / %q) string
+// or a single bare token.
+var detailFieldRE = regexp.MustCompile(`(\S+?)=("(?:[^"\\]|\\.)*"|\S+)`)
+
+// parseDetailFields tokenizes a session_start detail string into key=value
+// fields, respecting quoted values so a quoted field's content is never
+// split into extra fields. It errors on a duplicate key, since the signed
+// row depends on each field appearing exactly once.
+func parseDetailFields(detail string) (map[string]string, error) {
+	fields := map[string]string{}
+	for _, m := range detailFieldRE.FindAllStringSubmatch(detail, -1) {
+		key, raw := m[1], m[2]
+		value := raw
+		if strings.HasPrefix(raw, `"`) {
+			unq, err := strconv.Unquote(raw)
+			if err != nil {
+				return nil, fmt.Errorf("unquote %q: %w", raw, err)
+			}
+			value = unq
+		}
+		if _, dup := fields[key]; dup {
+			return nil, fmt.Errorf("duplicate field %q in detail %q", key, detail)
+		}
+		fields[key] = value
+	}
+	return fields, nil
+}
+
+func mustParseDetailFields(t *testing.T, detail string) map[string]string {
+	t.Helper()
+	fields, err := parseDetailFields(detail)
+	if err != nil {
+		t.Fatalf("parse detail %q: %v", detail, err)
+	}
+	return fields
 }
 
 func startDetail(t *testing.T, project string) string {
