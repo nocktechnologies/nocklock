@@ -6,7 +6,7 @@ All notable changes to NockLock will be documented in this file.
 
 ### Security
 
-- Remove internal drafts, private review instructions, server-specific acceptance material and personal identifiers from published probe records and design notes. Retain the technical probe verdicts with redacted host, account and home path, and add a public-content check to CI (N11824).
+- Remove internal drafts, private review instructions, server-specific acceptance material and personal identifiers from published probe records and design notes. Retain the technical probe verdicts with redacted host, account and home path. Add a public-content check to CI and store only exact historical finding fingerprints in the secret-scan baseline (N11824).
 
 ### Added
 

@@ -19,6 +19,6 @@ jobs:
           chmod +x gitleaks
       - name: Scan for secrets
         run: |
-          ./gitleaks detect --source . \
-            --baseline-path .gitleaks-baseline.json \
-            --redact -v
+          ./gitleaks detect --source . --report-format json \
+            --report-path /tmp/gitleaks-report.json --redact --exit-code 0
+          python3 scripts/check-gitleaks-baseline.py /tmp/gitleaks-report.json
