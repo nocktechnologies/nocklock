@@ -72,13 +72,29 @@ done
 
 # Verify must stage its own Linux executable pair under trusted ancestors too.
 # A skipped filesystem probe would hide the original /var/tmp staging regression.
-run_fenced verify --json > "$scratch/verify.json"
-python3 - "$scratch/verify.json" <<'PYVERIFY'
+# Capture the exit status and JSON without letting -e end the script, so a
+# failing check is reported by name instead of as a silent exit 1.
+verify_status=0
+run_fenced verify --json > "$scratch/verify.json" 2> "$scratch/verify.err" || verify_status=$?
+python3 - "$scratch/verify.json" "$scratch/verify.err" "$verify_status" <<'PYVERIFY'
 import json, sys
-with open(sys.argv[1]) as report:
-    checks = json.load(report)["checks"]
-filesystem = [check for check in checks if check["fence"] == "filesystem"]
-assert len(filesystem) == 1 and filesystem[0]["result"] == "PASS", checks
+path, err_path, status = sys.argv[1], sys.argv[2], int(sys.argv[3])
+raw = open(path).read()
+err = open(err_path).read()
+def fail(message):
+    sys.exit("verify: %s (exit %d)\nstdout: %s\nstderr: %s" % (message, status, raw, err))
+try:
+    checks = json.loads(raw)["checks"]
+except (ValueError, KeyError):
+    fail("no parsable JSON report")
+failed = ["%s (%s)" % (c["fence"], c.get("detail", "")) for c in checks if c["result"] == "FAIL"]
+if failed:
+    fail("failing check(s): " + ", ".join(failed))
+filesystem = [c for c in checks if c["fence"] == "filesystem"]
+if len(filesystem) != 1 or filesystem[0]["result"] != "PASS":
+    fail("filesystem check is not a single PASS")
+if status != 0:
+    fail("exited non-zero with no failing check")
 PYVERIFY
 
 echo "PASS: init wraps /bin/sh; project write succeeds; Landlock denies sibling and read-only /tmp writes; verify filesystem PASS"
