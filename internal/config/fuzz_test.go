@@ -108,7 +108,7 @@ func FuzzConfigLoad(f *testing.F) {
 // an overlay may tighten the base fence but may NEVER widen it. Any firing here
 // is either a real overlay-widening bypass or a too-strict assertion — do not
 // paper over it; minimise the input and inspect restrictOverlay /
-// overlayDefinedFields before concluding.
+// LoadOverlay before concluding.
 func assertOverlayNotWidened(t *testing.T, base, ov *Config) {
 	t.Helper()
 

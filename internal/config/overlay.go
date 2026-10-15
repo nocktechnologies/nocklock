@@ -1,77 +1,52 @@
 package config
 
 import (
-	"fmt"
-	"os"
 	"slices"
-	"strings"
-
-	"github.com/BurntSushi/toml"
 )
 
-func restrictOverlay(base, overlay Config, fields map[string]bool) Config {
+// restrictOverlay merges overlay over base so it can only tighten the fence.
+// overlay is decoded from a copy of base, so a field the file never set equals
+// base and restricts to itself; every field is restricted unconditionally and
+// the spelling of keys in the file decides nothing.
+func restrictOverlay(base, overlay Config) Config {
 	cfg := overlay
 	cfg.ProfileName = base.ProfileName
 
-	if fields["filesystem.allow"] {
-		cfg.Filesystem.Allow = intersectStrings(base.Filesystem.Allow, overlay.Filesystem.Allow)
-	}
-	if fields["filesystem.allow_rw"] {
-		cfg.Filesystem.AllowRW = intersectStrings(base.Filesystem.AllowRW, overlay.Filesystem.AllowRW)
-	}
-	if fields["filesystem.deny"] {
-		cfg.Filesystem.Deny = unionStrings(base.Filesystem.Deny, overlay.Filesystem.Deny)
-	}
-	if fields["filesystem.mode"] {
-		cfg.Filesystem.Mode = restrictiveFilesystemMode(base.Filesystem.Mode, overlay.Filesystem.Mode)
-	}
-	if fields["filesystem.root"] && overlay.Filesystem.Root != base.Filesystem.Root {
+	cfg.Filesystem.Allow = intersectStrings(base.Filesystem.Allow, overlay.Filesystem.Allow)
+	cfg.Filesystem.AllowRW = intersectStrings(base.Filesystem.AllowRW, overlay.Filesystem.AllowRW)
+	cfg.Filesystem.Deny = unionStrings(base.Filesystem.Deny, overlay.Filesystem.Deny)
+	cfg.Filesystem.Mode = restrictiveFilesystemMode(base.Filesystem.Mode, overlay.Filesystem.Mode)
+	if overlay.Filesystem.Root != base.Filesystem.Root {
 		cfg.Filesystem.Root = base.Filesystem.Root
 	}
-	if fields["filesystem.linux_enforcement"] {
-		cfg.Filesystem.LinuxEnforcement = restrictiveEnforcement(base.Filesystem.LinuxEnforcement, overlay.Filesystem.LinuxEnforcement)
-	}
+	cfg.Filesystem.LinuxEnforcement = restrictiveEnforcement(base.Filesystem.LinuxEnforcement, overlay.Filesystem.LinuxEnforcement)
 	cfg.Filesystem.Hardened = base.Filesystem.Hardened || overlay.Filesystem.Hardened
 
-	if fields["network.allow"] {
-		cfg.Network.Allow = intersectStrings(base.Network.Allow, overlay.Network.Allow)
-	}
+	cfg.Network.Allow = intersectStrings(base.Network.Allow, overlay.Network.Allow)
 	cfg.Network.AllowAll = base.Network.AllowAll && overlay.Network.AllowAll
 	cfg.Network.AllowPrivateRanges = base.Network.AllowPrivateRanges && overlay.Network.AllowPrivateRanges
 	cfg.Network.RequireEnforced = base.Network.RequireEnforced || overlay.Network.RequireEnforced
 	cfg.Network.RequireUnixSocketIsolation = base.Network.RequireUnixSocketIsolation || overlay.Network.RequireUnixSocketIsolation
 	// Look-back rules only narrow egress, so an overlay adds to the base's.
 	cfg.Network.Lookback = slices.Clone(base.Network.Lookback)
-	if fields["network.lookback"] {
-		cfg.Network.Lookback = append(cfg.Network.Lookback, overlay.Network.Lookback...)
-	}
+	cfg.Network.Lookback = append(cfg.Network.Lookback, overlay.Network.Lookback...)
 
-	if fields["secrets.pass"] {
-		// secrets.pass has INVERTED semantics: an empty pass list means "pass
-		// every non-blocked var" (secrets.go Rule 2). A disjoint overlay must
-		// never collapse a restrictive (non-empty) base to that permissive empty
-		// sentinel — that would LOOSEN the secret fence. Fail closed to base.
-		cfg.Secrets.Pass = tightenInvertedAllowlist(base.Secrets.Pass, overlay.Secrets.Pass)
-	}
-	if fields["secrets.block"] {
-		cfg.Secrets.Block = unionStrings(base.Secrets.Block, overlay.Secrets.Block)
-	}
+	// secrets.pass has INVERTED semantics: an empty pass list means "pass
+	// every non-blocked var" (secrets.go Rule 2). A disjoint overlay must
+	// never collapse a restrictive (non-empty) base to that permissive empty
+	// sentinel — that would LOOSEN the secret fence. Fail closed to base.
+	cfg.Secrets.Pass = tightenInvertedAllowlist(base.Secrets.Pass, overlay.Secrets.Pass)
+	cfg.Secrets.Block = unionStrings(base.Secrets.Block, overlay.Secrets.Block)
 	cfg.Secrets.ScanEnv = base.Secrets.ScanEnv || overlay.Secrets.ScanEnv
 	cfg.Secrets.ScanPaths = unionStrings(base.Secrets.ScanPaths, overlay.Secrets.ScanPaths)
 	cfg.Secrets.ScanEnvAllow = intersectStrings(base.Secrets.ScanEnvAllow, overlay.Secrets.ScanEnvAllow)
 
-	if fields["syscall.enforcement"] {
-		cfg.Syscall.Enforcement = restrictiveEnforcement(base.Syscall.Enforcement, overlay.Syscall.Enforcement)
-	}
+	cfg.Syscall.Enforcement = restrictiveEnforcement(base.Syscall.Enforcement, overlay.Syscall.Enforcement)
 	cfg.Syscall.AllowNamespaces = base.Syscall.AllowNamespaces && overlay.Syscall.AllowNamespaces
-	if fields["syscall.socket_families"] {
-		// socket_families also has INVERTED semantics: empty means "no socket
-		// restriction" (config.go). Same fail-closed-to-base guard as pass.
-		cfg.Syscall.SocketFamilies = tightenInvertedAllowlist(base.Syscall.SocketFamilies, overlay.Syscall.SocketFamilies)
-	}
-	if fields["syscall.extra_deny"] {
-		cfg.Syscall.ExtraDeny = unionStrings(base.Syscall.ExtraDeny, overlay.Syscall.ExtraDeny)
-	}
+	// socket_families also has INVERTED semantics: empty means "no socket
+	// restriction" (config.go). Same fail-closed-to-base guard as pass.
+	cfg.Syscall.SocketFamilies = tightenInvertedAllowlist(base.Syscall.SocketFamilies, overlay.Syscall.SocketFamilies)
+	cfg.Syscall.ExtraDeny = unionStrings(base.Syscall.ExtraDeny, overlay.Syscall.ExtraDeny)
 
 	// The audit-log DB path is the accountability anchor of a profile. A user
 	// overlay must not be able to redirect it (e.g. to /dev/null) and silently
@@ -113,88 +88,6 @@ func cloneConfig(cfg Config) Config {
 	cfg.Syscall.ExtraDeny = append([]string(nil), cfg.Syscall.ExtraDeny...)
 	cfg.Network.Lookback = slices.Clone(cfg.Network.Lookback)
 	return cfg
-}
-
-func overlayDefinedFields(path string) (map[string]bool, error) {
-	data, err := os.ReadFile(path)
-	if err != nil {
-		return nil, fmt.Errorf("failed to read config at %s: %w", path, err)
-	}
-	var raw map[string]any
-	if _, err := toml.Decode(string(data), &raw); err != nil {
-		return nil, fmt.Errorf("failed to parse config at %s: %w", path, err)
-	}
-	fields := make(map[string]bool)
-	collectTOMLFields(fields, nil, raw)
-	return fields, nil
-}
-
-func collectTOMLFields(fields map[string]bool, prefix []string, value any) {
-	switch typed := value.(type) {
-	case map[string]any:
-		for key, nested := range typed {
-			collectTOMLFields(fields, append(prefix, strings.ToLower(key)), nested)
-		}
-	default:
-		if len(prefix) > 0 {
-			fields[strings.Join(prefix, ".")] = true
-		}
-	}
-}
-
-func addMetadataFields(fields map[string]bool, md toml.MetaData) {
-	fieldNames := map[string]string{
-		"filesystem":       "filesystem",
-		"filesystemconfig": "filesystem",
-		"network":          "network",
-		"networkconfig":    "network",
-		"secrets":          "secrets",
-		"secretsconfig":    "secrets",
-		"syscall":          "syscall",
-		"syscallconfig":    "syscall",
-		"cloud":            "cloud",
-		"cloudconfig":      "cloud",
-	}
-	keyNames := map[string]string{
-		"allow":                "allow",
-		"allowrw":              "allow_rw",
-		"allow_rw":             "allow_rw",
-		"deny":                 "deny",
-		"mode":                 "mode",
-		"root":                 "root",
-		"linuxenforcement":     "linux_enforcement",
-		"linux_enforcement":    "linux_enforcement",
-		"allowall":             "allow_all",
-		"allow_all":            "allow_all",
-		"requireenforced":      "require_enforced",
-		"require_enforced":     "require_enforced",
-		"allowprivateranges":   "allow_private_ranges",
-		"allow_private_ranges": "allow_private_ranges",
-		"pass":                 "pass",
-		"block":                "block",
-		"enforcement":          "enforcement",
-		"allownamespaces":      "allow_namespaces",
-		"allow_namespaces":     "allow_namespaces",
-		"socketfamilies":       "socket_families",
-		"socket_families":      "socket_families",
-		"extradeny":            "extra_deny",
-		"extra_deny":           "extra_deny",
-		"enabled":              "enabled",
-	}
-	for _, key := range md.Keys() {
-		if len(key) < 2 {
-			continue
-		}
-		section, ok := fieldNames[strings.ToLower(key[len(key)-2])]
-		if !ok {
-			section = strings.ToLower(key[len(key)-2])
-		}
-		name, ok := keyNames[strings.ToLower(key[len(key)-1])]
-		if !ok {
-			name = strings.ToLower(key[len(key)-1])
-		}
-		fields[section+"."+name] = true
-	}
 }
 
 func restrictiveFilesystemMode(base, overlay string) string {

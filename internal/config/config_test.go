@@ -371,7 +371,7 @@ func TestOverlayCannotTurnOffRequireEnforced(t *testing.T) {
 	base.Network.RequireEnforced = true
 	overlay := DefaultConfig()
 	overlay.Network.RequireEnforced = false
-	cfg := restrictOverlay(base, overlay, map[string]bool{"network.require_enforced": true})
+	cfg := restrictOverlay(base, overlay)
 	if !cfg.Network.RequireEnforced {
 		t.Fatal("overlay disabled network.require_enforced from the base profile")
 	}
