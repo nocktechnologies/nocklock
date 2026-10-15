@@ -27,15 +27,15 @@ Its `detail` is `key=value` fields in the same quoted style as the `session_star
 | --- | --- |
 | `close=1` | contract version |
 | `session=<id>` | the run (also in the row's `session_id`) |
-| `first_id` | id of the run's `session_start` row |
+| `first_id` | id of the first row stamped with the run's `session_id`, whatever its type — in practice the config-digest row (`recordConfigDigest`, `internal/cli/wrap.go:197`), written before `session_start` |
 | `last_id` | id of the run's last row before the close |
-| `rows` | count of the run's rows from `first_id` through `last_id`, close excluded (**count**) |
+| `rows` | count of the run's rows from `first_id` through `last_id` inclusive, close excluded — this includes any pre-`session_start` rows (**count**) |
 | `root` | 64-hex rolling digest of those rows (**root**, below) |
 | `end` | `clean`, `child_exit`, `refused`, `audit_failed`: why the run ended, from the writer's own paths (not the child's exit code; that stays in `session_end`) |
 
-`end` is the writer's own reason for closing the run, recorded only inside a close row that itself made it to disk — it is not a status layered on top of a failed write. `audit_failed` means the egress decision-log reader failed (`decisionFailed`, checked at `internal/cli/wrap.go:1105`) but the `session_end` and close writes that follow it still succeeded. If the same underlying failure took down the signing logger, the `session_end` (or close) write fails too, per the rule above, and the run is `unclosed` instead — so `audit_failed` and a failed close can never both describe the same run.
+`end` is the writer's own reason for closing the run, recorded only inside a close row that itself made it to disk — it is not a status layered on top of a failed write. `audit_failed` means the egress decision-log reader failed (`decisionFailed`, checked at `internal/cli/wrap.go:1105`) but the `session_end` and close writes that follow it still succeeded. If the same underlying failure took down the signing logger, the `session_end` (or close) write fails too (see "A failed `session_end` must not produce `closed`", below), and the run is `unclosed` instead — so `audit_failed` and a failed close can never both describe the same run.
 
-**Root.** `R_0 = SHA-256("nocklock-run-close-v1\0" || session_id)`, `R_i = SHA-256(R_{i-1} || SHA-256(canonical_bytes_i))` over the run's rows in id order, where `canonical_bytes_i` is the row's existing signed canonical byte string (`canonicalBytes`, `internal/logging/logger.go:1297`, covering `id`, timestamp, type, category, detail, blocked and session id). Using canonical bytes and not `entry_hash` is deliberate: `entry_hash` includes `prev_hash`, which `Prune` rewrites (`internal/logging/logger.go:1180-1235`: it keeps each surviving row's `id` and canonical bytes and rewrites only `prev_hash` and `entry_hash`); canonical bytes do not, so a surviving run still verifies after a prune of other rows. Because `id` is itself inside the canonical bytes, the root survives a prune only *because* `Prune` preserves ids — a prune that renumbered surviving rows would break every root computed before it. The row signature already commits to the same bytes.
+**Root.** `R_0 = SHA-256("nocklock-run-close-v1\0" || session_id)`, `R_i = SHA-256(R_{i-1} || SHA-256(canonical_bytes_i))` over the run's rows from `first_id` through `last_id` in id order (pre-`session_start` rows included), where `canonical_bytes_i` is the row's existing signed canonical byte string (`canonicalBytes`, `internal/logging/logger.go:1297`, covering `id`, timestamp, type, category, detail, blocked and session id). Using canonical bytes and not `entry_hash` is deliberate: `entry_hash` includes `prev_hash`, which `Prune` rewrites (`internal/logging/logger.go:1180-1235`: it keeps each surviving row's `id` and canonical bytes and rewrites only `prev_hash` and `entry_hash`); canonical bytes do not, so a surviving run still verifies after a prune of other rows. Because `id` is itself inside the canonical bytes, the root survives a prune only *because* `Prune` preserves ids — a prune that renumbered surviving rows would break every root computed before it. The row signature already commits to the same bytes.
 
 **Atomicity.** The close is computed and appended in one SQLite write transaction, the same discipline `LogBatch` uses for predecessor lookup and append. It therefore covers every run row committed before it (a `session_id` belongs to one `wrap` process). Rows of other runs between `first_id` and `last_id` are excluded by the `session_id` filter. Cost is one indexed scan (`idx_events_session`) and one SHA-256 per run row, once per run.
 
@@ -60,7 +60,7 @@ Its `detail` is `key=value` fields in the same quoted style as the `session_star
 
 ## Verification
 
-For each run found in the chain (`session_start` rows with `lifecycle=1`, below), the verifier reports one of:
+For each run found in the chain (`session_start` rows with `lifecycle=1`), the verifier reports one of the statuses in the table below. A run is discovered, and the `unclosed` test applies, only once its `session_start` row exists; `first_id` is a separate notion — the earliest row carrying the run's `session_id`, which can precede `session_start` (the config-digest row at `internal/cli/wrap.go:197` and the secret-preflight row at `internal/cli/wrap.go:288` both predate `session_start` at `internal/cli/wrap.go:892`). `rows` and `root` cover every row with that `session_id` from `first_id` through `last_id`, close excluded:
 
 | Status | Condition | Severity |
 | --- | --- | --- |
@@ -124,6 +124,7 @@ Each negative control carries its positive control.
 | 14 | Full real `wrap` teardown against a live proxy and child | run ends `closed` |
 | 15 | `session_end` write forced to fail | no close attempted; loud stderr; verifier says `unclosed` |
 | 16 | Proxy shutdown exceeds its 5s drain deadline with a handler still writing | close skipped; run `unclosed`; never `rows_after_close` |
+| 17 | Honest run with a config-digest row before `session_start` (`first_id` precedes the start row), then that pre-start row deleted and the chain re-signed | verifies `closed` before the deletion; `close_mismatch` after |
 
 ## Decisions (Mira, round 1)
 
@@ -137,3 +138,4 @@ Each negative control carries its positive control.
 - It cannot tell crash from cut (above).
 - A run that never wrote a start (`lifecycle=1`) is invisible to it.
 - Rows of a run committed after its close are detected only while that `session_id` is not reused; IDs are UUIDs minted per process.
+- `first_id` is simply the earliest row carrying the `session_id` in the chain, not a fixed step of `wrap`'s startup; if a process exits before ever writing `session_start` (e.g. `recordConfigDigest` succeeds but `protectChainIdentity` then refuses), the config-digest and secret-preflight rows it left behind are not part of any run — there is no `session_start` to make one exist — the same as a `session_end` row with no start.
