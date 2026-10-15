@@ -76,6 +76,8 @@ Exit codes travel as `exitCodeError` and `Execute()` calls `os.Exit` once (`root
 
 Caveat: a wrapped child exiting `1` or `2` can overlap CLI failure codes. The banner on stderr (`NockLock: fatal:`) and the `session_end` audit row (`exit_code=<n>`) disambiguate (`wrap.go`).
 
+On Linux, `doctor` also emits an `interposer-library-trust` warning (exit 3, PARTIAL) when a `libfence_fs.so` candidate that `wrap` would consider is owned by someone other than root or the invoking user, or the file or a parent directory is group/world-writable. `wrap` skips such a candidate and uses a safe one if present; otherwise it refuses to start.
+
 `doctor` checks the managed Ed25519 signing-key directory resolved from `XDG_CONFIG_HOME` (or `~/.config`) against the effective filesystem fence. On macOS it must be inside a Seatbelt deny path. On Linux with Landlock it must be outside every read grant; if a deny overlaps a grant (for example, a key under the project or `/tmp`), `wrap` refuses to start and `doctor` reports `GAPS FOUND` (exit 2). With Landlock disabled, the userspace-only signing-key boundary is `advisory`, so the verdict cannot be `PROTECTED`. `doctor --json` includes `signing_key.directory` and `signing_key.posture`; the `signing-key` check and boundary explain any gap.
 
 ## Config schema (`.nock/config.toml`)

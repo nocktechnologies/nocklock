@@ -580,7 +580,7 @@ func libFenceTrustDoctorCheck(caps doctorCapabilities) (doctorCheck, bool) {
 		Name:     "interposer-library-trust",
 		Severity: doctorWarning,
 		Status:   "unsafe-library",
-		Message:  "wrap refuses filesystem fence library candidate(s) that are not owned by root or the invoking user, or are group/world-writable: " + strings.Join(unsafe, "; "),
+		Message:  "wrap will not use filesystem fence library candidate(s) that are not owned by root or the invoking user, or are group/world-writable: " + strings.Join(unsafe, "; "),
 		Fix:      "chown the library and its parent directories to root or your user and remove group/world write (chmod go-w), or reinstall nocklock",
 	}, true
 }
