@@ -54,9 +54,9 @@ func TestWrapSessionStartRecordsSignedAdvisoryEgressLevel(t *testing.T) {
 		logger.Close()
 		t.Fatalf("session-start egress level = %q, want ADVISORY", events[0].EgressLevel)
 	}
-	if events[0].Detail != "true" {
+	if !strings.HasPrefix(events[0].Detail, `command="true" exec_status=hashed exec_path=`) || !strings.Contains(events[0].Detail, " exec_sha256=") {
 		logger.Close()
-		t.Fatalf("session-start detail = %q, want command true", events[0].Detail)
+		t.Fatalf("session-start detail = %q, want command true with an executable fingerprint", events[0].Detail)
 	}
 	if err := logger.Close(); err != nil {
 		t.Fatalf("close audit DB: %v", err)
