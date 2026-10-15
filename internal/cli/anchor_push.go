@@ -42,8 +42,51 @@ func anchorRemoteConfig() (baseURL, token string) {
 
 // anchorCLITimeout bounds an interactive 'anchor push' or a remote fetch by
 // 'verify --against-remote-anchor'. Longer than the teardown budget because a
-// person is waiting on the answer, not a session exit.
+// person is waiting on the answer, not a session exit. It bounds each
+// identity-lock wait and each network step; anchorCLIWalkTimeout bounds the
+// local verification walk separately.
 var anchorCLITimeout = 30 * time.Second
+
+// anchorCLIWalkTimeout bounds ONLY the local verification walk of the interactive
+// 'anchor emit', 'verify --against-anchor' and 'anchor push' commands, separately
+// from anchorCLITimeout. Zero, the default, leaves the walk UNBOUNDED so these
+// commands finish on a large store, restoring completion that the walk's
+// context-bounding (N11800) otherwise cut off past ~30 s (~750k rows). A store
+// with a signed verify_receipt finishes quickly even under a bound, because the
+// verified prefix's signatures are skipped. Operators set a positive budget with
+// --walk-timeout; tests set it directly.
+var anchorCLIWalkTimeout time.Duration
+
+// anchorCLIWalkContext derives the verification-walk context for an interactive
+// anchor command from parent: bounded by anchorCLIWalkTimeout, or parent-tracking
+// but unbounded when the budget is zero (the default), so the walk completes on a
+// large store while still honoring an outer cancellation.
+func anchorCLIWalkContext(parent context.Context) (context.Context, context.CancelFunc) {
+	if parent == nil {
+		parent = context.Background()
+	}
+	if anchorCLIWalkTimeout <= 0 {
+		return context.WithCancel(parent)
+	}
+	return context.WithTimeout(parent, anchorCLIWalkTimeout)
+}
+
+// anchorCLIContexts derives the two budgets an interactive anchor/verify command
+// needs from the SAME caller context: lockCtx bounds each identity-lock wait at
+// anchorCLITimeout, walkCtx bounds only the verification walk (anchorCLIWalkTimeout,
+// unbounded by default). Both derive from parent — never walkCtx from lockCtx — so
+// a large-store walk never inherits the 30 s lock cap. cancel releases both.
+func anchorCLIContexts(parent context.Context) (lockCtx, walkCtx context.Context, cancel context.CancelFunc) {
+	if parent == nil {
+		parent = context.Background()
+	}
+	lockCtx, cancelLock := context.WithTimeout(parent, anchorCLITimeout)
+	walkCtx, cancelWalk := anchorCLIWalkContext(parent)
+	return lockCtx, walkCtx, func() {
+		cancelWalk()
+		cancelLock()
+	}
+}
 
 // errNoAnchorURL is the message for an unset NOCKLOCK_ANCHOR_URL.
 const errNoAnchorURL = "no anchor URL configured (NOCKLOCK_ANCHOR_URL)"
@@ -81,9 +124,10 @@ func runAnchorPush(ctx context.Context, w io.Writer, file string) error {
 	defer logger.Close()
 	// Interactive push: a person is waiting, so every lock wait and network step
 	// is bounded, each on its own fresh budget derived from the caller's context
-	// so a slow preflight walk cannot spend a later step's budget. The walk itself
-	// shares one budget off the same caller context.
-	walkCtx, cancelWalk := context.WithTimeout(ctx, anchorCLITimeout)
+	// so a slow preflight walk cannot spend a later step's budget. The verification
+	// walk runs on its own separate budget (anchorCLIWalkTimeout, unbounded by
+	// default) so a large store finishes rather than stopping at 30 s.
+	walkCtx, cancelWalk := anchorCLIWalkContext(ctx)
 	defer cancelWalk()
 	newStep := func(string) (context.Context, context.CancelFunc) {
 		return context.WithTimeout(ctx, anchorCLITimeout)
@@ -129,7 +173,11 @@ func runVerifyAgainstRemoteAnchor(ctx context.Context, w io.Writer, pubFlag stri
 	if err != nil {
 		return writeAnchorVerifyResult(w, anchorUnavailable(err.Error()))
 	}
-	result, err := logger.VerifyAgainstAnchorV2Context(fctx, a, pub)
+	// The identity read and fetch above are bounded by fctx (anchorCLITimeout); the
+	// local walk runs on its own separate budget so a large store finishes.
+	walkCtx, cancelWalk := anchorCLIWalkContext(ctx)
+	defer cancelWalk()
+	result, err := logger.VerifyAgainstAnchorV2Walk(fctx, walkCtx, a, pub)
 	if err != nil {
 		return writeAnchorVerifyResult(w, anchorUnavailable(err.Error()))
 	}

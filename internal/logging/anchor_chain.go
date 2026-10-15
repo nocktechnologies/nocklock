@@ -149,7 +149,10 @@ func (l *Logger) verifyAgainstAnchorV2Locked(ctx context.Context, a *AnchorV2, p
 		r.Classification, r.Reason = "truncation", fmt.Sprintf("truncation detected: anchor attests %d rows, local has %d", a.RowCount, actual)
 		return r, nil
 	}
-	verified, err := verifyChainInTransaction(ctx, tx, pub, true)
+	// A public-key-only verify --against-anchor / push preflight reads and uses any
+	// receipt here but never writes one (it holds no signing key); the anchor emit
+	// path, which does hold the key, maintains the receipt via verifyChain.
+	verified, _, _, err := verifyChainInTransaction(ctx, tx, pub, true)
 	if err != nil {
 		return nil, err
 	}
