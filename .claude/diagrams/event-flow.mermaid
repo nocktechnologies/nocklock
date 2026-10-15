@@ -26,7 +26,7 @@ flowchart LR
     KEY["~/.config/nocklock/signing-ed25519.key"] -. signs .-> ROW
     KEY -. signs .-> HEAD
 
-    ANCH -->|"NOCKLOCK_ANCHOR_URL set<br/>5s, fail-open"| OFF["Off-box anchor<br/>(e.g. NockCC)"]
+    ANCH -->|"NOCKLOCK_ANCHOR_URL set<br/>5s, fail-open"| OFF["Off-box anchor<br/>(external service)"]
     ROW -->|"[audit.forward] enabled<br/>bounded async queue"| CMD["Command ops log<br/>POST /api/brain/ops-log/<br/>session id + entry hash"]
 
     ROW --> LOG["nocklock log<br/>filter by type / action / time"]

@@ -1,8 +1,7 @@
 # Linux Landlock Filesystem Fence: Design
 
 **Date:** 2026-06-11
-**Status:** Approved (Mira, product lead), Phase 1 scoped for build
-**Author:** Mira Ashworth
+**Status:** Approved (product lead), Phase 1 scoped for build
 **Tracks:** Linux kernel-enforced fence backend (the Landlock half of the
 filesystem fence). Mirrors the macOS Seatbelt decision: a userspace interposer
 fails open against a determined process; the kernel-enforced backend is the
@@ -135,7 +134,7 @@ not require a Landlock kernel (ABI detection is mocked/guarded); the enforcement
 e2e is build-tagged + skips with a clear message off a Landlock kernel.
 
 ## Security review
-Kernel-enforcement code, **Warden review required post-build, pre-merge.**
+Kernel-enforcement code, **Maintainer review required post-build, pre-merge.**
 Specific review asks: the ABI-clamp masking (an unmasked unknown right rejects
 the whole ruleset, so accidental fail-*open* if mishandled), the fail-closed
 ordering in `__landlock-exec` (never exec on partial apply), and the events.db

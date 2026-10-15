@@ -52,7 +52,7 @@ nocklock/
 
 ## Config Structure
 
-Six TOML sections: `project`, `filesystem`, `network`, `secrets`, `logging`, `cloud`. Security-first defaults, deny sensitive dirs (`~/.ssh/`, `~/.aws/`), block secret env vars (`AWS_*`, `*_TOKEN*`), allow only common dev domains. Full struct and defaults as specified in PROMPT_NOCKLOCK_PR1_CLI_SKELETON.md.
+Six TOML sections: `project`, `filesystem`, `network`, `secrets`, `logging`, `cloud`. Security-first defaults, deny sensitive dirs (`~/.ssh/`, `~/.aws/`), block secret env vars (`AWS_*`, `*_TOKEN*`), allow only common dev domains. The current config parser and defaults are authoritative.
 
 ## Wrap Passthrough
 
@@ -67,7 +67,7 @@ Critical proof-of-concept. `nocklock wrap -- echo "hello"` spawns the child proc
 
 ## README
 
-Adapted from DESIGN_NOCK_CLI_ARCHITECTURE.md section 8: `nock` changed to `nocklock`, honest about current state (fences coming), keeps the compelling problem/solution pitch.
+Historical CLI design: `nock` changed to `nocklock`, honest about current state (fences coming), keeps the compelling problem/solution pitch.
 
 ## Out of Scope
 

@@ -3,7 +3,7 @@
 **Status:** Proposed
 **Date:** 2026-05-09
 **Nock:** #484
-**Audience:** Kevin, Warden, NockLock implementers
+**Audience:** NockLock maintainers and implementers
 
 ## Summary
 
@@ -311,7 +311,7 @@ Integration tests:
 ### Keep Linux-only
 
 Safest security story, but weak product fit for the likely early audience.
-Rejected unless Kevin decides macOS support would create unacceptable claim
+Rejected unless maintainers decide macOS support would create unacceptable claim
 risk.
 
 ### Single `libfence_fs.c` with `#ifdef __APPLE__`
@@ -336,8 +336,8 @@ heavier product/install story. Out of scope for the solo developer tier.
 
 Before implementation:
 
-- Kevin accepts the bounded macOS support claim.
-- Warden reviews the SIP/protected-binary escape analysis.
+- Maintainers accept the bounded macOS support claim.
+- A maintainer reviews the SIP/protected-binary escape analysis.
 
 Before merge of the implementation PR:
 

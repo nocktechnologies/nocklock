@@ -390,7 +390,7 @@ const (
 	ForwardURLEnv = "NOCKLOCK_FORWARD_URL"
 )
 
-// CloudConfig configures optional NockCC dashboard sync.
+// CloudConfig configures optional remote dashboard sync.
 type CloudConfig struct {
 	Enabled  bool   `toml:"enabled"`
 	APIKey   string `toml:"api_key"`

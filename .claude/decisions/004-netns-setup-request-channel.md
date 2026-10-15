@@ -2,7 +2,6 @@
 
 **Status:** Accepted
 **Date:** 2026-09-26
-**Author:** Beck (AI builder), N10711
 
 ## Context
 Under `nocklock wrap --net-fence=netns`, the unprivileged parent hands the

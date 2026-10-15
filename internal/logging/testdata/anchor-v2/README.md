@@ -5,7 +5,7 @@
 It contains **only public keys, records, signatures and hashes**. The one-time
 fixture generator used an ephemeral random Ed25519 key in memory and emitted no
 private key or seed. Do not regenerate these vectors when changing the encoder:
-they are a compatibility contract for NockLock and the actual NockCC server.
+they are a compatibility contract for NockLock and a remote anchor server.
 
 ## Envelope and cases
 

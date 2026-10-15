@@ -2,7 +2,7 @@
 // the latest one back (N10647 Inc.3b, client half). The anchor itself is
 // produced and verified by internal/logging; this package only moves it.
 //
-// Server contract (the NockCC endpoint ships separately):
+// Server contract (the remote anchor endpoint ships separately):
 //
 //	POST {base}/api/nocklock/anchors/
 //	     body {"anchor": <anchor object>, "pubkey": "<base64 std, 32-byte Ed25519 key>"}

@@ -204,8 +204,8 @@ func TestPushDoesNotFollowRedirects(t *testing.T) {
 
 func TestValidateBaseURL(t *testing.T) {
 	ok := []string{
-		"https://ncc.example.com",
-		"https://ncc.example.com/prefix/",
+		"https://anchor.example.com",
+		"https://anchor.example.com/prefix/",
 		"http://127.0.0.1:8080",
 		"http://localhost:9",
 		"http://[::1]:9",
@@ -217,13 +217,13 @@ func TestValidateBaseURL(t *testing.T) {
 	}
 	bad := []string{
 		"",
-		"http://ncc.example.com",
+		"http://anchor.example.com",
 		"http://10.0.0.5",
 		"http://127.0.0.1.example.com",
-		"ftp://ncc.example.com",
-		"ncc.example.com",
-		"https://user:pw@ncc.example.com",
-		"https://ncc.example.com/?x=1",
+		"ftp://anchor.example.com",
+		"anchor.example.com",
+		"https://user:pw@anchor.example.com",
+		"https://anchor.example.com/?x=1",
 		"https:///nohost",
 	}
 	for _, u := range bad {
@@ -235,7 +235,7 @@ func TestValidateBaseURL(t *testing.T) {
 
 func TestPushRejectsNonLoopbackHTTP(t *testing.T) {
 	a, pub := signedAnchor(t)
-	err := Push(context.Background(), "http://ncc.example.com", testToken, a, pub)
+	err := Push(context.Background(), "http://anchor.example.com", testToken, a, pub)
 	if err == nil || !strings.Contains(err.Error(), "loopback") {
 		t.Fatalf("non-loopback http must be rejected before any request, got %v", err)
 	}

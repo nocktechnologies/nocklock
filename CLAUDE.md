@@ -27,13 +27,10 @@ NockLock is an AI agent security fence: a Go CLI that wraps coding agents with f
 - `docs/decisions/`: decision records (the first five stay in `.claude/decisions/`)
 - `docs/ROADMAP.md`: the path to 1.0
 - `docs/design/`, `docs/superpowers/specs/`: design notes and specs; `ARCHITECTURE.md`: deep package tree
-- `.claude/diagrams/`, `.claude/design/`, `.claude/lessons/`, `.claude/review/PIPELINE.md`: diagrams, UI tokens, lessons, review pipeline
-
-## Session Closeout
-File a Session Report for every build/session before the final response, even docs-only work. Use `nockcc_session_report_create` or `POST /api/sessions/reports/` with `session_id`, `agent_name`, `duration`, task/PR/message/decision counts, `handoff_written`, standing-order pass/total counts, concise notes, and 2-5 highlights. Include `nocklock` in the session id or notes.
+- `.claude/diagrams/`, `.claude/design/`, `.claude/lessons/`: diagrams, UI tokens, and lessons
 
 ## Pre-Push Checklist
 1. `go test ./... -v`, `go vet ./...`, `go fmt ./...` clean
 2. Self-review for hardcoded secrets, path traversal, race conditions, subprocess injection
-3. Review pipeline complete (`.claude/review/PIPELINE.md`)
+3. Check the PR against the public contribution and review guidance in `CONTRIBUTING.md`.
 4. `CHANGELOG.md` updated; this file and `docs/REPO-MAP.md` updated if structure changed

@@ -2084,9 +2084,9 @@ Expected: Builds successfully.
 Run: `git log --oneline main..HEAD`
 Verify commits are clean, well-described, and focused.
 
-- [ ] **Step 7: Report ready for code review pipeline**
+- [ ] **Step 7: Report ready for review**
 
-Tell Kevin: "Ready for code review pipeline. Filesystem fence implementation complete with N tests. All go test/vet/fmt pass."
+Report: "Ready for review. Filesystem fence implementation complete with N tests. All go test/vet/fmt pass."
 
 ---
 
