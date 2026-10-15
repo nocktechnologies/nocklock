@@ -29,7 +29,7 @@ allow = [
     # systems, where the loader and /bin/sh live outside /usr — grant them so
     # exec works there too.
     #
-    # NOT granted, deliberately (N10748 round 2, Gander both lenses + probe):
+    # NOT granted, deliberately (N10748 round 2, review and probe):
     #   - "/proc/" exposed /proc/<pid>/environ and cmdline of every same-UID
     #     process, so a wrapped agent could read API keys out of the user's other
     #     shells (yama ptrace_scope does not gate the READ). node startup and

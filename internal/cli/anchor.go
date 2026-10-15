@@ -14,7 +14,7 @@ var anchorCmd = &cobra.Command{
 	Use:   "anchor",
 	Short: "Emit and manage external chain-head anchors for the audit log",
 	Long: "An anchor is a small, signed record of the audit chain's head hash and row count at a\n" +
-		"point in time, stored OUTSIDE events.db. Pushed off-box (e.g. to NockCC) it lets\n" +
+		"point in time, stored OUTSIDE events.db. Pushed off-box (e.g. to a remote anchor service) it lets\n" +
 		"'nocklock verify --against-anchor' detect tail truncation and rollback that the in-database\n" +
 		"chain and its signed head cannot resist on their own.",
 }

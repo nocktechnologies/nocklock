@@ -1,7 +1,6 @@
 # Tamper-Evident Audit Log: Spec (v1: hash chain)
 
 **Status:** Scoped, design questions answered. Ready to build.
-**Author:** Mira (product owner). Filed 2026-09-14.
 
 ## Why
 
@@ -35,7 +34,7 @@ controls. Build it now, but do not describe v1 alone as an unforgeable receipt.
 
 **2. Canonical bytes are explicit and pinned by a byte-literal test.**
 The hash covers a deterministic serialization of the row. Fix it precisely to
-avoid the exact class of bug fixed in NCC #1902 today (field-order / type drift
+avoid the exact class of bug fixed in a prior integration issue today (field-order / type drift
 silently breaking verification). The byte layout is, in order:
 
 1. encoding version: the single byte `0x01`;
@@ -95,7 +94,7 @@ output. Never claim pre-migration history is proven.
 Walk the chain from genesis; on success print `AUDIT: CONSISTENT — N entries
 verified, hash chain intact (not externally anchored)`; on the first broken link
 print `AUDIT: TAMPERED — chain breaks at entry <id> (<what mismatched>)` and exit
-non-zero. Expose the current head hash so an external watcher (NockCC) can pin
+non-zero. Expose the current head hash so an external watcher (remote anchor service) can pin
 it.
 
 ## Scope for the build (v1)
@@ -113,7 +112,7 @@ it.
   and its honest limit.
 
 **Out of scope for v1 (follow-on):** Ed25519 signing; external head anchoring
-(push the head to NockCC on session end for true tail-truncation resistance);
+(push the head to remote anchor service on session end for true tail-truncation resistance);
 cross-session chaining.
 
 ## Build constraints
@@ -121,7 +120,7 @@ cross-session chaining.
 - Pure Go crypto (`crypto/sha256`), no CGO, no new heavy deps.
 - **Safe to build and test from any host**: no netns, no root, no sudo, no
   fence enforcement. Standard `go test ./internal/logging/ -race` only.
-- Gate on the repo's normal review legs (claude-review + CodeRabbit at head, CI
+- Gate on the repo's normal review legs (maintainer review at head, CI
   green, 0 unresolved threads), merge is the product owner's call.
 
 ## Follow-on (filed intent, not this build)
@@ -129,6 +128,6 @@ cross-session chaining.
 1. **Ed25519 signing** over the same canonical bytes, per-row, key in the
    user's OS keychain / a NockLock-managed key file with 0600 perms, turns
    tamper-evidence into authenticity. This chain is the substrate.
-2. **External head anchor**: on session end, push `chain_head` to NockCC (or a
+2. **External head anchor**: on session end, push `chain_head` to remote anchor service (or a
    local append-only anchor file the agent can't reach) so tail-truncation is
    detectable even if `chain_head` in the DB is rewritten.

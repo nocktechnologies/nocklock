@@ -13,7 +13,7 @@ os_build=26200.9550
 os_edition=Professional (Microsoft Windows 11 Pro)
 os_arch=64-bit process_64bit=True
 ps=5.1.26100.9549
-user=Kevins-Desktop\kkwil elevated=True
+user=<host>\<user> elevated=True
 STATE(BEFORE) exemptions: (none)
 STATE(BEFORE) ports: (none)
 STATE(BEFORE) tasks: (none)
@@ -40,7 +40,7 @@ os_build=26200.9550
 os_edition=Professional (Microsoft Windows 11 Pro)
 os_arch=64-bit process_64bit=True
 ps=5.1.26100.9549
-user=Kevins-Desktop\kkwil elevated=True
+user=<host>\<user> elevated=True
 STATE(BEFORE) exemptions: (none)
 STATE(BEFORE) ports: (none)
 STATE(BEFORE) tasks: (none)
@@ -121,19 +121,19 @@ False
 curl.exe -> C:\Windows\system32\curl.exe
 git -> C:\Program Files\Git\cmd\git.exe
 node -> C:\Program Files\nodejs\node.exe
-python -> C:\Users\kkwil\AppData\Local\Programs\Python\Python312\python.exe
+python -> <home>\AppData\Local\Programs\Python\Python312\python.exe
 npm -> C:\Program Files\nodejs\npm.ps1
-pip -> C:\Users\kkwil\AppData\Local\Programs\Python\Python312\Scripts\pip.exe
+pip -> <home>\AppData\Local\Programs\Python\Python312\Scripts\pip.exe
 nslookup -> C:\Windows\system32\nslookup.exe
 BEFORE: loopbackexempt_count=0 ports_in_use(8899,9999,9998)=0 (documented desktop baseline: 0, 0)
 S-1-15-2-4050154218-862018945-726142581-281265089-1345647311-1751157957-3938723835
-processed file: C:\Users\kkwil\AppData\Local\Temp\nocklock-probe-aed59e49de2d4341b90a7cba9f9590b3\_launcher.dll
+processed file: <home>\AppData\Local\Temp\nocklock-probe-aed59e49de2d4341b90a7cba9f9590b3\_launcher.dll
 Successfully processed 1 files; Failed processing 0 files
-processed file: C:\Users\kkwil\AppData\Local\Temp\nocklock-probe-aed59e49de2d4341b90a7cba9f9590b3\_inside.ps1
+processed file: <home>\AppData\Local\Temp\nocklock-probe-aed59e49de2d4341b90a7cba9f9590b3\_inside.ps1
 Successfully processed 1 files; Failed processing 0 files
-processed file: C:\Users\kkwil\AppData\Local\Temp\nocklock-probe-aed59e49de2d4341b90a7cba9f9590b3\out
+processed file: <home>\AppData\Local\Temp\nocklock-probe-aed59e49de2d4341b90a7cba9f9590b3\out
 Successfully processed 1 files; Failed processing 0 files
-LAUNCHER-ENV: PASS - TEMP=C:\Users\kkwil\AppData\Local\Packages\nocklock-probe-aed59e49de2d4341b90a7cba9f9590b3\AC\Packages\nocklock-probe-aed59e49de2d4341b90a7cba9f9590b3\AC\Temp LOCALAPPDATA=C:\Users\kkwil\AppData\Local\Packages\nocklock-probe-aed59e49de2d4341b90a7cba9f9590b3\AC\Packages\nocklock-probe-aed59e49de2d4341b90a7cba9f9590b3\AC
+LAUNCHER-ENV: PASS - TEMP=<home>\AppData\Local\Packages\nocklock-probe-aed59e49de2d4341b90a7cba9f9590b3\AC\Packages\nocklock-probe-aed59e49de2d4341b90a7cba9f9590b3\AC\Temp LOCALAPPDATA=<home>\AppData\Local\Packages\nocklock-probe-aed59e49de2d4341b90a7cba9f9590b3\AC\Packages\nocklock-probe-aed59e49de2d4341b90a7cba9f9590b3\AC
 0
 LIMITED-TOKEN: PASS - task token is Medium IL with High absent
 ===== Probe 1: zero-capability loopback =====
@@ -243,7 +243,7 @@ RESTORED: AppContainer profile folder nocklock-probe-aed59e49de2d4341b90a7cba9f9
 RESTORED: AppContainer profile folder nocklock-p3-aed59e49de2d4341b90a7cba9f9590b3 absent
 RESTORED: AppContainer profile folder agent-escape-aed59e49de2d4341b90a7cba9f9590b3 absent
 RESTORED: AppContainer Mappings keys for this run's monikers absent
-RESTORED: probe root C:\Users\kkwil\AppData\Local\Temp\nocklock-probe-aed59e49de2d4341b90a7cba9f9590b3 absent
+RESTORED: probe root <home>\AppData\Local\Temp\nocklock-probe-aed59e49de2d4341b90a7cba9f9590b3 absent
 
 Data Collector Set                      Type                          Status
 -------------------------------------------------------------------------------

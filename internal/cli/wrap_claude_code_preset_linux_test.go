@@ -155,7 +155,7 @@ func TestWrapClaudeCodePresetBlocksSiblingProcEnviron(t *testing.T) {
 }
 
 // TestWrapClaudeCodePresetBlocksDescendantParentProcEnviron is the regression
-// test for Gander's round-2 MAJOR finding on #10757: granting the whole
+// test for the earlier review finding on #10757: granting the whole
 // /proc/self DIRECTORY (rather than the specific files Node needs) binds
 // Landlock to the wrapped child's /proc/<pid> dir inode, and Landlock rules are
 // inherited by every future descendant — so a grandchild of the wrapped process

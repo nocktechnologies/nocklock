@@ -96,7 +96,7 @@ feasibility study.
 - **Do nothing: document WSL2 as the supported Windows path.** The null option,
   and it costs zero PR rounds — inside WSL2 the existing Landlock, seccomp and
   netns fences already work, unmodified. Rejected because it does not fence the
-  case Kevin asked about: agents driving *native* Windows toolchains (MSVC,
+  case raised for review: agents driving *native* Windows toolchains (MSVC,
   MSBuild, Windows-only SDKs, PowerShell automation) and repositories on NTFS
   paths that WSL2 reaches only across the 9p/DrvFs boundary. It remains the
   correct interim recommendation to give Windows users *today*, and should be
@@ -766,13 +766,13 @@ is the SSH session itself.
 ### Elevation on the desktop — corrected premise
 
 An earlier revision said "OpenSSH on Windows gives a non-elevated shell." **That
-is false on Kevin's desktop.** For a member of the Administrators group, an
+is false on the test desktop.** For a member of the Administrators group, an
 OpenSSH logon receives the *full* (unfiltered) token — UAC's split token applies
-to interactive logons, not to this one. Mira's read-only precheck on the desktop
+to interactive logons, not to this one. A read-only precheck on the desktop
 (2026-09-27 23:3xZ), verbatim:
 
 ```
-ps=5.1.26100.9549 | ntobj=False | python=C:\Users\kkwil\AppData\Local\Programs\Python\Python312\python.exe | curl=C:\Windows\system32\curl.exe | elevated=True | loopbackexempt_count=0 | ports_in_use(8899,9999,9998)=0
+ps=5.1.26100.9549 | ntobj=False | python=C:\Users\<user>\AppData\Local\Programs\Python\Python312\python.exe | curl=C:\Windows\system32\curl.exe | elevated=True | loopbackexempt_count=0 | ports_in_use(8899,9999,9998)=0
 ```
 
 Left uncorrected, `elevated=True` produces three wrong-reason results: Probe 1's
@@ -1479,7 +1479,7 @@ purpose then dies when the phase exits: see `ContainSelf`).
 #### Limited-token runner (desktop)
 
 One Scheduled Task per run, registered for the current user with
-`-RunLevel Limited` and `-LogonType Interactive` (no stored password; Kevin must
+`-RunLevel Limited` and `-LogonType Interactive` (no stored password; the operator must
 be logged on at the console, otherwise the task never starts and every routed
 step records SETUP-FAULT). Its action is fixed at registration with the absolute,
 quoted path of `_limited.ps1`; the phase to run is handed over in
@@ -1931,7 +1931,7 @@ and whether `-s` listed the entry.
 
 **Reboot durability is deliberately UNVERIFIED this run.** A reboot cannot sit
 inside the single `try/finally` that wraps the probe run, and this run does **not**
-reboot Kevin's desktop. Verifying that the exemption (and the AppContainer profile)
+reboot the test desktop. Verifying that the exemption (and the AppContainer profile)
 survive a reboot would be a **separate, optional script, not part of this run**: it
 would first write a recovery manifest recording `$runId`/`$moniker`/`$probeRoot` so
 a fresh post-reboot session can find and clean the pre-reboot state, then reboot,
@@ -2346,7 +2346,7 @@ to get wrong.
 
 ### Probe 9: fail-open with the firewall off
 
-> **⚠ DEFERRED — VM / throwaway box only. Do NOT run this on Kevin's desktop.**
+> **⚠ DEFERRED — VM / throwaway box only. Do NOT run this on the test desktop.**
 > It disables the firewall, the single most dangerous action in this document.
 > Run it only on a disposable VM, and capture the prior per-profile state first so
 > it can be restored exactly (`set allprofiles state on` forces every profile on,
@@ -2404,7 +2404,7 @@ leaks. The `wfpdiag` output is under `$probeRoot`.
 |---|---|
 | Creates | `wfpdiag.cab` under `$probeRoot`; WFP capture session; firewall state change (VM only) |
 | Removes | WFP capture session; restores firewall to recorded per-profile state |
-| Must never touch | Kevin's desktop firewall (VM-only probe) |
+| Must never touch | the test desktop firewall (VM-only probe) |
 
 ---
 

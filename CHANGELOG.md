@@ -4,6 +4,10 @@ All notable changes to NockLock will be documented in this file.
 
 ## [Unreleased]
 
+### Security
+
+- Remove internal drafts, private review instructions, server-specific acceptance material and personal identifiers from published probe records and design notes. Retain the technical probe verdicts with redacted host, account and home path, and add a public-content check to CI (N11824).
+
 ### Added
 
 - Design for the run lifecycle contract (N11764): `docs/design/run-lifecycle-contract.md` defines per-run vs global-chain semantics and an additive signed `session_close` row binding a run's row count and root, states that a missing close cannot tell a crash from a deliberate cut, the backward-compatibility rule, and how the close relates to the verification receipt and the v2 anchor. Documentation only; the writer and verifier are N11765.

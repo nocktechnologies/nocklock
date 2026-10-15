@@ -2,7 +2,6 @@
 
 **Status:** Accepted
 **Date:** 2026-04-05
-**Author:** Mara (AI architect)
 
 ## Context
 NockLock has three fence types. Each has multiple implementation approaches with different tradeoffs around isolation strength, platform support, and privilege requirements.

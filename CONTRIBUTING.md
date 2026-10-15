@@ -50,17 +50,24 @@ Some changes need a conversation first. Open an issue before building a new fenc
 
 ## How to contribute
 
-Outside contributors can start with a GitHub issue and a fork; you do not need access to NockCC or the internal review tools. A maintainer creates or links the tracking card and arranges the required reviews. For a fork PR, the maintainer also arranges a reviewed in-repository branch when a required check cannot run on the fork.
+Outside contributors can start with a GitHub issue and a fork. A maintainer reviews PRs and merges accepted changes. If a required check cannot run on a fork, a maintainer arranges an in-repository branch for review.
 
-1. Create a feature branch from current `next` (in your fork if contributing externally). Keep it scoped to one issue/card and open the PR with **base `next`**, even though GitHub's default branch is `main`. Maintainers track one Nock card per PR.
+1. Create a feature branch from current `next` (in your fork if contributing externally). Keep it scoped to one issue and open the PR with **base `next`**, even though GitHub's default branch is `main`.
 2. Write tests for behavior changes, including an allowed-action control for each expected denial. Update the relevant docs and `CHANGELOG.md` under `[Unreleased]`.
 3. Run `go test ./... -v`, `go vet ./...`, and `go fmt ./...`; confirm `gofmt -l .` prints nothing. Self-review for secrets, path traversal, races and subprocess injection.
-4. Describe the problem, final behavior, validation and [risk tier](.claude/review/PIPELINE.md#risk-tiers) in the PR. Maintainers arrange the required three-agent code-simplifier pass and record its completion in the body. Include the tier's additional evidence, such as a written spec and security negative control for Tier 2. Mark it ready when it can be reviewed: the native macOS SBPL/full-suite job runs only on ready PRs.
-5. Maintainers record Gander's two-lens nock-review (Opus and Sol) against the exact PR head SHA. Wait for CodeRabbit, `claude-review` and all applicable CI, including the native macOS and root netns jobs. A skip is not an enforcement proof.
-6. Mira consolidates findings into one remediation-round spec on the PR. The same builder implements that spec and returns the new head with validation; review and checks must cover that head before Mira gates it. Unresolved findings remain blockers.
-7. Mira gates and squash-merges the card PR into `next`. Builders do not merge or push directly to `next` or `main`. A batch ships through one separately gated, squash-merged `next` → `main` release PR; a merge into `next` is not a release.
+4. Describe the problem, final behavior and validation in the PR. For a security change, include a negative control showing the guard fails when removed or bypassed. Mark the PR ready when it can be reviewed: the native macOS SBPL/full-suite job runs only on ready PRs.
+5. Wait for maintainer review and all applicable CI, including the native macOS and root netns jobs. A skipped job is not an enforcement proof.
+6. Address review findings and rerun affected checks on the final head. A maintainer reviews and squash-merges accepted PRs into `next`. A batch ships through a separate `next` → `main` release PR; a merge into `next` is not a release.
 
-See the [review pipeline](.claude/review/PIPELINE.md) for the live-check snapshot and the [release runbook](docs/runbooks/release.md) for promotion, tagging, GitHub release, tap update and installation smoke.
+See the [release runbook](docs/runbooks/release.md) for promotion, tagging, GitHub release, tap update and installation smoke.
+
+## Review depth
+
+Use the highest applicable tier in the PR body; each tier includes the requirements below it. A maintainer arranges three independent simplification reviews for every tier and reviews the final head with applicable CI before merging.
+
+- **Tier 1:** Default, including documentation changes. Resolve review findings before merge.
+- **Tier 2:** Changes to authentication, secrets, environment variables, subprocesses, file handling, networking, data deletion, dependencies, modules, fences, audit or signing, installation, or privilege code. Include a written scope and a security negative control; request adversarial review.
+- **Tier 3:** Changes to key custody, release signing, or a privilege boundary. Add a short threat note and a one-line rollback plan.
 
 ## Code standards
 

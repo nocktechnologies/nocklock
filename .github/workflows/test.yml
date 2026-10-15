@@ -55,6 +55,9 @@ jobs:
             exit 1
           fi
 
+      - name: public content check
+        run: python3 scripts/check-public-content.py
+
       - name: test
         run: go test ./... -count=1
 

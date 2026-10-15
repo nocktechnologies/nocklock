@@ -305,7 +305,7 @@ type LoggingConfig struct {
 	Level string `toml:"level"`
 }
 
-// CloudConfig configures optional NockCC dashboard sync.
+// CloudConfig configures optional remote anchor service dashboard sync.
 type CloudConfig struct {
 	Enabled  bool   `toml:"enabled"`
 	APIKey   string `toml:"api_key"`
@@ -1024,7 +1024,7 @@ git commit -m "chore: add Makefile, example config, and CLAUDE.md"
 
 - [ ] **Step 1: Replace README.md with adapted content**
 
-Adapt the draft from DESIGN_NOCK_CLI_ARCHITECTURE.md section 8. Change `nock` to `nocklock`. Be honest about current state. Keep the pitch compelling.
+Draft the user-facing introduction. Change `nock` to `nocklock`. Be honest about current state. Keep the pitch compelling.
 
 ```markdown
 # nocklock
@@ -1104,7 +1104,7 @@ Your agent never knew the fence was there. You sleep better at night.
 
 ## Dashboard (Coming Soon)
 
-Connect to [NockCC](https://nocktechnologies.io) for cloud monitoring:
+Connect to [remote anchor service](https://nocktechnologies.io) for cloud monitoring:
 - See fence events across all your machines
 - Get Telegram/Slack alerts on blocked escape attempts
 - Team visibility: know what every developer's agents are doing

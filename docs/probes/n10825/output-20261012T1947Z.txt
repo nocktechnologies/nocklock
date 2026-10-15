@@ -14,7 +14,7 @@ os_build=26300.9550
 os_edition=Professional (Microsoft Windows 11 Pro)
 os_arch=64-bit process_64bit=True
 ps=5.1.26100.9549
-user=Kevins-Desktop\kkwil elevated=True
+user=<host>\<user> elevated=True
 STATE(BEFORE) exemptions: (none)
 STATE(BEFORE) ports: (none)
 STATE(BEFORE) tasks: (none)
@@ -30,7 +30,7 @@ os_build=26300.9550
 os_edition=Professional (Microsoft Windows 11 Pro)
 os_arch=64-bit process_64bit=True
 ps=5.1.26100.9549
-user=Kevins-Desktop\kkwil elevated=True
+user=<host>\<user> elevated=True
 STATE(BEFORE) exemptions: (none)
 STATE(BEFORE) ports: (none)
 STATE(BEFORE) tasks: (none)
@@ -111,17 +111,17 @@ False
 curl.exe -> C:\Windows\system32\curl.exe
 git -> C:\Program Files\Git\cmd\git.exe
 node -> C:\Program Files\nodejs\node.exe
-python -> C:\Users\kkwil\AppData\Local\Programs\Python\Python312\python.exe
+python -> <home>\AppData\Local\Programs\Python\Python312\python.exe
 npm -> C:\Program Files\nodejs\npm.ps1
-pip -> C:\Users\kkwil\AppData\Local\Programs\Python\Python312\Scripts\pip.exe
+pip -> <home>\AppData\Local\Programs\Python\Python312\Scripts\pip.exe
 nslookup -> C:\Windows\system32\nslookup.exe
 BEFORE: loopbackexempt_count=0 ports_in_use(8899,9999,9998)=0 (documented desktop baseline: 0, 0)
 S-1-15-2-3482642125-4257376707-2968601254-1774957243-971363233-1587660273-898777979
-processed file: C:\Users\kkwil\AppData\Local\Temp\nocklock-probe-562bebd3b2f6420fbc5cec0f69c17a72\_launcher.dll
+processed file: <home>\AppData\Local\Temp\nocklock-probe-562bebd3b2f6420fbc5cec0f69c17a72\_launcher.dll
 Successfully processed 1 files; Failed processing 0 files
-processed file: C:\Users\kkwil\AppData\Local\Temp\nocklock-probe-562bebd3b2f6420fbc5cec0f69c17a72\out
+processed file: <home>\AppData\Local\Temp\nocklock-probe-562bebd3b2f6420fbc5cec0f69c17a72\out
 Successfully processed 1 files; Failed processing 0 files
-LAUNCHER-ENV: PASS - TEMP=C:\Users\kkwil\AppData\Local\Packages\nocklock-probe-562bebd3b2f6420fbc5cec0f69c17a72\AC\Temp LOCALAPPDATA=C:\Users\kkwil\AppData\Local\Packages\nocklock-probe-562bebd3b2f6420fbc5cec0f69c17a72\AC
+LAUNCHER-ENV: PASS - TEMP=<home>\AppData\Local\Packages\nocklock-probe-562bebd3b2f6420fbc5cec0f69c17a72\AC\Temp LOCALAPPDATA=<home>\AppData\Local\Packages\nocklock-probe-562bebd3b2f6420fbc5cec0f69c17a72\AC
 0
 LIMITED-TOKEN: PASS - task token is Medium IL with High absent
 ===== Probe 1: zero-capability loopback =====

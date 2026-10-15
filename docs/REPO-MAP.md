@@ -12,16 +12,15 @@ Go tests sit beside the code as `*_test.go`. Files ending `_linux_test.go` or `_
 | `internal/` | All implementation packages (below) | beside each package |
 | `pkg/receipt/` | Public, read-only per-session audit-chain verifier (`VerifySession`, `pkg/receipt/receipt.go`), importable by other modules | `pkg/receipt/receipt_test.go`, `external_test.go` (imports it as an outside module would), `testdata/` |
 | `integration/` | End-to-end test of the built binary | `integration/integration_test.go`, run with `go test -tags=integration ./...` (`CONTRIBUTING.md`) |
-| `scripts/` | `install-egress-helper.sh` (root-owned helper plus sudoers grant), `test-init-default-linux.sh` (fresh `init` then wrapped shell), `credential-mutation-overlay.py` (test-only credential mutations), `test-landlock-probe-thread-affinity.py` (deterministic cross-thread control and optional unpinned soak) | helper: `internal/fence/network/netns/install_helper_script_linux_test.go`; hosted credential jobs in `network-egress.yml`; thread-affinity classifier/cleanup tests in `test_landlock_probe_thread_affinity.py` and non-root controls in `test.yml`; actual anchor v2 CLI/NCC acceptance: `test-anchor-v2-ncc.py` (real NCC), `test_anchor_v2_ncc_harness.py` (lower-level cleanup/receipt controls), `testdata/anchor-v2-fixture/`, [runbook](runbooks/anchor-v2-ncc-acceptance.md) |
+| `scripts/` | `install-egress-helper.sh` (root-owned helper plus sudoers grant), `test-init-default-linux.sh` (fresh `init` then wrapped shell), `credential-mutation-overlay.py` (test-only credential mutations), `test-landlock-probe-thread-affinity.py` (deterministic cross-thread control and optional unpinned soak), `check-public-content.py` (tracked-file disclosure guard) | helper: `internal/fence/network/netns/install_helper_script_linux_test.go`; hosted credential jobs in `network-egress.yml`; thread-affinity classifier/cleanup tests in `test_landlock_probe_thread_affinity.py` and non-root controls in `test.yml`; public-content check in `test.yml` |
 | `docs/` | This documentation set; index at `docs/README.md` | none |
 | `bench/redteam/` | NockLock + NockGuard scripted attack bench (`attacks.toml`, `run.sh`, `redteam.py`) and signed receipt report; `kernel_cases.py` records Unix-socket/io_uring proof and explicit kernel coverage gaps separately | bench cases in `attacks.toml`, Python driver/receipt tests, CI `redteam-bench` job in `.github/workflows/network-egress.yml` |
-| `.claude/` | Agent config: branch-lock hook, `decisions/` (ADR-001..005), `design/`, `diagrams/`, `lessons/`, `review/PIPELINE.md` | none |
+| `.claude/` | Agent config: branch-lock hook, `decisions/` (ADR-001..005), `design/`, `diagrams/`, `lessons/` | none |
 | `.github/workflows/` | CI: `test.yml`, `network-egress.yml`, `gitleaks.yml`, `claude.yml`, `claude-code-review.yml` | n/a |
 | `.githooks/` | Local pre-commit hook (`pre-commit`) | no direct tests |
 | `.nock/` | Example project config (`config.toml.example`) | none |
 | `Makefile` | `build`, `build-all`, `install`, `install-egress-helper`, `fmt`, `vet`, `lint`, `test` | n/a |
 | `ARCHITECTURE.md`, `CONTRIBUTING.md`, `CHANGELOG.md`, `README.md` | Package tree, contribution rules, release notes, user-facing guide | n/a |
-| `DESIGN_NOCK_CLI_ARCHITECTURE.md`, `PROMPT_NOCKLOCK_PR1_CLI_SKELETON.md` | Original (April 2026) design and first-PR prompt; historical | n/a |
 
 ## `internal/`
 

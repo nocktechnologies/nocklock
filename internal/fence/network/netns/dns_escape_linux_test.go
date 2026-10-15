@@ -19,7 +19,7 @@ package netns
 //   T3  /etc/hosts pin: the agent maps the allowlisted name to a disallowed IP
 //       in the hosts file it sees.
 //
-// Mira's code read (this test is its receipt): the tproxy floor redirects every
+// The tproxy floor redirects every
 // TCP:80/443 connection — to ANY destination IP — to the in-namespace
 // transparent proxy, which reads the SNI/Host and hands that HOSTNAME to the
 // host-side proxy, which resolves it ITSELF outside the child's reach. So the

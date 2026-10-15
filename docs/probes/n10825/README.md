@@ -1,5 +1,7 @@
 # N10825 Windows probes: `run-probe.ps1`
 
+Published output files replace the host, account, and home path with `<host>`, `<user>`, and `<home>`; probe verdicts and setup details are retained.
+
 `run-probe.ps1` runs Probes 1, 2 and 3 of
 [`docs/design/windows-feasibility.md`](../../design/windows-feasibility.md#probes-to-run-on-a-real-windows-box)
 on a real Windows desktop. Every probe line in it is copied verbatim from the doc's code
