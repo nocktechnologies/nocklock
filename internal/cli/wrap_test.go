@@ -575,7 +575,17 @@ func TestFindTrustedLibFenceFSFailsClosedWhenNoTrustedLibraryExists(t *testing.T
 		filepath.Join(t.TempDir(), "nocklock"),
 		t.TempDir(),
 		nil,
-		func(string, []string) (string, error) { return "", os.ErrNotExist },
+		func(path string, projectDirs []string) (string, error) {
+			// Apply the moved project-containment rule before the path match, as
+			// the sibling stub above does, so this fake stays faithful to the
+			// resolver's contract (a project-owned candidate is skipped like a
+			// missing one). No candidate here is in-project, so the guard is a
+			// no-op and the resolver still fails closed.
+			if visitedPathWithinProject(path, projectDirs) {
+				return "", errTrustedPathWithinProject
+			}
+			return "", os.ErrNotExist
+		},
 	)
 	if err == nil {
 		t.Fatalf("expected fail-closed error when no trusted libfence_fs.so exists, got %q", got)
@@ -599,7 +609,13 @@ func TestFindTrustedLibFenceFSSelectsInstalledPath(t *testing.T) {
 		filepath.Join(t.TempDir(), "nocklock"),
 		t.TempDir(),
 		[]string{installed},
-		func(path string, _ []string) (string, error) {
+		func(path string, projectDirs []string) (string, error) {
+			// Apply the moved project-containment rule before the path match, as
+			// the sibling stub above does; the installed path sits outside the
+			// (separate) project directory, so the rule is a no-op here.
+			if visitedPathWithinProject(path, projectDirs) {
+				return "", errTrustedPathWithinProject
+			}
 			if path == installed {
 				return path, nil
 			}
@@ -620,7 +636,16 @@ func TestFindTrustedLibFenceFSAcceptsSystemPathFromRootWorkingDir(t *testing.T) 
 		filepath.Join(t.TempDir(), "nocklock"),
 		string(os.PathSeparator),
 		nil,
-		func(path string, _ []string) (string, error) {
+		func(path string, projectDirs []string) (string, error) {
+			// Apply the moved project-containment rule before the path match, as
+			// the sibling stub above does. With cwd "/", projectDirs is ["/"]; the
+			// rule must still accept a /usr/lib system path because
+			// lexicalPathIsWithinDir treats "/" as non-containing. If that root
+			// special case ever regressed, this stub would refuse the system path
+			// and the test below would fail instead of passing silently.
+			if visitedPathWithinProject(path, projectDirs) {
+				return "", errTrustedPathWithinProject
+			}
 			if path == systemLib {
 				return path, nil
 			}
@@ -635,13 +660,47 @@ func TestFindTrustedLibFenceFSAcceptsSystemPathFromRootWorkingDir(t *testing.T) 
 	}
 }
 
+// TestVisitedPathWithinProjectTreatsRootCwdAsNonContaining pins the root special
+// case directly, independent of any resolver stub. When the working directory is
+// the filesystem root, projectDirs is ["/"]; lexicalPathIsWithinDir must treat
+// "/" as non-containing, so a system library at /usr/lib/nocklock is NOT inside
+// the "project". Without this, a change to how lexicalPathIsWithinDir handles "/"
+// would make every launch from / treat every candidate as project-owned and
+// refuse to start — silently, because the resolver stubs would still match on
+// path. The second assertion is the negative control: a genuinely in-project path
+// against a real project dir must still be reported as inside.
+func TestVisitedPathWithinProjectTreatsRootCwdAsNonContaining(t *testing.T) {
+	const systemLib = "/usr/lib/nocklock/libfence_fs.so"
+	if visitedPathWithinProject(systemLib, []string{"/"}) {
+		t.Fatalf("visitedPathWithinProject(%q, [\"/\"]) = true; a system path must not count as inside the project when cwd is the filesystem root, or every launch from / would refuse silently", systemLib)
+	}
+
+	// Negative control: a path genuinely inside a real (non-root) project dir must
+	// still be reported as inside, so a visitedPathWithinProject that returned
+	// false for everything cannot pass this test.
+	projectRoot := t.TempDir()
+	inProject := filepath.Join(projectRoot, "internal", "fence", "fs", "interposer", "libfence_fs.so")
+	if !visitedPathWithinProject(inProject, []string{projectRoot}) {
+		t.Fatalf("visitedPathWithinProject(%q, [%q]) = false; a project-owned path must be reported as inside the project", inProject, projectRoot)
+	}
+}
+
 func TestFindTrustedLibFenceFSSurfacesStatErrors(t *testing.T) {
 	statErr := os.ErrPermission
 	got, err := findTrustedLibFenceFS(
 		"",
 		t.TempDir(),
 		[]string{filepath.Join(t.TempDir(), "libfence_fs.so")},
-		func(string, []string) (string, error) { return "", statErr },
+		func(path string, projectDirs []string) (string, error) {
+			// Apply the moved project-containment rule before returning the stat
+			// error, as the sibling stub above does; the candidate sits outside the
+			// (separate) project directory, so the rule is a no-op and the stat
+			// error is still surfaced.
+			if visitedPathWithinProject(path, projectDirs) {
+				return "", errTrustedPathWithinProject
+			}
+			return "", statErr
+		},
 	)
 	if err == nil {
 		t.Fatalf("expected stat error to fail closed, got %q", got)
