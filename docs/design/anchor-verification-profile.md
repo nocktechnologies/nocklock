@@ -21,7 +21,7 @@ NOCKLOCK_PROFILE_ROWS=100000 go test ./internal/logging \
   -run TestProfileAnchorVerification -count=1 -v -timeout 30m
 ```
 
-The test builds a genuinely signed chain through `LogBatch` (row signature plus head signature per row, the normal append path), then times each phase three times in-process.
+On a host with umask `002` run `umask 022` first, or the logging tests that check state-directory modes fail on 0775 temp directories. The test builds a genuinely signed chain through `LogBatch` (row signature plus head signature per row, the normal append path), then times each phase three times in-process.
 
 | Item | Value |
 | --- | --- |
@@ -52,7 +52,7 @@ Findings:
 
 - **About 97% of the cost is one Ed25519 verification per row (about 39 µs/row here).** Signing the anchor and writing the file are noise. SQLite and hashing together are about 1.5 µs/row.
 - The sibling measurement in the Nock (Apple M4, darwin-arm64, Go 1.26.5, PR209 head `937115fd`: 2.970 s `EmitAnchor`, 3.122 s `finishAnchorSession` at 100,000 rows) is the same shape on different hardware. It was not reproduced here and is quoted from the Nock. This host is about 1.35x slower per row. Neither number is a universal bound.
-- The 5 s teardown budget covers roughly 125,000 rows on this host and more on the M4. Linear extrapolation (not measured) puts 1,000,000 rows at about 40 s full verification against about 1.7 s for a prefix rescan.
+- The nominal 5 s teardown budget would cover roughly 125,000 rows on this host and more on the M4. Linear extrapolation (not measured) puts 1,000,000 rows at about 40 s full verification against about 1.7 s for a prefix rescan.
 - The prefix rescan costs about 1/24 of the full walk when nothing is new.
 
 ## Threat model
@@ -116,7 +116,7 @@ Three independently landable steps, in order.
 
 ### Step 2: signed verification receipt (option C)
 
-**Receipt.** A single-row table `verify_receipt` in `events.db`, written only by code that has just completed full verification of rows up to `through_id` in the same read snapshot, with the signing key. Fields, signed with the audit key under a new domain byte (unused today: rows `0x01`, head `0x03`, anchor v1 `0x05`, anchor v2 `0x06`; confirm at implementation) so it cannot be confused with another signature:
+**Receipt.** A single-row table `verify_receipt` in `events.db`. It attests a *verified prefix*, not an authentic chain: it is written only by code that has just checked linkage, hash and signature of every row through `through_id` within one read snapshot, under the signing key. Reaching the snapshot head and a clean head signature is a separate gate that only anchor emission requires. Fields, signed with the audit key under a new domain byte (unused today: rows `0x01`, head `0x03`, anchor v1 `0x05`, anchor v2 `0x06`; confirm at implementation) so it cannot be confused with another signature:
 
 `version || key_fingerprint || signed_genesis_at || unsigned_through_id || through_id || through_count || through_head_hash || D`
 
@@ -135,8 +135,10 @@ where `D` is the rolling digest `D_i = SHA-256(D_{i-1} || entry_hash_i || entry_
 
 **Write path.**
 
-- Written only when the result is `Intact` and `authentic` and a signing key is present. Writes use a separate short transaction after the read snapshot ends with a bounded busy timeout; failure is a warning and never affects the verdict.
-- It advances to the highest row fully verified in this run. A deadline mid-suffix may still advance the receipt to the last verified boundary (every row up to it passed signature verification in this snapshot). The anchor is only emitted if the walk reaches the snapshot head.
+- Written only when the verified-prefix precondition above holds and a signing key is present; it needs no `Intact`/`authentic` whole-chain result. A chain that fails at row j may still leave a receipt for rows before j, since those rows did pass. Writes use a separate short transaction after the read snapshot ends, with a bounded busy timeout.
+- It advances to the highest row verified in this run. A deadline mid-suffix (`ErrVerifyInterrupted`) therefore advances the receipt to the last verified boundary, and the anchor is emitted only if the walk reaches the snapshot head.
+- **Monotonicity:** a receipt can only shrink the set of rows whose signatures are skipped; it never extends trust past bytes the key holder already attested. Restoring an older or stale receipt causes more verification, not less.
+- Verification becomes a database writer in this step. A receipt write is not a fence decision, so the audit-row invariant in `CLAUDE.md` does not apply. On a read-only copy, mount or forensic image the write is skipped, which is expected and not an error; the verdict is unchanged.
 - `INSERT OR REPLACE` of one row is atomic in SQLite: a crash leaves the old receipt or none, never a torn one.
 - Anything unreadable or of unknown version is ignored, and an older binary ignores the table, so downgrade is safe. Receipt loss costs one full walk and nothing else (a performance, not integrity, event).
 
@@ -183,7 +185,7 @@ Each negative control has a positive control that proves the allowed case still 
 | 13 | Adoption metadata changed | Ignored |
 | 14 | Context cancelled at row 0, mid-prefix, mid-suffix, and at the last row (injected via a row-counting hook, not wall-clock) | `ErrVerifyInterrupted`, no anchor, never `authentic`/`tampered`; next run completes with the identical verdict |
 | 15 | Receipt write fails (read-only DB, busy) or process killed between verify and write | Verdict unchanged; old or no receipt; next run correct |
-| 16 | Forged or non-authentic chain verified | No receipt written; pub-key-only verifier writes none |
+| 16 | Chain broken at row j; pub-key-only verifier; read-only database | Receipt at most through the last good row, never past j; pub-key-only verifier writes none; read-only skips the write without error |
 | 17 | Appends during verification | Anchor equals the snapshot head; receipt `through_count` is at most the snapshot count |
 | 18 | Differential property test: random sequences of {append, edit, re-chain, strip, delete, prune, key swap, receipt add/stale/drop} on small chains, many seeds | receipt verdict equals full verdict in every case |
 | 19 | Mutation check: temporarily skip the `D` comparison | Cases 2, 3, 5 and 18 must fail, proving the controls bite |

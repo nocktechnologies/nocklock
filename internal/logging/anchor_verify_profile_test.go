@@ -57,9 +57,6 @@ func TestProfileAnchorVerification(t *testing.T) {
 		fn   func() error
 	}
 	var rowsData []profileRow
-	if err := l.db.QueryRow("SELECT COUNT(*) FROM events").Scan(new(int)); err != nil {
-		t.Fatal(err)
-	}
 	rowsData = loadProfileRows(t, l.db)
 
 	phases := []phase{
