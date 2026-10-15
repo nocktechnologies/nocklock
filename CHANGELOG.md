@@ -6,6 +6,7 @@ All notable changes to NockLock will be documented in this file.
 
 ### Added
 
+- The signed `session_start` row now records the requested command's resolved path, SHA-256 and an observation status (`hashed`, `unresolved`, `unreadable`, `not_regular`, `oversized`), with script and launcher labels. Reads are bounded to regular files up to 256 MiB. The hash is taken before exec and excludes interpreters, libraries and modules; see `docs/how-it-works/audit-log.md`.
 - Add a profiling recipe and design for bounded anchor verification: `docs/design/anchor-verification-profile.md`, an env-gated `TestProfileAnchorVerification`, and a negative control showing a signed-head-only check misses a laundered tamper. Documentation and tests only; no runtime change.
 
 ### Fixed

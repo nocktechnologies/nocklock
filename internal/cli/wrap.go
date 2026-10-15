@@ -874,7 +874,7 @@ var wrapCmd = &cobra.Command{
 
 		// Record the effective egress level in the signed session-start row only
 		// after the configured bridge and network fence have initialized.
-		sessionDetail := args[0]
+		sessionDetail := args[0] + fingerprintExecutable(args[0]).Detail()
 		if unixSocketReason != "" {
 			sessionDetail += " unix_sockets=reachable reason=" + unixSocketReason
 		}
