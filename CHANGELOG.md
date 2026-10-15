@@ -6,7 +6,7 @@ All notable changes to NockLock will be documented in this file.
 
 ### Security
 
-- Validate Linux interposer ownership, permissions and symlink paths before launch; report unsafe installations in `doctor`. A library candidate whose own path sits inside the project is refused before symlink resolution, so a project-owned pointer cannot select a trusted library outside the project (N11769).
+- Validate Linux interposer ownership, permissions and symlink paths before launch; report unsafe installations in `doctor`. A library candidate whose containing directory resolves inside the project is refused — that is where the pointer physically lives, whatever its final link targets — and a candidate whose own path is spelled inside the project is refused as well. A project-owned pointer therefore cannot select a trusted library outside the project, even one reached through a directory symlinked into the project (N11769).
 
 ### Added
 

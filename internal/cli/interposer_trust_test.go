@@ -394,8 +394,16 @@ func TestInterposerResolverSkipsLibraryInsideSymlinkedWorkingDirectory(t *testin
 // earlier symlinked-cwd test only exercised an in-project pointer to an
 // in-project target; it never covered a pointer that escapes outward, which the
 // resolve-both exclusion lets through because it canonicalizes the candidate
-// before the containment check. The positive controls prove a trusted installed
-// or Homebrew-style link that lives outside the project still resolves.
+// before the containment check.
+//
+// It also covers the ancestor-symlink shape (Gander round 5): a candidate
+// spelled OUTSIDE the project whose PARENT directory is a symlink INTO the
+// project, with the project file itself a symlink escaping outward. The lexical
+// arm sees an outside spelling and the resolved exclusions canonicalize the
+// candidate outward, so only the parent-directory resolution refuses it.
+//
+// The positive controls prove a trusted installed or Homebrew-style link that
+// lives outside the project still resolves.
 func TestQueueProjectLibrarySymlinkCannotChooseOutsideTarget(t *testing.T) {
 	base := resolvedTempDir(t)
 	proj := filepath.Join(base, "proj") // the project (working directory)
@@ -434,6 +442,59 @@ func TestQueueProjectLibrarySymlinkCannotChooseOutsideTarget(t *testing.T) {
 		t.Fatal(err)
 	}
 
+	// Ancestor-symlink shape: a directory inside the project holds an
+	// outward-escaping pointer, reached through a symlink that is spelled
+	// OUTSIDE the project but points INTO it. The candidate's own spelling is
+	// outside the project (the lexical arm misses it) and its final link
+	// resolves outward (the resolved exclusions miss it); only resolving the
+	// parent directory catches that the pointer physically lives in the project.
+	projLibDir := filepath.Join(proj, "libdir")
+	if err := os.Mkdir(projLibDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(filepath.Join(installed, "libfence_fs.so"), filepath.Join(projLibDir, "libfence_fs.so")); err != nil {
+		t.Fatal(err)
+	}
+	ancestorLink := filepath.Join(base, "ancestor-into-proj")
+	if err := os.Symlink(projLibDir, ancestorLink); err != nil {
+		t.Fatal(err)
+	}
+
+	// In-project spelling whose parent directory itself escapes outward: the
+	// candidate proj/vendor/libfence_fs.so is spelled inside the project, but
+	// proj/vendor is a symlink to a directory OUTSIDE it. The parent resolves out
+	// (the parent-resolved rule misses it) and the file resolves out (the
+	// resolved exclusions miss it), so only the lexical arm, reading the spelling
+	// before resolution, refuses it. This is the distinguishing negative control
+	// for the lexical arm now that the parent-resolved rule precedes it.
+	vendorTarget := filepath.Join(base, "vendor-outside")
+	if err := os.Mkdir(vendorTarget, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(filepath.Join(installed, "libfence_fs.so"), filepath.Join(vendorTarget, "libfence_fs.so")); err != nil {
+		t.Fatal(err)
+	}
+	vendorLink := filepath.Join(proj, "vendor")
+	if err := os.Symlink(vendorTarget, vendorLink); err != nil {
+		t.Fatal(err)
+	}
+
+	// Positive control for the parent-resolved rule's allow side: a real install
+	// reached through a parent directory that is a symlink pointing OUTSIDE the
+	// project must still resolve. The parent resolves out, so the rule must
+	// resolve the parent (not compare it lexically) to let this through.
+	outerInstall := filepath.Join(base, "outer-install")
+	if err := os.Mkdir(outerInstall, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(outerInstall, "libfence_fs.so"), []byte("inert; never loaded"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	outerAlias := filepath.Join(base, "outer-alias")
+	if err := os.Symlink(outerInstall, outerAlias); err != nil {
+		t.Fatal(err)
+	}
+
 	// Report only the fixture libraries as present so host /usr/lib paths do not
 	// influence the result; canonicalization matches the production resolver.
 	inspect := func(path string) (string, error) {
@@ -453,11 +514,27 @@ func TestQueueProjectLibrarySymlinkCannotChooseOutsideTarget(t *testing.T) {
 		// Project-owned outward pointer, raw cwd spelling, raw candidate.
 		{"negative: raw cwd, project pointer escapes outward", proj, projPointer, ""},
 		// Project-owned outward pointer, symlinked cwd, candidate spelled
-		// canonically: only the canonical-cwd arm of the lexical exclusion catches it.
+		// canonically through the raw project path. The parent-resolved rule
+		// refuses it (proj resolves to itself, inside the symlinked cwd); the
+		// lexical arm's canonical-cwd clause is the backstop.
 		{"negative: canonical cwd, project pointer escapes outward", projLink, projPointer, ""},
+		// Ancestor symlink: candidate spelled OUTSIDE the project, but its parent
+		// directory is a symlink into the project and the project file escapes
+		// outward. Only the parent-resolved rule catches it; this case is
+		// accepted on 305843d (the lexical and resolved arms both miss it).
+		{"negative: ancestor dir symlinked into project, pointer escapes outward", proj, filepath.Join(ancestorLink, "libfence_fs.so"), ""},
+		// In-project spelling whose parent symlinks outward: only the lexical arm
+		// catches it (parent and full path both resolve out). Distinguishing
+		// negative control for the lexical arm — removing that arm accepts this.
+		{"negative: in-project spelling, parent dir symlinks outward", proj, filepath.Join(vendorLink, "libfence_fs.so"), ""},
 		// Positive controls: trusted links that live outside the project resolve.
 		{"positive: safe installed link outside project", proj, installedLink, filepath.Join(installed, "libfence_fs.so")},
 		{"positive: Homebrew-style link outside project", proj, brewLink, filepath.Join(cellar, "libfence_fs.so")},
+		// Positive control for the parent-resolved rule's allow side: a real
+		// install whose parent directory is a symlink pointing OUTSIDE the project
+		// still resolves (the rule resolves the parent, it does not compare it
+		// lexically).
+		{"positive: install via parent dir symlinked outside project", proj, filepath.Join(outerAlias, "libfence_fs.so"), filepath.Join(outerInstall, "libfence_fs.so")},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			got, err := findTrustedLibFenceFS("", tc.workingDir, []string{tc.candidate}, inspect)

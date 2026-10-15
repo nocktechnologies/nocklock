@@ -1668,18 +1668,30 @@ func findTrustedLibFenceFS(exePath, workingDir string, extraCandidates []string,
 		if err != nil {
 			continue
 		}
-		// Refuse any candidate whose OWN path (before symlink resolution) is
-		// inside the project, checked lexically against both the raw and the
-		// canonical spellings of the working directory. The resolved-path
-		// exclusions below canonicalize the candidate first, so a project-owned
-		// pointer that is itself a symlink to a trusted library outside the
-		// project would escape them (Gander MAJOR / N11769): the pointer the
-		// resolver found is still project-owned and must not be trusted,
-		// whatever it targets.
+		// A project-owned library pointer must never select a trusted library,
+		// in any spelling or resolution of its path (Gander MAJOR / N11769).
+		// Three shapes are refused here; no single check covers all, so each
+		// stays. TestQueueProjectLibrarySymlinkCannotChooseOutsideTarget pins the
+		// first two with distinguishing negatives.
+		//
+		// Containing directory resolves inside the project: that is where the
+		// pointer physically lives, whatever its final link targets. Catches a
+		// candidate reached through a directory symlinked into the project.
+		// pathIsWithinDir resolves both operands, covering the raw and canonical
+		// spellings of the cwd in one check.
+		if pathIsWithinDir(filepath.Dir(abs), workingDir) {
+			continue
+		}
+		// Own path, unresolved, is spelled inside the project: refused lexically
+		// against both cwd spellings. The parent-resolved rule above misses this
+		// when the parent directory itself symlinks outward; failing closed.
 		if lexicalPathIsWithinDir(abs, workingDir) ||
 			lexicalPathIsWithinDir(abs, canonicalWorkingDir) {
 			continue
 		}
+		// Fully resolved path lands inside the project: catches a candidate whose
+		// final component is a symlink pointing in, skipping it (continue) before
+		// inspect, which would hard-fail the launch on a non-ENOENT error.
 		if pathIsWithinDir(abs, workingDir) {
 			continue
 		}
