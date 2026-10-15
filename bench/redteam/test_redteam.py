@@ -193,6 +193,16 @@ class NockLockProofTest(unittest.TestCase):
         self.assertIsNone(self.proof(json.dumps(self.envelope()), blocked=0))
         self.assertIsNone(self.proof(json.dumps(self.envelope()), event_type="network_blocked"))
 
+    def test_match_requires_path_component_boundaries(self):
+        for path, expected in (("/tmp/xcanary.txt", False), ("/tmp/canary.txt.bak", False),
+                               ("/tmp/canary.txt", True), ("canary.txt", True)):
+            envelope = self.envelope()
+            envelope["report"]["path"] = path
+            details = (json.dumps(envelope), f"op=open path={path} reason=outside allowed directory")
+            for detail in details:
+                with self.subTest(path=path, detail=detail[:20]):
+                    self.assertEqual(self.proof(detail) is not None, expected)
+
     def test_all_four_existing_file_rules_match_both_formats(self):
         attacks = tomllib.loads(Path(redteam.__file__).with_name("attacks.toml").read_text())["attack"]
         files = [attack for attack in attacks if attack.get("event") == "file_blocked"]
@@ -205,6 +215,20 @@ class NockLockProofTest(unittest.TestCase):
             for detail in (legacy, json.dumps(envelope)):
                 with self.subTest(attack=attack["id"], detail=detail):
                     self.assertTrue(redteam.nocklock_detail_matches(detail, attack))
+
+    def test_path_rule_matches_whole_path_or_component_suffix(self):
+        def matches(rule, path):
+            envelope = self.envelope()
+            envelope["report"]["path"] = path
+            return redteam.nocklock_detail_matches(
+                json.dumps(envelope), {**self.attack, "rule": "path=" + rule, "match": ""})
+        for rule, path in (("canary.txt", "/tmp/canary.txt"), ("dir/canary.txt", "/a/dir/canary.txt"),
+                           ("/tmp/canary.txt", "/tmp/canary.txt")):
+            with self.subTest(rule=rule, path=path):
+                self.assertTrue(matches(rule, path))
+        for path in ("/tmp/xcanary.txt", "/tmp/canary.txt.bak", "/tmp/canary.txt.d/x", "/tmp/notcanary.txt"):
+            with self.subTest(path=path):
+                self.assertFalse(matches("canary.txt", path))
 
     def test_collector_metadata_cannot_supply_action_proof(self):
         envelope = self.envelope()

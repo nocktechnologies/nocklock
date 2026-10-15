@@ -21,7 +21,8 @@
 #   evidence = "nocklock"  -> a row in the NockLock Ed25519 audit chain
 #   evidence = "nockguard" -> an entry in the NockGuard Ed25519 audit trail
 #   event / rule / match   -> event type, a substring of the row's rule text,
-#                             and an optional substring naming the target.
+#                             and an optional match; file_blocked matches use
+#                             component-bounded paths, others literal substrings.
 #   floor = true           -> the kernel floor (netns default-drop)
 #                             stops the attempt before any proxy sees it, so
 #                             NockLock writes no per-attempt row today. The

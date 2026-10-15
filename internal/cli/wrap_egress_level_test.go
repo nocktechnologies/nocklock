@@ -54,16 +54,16 @@ func TestWrapSessionStartRecordsSignedAdvisoryEgressLevel(t *testing.T) {
 		logger.Close()
 		t.Fatalf("session-start egress level = %q, want ADVISORY", events[0].EgressLevel)
 	}
-	if events[0].Detail != "true" {
+	if !strings.HasPrefix(events[0].Detail, `command="true" exec_status=hashed exec_path=`) || !strings.Contains(events[0].Detail, " exec_sha256=") {
 		logger.Close()
-		t.Fatalf("session-start detail = %q, want command true", events[0].Detail)
+		t.Fatalf("session-start detail = %q, want command true with an executable fingerprint", events[0].Detail)
 	}
 	if err := logger.Close(); err != nil {
 		t.Fatalf("close audit DB: %v", err)
 	}
 
 	var audit bytes.Buffer
-	if err := runAuditVerify(context.Background(), &audit, ""); err != nil {
+	if err := runAuditVerify(context.Background(), &audit, "", false); err != nil {
 		t.Fatalf("verify --audit failed for the signed egress-level event: %v\n%s", err, audit.String())
 	}
 	if !strings.Contains(audit.String(), "AUDIT: AUTHENTIC") {
@@ -92,7 +92,7 @@ func TestWrapSessionStartRecordsSignedAdvisoryEgressLevel(t *testing.T) {
 		t.Fatalf("close tampered audit DB: %v", err)
 	}
 	audit.Reset()
-	if err := runAuditVerify(context.Background(), &audit, ""); err == nil {
+	if err := runAuditVerify(context.Background(), &audit, "", false); err == nil {
 		t.Fatalf("verify --audit accepted a changed egress level:\n%s", audit.String())
 	}
 	if !strings.Contains(audit.String(), "AUDIT: TAMPERED") {
@@ -248,7 +248,7 @@ func TestWrapRefusesLookbackBelowConfined(t *testing.T) {
 		t.Fatalf("network_error rows = %+v, want one blocked row citing the lookback level requirement", events)
 	}
 	var audit bytes.Buffer
-	if err := runAuditVerify(context.Background(), &audit, ""); err != nil || !strings.Contains(audit.String(), "AUDIT: AUTHENTIC") {
+	if err := runAuditVerify(context.Background(), &audit, "", false); err != nil || !strings.Contains(audit.String(), "AUDIT: AUTHENTIC") {
 		t.Fatalf("verify --audit did not authenticate the refusal row: %v\n%s", err, audit.String())
 	}
 }

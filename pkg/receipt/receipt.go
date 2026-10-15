@@ -40,7 +40,7 @@
 // signed earlier head with the rows it anchored) passes every local check,
 // because that state was once real. Only an external anchor closes this:
 // nocklock verify --against-remote-anchor compares the local head with the
-// head last pushed to NockCC. This package does not consult it.
+// head last pushed to a remote anchor service. This package does not consult it.
 package receipt
 
 import (

@@ -1,7 +1,8 @@
 # NockLock N10753 AF_INET-to-AF_UNIX Node/undici probe
+# Redacted copy: host, user and home fields use <host>, <user>, <home>; technical probe results retained.
 date_utc=2026-09-27T16:25:55Z
 repo_head=5c1ba39
-kernel=Linux kevinlinux 7.0.0-30-generic #30~24.04.1-Ubuntu SMP PREEMPT_DYNAMIC Fri Aug  7 13:27:52 UTC 2 x86_64 x86_64 x86_64 GNU/Linux
+kernel=Linux <host> 7.0.0-30-generic #30~24.04.1-Ubuntu SMP PREEMPT_DYNAMIC Fri Aug  7 13:27:52 UTC 2 x86_64 x86_64 x86_64 GNU/Linux
 node=v22.23.2
 claude=2.1.281 (Claude Code)
 gcc=gcc (Ubuntu 13.3.0-6ubuntu2~24.04.1) 13.3.0

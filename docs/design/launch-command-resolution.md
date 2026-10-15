@@ -51,7 +51,7 @@ Executable fingerprinting is separate N11763 work.
    composed netns proof as well. Preserve its allowed and denied egress evidence.
 4. Update user documentation and the changelog for the implemented behavior.
    Obtain three independent security/simplifier reviews, the full exact-head
-   Gander review, applicable hosted proofs and Mira's gate.
+   maintainer review and applicable hosted checks.
 
 Build: `go build ./cmd/nocklock`. Local checks: `go test ./... -v`,
 `go vet ./...`, `go fmt ./...`, and `gofmt -l .`. Scoped race checks cover the CLI

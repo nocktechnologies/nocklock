@@ -4,6 +4,41 @@ All notable changes to NockLock will be documented in this file.
 
 ## [Unreleased]
 
+## [0.11.0] - 2026-10-15
+
+v0.11.0 makes each run's audit trail provably complete or provably cut short. `wrap` now ends every run with a signed close row, and `nocklock verify --audit` reports whether each run closed cleanly, was cut short, was pruned, or fails its close check. Repeat verification is much faster on large trails: a signed receipt lets the verifier skip re-checking signatures it already checked, and a new `--walk-timeout` flag bounds long walks. The signed `session_start` row now records the SHA-256 of the command that ran. On Linux, `wrap` refuses an interposer library that is unsafe to load. Older audit databases verify as before.
+
+### Breaking
+
+- Linux: `wrap` now refuses an interposer library with unsafe ownership or permissions, or one reached through a path inside the project. An install that worked before can be refused after upgrading. Run `nocklock doctor` to see which check fails.
+- A project overlay that loosened a `--profile` fence through unusual key or table-name spelling no longer takes effect; the stricter profile value applies.
+
+### Security
+
+- Linux: before launch, `wrap` checks the ownership, permissions and symlink path of the interposer library and refuses one the project could control. Any path the trust check visits that lies inside the project (the library path, a parent directory, a symlink or a symlink target) rejects that library, so a file in the project cannot point `wrap` at a library of its choosing. The check follows at most 40 symlinks and has the same time-of-check window as the rest of the path walk. `nocklock doctor` reports an unsafe installation.
+
+### Added
+
+- Signed run close. At teardown, `wrap` writes a signed `session_close` row that binds the run's first and last row, its row count and a rolling hash over its rows. `nocklock verify --audit` reports each run as `closed`, `unclosed`, `pruned`, `close_mismatch`, `rows_after_close` or `legacy`. A mismatched close, or rows written after the close, always fail verification. An `unclosed` run fails only with the new `--require-closed` flag; otherwise the `COVERAGE: LIMITED` notice names it. A missing close cannot tell a crash from a deliberate cut, so it is never reported as tampering. Audit trails written before this release verify as `legacy`. The design is in `docs/design/run-lifecycle-contract.md`.
+- Signed verification receipt. After a full verification, a key holder stores a signed receipt for the verified prefix of the chain. Later runs re-check that prefix byte for byte and verify signatures only for newer rows, which removes about 97% of the per-row cost on an unchanged prefix. Any change to the prefix, its signatures or the key discards the receipt and runs the full check with the same diagnostics. Output labels those prefix signatures as attested by the receipt, not verified in this run. A verifier with only the public key reads receipts but never writes them, and `prune` drops the receipt.
+- `--walk-timeout` on `anchor emit`, `anchor push`, `verify --against-anchor`, `verify --audit` and `verify --against-remote-anchor`. It bounds only the local verification walk, separately from the 30-second lock and network budget. The default is `0` (no limit). An interrupted walk reports that the chain was not judged; it never reports the chain authentic or tampered, and it writes no anchor.
+- Command fingerprint. The signed `session_start` row records the resolved path and SHA-256 of the command `wrap` runs, with a status (`hashed`, `unresolved`, `unreadable`, `not_regular` or `oversized`). Only regular files up to 256 MiB are hashed. The hash covers the command file only, not its interpreter, libraries or modules. The command is quoted in the signed row so its text cannot plant a fake hash field, and the hashed path is the path `wrap` runs. See `docs/how-it-works/audit-log.md`.
+
+### Fixed
+
+- Off-box anchor push no longer loses its time budget to its own preflight checks. Each step (identity read, preflight walks, fetch and push) gets its own budget, so a slow walk can no longer drop off-box delivery without notice.
+- `anchor enroll` and `anchor migrate` no longer skip the local anchor write when the follow-up verification runs out of time. The follow-up fetch gets its own budget and the walk runs unbounded.
+- `wrap` stops the network proxy before it writes `session_end`, so the close row is the run's last row. If the proxy takes longer than 5 seconds to drain, the run is left `unclosed` rather than risk a false `rows_after_close`. A failed `session_end` write now prints a warning that names the run. The child's exit code is unchanged.
+- `verify --audit` applies `--walk-timeout` to the whole run check, uses less memory on large trails, and reads in one snapshot so a concurrent `prune` cannot make an honest run show `close_mismatch`. A run integrity failure prints an `AUDIT: RUN INTEGRITY FAILURE` line. The list of unclosed runs in the coverage notice is capped and sanitized.
+- The network proxy watchdog no longer reports a failure after teardown has cancelled it.
+- A project overlay can no longer loosen a `--profile` fence through unusual key or table-name spelling.
+- Red-team bench: a `path=` rule matches the whole path or a path-component suffix, so a bare filename works and `xcanary.txt` no longer matches `canary.txt`. The kernel companion prints cleanup failures after an interrupt.
+
+### Changed
+
+- The repository no longer carries internal drafts, review instructions or personal identifiers in its probe records and design notes; probe verdicts remain with host, account and home paths redacted. CI now checks published content and fails closed on malformed input.
+- New design notes: `docs/design/run-lifecycle-contract.md` and `docs/design/anchor-verification-profile.md`, with an env-gated profiling test.
+
 ## [0.10.0] - 2026-10-14
 
 v0.10.0 gives each project its own remote audit chain: anchor v2 requires explicit `nocklock anchor enroll` or `anchor migrate` before remote push and verify, and prune and `anchor emit` now refuse unsafe states. It fixes two security issues: cloud metadata addresses in Linux netns bridge allocation, and current-directory lookup in `nocklock wrap`. Text output of audit and anchor verification now ends with a `COVERAGE: LIMITED` notice that states what recorded history does and does not prove.

@@ -106,7 +106,7 @@ func TestWrapSymlinkedProjectRecordsCanonicalConfigPathAndVerifies(t *testing.T)
 	}
 
 	var verifyOut strings.Builder
-	if err := runAuditVerify(context.Background(), &verifyOut, ""); err != nil {
+	if err := runAuditVerify(context.Background(), &verifyOut, "", false); err != nil {
 		t.Fatalf("verify --audit after symlinked wrapped session: %v\n%s", err, verifyOut.String())
 	}
 
@@ -495,7 +495,7 @@ func TestRunAuditVerifyReportsDigestHistory(t *testing.T) {
 	}
 
 	var output strings.Builder
-	if err := runAuditVerify(context.Background(), &output, ""); err != nil {
+	if err := runAuditVerify(context.Background(), &output, "", false); err != nil {
 		t.Fatalf("runAuditVerify: %v\n%s", err, output.String())
 	}
 	if !strings.Contains(output.String(), "Config digest history: 2 row(s), 1 change(s)") {
@@ -537,7 +537,7 @@ func TestRunAuditVerifyTreatsPreAdoptionSessionsAsLegacy(t *testing.T) {
 	}
 
 	var output strings.Builder
-	if err := runAuditVerify(context.Background(), &output, ""); err != nil {
+	if err := runAuditVerify(context.Background(), &output, "", false); err != nil {
 		t.Fatalf("runAuditVerify rejected a pre-adoption session: %v\n%s", err, output.String())
 	}
 	if !strings.Contains(output.String(), "1 legacy session(s)") {
@@ -570,7 +570,7 @@ func TestRunAuditVerifyRejectsSessionWithoutConfigDigest(t *testing.T) {
 	}
 
 	var output strings.Builder
-	err = runAuditVerify(context.Background(), &output, "")
+	err = runAuditVerify(context.Background(), &output, "", false)
 	if err == nil {
 		t.Fatalf("runAuditVerify passed despite missing config.digest:\n%s", output.String())
 	}
@@ -651,7 +651,7 @@ func TestRunAuditVerifyAllowsSetupEventsWhileConfigDigestIsPending(t *testing.T)
 			}
 
 			var output strings.Builder
-			err = runAuditVerify(context.Background(), &output, "")
+			err = runAuditVerify(context.Background(), &output, "", false)
 			if tt.wantMissing == "" {
 				if err != nil {
 					t.Fatalf("runAuditVerify rejected setup events covered by the digest: %v\n%s", err, output.String())
@@ -693,7 +693,7 @@ func TestRunAuditVerifyRejectsPostAdoptionStartReusingLegacyID(t *testing.T) {
 	}
 
 	var output strings.Builder
-	err = runAuditVerify(context.Background(), &output, "")
+	err = runAuditVerify(context.Background(), &output, "", false)
 	if err == nil {
 		t.Fatalf("runAuditVerify accepted a post-adoption start with a reused legacy ID:\n%s", output.String())
 	}
@@ -732,7 +732,7 @@ func TestRunAuditVerifyRequiresOneDigestPerSessionStart(t *testing.T) {
 	}
 
 	var output strings.Builder
-	err = runAuditVerify(context.Background(), &output, "")
+	err = runAuditVerify(context.Background(), &output, "", false)
 	if err == nil || !strings.Contains(output.String(), "CONFIG DIGEST: INCOMPLETE") || !strings.Contains(output.String(), "reused") {
 		t.Fatalf("runAuditVerify accepted two session starts with one digest: %v\n%s", err, output.String())
 	}
@@ -768,7 +768,7 @@ func TestRunAuditVerifyAllowsLegacySessionToFinishAfterAdoption(t *testing.T) {
 	}
 
 	var output strings.Builder
-	if err := runAuditVerify(context.Background(), &output, ""); err != nil {
+	if err := runAuditVerify(context.Background(), &output, "", false); err != nil {
 		t.Fatalf("runAuditVerify rejected a legacy session that finished after adoption: %v\n%s", err, output.String())
 	}
 	if !strings.Contains(output.String(), "1 legacy session(s)") {
@@ -809,7 +809,7 @@ func TestRunAuditVerifyRejectsInvalidConfigDigest(t *testing.T) {
 	}
 
 	var output strings.Builder
-	err = runAuditVerify(context.Background(), &output, "")
+	err = runAuditVerify(context.Background(), &output, "", false)
 	if err == nil || !strings.Contains(err.Error(), "digest does not match canonical policy") {
 		t.Fatalf("runAuditVerify accepted an invalid config digest: %v\n%s", err, output.String())
 	}
@@ -848,7 +848,7 @@ func TestRunAuditVerifyRejectsInvalidConfigDigestPredecessor(t *testing.T) {
 	}
 
 	var output strings.Builder
-	err = runAuditVerify(context.Background(), &output, "")
+	err = runAuditVerify(context.Background(), &output, "", false)
 	if err == nil || !strings.Contains(err.Error(), "predecessor before the first digest") {
 		t.Fatalf("runAuditVerify accepted an invalid config digest predecessor: %v\n%s", err, output.String())
 	}
@@ -946,7 +946,7 @@ func TestRunAuditVerifyAllowsOnlyTheFirstRetainedDigestPredecessorAfterPrune(t *
 			}
 
 			var output strings.Builder
-			err = runAuditVerify(context.Background(), &output, "")
+			err = runAuditVerify(context.Background(), &output, "", false)
 			if tt.wantError == "" {
 				if err != nil {
 					t.Fatalf("runAuditVerify rejected the first retained digest after prune: %v\n%s", err, output.String())
@@ -1048,7 +1048,7 @@ func TestRunAuditVerifyIgnoresRetainedRowsForPrunedSession(t *testing.T) {
 	}
 
 	var output strings.Builder
-	if err := runAuditVerify(context.Background(), &output, ""); err != nil {
+	if err := runAuditVerify(context.Background(), &output, "", false); err != nil {
 		t.Fatalf("runAuditVerify rejected retained rows for a pruned session: %v\n%s", err, output.String())
 	}
 }

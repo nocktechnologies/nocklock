@@ -12,6 +12,7 @@ from pathlib import Path
 import platform
 import signal
 import subprocess
+import sys
 
 CASES = (
     ("unix-wrap", "./internal/cli", "TestWrapUnixSocketReachability"),
@@ -123,6 +124,8 @@ def _stop_group(process, stdout="", stderr="", grace=0):
                 os.killpg(process.pid, signal.SIGTERM)
                 process.wait(timeout=grace)
             except (ProcessLookupError, subprocess.TimeoutExpired):
+                # Group already gone, or the grace period elapsed. The SIGKILL
+                # below handles the second case.
                 pass
             except OSError as term_error:
                 fault += f"; process-group terminate failed: {term_error}"
@@ -166,7 +169,12 @@ def run_case(repo, out, case, package, test):
     except BaseException:
         # KeyboardInterrupt, SIGTERM (see main) or any other exit path: never
         # leave the owned process group running.
-        _stop_group(process, grace=SIGTERM_GRACE_SECONDS)
+        _, _, fault = _stop_group(process, grace=SIGTERM_GRACE_SECONDS)
+        if fault:
+            try:
+                sys.stderr.write("kernel_cases: cleanup after interrupt" + fault + "\n")
+            except OSError:
+                pass  # A closed pipe after Ctrl-C must not replace the interrupt.
         _raise_if_terminated()
         raise
     (out / (case + ".jsonl")).write_text(stdout)

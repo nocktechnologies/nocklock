@@ -1,5 +1,6 @@
 # Second desktop run of run-probe.ps1 (script 495f2b44), 2026-10-12 19:47Z, run_id 562bebd3b2f6420fbc5cec0f69c17a72.
-# Verbatim byte copies of the two files the run produced, in this order (SHA-256 of each source file):
+# Redacted copies: host, user and home fields use <host>, <user>, <home>.
+# Files in this order; SHA-256 values below identify the original unredacted files:
 # 1. output.txt                 01206e450440ead995dcd38413004e1bb48ca007f8d4f4b9ca967e3cd105558b (BEFORE state only: the SSH session dropped before the AFTER listing)
 # 2. probe-20261012T1947Z.log   ce4208d5e068cf7b2c4646a0f2037b424840785dabb63c4bcfcb336f0d2aed30 (the transcript, cut off at Probe 1's 9998 line)
 # Results and what the run does and does not show: RESULTS-20261012T1947Z.md
@@ -14,7 +15,7 @@ os_build=26300.9550
 os_edition=Professional (Microsoft Windows 11 Pro)
 os_arch=64-bit process_64bit=True
 ps=5.1.26100.9549
-user=Kevins-Desktop\kkwil elevated=True
+user=<host>\<user> elevated=True
 STATE(BEFORE) exemptions: (none)
 STATE(BEFORE) ports: (none)
 STATE(BEFORE) tasks: (none)
@@ -30,7 +31,7 @@ os_build=26300.9550
 os_edition=Professional (Microsoft Windows 11 Pro)
 os_arch=64-bit process_64bit=True
 ps=5.1.26100.9549
-user=Kevins-Desktop\kkwil elevated=True
+user=<host>\<user> elevated=True
 STATE(BEFORE) exemptions: (none)
 STATE(BEFORE) ports: (none)
 STATE(BEFORE) tasks: (none)
@@ -111,17 +112,17 @@ False
 curl.exe -> C:\Windows\system32\curl.exe
 git -> C:\Program Files\Git\cmd\git.exe
 node -> C:\Program Files\nodejs\node.exe
-python -> C:\Users\kkwil\AppData\Local\Programs\Python\Python312\python.exe
+python -> <home>\AppData\Local\Programs\Python\Python312\python.exe
 npm -> C:\Program Files\nodejs\npm.ps1
-pip -> C:\Users\kkwil\AppData\Local\Programs\Python\Python312\Scripts\pip.exe
+pip -> <home>\AppData\Local\Programs\Python\Python312\Scripts\pip.exe
 nslookup -> C:\Windows\system32\nslookup.exe
 BEFORE: loopbackexempt_count=0 ports_in_use(8899,9999,9998)=0 (documented desktop baseline: 0, 0)
 S-1-15-2-3482642125-4257376707-2968601254-1774957243-971363233-1587660273-898777979
-processed file: C:\Users\kkwil\AppData\Local\Temp\nocklock-probe-562bebd3b2f6420fbc5cec0f69c17a72\_launcher.dll
+processed file: <home>\AppData\Local\Temp\nocklock-probe-562bebd3b2f6420fbc5cec0f69c17a72\_launcher.dll
 Successfully processed 1 files; Failed processing 0 files
-processed file: C:\Users\kkwil\AppData\Local\Temp\nocklock-probe-562bebd3b2f6420fbc5cec0f69c17a72\out
+processed file: <home>\AppData\Local\Temp\nocklock-probe-562bebd3b2f6420fbc5cec0f69c17a72\out
 Successfully processed 1 files; Failed processing 0 files
-LAUNCHER-ENV: PASS - TEMP=C:\Users\kkwil\AppData\Local\Packages\nocklock-probe-562bebd3b2f6420fbc5cec0f69c17a72\AC\Temp LOCALAPPDATA=C:\Users\kkwil\AppData\Local\Packages\nocklock-probe-562bebd3b2f6420fbc5cec0f69c17a72\AC
+LAUNCHER-ENV: PASS - TEMP=<home>\AppData\Local\Packages\nocklock-probe-562bebd3b2f6420fbc5cec0f69c17a72\AC\Temp LOCALAPPDATA=<home>\AppData\Local\Packages\nocklock-probe-562bebd3b2f6420fbc5cec0f69c17a72\AC
 0
 LIMITED-TOKEN: PASS - task token is Medium IL with High absent
 ===== Probe 1: zero-capability loopback =====

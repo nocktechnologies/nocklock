@@ -126,7 +126,7 @@ type doctorCapabilities struct {
 
 var currentDoctorCapabilities = doctorCapabilities{
 	goos:           runtime.GOOS,
-	fsBackend:      func() error { return nil },
+	fsBackend:      filesystemInterposerAvailable,
 	landlockABI:    landlock.DetectABI,
 	syscallBackend: syscallfence.Supported,
 	networkBackend: localProxyBackendAvailable,
@@ -407,6 +407,18 @@ func sandboxExecErr(caps doctorCapabilities) error {
 	return caps.sandboxExec()
 }
 
+func filesystemInterposerAvailable() error {
+	_, err := findLibFenceFS()
+	return err
+}
+
+func filesystemBackendErr(caps doctorCapabilities) error {
+	if caps.fsBackend == nil {
+		return errors.New("filesystem backend probe not configured")
+	}
+	return caps.fsBackend()
+}
+
 func filesystemDoctorCheck(cfg *config.Config, caps doctorCapabilities) doctorCheck {
 	if cfg.Filesystem.Root == "" {
 		return doctorCheck{
@@ -427,10 +439,10 @@ func filesystemDoctorCheck(cfg *config.Config, caps doctorCapabilities) doctorCh
 		}
 		return doctorOKCheck("Fences", "filesystem", "enforceable", "Filesystem fence enforceable with macOS Seatbelt root-write confinement and sensitive-path denies.")
 	case "linux":
-		if err := caps.fsBackend(); err != nil {
+		if err := filesystemBackendErr(caps); err != nil {
 			return doctorCriticalCheck("Fences", "filesystem", "configured-but-backend-missing",
 				fmt.Sprintf("Filesystem fence configured, but userspace backend is unavailable: %v", err),
-				"build/install the filesystem fence backend")
+				"install the filesystem fence library with safe ownership and no group/world-writable file or ancestors (for example, run chmod g-w on a group-writable /usr/local/lib); wrap will otherwise refuse to start")
 		}
 		if linuxEnforcementMode(cfg.Filesystem.LinuxEnforcement) != linuxEnforcementOff {
 			abi, err := caps.landlockABI()

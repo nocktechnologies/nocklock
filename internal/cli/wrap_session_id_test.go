@@ -32,7 +32,7 @@ func plainLaunchTOML(t *testing.T) string {
 		t.Fatal("test setup: could not find the secrets.pass list")
 	}
 	toml = strings.Replace(toml, passTail,
-		"    \"TERM\",\n    \"NOCKLOCK_SESSION_ID\",\n    \"NOCKLOCK_ANCHOR_URL\",\n    \"NOCKLOCK_ANCHOR_TOKEN\",\n    \"NOCKLOCK_FORWARD_URL\",\n    \"NOCKLOCK_FORWARD_KEY\",\n    \"NOCKCC_API_KEY\",\n]", 1)
+		"    \"TERM\",\n    \"NOCKLOCK_SESSION_ID\",\n    \"NOCKLOCK_ANCHOR_URL\",\n    \"NOCKLOCK_ANCHOR_TOKEN\",\n    \"NOCKLOCK_FORWARD_URL\",\n    \"NOCKLOCK_FORWARD_KEY\",\n    \"EXTERNAL_SERVICE_API_KEY\",\n]", 1)
 	i := strings.Index(toml, "[syscall]")
 	if i < 0 {
 		t.Fatal("test setup: default config has no [syscall] table")
@@ -65,7 +65,7 @@ func runWrapPrintingEnv(t *testing.T) (childSees map[string]string, dbSessionIDs
 		`echo "tok=${NOCKLOCK_ANCHOR_TOKEN-<unset>}"; ` +
 		`echo "forward_url=${NOCKLOCK_FORWARD_URL-<unset>}"; ` +
 		`echo "forward_key=${NOCKLOCK_FORWARD_KEY-<unset>}"; ` +
-		`echo "shared_key=${NOCKCC_API_KEY-<unset>}"; } > "$1"`
+		`echo "shared_key=${EXTERNAL_SERVICE_API_KEY-<unset>}"; } > "$1"`
 
 	cmd := &cobra.Command{}
 	cmd.SetContext(context.Background())
@@ -172,13 +172,13 @@ func TestWrapStripsDedicatedForwardCredentialAndAuditsRemoval(t *testing.T) {
 	defer server.Close()
 	t.Setenv("NOCKLOCK_FORWARD_URL", server.URL)
 	t.Setenv("NOCKLOCK_FORWARD_KEY", "operator-only-test-key")
-	t.Setenv("NOCKCC_API_KEY", "agent-pass-through-key")
+	t.Setenv("EXTERNAL_SERVICE_API_KEY", "agent-pass-through-key")
 	sees, _ := runWrapPrintingEnv(t)
 	if sees["forward_url"] != "<unset>" || sees["forward_key"] != "<unset>" {
 		t.Fatal("Command forwarding variables reached the child")
 	}
 	if sees["shared_key"] != "agent-pass-through-key" {
-		t.Fatal("the unrelated NockCC key did not follow the configured secret policy")
+		t.Fatal("the unrelated external-service key did not follow the configured secret policy")
 	}
 	if calls.Load() != 0 {
 		t.Fatalf("disabled forwarding made %d network calls", calls.Load())
@@ -201,8 +201,8 @@ func TestWrapStripsDedicatedForwardCredentialAndAuditsRemoval(t *testing.T) {
 	for _, row := range rows {
 		seen[row.Detail] = true
 	}
-	if !seen["NOCKLOCK_FORWARD_KEY"] || !seen["NOCKLOCK_FORWARD_URL"] || seen["NOCKCC_API_KEY"] {
-		t.Fatalf("dedicated credential audit mismatch: key=%t url=%t shared_blocked=%t", seen["NOCKLOCK_FORWARD_KEY"], seen["NOCKLOCK_FORWARD_URL"], seen["NOCKCC_API_KEY"])
+	if !seen["NOCKLOCK_FORWARD_KEY"] || !seen["NOCKLOCK_FORWARD_URL"] || seen["EXTERNAL_SERVICE_API_KEY"] {
+		t.Fatalf("dedicated credential audit mismatch: key=%t url=%t shared_blocked=%t", seen["NOCKLOCK_FORWARD_KEY"], seen["NOCKLOCK_FORWARD_URL"], seen["EXTERNAL_SERVICE_API_KEY"])
 	}
 }
 

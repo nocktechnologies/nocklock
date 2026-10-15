@@ -1,6 +1,7 @@
 package logging
 
 import (
+	"context"
 	"database/sql"
 	"os"
 	"path/filepath"
@@ -1200,7 +1201,7 @@ func TestVerifyChainMissingHeadWithEventsIsTampered(t *testing.T) {
 		t.Fatalf("delete chain_head: %v", err)
 	}
 
-	result, err := l.verifyChain(nil, false)
+	result, err := l.verifyChain(context.Background(), nil, false)
 	if err != nil {
 		t.Fatalf("verifyChain failed: %v", err)
 	}

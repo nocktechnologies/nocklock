@@ -12,9 +12,9 @@ Registered in `internal/cli/` (one file per command). `README.md` "Commands" has
 | `validate [config-path]` | | `validate.go` |
 | `config` | | `config.go` |
 | `doctor [--json]` | | `doctor.go` |
-| `verify [--json]` | `--audit`, `--export-pubkey`, `--ed25519-pub <key>`, `--against-anchor <file>`, `--against-remote-anchor` (the last two are mutually exclusive) | `verify.go` |
+| `verify [--json]` | `--audit`, `--export-pubkey`, `--ed25519-pub <key>`, `--against-anchor <file>`, `--against-remote-anchor` (the last two are mutually exclusive), `--require-closed`, `--walk-timeout <dur>` | `verify.go` |
 | `scan [path ...]` | `--env`, `--json` | `scan.go` |
-| `anchor emit [--out <file>]`, `anchor push [--file <file>]` | | `anchor.go` |
+| `anchor emit [--out <file>]`, `anchor push [--file <file>]` | `--walk-timeout <dur>` | `anchor.go` |
 | `anchor enroll`, `anchor migrate` | enroll: `--acknowledge-no-legacy-history` | `anchor_v2.go` |
 | `log` | `--session`, `--blocked`, `--since`, `--json`, `--stats`, `--prune <age>` | `log.go` |
 | `status`, `version` | | `status.go`, `version.go` |
@@ -46,6 +46,8 @@ Preserve incomplete or moved state and follow the
 
 `anchor emit` verifies an existing signed log and original key without adopting or re-signing its database. It emits v2 when trusted identity exists, otherwise a local v1 file. `verify --against-anchor` supports explicit v1 and v2 files; v2 requires local expected identity agreement. `anchor push [--file <file>]` accepts v2 only, requires enrollment, and validates both candidate and previous remote prefixes before compare-and-swap. An absent remote pin cannot be recreated by push.
 
+`--walk-timeout <dur>` (on `anchor emit`, `anchor push`, `verify --against-anchor` (v1 and v2 files), `verify --audit` and `verify --against-remote-anchor`) bounds only the local chain-verification walk; its default is `0` (unbounded), so these commands complete on a large store, and a signed verification receipt keeps the walk short on an unchanged prefix (`docs/how-it-works/audit-log.md`). The identity-lock waits and network steps keep their own 30 s budget. Set a positive duration (e.g. `--walk-timeout=30s`) to cap the walk.
+
 `verify --against-remote-anchor` fetches only the trusted signed pair, authenticates it before any row-count verdict, and exits non-zero for missing/unreachable anchors, absent identity, unsupported v2 routes, malformed records or mismatches. Projects sharing a managed key have separate random chain IDs. No remote command falls back to v1; upgrade the store first. After v2 registration the store freezes ordinary v1 access, retaining legacy history for explicit migration.
 
 The URL and bearer token come from `NOCKLOCK_ANCHOR_URL` / `NOCKLOCK_ANCHOR_TOKEN`; the token is never a flag/config key. Anchor commands and anchor verification share a 30-second budget for identity-lock waits and HTTP. Wrap teardown starts its five-second budget before the first identity read; failure warns and preserves the child exit code. Synchronous filesystem and SQLite work completes on the caller and is not interrupted by these deadlines. An unenrolled legacy chain writes a local v1 file and warns that explicit enrollment is required when a URL is configured. See [audit log](../how-it-works/audit-log.md) for routes, trust boundaries and retries.
@@ -60,6 +62,28 @@ see [audit recording limits](../how-it-works/audit-log.md#what-is-recorded).
 The original verdict and exit code remain unchanged. This adds no aggregate grade,
 host probe or audit JSON format; `--json` remains the live fence-probe format.
 Public-key export and anchor enrollment/push output are unchanged.
+
+`verify --audit` also reports each run's observed lifecycle over the intact chain
+(`internal/logging/run_close.go`, design `docs/design/run-lifecycle-contract.md`),
+on a `RUNS:` summary line plus a `RUN <id>:` line per integrity failure:
+
+| Status | Meaning |
+|---|---|
+| `closed` | one signed `session_close`, recomputed row count and root equal the signed binding, no later row under the run's `session_id` |
+| `unclosed` | the run's signed `session_start` owes a close (`lifecycle=1`) but none is present — a crash, kill, or failed close are indistinguishable; neutral |
+| `pruned` | a recomputed value differs under a recorded prune, and the post-prune checks pass; neutral |
+| `close_mismatch` | a recomputed value differs with no prune to explain it; a failure |
+| `rows_after_close` | a row carries the run's `session_id` after its close, or a second close; a failure |
+| `legacy` | a `session_start` with no `lifecycle=1` and no close, written before this contract; never a failure |
+
+`close_mismatch` and `rows_after_close` fail verification (exit `1`) regardless of
+`--require-closed`, and the run output then ends with an explicit
+`AUDIT: RUN INTEGRITY FAILURE` verdict line — so the chain's own
+`AUDIT: AUTHENTIC` line, printed earlier, is never mistaken for the overall
+result. A neutral `unclosed` run fails only when `--require-closed` is set (then an
+`AUDIT: UNCLOSED` line is printed); by default it passes but is named in the
+`COVERAGE: LIMITED` notice, since a missing close cannot prove the run's recorded
+extent is complete.
 
 ## Exit codes
 Exit codes travel as `exitCodeError` and `Execute()` calls `os.Exit` once (`root.go`). Any other error prints to stderr and exits `1` (`root.go`).

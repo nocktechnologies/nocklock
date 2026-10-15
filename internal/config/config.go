@@ -390,7 +390,7 @@ const (
 	ForwardURLEnv = "NOCKLOCK_FORWARD_URL"
 )
 
-// CloudConfig configures optional NockCC dashboard sync.
+// CloudConfig configures optional remote dashboard sync.
 type CloudConfig struct {
 	Enabled  bool   `toml:"enabled"`
 	APIKey   string `toml:"api_key"`
@@ -447,16 +447,10 @@ func LoadOverlay(base Config, path string) (*Config, error) {
 	overlay := cloneConfig(base)
 	// Decoding into a seeded slice would merge field by field into base's rules.
 	overlay.Network.Lookback = nil
-	fields, err := overlayDefinedFields(path)
-	if err != nil {
+	if err := loadInto(&overlay, path); err != nil {
 		return nil, err
 	}
-	md, err := loadIntoWithMetadata(&overlay, path)
-	if err != nil {
-		return nil, err
-	}
-	addMetadataFields(fields, md)
-	cfg := restrictOverlay(baseCopy, overlay, fields)
+	cfg := restrictOverlay(baseCopy, overlay)
 	if errs := validateLookback(cfg.Network.Lookback); len(errs) > 0 {
 		return nil, fmt.Errorf("invalid config at %s: %s", path, errs[0].Error())
 	}
@@ -464,36 +458,31 @@ func LoadOverlay(base Config, path string) (*Config, error) {
 }
 
 func loadInto(cfg *Config, path string) error {
-	_, err := loadIntoWithMetadata(cfg, path)
-	return err
-}
-
-func loadIntoWithMetadata(cfg *Config, path string) (toml.MetaData, error) {
 	data, err := os.ReadFile(path)
 	if err != nil {
-		return toml.MetaData{}, fmt.Errorf("failed to read config at %s: %w", path, err)
+		return fmt.Errorf("failed to read config at %s: %w", path, err)
 	}
 
 	md, err := toml.Decode(string(data), cfg)
 	if err != nil {
-		return toml.MetaData{}, fmt.Errorf("failed to parse config at %s: %w", path, err)
+		return fmt.Errorf("failed to parse config at %s: %w", path, err)
 	}
 	if undecoded := md.Undecoded(); len(undecoded) > 0 {
-		return toml.MetaData{}, fmt.Errorf("unknown config keys at %s: %v", path, undecoded)
+		return fmt.Errorf("unknown config keys at %s: %v", path, undecoded)
 	}
 
 	if errs := Validate(cfg); len(errs) > 0 {
 		for _, e := range errs {
 			if e.Severity == "error" {
-				return toml.MetaData{}, fmt.Errorf("invalid config at %s: %s", path, e.Error())
+				return fmt.Errorf("invalid config at %s: %s", path, e.Error())
 			}
 		}
 	}
 	if err := validateAuditDBLocation(cfg, path); err != nil {
-		return toml.MetaData{}, fmt.Errorf("invalid config at %s: %w", path, err)
+		return fmt.Errorf("invalid config at %s: %w", path, err)
 	}
 
-	return md, nil
+	return nil
 }
 
 // validateAuditDBLocation rejects an absolute logging.db that points outside

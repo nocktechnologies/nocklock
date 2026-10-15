@@ -221,6 +221,91 @@ var wrapCmd = &cobra.Command{
 				SessionID: sessionID,
 			})
 		}
+
+		// Run-lifecycle teardown state (docs/design/run-lifecycle-contract.md). A run
+		// that writes a lifecycle=1 session_start owes exactly one signed
+		// session_close, after its last ordinary row. These flags record whether the
+		// end row landed and why the run ended, so the deferred close below fires once
+		// and only when the run is eligible.
+		var (
+			runSessionStarted     bool
+			runSessionEnded       bool
+			runSessionEndFailed   bool
+			runEndReason          string
+			runProxyDrainExceeded bool
+			stopProxyFn           func() error // set when a network proxy is created
+			joinWatchdog          func()       // set when a proxy watchdog is started
+		)
+
+		// endSession writes the run's session_end, capturing the write error loudly
+		// instead of discarding it: a dropped end row would otherwise leave the run
+		// looking like a crash. reason is the writer's own close reason (clean,
+		// child_exit, refused, audit_failed). A failed end row means no close is
+		// attempted — the close's last_id is only meaningful once session_end is the
+		// run's last ordinary row — and the run reads unclosed.
+		endSession := func(detail string, blocked bool, reason string) {
+			runEndReason = reason
+			if err := logger.Log(logging.Event{
+				Timestamp: time.Now(),
+				EventType: logging.EventSessionEnd,
+				Category:  "session",
+				Detail:    detail,
+				Blocked:   blocked,
+				SessionID: sessionID,
+			}); err != nil {
+				runSessionEndFailed = true
+				fmt.Fprintf(cmd.ErrOrStderr(), "NockLock: warning: failed to record session_end for run %s: %v — the run will read unclosed\n", sessionID, err)
+				return
+			}
+			runSessionEnded = true
+		}
+
+		// drainProxy joins any producer that can still write under the run's
+		// session_id (the network proxy) before the signed close, recording a
+		// deadline overrun so the close is skipped. It reads stopProxyFn at call
+		// time (set only once a proxy starts) and is a no-op once the drain has
+		// already exceeded its deadline, so the inline call before session_end and
+		// the deferred close's own join never warn twice. stopProxyFn is
+		// sync.Once-idempotent, so a repeat call returns the first drain's result.
+		drainProxy := func() {
+			if stopProxyFn == nil || runProxyDrainExceeded {
+				return
+			}
+			// Join the proxy watchdog first: its onFailure callback writes
+			// network_error rows under this run's session_id (ProxyServer.MarkDegraded
+			// and the watchdog's own logEvent), so it is a second producer that must be
+			// quiesced before the close or those rows could land after session_close and
+			// read as a false rows_after_close.
+			if joinWatchdog != nil {
+				joinWatchdog()
+			}
+			if err := stopProxyFn(); err != nil {
+				runProxyDrainExceeded = true
+				fmt.Fprintf(cmd.ErrOrStderr(), "NockLock: warning: network proxy drain exceeded its deadline; run %s left unclosed: %v\n", sessionID, err)
+			}
+		}
+
+		// Write the run's signed close last. Deferred here, after the anchor and
+		// logger.Close defers, so LIFO runs it BEFORE them and the emitted anchor
+		// covers the close row. It joins any producer that can still write under the
+		// run's session_id (the network proxy), then writes the close only if the
+		// drain succeeded and session_end landed. Otherwise the run is left unclosed,
+		// which is neutral; the loud warning at the failure site already explains why.
+		defer func() {
+			if !runSessionStarted {
+				return
+			}
+			// Join the proxy before the close even on early-return paths that never
+			// reached the inline stop; idempotent via sync.Once.
+			drainProxy()
+			if !closeRunEligible(runSessionStarted, runProxyDrainExceeded, runSessionEndFailed, runSessionEnded) {
+				return
+			}
+			covered, err := logger.CloseRun(sessionID, runEndReason)
+			if err != nil {
+				fmt.Fprintf(cmd.ErrOrStderr(), "NockLock: warning: failed to write signed session close for run %s (%d rows covered): %v — the run will read unclosed\n", sessionID, covered, err)
+			}
+		}()
 		// macOS filesystem-fence state is an enforcement prerequisite, unlike
 		// ordinary best-effort access telemetry: the child must not run unless
 		// ENGAGED or the explicit filesystem.root = "" DEGRADED state is durably recorded.
@@ -412,6 +497,7 @@ var wrapCmd = &cobra.Command{
 					// Look for the shared library next to the nocklock binary or in standard paths.
 					libPath, err := findLibFenceFS()
 					if err != nil {
+						logEvent(logging.EventFileBlocked, "filesystem", err.Error(), true)
 						return err
 					}
 
@@ -818,7 +904,19 @@ var wrapCmd = &cobra.Command{
 					}
 					logEvent(logging.EventNetworkPassed, "network", "Landlock Unix-socket isolation rules staged for the pre-exec shim", false)
 				}
-				defer proxy.Stop()
+				// Join the proxy's stop through a once-guarded closure so the run's
+				// teardown can drain it BEFORE writing session_end (run-lifecycle
+				// contract: Teardown ordering), while this defer still guarantees a
+				// stop on every early-return path. proxy.Stop reports the http.Server
+				// drain-deadline error, which the close path reads to decide whether
+				// to skip the close.
+				var stopProxyOnce sync.Once
+				var proxyStopErr error
+				stopProxyFn = func() error {
+					stopProxyOnce.Do(func() { proxyStopErr = proxy.Stop() })
+					return proxyStopErr
+				}
+				defer func() { _ = stopProxyFn() }()
 
 				// Launch watchdog: if proxy crashes mid-session, cancel childCtx to kill the child.
 				watchdogCtx, watchdogCancel := context.WithCancel(cmd.Context())
@@ -837,6 +935,13 @@ var wrapCmd = &cobra.Command{
 					watchdog = network.NewProxyWatchdog(addr, 5*time.Second, 2, onProxyFailure)
 				}
 				watchdog.Start(watchdogCtx)
+				// Expose a teardown join: cancel the watchdog and wait for its
+				// goroutine (and any in-flight onProxyFailure writes) to finish before
+				// the run's close.
+				joinWatchdog = func() {
+					watchdogCancel()
+					watchdog.Wait()
+				}
 
 				proxyURL := "http://" + addr
 				childEnv = removeEnvVars(childEnv,
@@ -872,12 +977,21 @@ var wrapCmd = &cobra.Command{
 			childEnv = append(removeEnvVars(childEnv, landlockRulesEnv), landlockRulesEnv+"="+encoded)
 		}
 
+		// Resolve the requested command once, before any kernel-fence shim or
+		// netns helper receives it (their execve calls do not search the
+		// caller's PATH), and reuse that single resolution both to fingerprint
+		// the command below and to build childArgv further down — never
+		// resolve args[0] a second time, or the two resolutions could pick
+		// different files.
+		resolved, resolveErr := resolveChildArgv(args)
+		fp := execFingerprint{Status: execUnresolved}
+		if resolveErr == nil {
+			fp = fingerprintExecutable(resolved[0])
+		}
+
 		// Record the effective egress level in the signed session-start row only
 		// after the configured bridge and network fence have initialized.
-		sessionDetail := args[0]
-		if unixSocketReason != "" {
-			sessionDetail += " unix_sockets=reachable reason=" + unixSocketReason
-		}
+		sessionDetail := sessionStartDetail(args[0], fp, unixSocketReason)
 		if err := logger.Log(logging.Event{
 			Timestamp:   time.Now(),
 			EventType:   logging.EventSessionStart,
@@ -891,16 +1005,18 @@ var wrapCmd = &cobra.Command{
 			cmd.SilenceErrors = true
 			return &exitCodeError{code: 2}
 		}
-
-		// Resolve the requested command before any kernel-fence shim or netns
-		// helper receives it; their execve calls do not search the caller's PATH.
-		childArgv, err := resolveChildArgv(args, landlockPrefix, fsSandboxPrefix)
-		if err != nil {
-			logEvent(logging.EventSessionEnd, "session", "exit_code=1", false)
+		// The run now owes a signed close; the deferred close writes it at teardown.
+		runSessionStarted = true
+		if resolveErr != nil {
+			// The child never launched, but the proxy and its watchdog did; join them
+			// before session_end so it stays the run's last ordinary row on this path.
+			drainProxy()
+			endSession("exit_code=1", false, "refused")
 			cmd.SilenceErrors = true
 			cmd.SilenceUsage = true
-			return err
+			return resolveErr
 		}
+		childArgv := composeChildArgv(resolved, landlockPrefix, fsSandboxPrefix)
 		// Export this run's session id to the child (N10647) so a co-located tool
 		// can stamp the SAME id. Done here, after every other env mutation and
 		// immediately before the single point where childEnv is consumed, so it
@@ -1090,6 +1206,14 @@ var wrapCmd = &cobra.Command{
 		}
 		eventsWg.Wait()
 
+		// Join the network proxy — including any in-flight look-back write — before
+		// writing session_end, so the signed close is the run's last row (not a
+		// trailing defer, as earlier revisions left it). An exceeded drain deadline
+		// leaves the run unclosed rather than risk a false rows_after_close on an
+		// honestly slow request. Idempotent, so the deferred close's own join is a
+		// no-op after this.
+		drainProxy()
+
 		// FAIL CLOSED on any egress-audit failure: an allowed/denied decision that
 		// could not be signed (or a decision-log that could not be read) means the
 		// audit trail is incomplete, so the session must not report success — even
@@ -1097,7 +1221,7 @@ var wrapCmd = &cobra.Command{
 		// verdict wins. The reader goroutine has finished (Wait above), establishing
 		// happens-before for decisionFailErr.
 		if decisionFailed.Load() {
-			logEvent(logging.EventSessionEnd, "session", fmt.Sprintf("exit_code=2 decision_audit_failed=true err=%v", decisionFailErr), true)
+			endSession(fmt.Sprintf("exit_code=2 decision_audit_failed=true err=%v", decisionFailErr), true, "audit_failed")
 			cmd.SilenceErrors = true
 			cmd.SilenceUsage = true
 			return &exitCodeError{code: 2}
@@ -1105,7 +1229,7 @@ var wrapCmd = &cobra.Command{
 
 		if childErr != nil {
 			if proxyFailed.Load() {
-				logEvent(logging.EventSessionEnd, "session", "exit_code=2 proxy_failed=true", true)
+				endSession("exit_code=2 proxy_failed=true", true, "refused")
 				cmd.SilenceErrors = true
 				cmd.SilenceUsage = true
 				return &exitCodeError{code: 2}
@@ -1117,27 +1241,38 @@ var wrapCmd = &cobra.Command{
 					// Fall back to 1 for cross-platform safety.
 					code = 1
 				}
-				logEvent(logging.EventSessionEnd, "session", fmt.Sprintf("exit_code=%d", code), false)
+				endSession(fmt.Sprintf("exit_code=%d", code), false, "child_exit")
 				cmd.SilenceErrors = true
 				cmd.SilenceUsage = true
 				return &exitCodeError{code: code}
 			}
-			logEvent(logging.EventSessionEnd, "session", "exit_code=1", false)
+			endSession("exit_code=1", false, "child_exit")
 			cmd.SilenceErrors = true
 			cmd.SilenceUsage = true
 			return fmt.Errorf("failed to run %q: %w", args[0], childErr)
 		}
 
 		if proxyFailed.Load() {
-			logEvent(logging.EventSessionEnd, "session", "exit_code=2 proxy_failed=true", true)
+			endSession("exit_code=2 proxy_failed=true", true, "refused")
 			cmd.SilenceErrors = true
 			cmd.SilenceUsage = true
 			return &exitCodeError{code: 2}
 		}
 
-		logEvent(logging.EventSessionEnd, "session", "exit_code=0", false)
+		endSession("exit_code=0", false, "clean")
 		return nil
 	},
+}
+
+// closeRunEligible reports whether a run that has started should receive its
+// signed session_close at teardown. The close is skipped — leaving the run
+// neutral-unclosed — in three cases: the network proxy's drain deadline was
+// exceeded (a handler may still write a row under the run's session_id, risking a
+// false rows_after_close); the session_end append failed; or no session_end
+// landed. The close's last_id is only meaningful once session_end is the run's
+// last ordinary row, so a run missing its end row must never be reported closed.
+func closeRunEligible(started, proxyDrainExceeded, sessionEndFailed, sessionEnded bool) bool {
+	return started && !proxyDrainExceeded && !sessionEndFailed && sessionEnded
 }
 
 func init() {
@@ -1201,6 +1336,24 @@ func resolvedNetworkFenceMode(flags WrapFlags) string {
 		return "netns"
 	}
 	return "proxy"
+}
+
+// sessionStartDetail renders the signed session_start detail: the requested
+// command, quoted (Go's %q, via strconv.Quote) so its value can never be
+// mistaken for one of the key=value fields that follow it. An unquoted
+// command containing, say, " exec_sha256=deadbeef" would otherwise plant a
+// second exec_sha256-looking field ahead of the real one.
+func sessionStartDetail(command string, fp execFingerprint, unixSocketReason string) string {
+	detail := "command=" + strconv.Quote(command) + fp.Detail()
+	if unixSocketReason != "" {
+		detail += " unix_sockets=reachable reason=" + unixSocketReason
+	}
+	// lifecycle=1 marks a run that owes a signed session_close at teardown. The
+	// verifier reads it from this signed detail; without the signing key it cannot
+	// be stripped without breaking this row's signature. See
+	// docs/design/run-lifecycle-contract.md ("Downgrade resistance").
+	detail += " lifecycle=1"
+	return detail
 }
 
 func composeChildArgv(args []string, prefixes ...[]string) []string {
@@ -1536,7 +1689,7 @@ func findLibFenceFS() (string, error) {
 	if err != nil {
 		return "", fmt.Errorf("cannot resolve current working directory for filesystem fence library trust check: %w", err)
 	}
-	return findTrustedLibFenceFS(exePath, cwd, nil, fileExists)
+	return findTrustedLibFenceFS(exePath, cwd, nil, nil)
 }
 
 // networkFloorDetail renders the Seatbelt network-floor state for the signed
@@ -1625,9 +1778,9 @@ func validateUnixProxySocketPath(path string) error {
 	return nil
 }
 
-func findTrustedLibFenceFS(exePath, workingDir string, extraCandidates []string, exists func(string) (bool, error)) (string, error) {
-	if exists == nil {
-		exists = fileExists
+func findTrustedLibFenceFS(exePath, workingDir string, extraCandidates []string, inspect func(string, []string) (string, error)) (string, error) {
+	if inspect == nil {
+		inspect = trustedInterposerPathInProject
 	}
 
 	candidates := make([]string, 0, len(extraCandidates)+3)
@@ -1640,38 +1793,86 @@ func findTrustedLibFenceFS(exePath, workingDir string, extraCandidates []string,
 	)
 	candidates = append(candidates, extraCandidates...)
 
+	// A project-owned library pointer must never select a trusted library. The one
+	// rule that enforces this runs inside the trust walk (see inspectTrustedPath),
+	// which checks every visited path against these project spellings; a hit
+	// returns errTrustedPathWithinProject and the loop below skips the candidate,
+	// the same as a missing one.
+	projectDirs := projectDirSpellings(workingDir)
+
 	for _, candidate := range candidates {
 		abs, err := filepath.Abs(candidate)
 		if err != nil {
 			continue
 		}
-		ok, err := exists(abs)
+		canonical, err := inspect(abs, projectDirs)
+		// A project-owned candidate (sentinel) and a missing one both let the
+		// resolver try the next location; neither fails the launch.
+		if errors.Is(err, errTrustedPathWithinProject) || errors.Is(err, os.ErrNotExist) {
+			continue
+		}
 		if err != nil {
-			return "", fmt.Errorf("cannot inspect trusted filesystem fence library candidate %q: %w", abs, err)
+			return "", fmt.Errorf("cannot inspect trusted filesystem fence library candidate %q: %w; refusing to launch with an unsafe LD_PRELOAD path", abs, err)
 		}
-		if !ok {
-			continue
-		}
-		if pathIsWithinDir(abs, workingDir) {
-			continue
-		}
-		return abs, nil
+		return canonical, nil
 	}
 
 	return "", fmt.Errorf("trusted filesystem fence library not found. Install libfence_fs.so next to the nocklock binary, at /usr/local/lib/nocklock/libfence_fs.so, or at /usr/lib/nocklock/libfence_fs.so; refusing to launch with an untrusted LD_PRELOAD path")
 }
 
-func fileExists(path string) (bool, error) {
-	_, err := os.Stat(path)
-	if err == nil {
-		return true, nil
+// errTrustedPathWithinProject marks a trust-walk refusal: a path the walk visited
+// lies inside the project. The library resolver skips such a candidate rather
+// than trusting a project-owned pointer.
+var errTrustedPathWithinProject = errors.New("trusted filesystem fence library path lies inside the project")
+
+// projectDirSpellings returns the working directory's raw spelling and, when it
+// differs, its canonical (symlink-resolved) spelling, so the trust walk can
+// compare visited paths against both. An empty working directory yields no
+// project dirs, disabling the check (the plain interposer callers pass none).
+func projectDirSpellings(workingDir string) []string {
+	if workingDir == "" {
+		return nil
 	}
-	if errors.Is(err, os.ErrNotExist) {
-		return false, nil
+	dirs := []string{workingDir}
+	if canonical := resolvePathBestEffort(workingDir); canonical != workingDir {
+		dirs = append(dirs, canonical)
 	}
-	return false, err
+	return dirs
 }
 
+// visitedPathWithinProject reports whether a path the trust walk visited lies
+// inside the project. It checks the path's raw spelling and its canonical
+// (symlink-resolved) spelling against every project directory spelling, so a
+// candidate cannot hide an in-project location by canonicalizing away from it or
+// by being reached through a symlinked working directory.
+func visitedPathWithinProject(path string, projectDirs []string) bool {
+	if len(projectDirs) == 0 {
+		return false
+	}
+	// Raw-spelling checks are pure string work; try them for every project
+	// spelling first and only resolve symlinks (an EvalSymlinks syscall) when none
+	// match. The resolved check is still load-bearing — it catches a visited path
+	// whose own spelling sits outside the project but which resolves into it (a
+	// hop through a symlink pointing inward) — so a node that is genuinely outside
+	// the project does pay one resolve here.
+	for _, dir := range projectDirs {
+		if lexicalPathIsWithinDir(path, dir) {
+			return true
+		}
+	}
+	resolved := resolvePathBestEffort(path)
+	for _, dir := range projectDirs {
+		if lexicalPathIsWithinDir(resolved, dir) {
+			return true
+		}
+	}
+	return false
+}
+
+// pathIsWithinDir reports whether path is inside dir. It resolves both operands
+// with resolvePathBestEffort before the relative-path check, so a symlinked
+// working directory (or a candidate spelled through a symlink) cannot hide a
+// path that is inside it.
 func pathIsWithinDir(path, dir string) bool {
 	if dir == "" {
 		return false
@@ -1682,6 +1883,29 @@ func pathIsWithinDir(path, dir string) bool {
 		return false
 	}
 	rel, err := filepath.Rel(resolvedDir, resolvedPath)
+	if err != nil {
+		return false
+	}
+	return rel == "." || (rel != ".." && !strings.HasPrefix(rel, ".."+string(os.PathSeparator)))
+}
+
+// lexicalPathIsWithinDir reports whether path is inside dir using only lexical
+// cleaning — it never resolves symlinks. visitedPathWithinProject uses it to
+// refuse a visited path whose own spelling sits inside the project even when that
+// path is a symlink pointing at a trusted target outside the project: the pointer
+// is project-owned, so it cannot be trusted whatever it targets. pathIsWithinDir,
+// which resolves both operands, cannot answer this because it canonicalizes the
+// path away from the project first, so visitedPathWithinProject calls both — the
+// raw spelling here and the canonical spelling via resolvePathBestEffort.
+func lexicalPathIsWithinDir(path, dir string) bool {
+	if dir == "" {
+		return false
+	}
+	cleanDir := filepath.Clean(dir)
+	if cleanDir == filepath.Dir(cleanDir) {
+		return false
+	}
+	rel, err := filepath.Rel(cleanDir, filepath.Clean(path))
 	if err != nil {
 		return false
 	}

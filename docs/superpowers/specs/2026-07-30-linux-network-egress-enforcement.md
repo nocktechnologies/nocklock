@@ -1,8 +1,7 @@
 # Linux Network Egress Enforcement: Design
 
 **Date:** 2026-07-30
-**Status:** Proposed (Mira, product lead), problem confirmed, mechanism recommended. **Phase 0 STARTED (2026-08-03): VPS target probed with receipts, unprivileged-clean netns RULED OUT on the tested target (AppArmor indicated; toggle test pending), privileged-helper setup path CONFIRMED viable. See "Phase 0 results, VPS probe (2026-08-03)" below.**
-**Author:** Mira Ashworth
+**Status:** Proposed (product lead), problem confirmed, mechanism recommended. **Phase 0 STARTED (2026-08-03): VPS target probed with receipts, unprivileged-clean netns RULED OUT on the tested target (AppArmor indicated; toggle test pending), privileged-helper setup path CONFIRMED viable. See "Phase 0 results, VPS probe (2026-08-03)" below.**
 **Tracks:** Making NockLock's headline domain-allowlist feature both *working* and
 *bypass-resistant* on Linux. Mirrors the Landlock and seccomp decisions: a
 userspace boundary fails open against a determined child; the kernel-enforced

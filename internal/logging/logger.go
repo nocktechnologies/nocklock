@@ -2,6 +2,7 @@
 package logging
 
 import (
+	"bytes"
 	"context"
 	"crypto/ed25519"
 	"crypto/sha256"
@@ -15,6 +16,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"time"
 
 	_ "modernc.org/sqlite"
@@ -38,6 +40,7 @@ const (
 	EventNetworkError         EventType = "network_error"
 	EventSessionStart         EventType = "session_start"
 	EventSessionEnd           EventType = "session_end"
+	EventSessionClose         EventType = "session_close"
 	EventConfigLoaded         EventType = "config_loaded"
 	EventConfigDigest         EventType = "config.digest"
 )
@@ -127,11 +130,31 @@ type Stats struct {
 // Logger handles SQLite event storage.
 type Logger struct {
 	db               *sql.DB
+	writeDSN         string  // file:...?mode=rw for the throwaway verify_receipt write connection
 	signer           *signer // nil when Ed25519 signing is off
 	onCommit         func(Event, string)
 	projectRoot      string               // canonical project root for the external trusted identity
 	identitySync     func(*os.File) error // per-instance record durability fault injection for tests
 	identityRootSync func(*os.File) error // per-instance root-establishment fault injection
+
+	// mu serializes each append from BEGIN through COMMIT and the run-accumulator
+	// fold that follows it, and the CloseRun read of the accumulator. It is logger-
+	// wide, not per-session: appends already serialize through the single database
+	// connection (SetMaxOpenConns(1)), so this adds no new cross-session contention,
+	// but it must be acquired BEFORE the transaction or connection in every append
+	// path so a connection held before the mutex cannot deadlock against that single
+	// connection. Held only for one append-plus-fold or one close read, never across
+	// a whole run. See docs/design/run-lifecycle-contract.md ("Requirements for N11765").
+	mu sync.Mutex
+	// accumulators holds, per session_id, the rolling run-close commitment (a row
+	// counter and a 32-byte root) advanced under mu as each row for that session
+	// commits. CloseRun reads and signs these values; the entry is dropped once its
+	// close is written. Bounded to a counter and a root, never raw row bytes.
+	accumulators map[string]*runAccumulator
+	// afterCommit is an unexported test seam invoked under mu after a successful
+	// COMMIT and before the accumulator fold, so a test can observe or stall the
+	// window the mutex protects. Never set in production. See withAfterCommit.
+	afterCommit func()
 }
 
 // eventTransaction is the common database/sql operation set shared by a
@@ -150,6 +173,7 @@ type loggerConfig struct {
 	signingKeyPath      string
 	onCommit            func(Event, string)
 	afterValidate       func() // test seam, see withAfterValidate
+	afterCommit         func() // test seam, see withAfterCommit
 }
 
 // WithEventCommitted observes an event and its audit-chain entry hash only
@@ -188,6 +212,14 @@ func withAfterValidate(fn func()) Option {
 	return func(c *loggerConfig) { c.afterValidate = fn }
 }
 
+// withAfterCommit lets a test stall or observe an append inside the logger mutex,
+// between a successful COMMIT and the run-accumulator fold, so the single-critical-
+// section guarantee can be exercised against a concurrent producer. Unexported:
+// never set in production.
+func withAfterCommit(fn func()) Option {
+	return func(c *loggerConfig) { c.afterCommit = fn }
+}
+
 // ChainVerifyResult holds the outcome of a chain verification.
 type ChainVerifyResult struct {
 	Intact          bool       // true if chain is unbroken from genesis to current head
@@ -215,7 +247,8 @@ type ChainVerifyResult struct {
 	SigState          string
 	SignedEntries     int        // rows carrying a signature
 	UnsignedEntries   int        // rows with no signature
-	SigVerified       int        // rows whose signature verified against the key
+	SigVerified       int        // rows whose signature verified against the key in this run
+	SigAttested       int        // rows whose signature a valid verify_receipt attests (prefix skipped this run, re-proven byte-identical; never verified in this run)
 	SigBrokenID       int64      // id of the first row whose signature failed (0 = none)
 	SigBrokenReason   string     // explanation of the signature failure
 	SignedGenesisAt   *time.Time // when signing was adopted (if applicable)
@@ -256,6 +289,18 @@ CREATE TABLE IF NOT EXISTS chain_head (
 	signed_genesis_at TEXT,
 	unsigned_through_id INTEGER,
 	signing_pubkey_fingerprint TEXT NOT NULL DEFAULT ''
+);
+CREATE TABLE IF NOT EXISTS verify_receipt (
+	id INTEGER PRIMARY KEY CHECK (id = 1),
+	version INTEGER NOT NULL,
+	key_fingerprint TEXT NOT NULL,
+	signed_genesis_at TEXT,
+	unsigned_through_id INTEGER,
+	through_id INTEGER NOT NULL,
+	through_count INTEGER NOT NULL,
+	through_head_hash TEXT NOT NULL,
+	digest TEXT NOT NULL,
+	sig TEXT NOT NULL
 );
 `
 
@@ -460,15 +505,19 @@ func NewLogger(dbPath string, projectRoot string, opts ...Option) (*Logger, erro
 			return nil, fmt.Errorf("cannot resolve project root for chain identity: %w", err)
 		}
 	}
+	absolute, err := filepath.Abs(dbPath)
+	if err != nil {
+		return nil, err
+	}
+	// mode=rw cannot create a missing DB and observes committed WAL pages.
+	// immutable=1 would incorrectly ignore a live WAL and is not safe here. This
+	// is also the DSN the best-effort verify_receipt write opens on its own
+	// throwaway connection (writeVerifyReceipt), so its short busy timeout never
+	// touches this Logger's shared, pooled connection.
+	writeDSN := (&url.URL{Scheme: "file", Path: filepath.ToSlash(absolute), RawQuery: "mode=rw"}).String()
 	dsn := dbPath
 	if lc.existingSigningOnly {
-		absolute, err := filepath.Abs(dbPath)
-		if err != nil {
-			return nil, err
-		}
-		// mode=rw cannot create a missing DB and observes committed WAL pages.
-		// immutable=1 would incorrectly ignore a live WAL and is not safe here.
-		dsn = (&url.URL{Scheme: "file", Path: filepath.ToSlash(absolute), RawQuery: "mode=rw"}).String()
+		dsn = writeDSN
 	}
 	db, err := sql.Open("sqlite", dsn)
 	if err != nil {
@@ -490,8 +539,10 @@ func NewLogger(dbPath string, projectRoot string, opts ...Option) (*Logger, erro
 		l, err := openExistingSignedLogger(db, canonicalRoot, lc)
 		if err != nil {
 			db.Close()
+			return l, err
 		}
-		return l, err
+		l.writeDSN = writeDSN
+		return l, nil
 	}
 
 	// Enable WAL mode for concurrent read/write.
@@ -529,7 +580,7 @@ func NewLogger(dbPath string, projectRoot string, opts ...Option) (*Logger, erro
 		db.Close()
 		return nil, fmt.Errorf("failed to initialize chain identity metadata: %w", err)
 	}
-	l := &Logger{db: db, onCommit: lc.onCommit, projectRoot: canonicalRoot}
+	l := &Logger{db: db, writeDSN: writeDSN, onCommit: lc.onCommit, projectRoot: canonicalRoot, accumulators: make(map[string]*runAccumulator), afterCommit: lc.afterCommit}
 
 	if lc.signingEnabled {
 		adopted, err := signingAlreadyAdopted(db)
@@ -602,7 +653,7 @@ func openExistingSignedLogger(db *sql.DB, projectRoot string, lc loggerConfig) (
 	if err := tx.Commit(); err != nil {
 		return nil, err
 	}
-	return &Logger{db: db, signer: s, onCommit: lc.onCommit, projectRoot: projectRoot}, nil
+	return &Logger{db: db, signer: s, onCommit: lc.onCommit, projectRoot: projectRoot, accumulators: make(map[string]*runAccumulator), afterCommit: lc.afterCommit}, nil
 }
 
 func validateAdoptedSigningHead(tx *sql.Tx, s *signer, fingerprint string) error {
@@ -627,24 +678,45 @@ func validateAdoptedSigningHead(tx *sql.Tx, s *signer, fingerprint string) error
 	return nil
 }
 
-// Log records a single event with hash chain. Thread-safe (SQLite WAL handles locking).
+// Log records a single event with hash chain. Thread-safe: the logger mutex is
+// held from BEGIN through COMMIT and the run-accumulator fold, then released
+// before the observer callback runs.
 func (l *Logger) Log(event Event) error {
-	tx, err := l.db.Begin()
+	l.mu.Lock()
+	hash, err := l.appendLocked(&event)
+	l.mu.Unlock()
 	if err != nil {
-		return fmt.Errorf("failed to begin log transaction: %w", err)
-	}
-	defer tx.Rollback()
-	var hash string
-	if err := l.logInTransaction(tx, &event, &hash); err != nil {
 		return err
-	}
-	if err := tx.Commit(); err != nil {
-		return fmt.Errorf("failed to commit log transaction: %w", err)
 	}
 	if l.onCommit != nil {
 		l.onCommit(event, hash)
 	}
 	return nil
+}
+
+// appendLocked performs one event append — BEGIN, insert, COMMIT, and the
+// run-accumulator fold — assuming the caller already holds l.mu. It never
+// invokes the observer callback (that runs after the mutex is released) so the
+// same helper can write the session_close row inside CloseRun's critical section.
+func (l *Logger) appendLocked(event *Event) (string, error) {
+	tx, err := l.db.Begin()
+	if err != nil {
+		return "", fmt.Errorf("failed to begin log transaction: %w", err)
+	}
+	defer tx.Rollback()
+	var hash string
+	var cb []byte
+	if err := l.logInTransaction(tx, event, &hash, &cb); err != nil {
+		return "", err
+	}
+	if err := tx.Commit(); err != nil {
+		return "", fmt.Errorf("failed to commit log transaction: %w", err)
+	}
+	if l.afterCommit != nil {
+		l.afterCommit()
+	}
+	l.foldRun(event.SessionID, event.EventType, event.ID, cb)
+	return hash, nil
 }
 
 // LogAfterLatest records an event built from the latest event of eventType and
@@ -656,14 +728,35 @@ func (l *Logger) LogAfterLatest(eventType EventType, build func(*Event) (Event, 
 		return nil, errors.New("log event builder is required")
 	}
 
+	// Acquire the logger mutex BEFORE reserving the single pooled connection.
+	// Taking the connection first (as earlier revisions did) could deadlock a
+	// concurrent append against SetMaxOpenConns(1); mutex-first keeps the order
+	// uniform across Log, LogBatch and LogAfterLatest.
+	l.mu.Lock()
+	previous, event, hash, err := l.appendAfterLatestLocked(eventType, build)
+	l.mu.Unlock()
+	if err != nil {
+		return nil, err
+	}
+	if l.onCommit != nil {
+		l.onCommit(event, hash)
+	}
+	return previous, nil
+}
+
+// appendAfterLatestLocked runs the look-up-and-append under l.mu, reserving the
+// connection only after the mutex is held and releasing it (deferred Close)
+// before the caller unlocks. The accumulator fold runs after COMMIT, in the same
+// critical section.
+func (l *Logger) appendAfterLatestLocked(eventType EventType, build func(*Event) (Event, error)) (*Event, Event, string, error) {
 	ctx := context.Background()
 	conn, err := l.db.Conn(ctx)
 	if err != nil {
-		return nil, fmt.Errorf("failed to reserve log connection: %w", err)
+		return nil, Event{}, "", fmt.Errorf("failed to reserve log connection: %w", err)
 	}
 	defer conn.Close()
 	if _, err := conn.ExecContext(ctx, "BEGIN IMMEDIATE"); err != nil {
-		return nil, fmt.Errorf("failed to begin immediate log transaction: %w", err)
+		return nil, Event{}, "", fmt.Errorf("failed to begin immediate log transaction: %w", err)
 	}
 	committed := false
 	defer func() {
@@ -674,24 +767,26 @@ func (l *Logger) LogAfterLatest(eventType EventType, build func(*Event) (Event, 
 
 	previous, err := latestEvent(ctx, conn, eventType)
 	if err != nil {
-		return nil, err
+		return nil, Event{}, "", err
 	}
 	event, err := build(previous)
 	if err != nil {
-		return nil, err
+		return nil, Event{}, "", err
 	}
 	var hash string
-	if err := l.logInTransaction(conn, &event, &hash); err != nil {
-		return nil, err
+	var cb []byte
+	if err := l.logInTransaction(conn, &event, &hash, &cb); err != nil {
+		return nil, Event{}, "", err
 	}
 	if _, err := conn.ExecContext(ctx, "COMMIT"); err != nil {
-		return nil, fmt.Errorf("failed to commit immediate log transaction: %w", err)
+		return nil, Event{}, "", fmt.Errorf("failed to commit immediate log transaction: %w", err)
 	}
 	committed = true
-	if l.onCommit != nil {
-		l.onCommit(event, hash)
+	if l.afterCommit != nil {
+		l.afterCommit()
 	}
-	return previous, nil
+	l.foldRun(event.SessionID, event.EventType, event.ID, cb)
+	return previous, event, hash, nil
 }
 
 // LogImmediate records an event like Log, but opens a BEGIN IMMEDIATE
@@ -753,7 +848,7 @@ func latestEvent(ctx context.Context, tx eventTransaction, eventType EventType) 
 	return &event, nil
 }
 
-func (l *Logger) logInTransaction(tx eventTransaction, event *Event, hash *string) error {
+func (l *Logger) logInTransaction(tx eventTransaction, event *Event, hash *string, canonical *[]byte) error {
 	ts := formatTimestampForChain(event.Timestamp)
 	storedDetail := encodeEventDetail(event.EventType, event.Detail, event.EgressLevel)
 	blocked := 0
@@ -792,6 +887,9 @@ func (l *Logger) logInTransaction(tx eventTransaction, event *Event, hash *strin
 	entryHash, err := chainEntryFromCanonical(cb, prevHashHex)
 	if err != nil {
 		return fmt.Errorf("failed to compute chain: %w", err)
+	}
+	if canonical != nil {
+		*canonical = cb
 	}
 
 	// Sign over the SAME canonical bytes the hash covers (v1.1). Empty when
@@ -836,24 +934,43 @@ func (l *Logger) logInTransaction(tx eventTransaction, event *Event, hash *strin
 }
 
 // LogBatch records multiple events in a single transaction for efficiency, with chain.
-// Thread-safe. Use this when logging multiple events at once (e.g., blocked vars).
+// Thread-safe: the logger mutex is held from BEGIN through COMMIT and the
+// run-accumulator fold of every row, then released before the observer callbacks.
 func (l *Logger) LogBatch(events []Event) error {
 	if len(events) == 0 {
 		return nil
 	}
+	l.mu.Lock()
+	committedEvents, hashes, err := l.appendBatchLocked(events)
+	l.mu.Unlock()
+	if err != nil {
+		return err
+	}
+	if l.onCommit != nil {
+		for i, event := range committedEvents {
+			l.onCommit(event, hashes[i])
+		}
+	}
+	return nil
+}
 
+// appendBatchLocked inserts every event in one transaction and folds each
+// committed row into its run accumulator, assuming the caller holds l.mu. It
+// returns the committed events and their entry hashes for the observer callbacks
+// the public wrapper runs after releasing the mutex.
+func (l *Logger) appendBatchLocked(events []Event) ([]Event, []string, error) {
 	tx, err := l.db.Begin()
 	if err != nil {
-		return fmt.Errorf("failed to begin batch transaction: %w", err)
+		return nil, nil, fmt.Errorf("failed to begin batch transaction: %w", err)
 	}
 	defer tx.Rollback()
 
 	// Initialize chain_head if needed
 	if err := initChainHeadIfNeeded(tx); err != nil {
-		return fmt.Errorf("failed to initialize chain_head: %w", err)
+		return nil, nil, fmt.Errorf("failed to initialize chain_head: %w", err)
 	}
 	if err := l.ensureWritableSignerState(tx); err != nil {
-		return err
+		return nil, nil, err
 	}
 
 	// Get current head
@@ -866,6 +983,7 @@ func (l *Logger) LogBatch(events []Event) error {
 	prevHashHex := currentHeadHash
 	hashes := make([]string, 0, len(events))
 	committedEvents := make([]Event, 0, len(events))
+	canonicals := make([][]byte, 0, len(events))
 
 	// Insert all events with chaining
 	for i := range events {
@@ -883,19 +1001,19 @@ func (l *Logger) LogBatch(events []Event) error {
 			ts, string(event.EventType), event.Category, storedDetail, blocked, event.SessionID, prevHashHex, "",
 		)
 		if err != nil {
-			return fmt.Errorf("failed to insert event in batch: %w", err)
+			return nil, nil, fmt.Errorf("failed to insert event in batch: %w", err)
 		}
 
 		eventID, err := result.LastInsertId()
 		if err != nil {
-			return fmt.Errorf("failed to get event ID: %w", err)
+			return nil, nil, fmt.Errorf("failed to get event ID: %w", err)
 		}
 
 		// Compute hash and sign the same canonical bytes.
 		cb := canonicalBytes(eventID, ts, event.EventType, event.Category, storedDetail, event.Blocked, event.SessionID)
 		entryHash, err := chainEntryFromCanonical(cb, prevHashHex)
 		if err != nil {
-			return fmt.Errorf("failed to compute chain for event %d: %w", eventID, err)
+			return nil, nil, fmt.Errorf("failed to compute chain for event %d: %w", eventID, err)
 		}
 		entrySig := ""
 		if l.signer != nil {
@@ -908,46 +1026,48 @@ func (l *Logger) LogBatch(events []Event) error {
 			entryHash, entrySig, eventID,
 		)
 		if err != nil {
-			return fmt.Errorf("failed to update event hash: %w", err)
+			return nil, nil, fmt.Errorf("failed to update event hash: %w", err)
 		}
 
 		prevHashHex = entryHash
 		event.ID = eventID
 		committedEvents = append(committedEvents, event)
 		hashes = append(hashes, entryHash)
+		canonicals = append(canonicals, cb)
 	}
 
 	// Update chain_head with final state
 	count, err := countEvents(tx)
 	if err != nil {
-		return fmt.Errorf("failed to count events: %w", err)
+		return nil, nil, fmt.Errorf("failed to count events: %w", err)
 	}
 
 	headMeta, err := readHeadSignatureMetadata(tx)
 	if err != nil {
-		return fmt.Errorf("failed to read chain head signing metadata: %w", err)
+		return nil, nil, fmt.Errorf("failed to read chain head signing metadata: %w", err)
 	}
 	headSig, err := signHead(l.signer, prevHashHex, count, headMeta)
 	if err != nil {
-		return fmt.Errorf("failed to sign chain head: %w", err)
+		return nil, nil, fmt.Errorf("failed to sign chain head: %w", err)
 	}
 	_, err = tx.Exec(
 		"UPDATE chain_head SET entry_hash = ?, row_count = ?, head_sig = ? WHERE id = 1",
 		prevHashHex, count, headSig,
 	)
 	if err != nil {
-		return fmt.Errorf("failed to update chain_head: %w", err)
+		return nil, nil, fmt.Errorf("failed to update chain_head: %w", err)
 	}
 
 	if err := tx.Commit(); err != nil {
-		return fmt.Errorf("failed to commit batch transaction: %w", err)
+		return nil, nil, fmt.Errorf("failed to commit batch transaction: %w", err)
 	}
-	if l.onCommit != nil {
-		for i, event := range committedEvents {
-			l.onCommit(event, hashes[i])
-		}
+	if l.afterCommit != nil {
+		l.afterCommit()
 	}
-	return nil
+	for i := range committedEvents {
+		l.foldRun(committedEvents[i].SessionID, committedEvents[i].EventType, committedEvents[i].ID, canonicals[i])
+	}
+	return committedEvents, hashes, nil
 }
 
 // Query returns events matching the given filters.
@@ -1145,6 +1265,14 @@ func (l *Logger) Prune(olderThan time.Duration) (int, error) {
 	if pruneCount == 0 {
 		// No events pruned, commit and return
 		return pruneCount, tx.Commit()
+	}
+
+	// A prune re-chains every surviving row, so any verify_receipt now attests a
+	// prefix that no longer exists byte-for-byte. It would be ignored on the next
+	// verify (digest mismatch, full walk), but dropping it here avoids that wasted
+	// rescan. The table is created at open, so this is a no-op on a fresh chain.
+	if _, err := tx.Exec("DELETE FROM verify_receipt"); err != nil {
+		return 0, fmt.Errorf("failed to clear verify receipt during prune: %w", err)
 	}
 
 	// Get the first surviving row
@@ -1681,7 +1809,7 @@ func migrateToChain(db *sql.DB) error {
 // signatures present but does not check them. Use VerifyChainSigned to verify
 // authenticity against a public key.
 func (l *Logger) VerifyChain() (*ChainVerifyResult, error) {
-	return l.verifyChain(nil, false)
+	return l.verifyChain(context.Background(), nil, false)
 }
 
 // VerifyChainSigned walks the hash chain and, using the supplied Ed25519 public
@@ -1693,7 +1821,46 @@ func (l *Logger) VerifyChain() (*ChainVerifyResult, error) {
 // The three states — AUTHENTIC, CONSISTENT/UNSIGNED, FORGED/TAMPERED — are kept
 // distinct in the result and never conflated.
 func (l *Logger) VerifyChainSigned(pub ed25519.PublicKey, requireSigned bool) (*ChainVerifyResult, error) {
-	return l.verifyChain(pub, requireSigned)
+	return l.verifyChain(context.Background(), pub, requireSigned)
+}
+
+// VerifyChainSignedContext is VerifyChainSigned bounded by ctx. When ctx ends
+// before the walk completes it returns ErrVerifyInterrupted and no result: a
+// partial walk is never reported as authentic or as tampering.
+func (l *Logger) VerifyChainSignedContext(ctx context.Context, pub ed25519.PublicKey, requireSigned bool) (*ChainVerifyResult, error) {
+	return l.verifyChain(ctx, pub, requireSigned)
+}
+
+// ErrVerifyInterrupted reports that a chain walk stopped (context cancelled or
+// deadline reached) before it finished. It is distinct from Intact=false and
+// from every signature state: the chain was neither authenticated nor shown to
+// be tampered with, so callers must emit no anchor and claim no verdict.
+var ErrVerifyInterrupted = errors.New("chain verification interrupted before completion; the chain was not judged (the walk deadline or context ended first, so retry with a longer one)")
+
+// verifyCtxCheckInterval is how many rows the walk verifies between context
+// checks.
+const verifyCtxCheckInterval = 1024
+
+// verifyRowHook, when set by a test, runs before each row with the number of
+// rows already verified. It lets tests cancel at an exact row, not a wall clock.
+var verifyRowHook func(rowsVerified int)
+
+// verifyInterrupted maps an error raised while ctx is done to
+// ErrVerifyInterrupted, keeping the context cause matchable.
+func verifyInterrupted(ctx context.Context, err error) error {
+	if cause := ctx.Err(); cause != nil {
+		if err != nil {
+			// Keep a real failure that coincided with the deadline visible.
+			return fmt.Errorf("%w: %w (underlying error: %v)", ErrVerifyInterrupted, cause, err)
+		}
+		return fmt.Errorf("%w: %w", ErrVerifyInterrupted, cause)
+	}
+	return err
+}
+
+// walkInterrupted returns ErrVerifyInterrupted once ctx has ended, else nil.
+func walkInterrupted(ctx context.Context) error {
+	return verifyInterrupted(ctx, nil)
 }
 
 // chainHeadRecord is the stored chain_head row: the tail anchor (hash and row
@@ -1721,33 +1888,65 @@ func readChainHeadRecord(tx *sql.Tx) (chainHeadRecord, error) {
 	return h, nil
 }
 
-func (l *Logger) verifyChain(pub ed25519.PublicKey, requireSigned bool) (*ChainVerifyResult, error) {
+func (l *Logger) verifyChain(ctx context.Context, pub ed25519.PublicKey, requireSigned bool) (*ChainVerifyResult, error) {
 	tx, err := l.db.Begin()
 	if err != nil {
 		return nil, fmt.Errorf("failed to begin chain verification transaction: %w", err)
 	}
-	defer tx.Rollback()
-	return verifyChainInTransaction(tx, pub, requireSigned)
+	result, prog, skipWrite, verr := verifyChainInTransaction(ctx, tx, pub, requireSigned)
+	// End the read snapshot before any receipt write: the write runs in its own
+	// short transaction (writeVerifyReceipt), never while this snapshot is open.
+	_ = tx.Rollback()
+
+	// A key holder records the verified prefix so later runs skip its signatures.
+	// prog is frozen at the last fully-verified row: for an authentic chain that is
+	// the head; for one that fails at row j it is at most j-1; for an interrupted
+	// walk it is the last row proved before the deadline. Recording that bounded
+	// prefix — even on a tampered or forged chain — keeps a stale wider receipt
+	// from lingering and never covers past the last good row (fail-closed: the
+	// receipt is always re-proven on use). skipWrite avoids re-writing an identical
+	// receipt on a steady-state chain. Only a real DB/transaction error, which
+	// yields no trustworthy prefix, writes nothing. The write is best-effort.
+	if prog != nil && !skipWrite && (verr == nil || errors.Is(verr, ErrVerifyInterrupted)) {
+		l.writeVerifyReceipt(pub, prog)
+	}
+	return result, verr
 }
 
 // verifyChainInTransaction lets anchor preflight authenticate the head and its
-// prefix in the same SQLite snapshot without weakening ordinary verification.
-func verifyChainInTransaction(tx *sql.Tx, pub ed25519.PublicKey, requireSigned bool) (*ChainVerifyResult, error) {
-	result := &ChainVerifyResult{PubKeyProvided: pub != nil}
-
+// prefix in the same SQLite snapshot without weakening ordinary verification. It
+// returns the verdict, the verified prefix a key holder may record as a receipt
+// (verifyProgress, returned even on ErrVerifyInterrupted so an interrupted walk
+// still records what it proved), and an error. The walk checks ctx every
+// verifyCtxCheckInterval rows and once more after the last row, and returns
+// ErrVerifyInterrupted (and no verdict) when ctx ends.
+//
+// When a valid signed verify_receipt is present (Step 2 of
+// docs/design/anchor-verification-profile.md), the first attempt re-proves the
+// receipt's prefix is byte-identical (linkage, hash recompute and the rolling
+// digest) and skips only its Ed25519 signature checks, verifying signatures for
+// the suffix and always re-checking the head. If the prefix does not reproduce
+// the receipt, the second attempt re-runs the full walk with no receipt on a
+// fresh query in the SAME snapshot, so the verdict and diagnostics are identical
+// to verification without a receipt.
+// The returned skipWrite is true when a valid receipt was used and the verified
+// prefix did not extend past it, so re-writing the identical receipt would be
+// wasted I/O; the caller then skips the write.
+func verifyChainInTransaction(ctx context.Context, tx *sql.Tx, pub ed25519.PublicKey, requireSigned bool) (result *ChainVerifyResult, prog *verifyProgress, skipWrite bool, err error) {
 	// Get chain_head state
 	head, err := readChainHeadRecord(tx)
 	if err == sql.ErrNoRows {
+		result := &ChainVerifyResult{PubKeyProvided: pub != nil}
 		var actualRowCount int
 		if countErr := tx.QueryRow("SELECT COUNT(*) FROM events").Scan(&actualRowCount); countErr != nil {
-			return nil, fmt.Errorf("failed to count events without chain_head: %w", countErr)
+			return nil, nil, false, fmt.Errorf("failed to count events without chain_head: %w", countErr)
 		}
 
 		result.HeadHash = chainGenesisHashHex
 		if actualRowCount > 0 {
 			result.Intact = false
 			result.BrokenReason = fmt.Sprintf("chain_head missing while events table contains %d row(s)", actualRowCount)
-			return result, nil
+			return result, emptyVerifyProgress(head), false, nil
 		}
 
 		// No chain_head row and no events: there is nothing to walk, so the
@@ -1761,11 +1960,62 @@ func verifyChainInTransaction(tx *sql.Tx, pub ed25519.PublicKey, requireSigned b
 		if result.SigState == "suspect" {
 			result.SigBrokenReason = suspectSigReason
 		}
-		return result, nil
+		return result, emptyVerifyProgress(head), false, nil
 	}
 	if err != nil {
-		return nil, fmt.Errorf("failed to read chain_head: %w", err)
+		return nil, nil, false, fmt.Errorf("failed to read chain_head: %w", err)
 	}
+
+	// Load and authenticate a receipt once; walkEvents uses it to skip the prefix.
+	// A nil pub (hash-only verification) never qualifies, so hash-only verification
+	// is byte-for-byte unchanged.
+	var receipt *verifyReceipt
+	if pub != nil && !verifyReceiptDisableRead {
+		if r, _ := loadVerifyReceipt(tx); validVerifyReceiptFor(r, pub, head) {
+			receipt = r
+		}
+	}
+
+	result, prog, mismatch, err := walkEvents(ctx, tx, pub, requireSigned, head, receipt)
+	if err != nil {
+		return nil, prog, false, err
+	}
+	if mismatch {
+		// The prefix did not reproduce the receipt: discard it and run the full
+		// walk on a fresh query in the same snapshot, so the verdict and its
+		// diagnostics (first broken id, reason) match verification without a
+		// receipt exactly.
+		result, prog, _, err = walkEvents(ctx, tx, pub, requireSigned, head, nil)
+		if err != nil {
+			return nil, prog, false, err
+		}
+		return result, prog, false, nil
+	}
+	// A valid receipt that was not extended attests the identical prefix already on
+	// disk, so re-writing it would be a wasted (fsync-bearing) transaction.
+	skipWrite = receipt != nil && prog.throughID == receipt.ThroughID
+	return result, prog, skipWrite, nil
+}
+
+// emptyVerifyProgress is the zero-row prefix (nothing to attest). Its metadata
+// still binds the current head so a caller inspecting it sees the adoption state.
+func emptyVerifyProgress(head chainHeadRecord) *verifyProgress {
+	return &verifyProgress{
+		throughHeadHash:   chainGenesisHashHex,
+		digest:            verifyReceiptDigestSeed(),
+		signedGenesisAt:   head.meta.signedGenesisAt,
+		unsignedThroughID: head.meta.unsignedThroughID,
+	}
+}
+
+// walkEvents performs one verification pass over the events in tx's snapshot.
+// With receipt == nil it is the full walk, byte-for-byte as before. With a
+// receipt it re-proves the receipt's prefix byte-identical and skips only that
+// prefix's signature verification. It returns the verdict, the attestable
+// verified prefix, and receiptMismatch=true when a non-nil receipt's prefix did
+// not reproduce (the caller then re-walks with receipt == nil).
+func walkEvents(ctx context.Context, tx *sql.Tx, pub ed25519.PublicKey, requireSigned bool, head chainHeadRecord, receipt *verifyReceipt) (result *ChainVerifyResult, prog *verifyProgress, receiptMismatch bool, err error) {
+	result = &ChainVerifyResult{PubKeyProvided: pub != nil}
 
 	headHash, rowCount, headSig := head.hash, head.rowCount, head.sig
 	migratedAtStr, legacyID := head.migratedAt, head.legacyThroughID
@@ -1802,12 +2052,18 @@ func verifyChainInTransaction(tx *sql.Tx, pub ed25519.PublicKey, requireSigned b
 	if unsignedThroughID != nil {
 		result.UnsignedThroughID = *unsignedThroughID
 	}
+
+	// prog tracks the attestable verified prefix: rows actually verified under the
+	// key this run, plus — once the receipt boundary is confirmed — the receipt's
+	// re-proven prefix. It never includes rows merely scanned.
+	prog = emptyVerifyProgress(head)
+
 	// Get all events in order
-	rows, err := tx.Query(
+	rows, err := tx.QueryContext(ctx,
 		"SELECT id, timestamp, event_type, category, detail, blocked, session_id, prev_hash, entry_hash, entry_sig FROM events ORDER BY id ASC",
 	)
 	if err != nil {
-		return nil, fmt.Errorf("failed to query events for verification: %w", err)
+		return nil, prog, false, verifyInterrupted(ctx, fmt.Errorf("failed to query events for verification: %w", err))
 	}
 	defer rows.Close()
 
@@ -1822,52 +2078,105 @@ func verifyChainInTransaction(tx *sql.Tx, pub ed25519.PublicKey, requireSigned b
 			result.SigBrokenReason = "chain_head signing public key fingerprint does not match the supplied key"
 		}
 	}
+
 	prevHashHex := chainGenesisHashHex
+	digest := verifyReceiptDigestSeed()
+	usingReceipt := receipt != nil
+	boundaryResolved := false
+
 	for rows.Next() {
+		if verifyRowHook != nil {
+			verifyRowHook(result.EntriesVerified)
+		}
+		if result.EntriesVerified%verifyCtxCheckInterval == 0 {
+			if err := walkInterrupted(ctx); err != nil {
+				return nil, prog, false, err
+			}
+		}
 		var id int64
 		var ts, et, cat, detail, sid, storedPrevHash, storedEntryHash, storedSig string
 		var blocked int
 		if err := rows.Scan(&id, &ts, &et, &cat, &detail, &blocked, &sid, &storedPrevHash, &storedEntryHash, &storedSig); err != nil {
-			return nil, fmt.Errorf("failed to scan event row: %w", err)
+			return nil, prog, false, verifyInterrupted(ctx, fmt.Errorf("failed to scan event row: %w", err))
 		}
+
+		// A row is in the (tentative) attested prefix when a receipt is active, the
+		// boundary is not yet resolved, and its id is within the receipt's prefix.
+		inPrefix := usingReceipt && !boundaryResolved && id <= receipt.ThroughID
+		// trustBlindly is the negative-control-19 mutation only: skip the prefix's
+		// integrity re-verification (per-row hash recompute and the rolling-digest
+		// comparison) that makes receipt-skipping safe. Never true in production.
+		trustBlindly := inPrefix && verifyReceiptSkipDigestCheck
 
 		// Check for non-genesis prev_hash on first row (indicates pruning)
 		if result.EntriesVerified == 0 && storedPrevHash != chainGenesisHashHex {
+			// A link break inside the attested prefix discards the receipt and re-runs
+			// the full, receipt-free walk (mismatch=true), so the verdict AND its
+			// diagnostics (FirstBrokenID, SigBrokenID, reasons, counts) are identical
+			// to verification without a receipt. Returning here would keep the verdict
+			// but skip the prefix's per-row signature accounting, diverging the counts.
+			if inPrefix {
+				return nil, prog, true, nil
+			}
 			result.Intact = false
 			result.FirstBrokenID = id
 			result.BrokenReason = fmt.Sprintf("first row id=%d has non-genesis prev_hash; earlier rows removed", id)
-			return result, nil
+			return result, prog, false, nil
 		}
 
 		// Check prev_hash link
 		if storedPrevHash != prevHashHex {
+			if inPrefix { // see the first-row branch: re-walk for identical diagnostics.
+				return nil, prog, true, nil
+			}
 			result.Intact = false
 			result.FirstBrokenID = id
 			result.BrokenReason = fmt.Sprintf("entry %d: prev_hash mismatch (expected %s, got %s)", id, prevHashHex, storedPrevHash)
-			return result, nil
+			return result, prog, false, nil
 		}
 
-		// Recompute entry_hash over the canonical bytes (reused for signature check).
-		cb := canonicalBytes(id, ts, EventType(et), cat, detail, blocked != 0, sid)
-		expectedHash, err := chainEntryFromCanonical(cb, prevHashHex)
-		if err != nil {
-			result.Intact = false
-			result.FirstBrokenID = id
-			result.BrokenReason = fmt.Sprintf("entry %d: failed to compute hash: %v", id, err)
-			return result, nil
+		// Recompute entry_hash over the canonical bytes (reused for the signature
+		// check). This runs for every row, prefix included, so a prefix content edit
+		// is caught here exactly as in the full walk. The mutation seam alone skips
+		// it for an attested-prefix row.
+		var cb []byte
+		if !trustBlindly {
+			cb = canonicalBytes(id, ts, EventType(et), cat, detail, blocked != 0, sid)
+			expectedHash, hErr := chainEntryFromCanonical(cb, prevHashHex)
+			if hErr != nil {
+				if inPrefix { // see the first-row branch: re-walk for identical diagnostics.
+					return nil, prog, true, nil
+				}
+				result.Intact = false
+				result.FirstBrokenID = id
+				result.BrokenReason = fmt.Sprintf("entry %d: failed to compute hash: %v", id, hErr)
+				return result, prog, false, nil
+			}
+			if storedEntryHash != expectedHash {
+				if inPrefix { // see the first-row branch: re-walk for identical diagnostics.
+					return nil, prog, true, nil
+				}
+				result.Intact = false
+				result.FirstBrokenID = id
+				result.BrokenReason = fmt.Sprintf("entry %d: entry_hash mismatch (expected %s, got %s)", id, expectedHash, storedEntryHash)
+				return result, prog, false, nil
+			}
 		}
 
-		if storedEntryHash != expectedHash {
-			result.Intact = false
-			result.FirstBrokenID = id
-			result.BrokenReason = fmt.Sprintf("entry %d: entry_hash mismatch (expected %s, got %s)", id, expectedHash, storedEntryHash)
-			return result, nil
-		}
-
-		// Signature accounting and, when a key is present, verification.
+		// Signature accounting. An attested-prefix row's signature is re-proven by
+		// the rolling digest, not re-verified here, so it counts as SigAttested;
+		// every other row is verified against the key. SigAttested mirrors the
+		// SigVerified guard (pub present, not already forged) so the two counters
+		// reconcile exactly even when a pre-loop head-fingerprint mismatch set
+		// sigForged.
 		if storedSig != "" {
 			result.SignedEntries++
-			if pub != nil && !sigForged {
+			switch {
+			case inPrefix:
+				if pub != nil && !sigForged {
+					result.SigAttested++
+				}
+			case pub != nil && !sigForged:
 				if verifyRowSig(pub, cb, storedSig) {
 					result.SigVerified++
 				} else {
@@ -1879,19 +2188,66 @@ func verifyChainInTransaction(tx *sql.Tx, pub ed25519.PublicKey, requireSigned b
 		} else {
 			result.UnsignedEntries++
 			// A post-adoption row with no signature is a stripped signature — a
-			// forgery signal, not a benign pre-adoption row.
-			if pub != nil && !sigForged && adopted && id > result.UnsignedThroughID {
+			// forgery signal, not a benign pre-adoption row. In the attested prefix
+			// a strip changes the digest instead, falling back to the full walk.
+			if !inPrefix && pub != nil && !sigForged && adopted && id > result.UnsignedThroughID {
 				sigForged = true
 				result.SigBrokenID = id
 				result.SigBrokenReason = fmt.Sprintf("entry %d: signature missing after signing adoption (stripped)", id)
 			}
 		}
 
+		// Fold the rolling digest over the STORED bytes. It binds entry_sig, which
+		// the hash chain does not cover, so a signature edit or strip on an
+		// otherwise-consistent prefix changes the digest and forces a full walk. It
+		// is load-bearing only for a keyed walk (the boundary check and the receipt),
+		// so a hash-only walk and the mutation seam skip it.
+		if pub != nil && !trustBlindly {
+			digest = verifyRollingDigest(digest, storedEntryHash, storedSig)
+		}
+
 		prevHashHex = storedEntryHash
 		result.EntriesVerified++
+
+		// Resolve the receipt boundary when we reach (or pass) its last prefix row.
+		if usingReceipt && !boundaryResolved && id >= receipt.ThroughID {
+			boundaryResolved = true
+			if !trustBlindly {
+				if id != receipt.ThroughID ||
+					int64(result.EntriesVerified) != receipt.ThroughCount ||
+					prevHashHex != receipt.ThroughHeadHash ||
+					!bytes.Equal(digest, receipt.Digest) {
+					// The prefix does not reproduce the receipt (a row was deleted at
+					// the boundary, the count differs, or a hash/signature byte
+					// changed): fall back to the full walk for identical diagnostics.
+					return nil, prog, true, nil
+				}
+			}
+			// Confirmed (or blindly trusted under the mutation): the whole prefix is
+			// attested, so advance the attestable progress to the boundary.
+			prog.advanceTo(id, int64(result.EntriesVerified), prevHashHex, digest)
+			continue
+		}
+
+		// Suffix rows (and every row when no receipt is used) advance the attestable
+		// prefix until a forgery is seen, which freezes it at the last good row so a
+		// receipt never attests past the break.
+		if !inPrefix && !sigForged {
+			prog.advanceTo(id, int64(result.EntriesVerified), prevHashHex, digest)
+		}
 	}
 	if err := rows.Err(); err != nil {
-		return nil, fmt.Errorf("error iterating events during verification: %w", err)
+		return nil, prog, false, verifyInterrupted(ctx, fmt.Errorf("error iterating events during verification: %w", err))
+	}
+	// A receipt whose prefix extends past the last row never reproduced (the
+	// boundary row is missing): fall back to the full walk.
+	if usingReceipt && !boundaryResolved {
+		return nil, prog, true, nil
+	}
+	// A deadline that lands after the last periodic check must not let the walk
+	// report a verdict it did not finish under.
+	if err := walkInterrupted(ctx); err != nil {
+		return nil, prog, false, err
 	}
 	if pub != nil && !adopted && (headSig != "" || publicKeyFingerprintHex != "" || result.SignedEntries > 0) {
 		// Signing artifacts remain but the adoption marker is gone — a genuine
@@ -1909,20 +2265,21 @@ func verifyChainInTransaction(tx *sql.Tx, pub ed25519.PublicKey, requireSigned b
 	if rowCount != actualRowCount {
 		result.Intact = false
 		result.BrokenReason = fmt.Sprintf("chain_head row_count (%d) does not match actual events (%d)", rowCount, actualRowCount)
-		return result, nil
+		return result, prog, false, nil
 	}
 
 	if headHash != prevHashHex {
 		result.Intact = false
 		result.BrokenReason = fmt.Sprintf("chain_head entry_hash mismatch (expected %s, got %s)", prevHashHex, headHash)
-		return result, nil
+		return result, prog, false, nil
 	}
 
 	result.Intact = true
 
 	// Verify the chain_head signature. Signing the head is what upgrades
 	// tail-truncation resistance: an attacker rewriting the head in lockstep
-	// still needs the key.
+	// still needs the key. The receipt never covers the head: it is always
+	// re-checked here.
 	if pub != nil && !sigForged && adopted {
 		if headSig == "" {
 			sigForged = true
@@ -1937,7 +2294,7 @@ func verifyChainInTransaction(tx *sql.Tx, pub ed25519.PublicKey, requireSigned b
 	if result.SigState == "suspect" {
 		result.SigBrokenReason = suspectSigReason
 	}
-	return result, nil
+	return result, prog, false, nil
 }
 
 // suspectSigReason explains the "suspect" state. It applies whether or not the

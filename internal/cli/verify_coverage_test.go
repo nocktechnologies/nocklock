@@ -76,7 +76,7 @@ func TestAuditVerificationCoveragePreservesVerdicts(t *testing.T) {
 				code = 1
 			}
 			var out bytes.Buffer
-			err := runAuditVerify(context.Background(), &out, "")
+			err := runAuditVerify(context.Background(), &out, "", false)
 			requireHistoryCoverage(t, out.String(), "AUDIT: "+strings.ToUpper(state), err, code)
 		})
 	}
@@ -198,7 +198,7 @@ func TestHistoryVerificationCoverageOnEarlyErrors(t *testing.T) {
 				var err error
 				switch mode {
 				case "audit":
-					err = runAuditVerify(context.Background(), &out, pub)
+					err = runAuditVerify(context.Background(), &out, pub, false)
 				case "local":
 					err = runVerifyAgainstAnchor(context.Background(), &out, path, pub)
 				case "remote":

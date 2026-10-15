@@ -155,7 +155,7 @@ func TestAnchor_ChainGrownPastAnchorPasses(t *testing.T) {
 // ---------- the truncation teeth (RED / GREEN) ----------
 
 // TestAnchor_TruncationDetectedWhereHashChainIsFooled is the marquee test on the
-// keyless / hash-only verification path (e.g. NockCC pulled events.db and the
+// keyless / hash-only verification path (e.g. an external service pulled events.db and the
 // anchor but not the private key). An attacker truncates the tail and rewrites
 // chain_head in lockstep:
 //   - RED: the hash-only VerifyChain() still reads INTACT — this is exactly the

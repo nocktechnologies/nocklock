@@ -24,6 +24,22 @@ An early input or availability error still returns its original error without
 inventing an audit verdict. Exporting a public key, anchor enrollment/push, and
 live fence-probe output do not acquire this history-verification notice.
 
+### Executable fingerprint on the start row
+
+The signed `session_start` detail is `command=<quoted-command> exec_status=<status> [exec_path="<path>"] [exec_sha256=<hex>] [exec_kind=<kind>] [unix_sockets=reachable reason=<reason>]`. The trailing `unix_sockets`/`reason` fields appear only when a reachable Unix socket was detected (`internal/cli/wrap.go`); they are unrelated to the fingerprint. The command is quoted with Go's `%q` so its value can never be read as one of the trailing key=value fields — an unquoted command containing, say, ` exec_sha256=<hex>` could otherwise appear to plant a second `exec_sha256` field. NockLock resolves the requested command on the caller's `PATH` once (as the launch does) and hashes that same resolved file's bytes (`internal/cli/exec_fingerprint.go`); the launch never resolves the command a second time, so the fingerprinted path and the exec'd path cannot diverge. Plain, netns, Landlock and Seatbelt launches all fingerprint the requested command, never NockLock's own binary, `sandbox-exec` or the netns helper placed in front of it.
+
+| `exec_status` | Meaning |
+|---|---|
+| `hashed` | Regular file, read in full, digest recorded |
+| `unresolved` | Not found on `PATH`; the launch then fails |
+| `unreadable` | Found but could not be opened or read; no digest |
+| `not_regular` | FIFO, device or similar; never read |
+| `oversized` | Over 256 MiB; never hashed |
+
+`exec_kind=script` means the file starts with `#!`: the digest covers that script file only, not its interpreter. `exec_kind=launcher` means the basename is a known launcher (`sudo`, `nohup`, `timeout`, `xargs`, `npx`, `uvx`, and similar): the digest identifies the launcher, not the agent it starts. Treat both as "this file", never "the agent".
+
+Limits: the hash is taken before exec, so a file swapped between the hash and the exec is not detected (time-of-check/time-of-use). Not covered: what a script's interpreter, shared libraries, language modules or plugins later load; programs a launcher or script goes on to exec; the launcher list is a fixed heuristic, so an unlisted wrapper is not labelled. A symlink is followed, so the digest is of its target. The row records what NockLock observed, not that the binary is safe or approved; nothing is blocked on a digest.
+
 ### Linux interposer connection provenance
 
 New Linux interposer `file_blocked` rows use a version 1 JSON detail envelope
@@ -68,6 +84,14 @@ The managed signing key lives in `$XDG_CONFIG_HOME/nocklock/signing-ed25519.key`
 `nocklock verify --audit` reports `AUTHENTIC` (signed, valid; printed on the machine that holds the signing key, or when `--ed25519-pub` is supplied), `CONSISTENT` (chain intact, unsigned or no key to check), `FORGED`, or `SUSPECT` (a signed check was required with `--ed25519-pub` but no signing artifacts exist) (`internal/cli/verify.go`). A chain that is not intact prints `TAMPERED`. Exit codes (`writeAuditVerifyResult` in `internal/cli/verify.go`): `AUTHENTIC` and `CONSISTENT` exit `0`; `TAMPERED`, `FORGED` and `SUSPECT` exit `1`. `CONSISTENT` is a pass with no authenticity claim. A passing check means the stored rows are internally consistent; it does not prove NockLock recorded them unless signed and checked with the public key (`verify --export-pubkey`).
 
 V2 anchors sign the verified `(agent_id, chain_id)` pair, current head/count, timestamp and immutable legacy witness with domain byte `0x06` (`internal/logging/anchor_v2.go`). Independent projects can share a managed key without sharing a stream. V1 file verification preserves its original `0x05` encoding. `anchor emit` verifies the signed chain and uses v2 when a trusted identity exists, otherwise v1. It loads the existing key without generating a key or adopting/re-signing the database (`WithExistingSigning`); an unsigned or stripped log is refused. `pkg/receipt` continues verifying individual sessions offline.
+
+### Signed verification receipt (prefix rescan)
+
+Full signed verification costs one Ed25519 verify per row — about 97% of the walk — and is re-paid in full on every anchor emission even when nothing changed (`docs/design/anchor-verification-profile.md`, option C). A single-row `verify_receipt` table in `events.db` caches the result of one complete verification as a key-signed attestation of a *verified prefix* (`internal/logging/verify_receipt.go`). It is signed under a new domain byte `0x07` (distinct from row `0x01`, head `0x03`, anchor v1 `0x05`, anchor v2 `0x06`) over `version || key_fingerprint || signed_genesis_at || unsigned_through_id || through_id || through_count || through_head_hash || D`, where `D` is the rolling `SHA-256(D_{i-1} || entry_hash_i || entry_sig_i)` over the prefix.
+
+On the next verification the receipt lets the walk re-prove the prefix is byte-identical — linkage, `entry_hash` recompute and the rolling digest `D`, but **not** the per-row signatures — and verify signatures only for rows after the prefix. Detection is unchanged: the head is always re-checked in full, and any prefix content edit (hash mismatch), signature edit or strip (`D` mismatch), reorder, deletion, key change or adoption-metadata change discards the receipt and runs the full walk, giving the identical verdict and diagnostics. A valid receipt counts prefix signatures as *attested by the receipt*, never as verified in this run (`verify --audit` says so); `D` is folded over the stored `entry_hash`/`entry_sig` bytes, so equal `D` implies byte-identical signatures under SHA-256 collision resistance.
+
+Only a key holder writes a receipt, and only after verifying a clean prefix, in a short separate transaction after the read snapshot ends with the busy wait dropped to zero so it is skipped (never delays) under a concurrent `Logger` append, and skipped silently on a read-only database. A public-key-only `verify --audit` reads and uses a receipt but never writes one. The receipt advances to the highest verified row (an interrupted walk still records the prefix it proved) and is dropped by `Prune` (which re-chains every row). It is never trusted for rollback (A2): a consistent older database with its older receipt still verifies authentic exactly as before, and the remote v2 pin remains the only rollback detector. An older binary ignores the table; an unknown version, a corrupt row or a missing table all fall back to a full walk, so receipt loss is a performance event, never an integrity one.
 
 Existing-signing opens used by anchor commands validate the adopted key fingerprint
 and signed head before any schema or signing change. Absent, unsigned or stripped
@@ -117,7 +141,7 @@ Set `NOCKLOCK_ANCHOR_URL` and `NOCKLOCK_ANCHOR_TOKEN` in the operator environmen
 
 The upgraded store retains v1 migration history and freezes ordinary v1 access for a key once it has a v2 stream. Explicit `verify --against-anchor <v1-file>` still works. An old store must be upgraded before using these remote commands.
 
-`wrap` emits `chain-anchor.json` beside the DB and pushes enrolled v2 chains. Its five-second budget starts before the first identity read and bounds identity-lock waits and HTTP together. Failure warns and retains the child's exit code; interactive anchor commands and anchor verification use 30 seconds. Caller cancellation reaches identity-lock acquisition. Synchronous filesystem/SQLite work and in-progress durable writes complete on the caller; these deadlines do not interrupt them. Legacy chains emit local v1 files but require explicit enrollment/migration for any remote push. The real NCC/CLI [acceptance runbook](../runbooks/anchor-v2-ncc-acceptance.md) exercises distinct projects, rollback, missing/swapped state, migration, lost-response retries and moves.
+`wrap` emits `chain-anchor.json` beside the DB and pushes enrolled v2 chains. Its five-second budget starts before the first identity read and bounds identity-lock waits and HTTP together. Failure warns and retains the child's exit code; interactive anchor commands and anchor verification use 30 seconds. Caller cancellation reaches identity-lock acquisition. Synchronous filesystem/SQLite work and in-progress durable writes complete on the caller; these deadlines do not interrupt them. Legacy chains emit local v1 files but require explicit enrollment/migration for any remote push. Package tests exercise the local chain state and client response handling; this repository no longer includes an external server acceptance harness.
 
 Prune requires explicit project context; rootless library calls refuse even for
 legacy databases. On Linux and macOS, neither identity copy may exist, or both
@@ -233,4 +257,4 @@ The scratch directory is only a verification workspace: never run `wrap`, `log -
   `verify` prints a `NOTE`. V2 local pending/enrolled state or a retained original registration request refuses prune, including state none after an interrupted write.
 
 ## Tests
-`internal/logging/*_test.go`, `internal/cli/verify_test.go`, `verify_signing_test.go`, `audit_state_*_test.go`, `anchor_*_test.go`, `internal/anchorclient/client*_test.go`, `pkg/receipt/*_test.go`.
+`internal/logging/*_test.go`, `internal/cli/exec_fingerprint_test.go`, `internal/cli/verify_test.go`, `verify_signing_test.go`, `audit_state_*_test.go`, `anchor_*_test.go`, `internal/anchorclient/client*_test.go`, `pkg/receipt/*_test.go`.
