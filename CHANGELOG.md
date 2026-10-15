@@ -6,7 +6,7 @@ All notable changes to NockLock will be documented in this file.
 
 ### Security
 
-- Validate Linux interposer ownership, permissions and symlink paths before launch; report unsafe installations in `doctor` (N11769).
+- Validate Linux interposer ownership, permissions and symlink paths before launch; report unsafe installations in `doctor`. A library candidate whose own path sits inside the project is refused before symlink resolution, so a project-owned pointer cannot select a trusted library outside the project (N11769).
 
 ### Added
 

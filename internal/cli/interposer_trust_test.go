@@ -387,6 +387,94 @@ func TestInterposerResolverSkipsLibraryInsideSymlinkedWorkingDirectory(t *testin
 	}
 }
 
+// TestQueueProjectLibrarySymlinkCannotChooseOutsideTarget covers the Gander
+// MAJOR: a project-owned pointer (project/libfence_fs.so) that is itself a
+// symlink to a trusted library outside the project must be refused, because the
+// pointer the resolver found sits inside the project — whatever it targets. The
+// earlier symlinked-cwd test only exercised an in-project pointer to an
+// in-project target; it never covered a pointer that escapes outward, which the
+// resolve-both exclusion lets through because it canonicalizes the candidate
+// before the containment check. The positive controls prove a trusted installed
+// or Homebrew-style link that lives outside the project still resolves.
+func TestQueueProjectLibrarySymlinkCannotChooseOutsideTarget(t *testing.T) {
+	base := resolvedTempDir(t)
+	proj := filepath.Join(base, "proj") // the project (working directory)
+	installed := filepath.Join(base, "installed")
+	cellar := filepath.Join(base, "cellar")
+	opt := filepath.Join(base, "opt")
+	for _, dir := range []string{proj, installed, cellar, opt} {
+		if err := os.Mkdir(dir, 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	// A symlinked spelling of the project root, so raw and canonical cwd differ.
+	projLink := filepath.Join(base, "projlink")
+	if err := os.Symlink(proj, projLink); err != nil {
+		t.Skipf("symlinks unavailable: %v", err)
+	}
+	// Real trusted libraries, all OUTSIDE the project.
+	for _, dir := range []string{installed, cellar} {
+		if err := os.WriteFile(filepath.Join(dir, "libfence_fs.so"), []byte("inert; never loaded"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	// Project-owned pointer that escapes outward: proj/libfence_fs.so -> installed.
+	projPointer := filepath.Join(proj, "libfence_fs.so")
+	if err := os.Symlink(filepath.Join(installed, "libfence_fs.so"), projPointer); err != nil {
+		t.Fatal(err)
+	}
+	// Trusted links that live outside the project and target outside it: a safe
+	// installed-style link and a Homebrew-style link into a Cellar.
+	installedLink := filepath.Join(base, "usr-local-libfence_fs.so")
+	if err := os.Symlink(filepath.Join(installed, "libfence_fs.so"), installedLink); err != nil {
+		t.Fatal(err)
+	}
+	brewLink := filepath.Join(opt, "libfence_fs.so")
+	if err := os.Symlink(filepath.Join(cellar, "libfence_fs.so"), brewLink); err != nil {
+		t.Fatal(err)
+	}
+
+	// Report only the fixture libraries as present so host /usr/lib paths do not
+	// influence the result; canonicalization matches the production resolver.
+	inspect := func(path string) (string, error) {
+		if !strings.HasPrefix(path, base) {
+			return "", os.ErrNotExist
+		}
+		return filepath.EvalSymlinks(path)
+	}
+
+	for _, tc := range []struct {
+		name, workingDir, candidate string
+		want                        string
+	}{
+		// The reviewer's reproduction: project-owned pointer inside a symlinked
+		// cwd, spelled through the cwd symlink, escaping outward.
+		{"regression: symlinked cwd, project pointer escapes outward", projLink, filepath.Join(projLink, "libfence_fs.so"), ""},
+		// Project-owned outward pointer, raw cwd spelling, raw candidate.
+		{"negative: raw cwd, project pointer escapes outward", proj, projPointer, ""},
+		// Project-owned outward pointer, symlinked cwd, candidate spelled
+		// canonically: only the canonical-cwd arm of the lexical exclusion catches it.
+		{"negative: canonical cwd, project pointer escapes outward", projLink, projPointer, ""},
+		// Positive controls: trusted links that live outside the project resolve.
+		{"positive: safe installed link outside project", proj, installedLink, filepath.Join(installed, "libfence_fs.so")},
+		{"positive: Homebrew-style link outside project", proj, brewLink, filepath.Join(cellar, "libfence_fs.so")},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			got, err := findTrustedLibFenceFS("", tc.workingDir, []string{tc.candidate}, inspect)
+			if tc.want == "" {
+				if err == nil || got != "" {
+					t.Fatalf("project-owned pointer that escapes outward was accepted: %q", got)
+				}
+				return
+			}
+			want, _ := filepath.EvalSymlinks(tc.want)
+			if err != nil || got != want {
+				t.Fatalf("trusted library outside cwd rejected: got %q err %v; want %q", got, err, want)
+			}
+		})
+	}
+}
+
 func TestVerificationScratchStateFallbackKeepsLandlockRulesValid(t *testing.T) {
 	fixture, err := os.MkdirTemp(mustHome(t), ".nocklock-state-fallback-*")
 	if err != nil {

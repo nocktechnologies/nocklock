@@ -1660,9 +1660,24 @@ func findTrustedLibFenceFS(exePath, workingDir string, extraCandidates []string,
 	)
 	candidates = append(candidates, extraCandidates...)
 
+	// The working directory is loop-invariant; resolve its canonical spelling once.
+	canonicalWorkingDir := resolvePathBestEffort(workingDir)
+
 	for _, candidate := range candidates {
 		abs, err := filepath.Abs(candidate)
 		if err != nil {
+			continue
+		}
+		// Refuse any candidate whose OWN path (before symlink resolution) is
+		// inside the project, checked lexically against both the raw and the
+		// canonical spellings of the working directory. The resolved-path
+		// exclusions below canonicalize the candidate first, so a project-owned
+		// pointer that is itself a symlink to a trusted library outside the
+		// project would escape them (Gander MAJOR / N11769): the pointer the
+		// resolver found is still project-owned and must not be trusted,
+		// whatever it targets.
+		if lexicalPathIsWithinDir(abs, workingDir) ||
+			lexicalPathIsWithinDir(abs, canonicalWorkingDir) {
 			continue
 		}
 		if pathIsWithinDir(abs, workingDir) {
@@ -1698,6 +1713,30 @@ func pathIsWithinDir(path, dir string) bool {
 		return false
 	}
 	rel, err := filepath.Rel(resolvedDir, resolvedPath)
+	if err != nil {
+		return false
+	}
+	return rel == "." || (rel != ".." && !strings.HasPrefix(rel, ".."+string(os.PathSeparator)))
+}
+
+// lexicalPathIsWithinDir reports whether path is inside dir using only lexical
+// cleaning — it never resolves symlinks. The library resolver uses it to refuse
+// a candidate whose own spelling sits inside the project even when that
+// candidate is a symlink pointing at a trusted target outside the project: the
+// pointer is project-owned, so it cannot be trusted whatever it targets.
+// pathIsWithinDir, which resolves both operands, cannot answer this because it
+// canonicalizes the candidate away from the project first. Callers pass both the
+// raw and canonical spellings of dir so a symlinked working directory is covered
+// without resolving the candidate.
+func lexicalPathIsWithinDir(path, dir string) bool {
+	if dir == "" {
+		return false
+	}
+	cleanDir := filepath.Clean(dir)
+	if cleanDir == filepath.Dir(cleanDir) {
+		return false
+	}
+	rel, err := filepath.Rel(cleanDir, filepath.Clean(path))
 	if err != nil {
 		return false
 	}
