@@ -216,8 +216,11 @@ func writeAnchorV2VerifyResult(w io.Writer, result *logging.AnchorV2VerifyResult
 func finishAnchorSession(w io.Writer, logger *logging.Logger, dbPath string) {
 	ctx, cancel := context.WithTimeout(context.Background(), anchorPushTimeout)
 	defer cancel()
+	// One walk budget covers every walk in this teardown: the emission walk and
+	// the two push-preflight walks.
 	walkCtx, cancelWalk := context.WithCancel(context.Background())
 	if anchorWalkTimeout > 0 {
+		cancelWalk()
 		walkCtx, cancelWalk = context.WithTimeout(context.Background(), anchorWalkTimeout)
 	}
 	defer cancelWalk()

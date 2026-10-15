@@ -219,7 +219,9 @@ func (l *Logger) RegisterAnchorV2(mode string, legacy *Anchor, send func(AnchorR
 }
 
 // RegisterAnchorV2Context is RegisterAnchorV2 with cancellable identity-lock acquisition.
-// Local verification and durable writes remain synchronous; send must respect ctx.
+// Local verification and durable writes remain synchronous and unbounded: an
+// interruption after the remote accepted the pin would leave enrollment pending
+// for a pin that exists, so ctx bounds only the lock wait and send, which must respect it.
 func (l *Logger) RegisterAnchorV2Context(ctx context.Context, mode string, legacy *Anchor, send func(AnchorRegistrationRequest) (*AnchorV2, error)) (*ChainIdentity, error) {
 	if l.signer == nil || send == nil {
 		return nil, errors.New("v2 registration requires the original signing key and a confirmation callback")
@@ -251,7 +253,7 @@ func (l *Logger) RegisterAnchorV2Context(ctx context.Context, mode string, legac
 		if id.RegistrationState != ChainRegistrationNone {
 			return nil, errors.New("pending registration has lost its original request; restore trusted state, never regenerate it or clear the remote pin")
 		}
-		anchor, err := l.emitAnchorV2Locked(ctx, id)
+		anchor, err := l.emitAnchorV2Locked(context.Background(), id)
 		if err != nil {
 			return nil, err
 		}
@@ -279,7 +281,7 @@ func (l *Logger) RegisterAnchorV2Context(ctx context.Context, mode string, legac
 	}
 	// Verify inside the same lock as prune, on every retry. A prior candidate
 	// cannot be pinned after a none-state prune rewrote its signed chain.
-	result, err := l.verifyAgainstAnchorV2Locked(ctx, request.Anchor, l.signer.pub, id)
+	result, err := l.verifyAgainstAnchorV2Locked(context.Background(), request.Anchor, l.signer.pub, id)
 	if err != nil {
 		return nil, err
 	}
@@ -310,7 +312,7 @@ func (l *Logger) RegisterAnchorV2Context(ctx context.Context, mode string, legac
 		if stored == nil || stored.RowCount < request.Anchor.RowCount || (stored.RowCount == request.Anchor.RowCount && stored.HeadHash != request.Anchor.HeadHash) {
 			return nil, errors.New("registration confirmation is older than or conflicts with the original signed request")
 		}
-		checked, err := l.verifyAgainstAnchorV2Locked(ctx, stored, l.signer.pub, id)
+		checked, err := l.verifyAgainstAnchorV2Locked(context.Background(), stored, l.signer.pub, id)
 		if err != nil {
 			return nil, err
 		}
