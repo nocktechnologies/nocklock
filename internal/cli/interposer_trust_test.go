@@ -412,8 +412,8 @@ func TestVerificationScratchStateFallbackKeepsLandlockRulesValid(t *testing.T) {
 	if err := os.MkdirAll(state, 0o700); err != nil {
 		t.Fatal(err)
 	}
-	// The same exclusion set runProbeUnderWrap builds: the audit state wrap
-	// denies to the child, in canonical form.
+	// The same exclusion set runProbeUnderWrap builds: the original project's
+	// audit-state directory, in canonical form, kept out of staging scratch.
 	forbidden := []string{resolveExistingPrefix(state)}
 	if canonical, _ := filepath.EvalSymlinks(state); forbidden[0] != canonical {
 		t.Fatalf("audit state exclusion %q is not canonical %q", forbidden[0], canonical)

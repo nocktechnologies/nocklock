@@ -692,8 +692,10 @@ func runProbeUnderWrap(ctx context.Context, cfg *config.Config, configPath, fenc
 	for _, deny := range cfg.Filesystem.Deny {
 		forbidden = append(forbidden, absConfigPath(projectRoot, deny))
 	}
-	// wrap denies the project's audit-state directory to the child, and Landlock
-	// cannot carve a deny out of a grant, so no scratch or grant may sit in it.
+	// Exclude the original project's audit-state directory so staging the probe
+	// never places scratch or a grant inside the developer's real audit state.
+	// (The probe's own wrap runs against the temporary DB and state paths set
+	// below, not this directory.)
 	state, _ := config.AuditStateDir(projectRoot)
 	forbidden = append(forbidden, resolveExistingPrefix(state))
 	tmp, cleanup, ok := createScratchOutside(forbidden)
@@ -738,7 +740,7 @@ func runProbeUnderWrap(ctx context.Context, cfg *config.Config, configPath, fenc
 		// Put the executable pair in private scratch outside the same grants
 		// and denies, then validate its complete ancestry before using it.
 		// The state fallback is the state root (the parent of nocklock/<key>),
-		// never the denied audit directory itself.
+		// never the excluded original-project audit directory itself.
 		home, _ := os.UserHomeDir()
 		stateRoot := filepath.Dir(filepath.Dir(state))
 		var cleanupBin func()
