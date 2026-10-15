@@ -497,6 +497,7 @@ var wrapCmd = &cobra.Command{
 					// Look for the shared library next to the nocklock binary or in standard paths.
 					libPath, err := findLibFenceFS()
 					if err != nil {
+						logEvent(logging.EventFileBlocked, "filesystem", err.Error(), true)
 						return err
 					}
 
@@ -1688,7 +1689,7 @@ func findLibFenceFS() (string, error) {
 	if err != nil {
 		return "", fmt.Errorf("cannot resolve current working directory for filesystem fence library trust check: %w", err)
 	}
-	return findTrustedLibFenceFS(exePath, cwd, nil, fileExists)
+	return findTrustedLibFenceFS(exePath, cwd, nil, nil)
 }
 
 // networkFloorDetail renders the Seatbelt network-floor state for the signed
@@ -1777,9 +1778,9 @@ func validateUnixProxySocketPath(path string) error {
 	return nil
 }
 
-func findTrustedLibFenceFS(exePath, workingDir string, extraCandidates []string, exists func(string) (bool, error)) (string, error) {
-	if exists == nil {
-		exists = fileExists
+func findTrustedLibFenceFS(exePath, workingDir string, extraCandidates []string, inspect func(string, []string) (string, error)) (string, error) {
+	if inspect == nil {
+		inspect = trustedInterposerPathInProject
 	}
 
 	candidates := make([]string, 0, len(extraCandidates)+3)
@@ -1792,38 +1793,86 @@ func findTrustedLibFenceFS(exePath, workingDir string, extraCandidates []string,
 	)
 	candidates = append(candidates, extraCandidates...)
 
+	// A project-owned library pointer must never select a trusted library. The one
+	// rule that enforces this runs inside the trust walk (see inspectTrustedPath),
+	// which checks every visited path against these project spellings; a hit
+	// returns errTrustedPathWithinProject and the loop below skips the candidate,
+	// the same as a missing one.
+	projectDirs := projectDirSpellings(workingDir)
+
 	for _, candidate := range candidates {
 		abs, err := filepath.Abs(candidate)
 		if err != nil {
 			continue
 		}
-		ok, err := exists(abs)
+		canonical, err := inspect(abs, projectDirs)
+		// A project-owned candidate (sentinel) and a missing one both let the
+		// resolver try the next location; neither fails the launch.
+		if errors.Is(err, errTrustedPathWithinProject) || errors.Is(err, os.ErrNotExist) {
+			continue
+		}
 		if err != nil {
-			return "", fmt.Errorf("cannot inspect trusted filesystem fence library candidate %q: %w", abs, err)
+			return "", fmt.Errorf("cannot inspect trusted filesystem fence library candidate %q: %w; refusing to launch with an unsafe LD_PRELOAD path", abs, err)
 		}
-		if !ok {
-			continue
-		}
-		if pathIsWithinDir(abs, workingDir) {
-			continue
-		}
-		return abs, nil
+		return canonical, nil
 	}
 
 	return "", fmt.Errorf("trusted filesystem fence library not found. Install libfence_fs.so next to the nocklock binary, at /usr/local/lib/nocklock/libfence_fs.so, or at /usr/lib/nocklock/libfence_fs.so; refusing to launch with an untrusted LD_PRELOAD path")
 }
 
-func fileExists(path string) (bool, error) {
-	_, err := os.Stat(path)
-	if err == nil {
-		return true, nil
+// errTrustedPathWithinProject marks a trust-walk refusal: a path the walk visited
+// lies inside the project. The library resolver skips such a candidate rather
+// than trusting a project-owned pointer.
+var errTrustedPathWithinProject = errors.New("trusted filesystem fence library path lies inside the project")
+
+// projectDirSpellings returns the working directory's raw spelling and, when it
+// differs, its canonical (symlink-resolved) spelling, so the trust walk can
+// compare visited paths against both. An empty working directory yields no
+// project dirs, disabling the check (the plain interposer callers pass none).
+func projectDirSpellings(workingDir string) []string {
+	if workingDir == "" {
+		return nil
 	}
-	if errors.Is(err, os.ErrNotExist) {
-		return false, nil
+	dirs := []string{workingDir}
+	if canonical := resolvePathBestEffort(workingDir); canonical != workingDir {
+		dirs = append(dirs, canonical)
 	}
-	return false, err
+	return dirs
 }
 
+// visitedPathWithinProject reports whether a path the trust walk visited lies
+// inside the project. It checks the path's raw spelling and its canonical
+// (symlink-resolved) spelling against every project directory spelling, so a
+// candidate cannot hide an in-project location by canonicalizing away from it or
+// by being reached through a symlinked working directory.
+func visitedPathWithinProject(path string, projectDirs []string) bool {
+	if len(projectDirs) == 0 {
+		return false
+	}
+	// Raw-spelling checks are pure string work; try them for every project
+	// spelling first and only resolve symlinks (an EvalSymlinks syscall) when none
+	// match. The resolved check is still load-bearing — it catches a visited path
+	// whose own spelling sits outside the project but which resolves into it (a
+	// hop through a symlink pointing inward) — so a node that is genuinely outside
+	// the project does pay one resolve here.
+	for _, dir := range projectDirs {
+		if lexicalPathIsWithinDir(path, dir) {
+			return true
+		}
+	}
+	resolved := resolvePathBestEffort(path)
+	for _, dir := range projectDirs {
+		if lexicalPathIsWithinDir(resolved, dir) {
+			return true
+		}
+	}
+	return false
+}
+
+// pathIsWithinDir reports whether path is inside dir. It resolves both operands
+// with resolvePathBestEffort before the relative-path check, so a symlinked
+// working directory (or a candidate spelled through a symlink) cannot hide a
+// path that is inside it.
 func pathIsWithinDir(path, dir string) bool {
 	if dir == "" {
 		return false
@@ -1834,6 +1883,29 @@ func pathIsWithinDir(path, dir string) bool {
 		return false
 	}
 	rel, err := filepath.Rel(resolvedDir, resolvedPath)
+	if err != nil {
+		return false
+	}
+	return rel == "." || (rel != ".." && !strings.HasPrefix(rel, ".."+string(os.PathSeparator)))
+}
+
+// lexicalPathIsWithinDir reports whether path is inside dir using only lexical
+// cleaning — it never resolves symlinks. visitedPathWithinProject uses it to
+// refuse a visited path whose own spelling sits inside the project even when that
+// path is a symlink pointing at a trusted target outside the project: the pointer
+// is project-owned, so it cannot be trusted whatever it targets. pathIsWithinDir,
+// which resolves both operands, cannot answer this because it canonicalizes the
+// path away from the project first, so visitedPathWithinProject calls both — the
+// raw spelling here and the canonical spelling via resolvePathBestEffort.
+func lexicalPathIsWithinDir(path, dir string) bool {
+	if dir == "" {
+		return false
+	}
+	cleanDir := filepath.Clean(dir)
+	if cleanDir == filepath.Dir(cleanDir) {
+		return false
+	}
+	rel, err := filepath.Rel(cleanDir, filepath.Clean(path))
 	if err != nil {
 		return false
 	}

@@ -6,6 +6,7 @@ All notable changes to NockLock will be documented in this file.
 
 ### Security
 
+- Validate Linux interposer ownership, permissions and symlink paths before launch; report unsafe installations in `doctor`. One rule guards project ownership: during the trust walk, every path the walk visits — the original spelling, every ancestor, every symlink and every symlink-target hop — is compared against the project by its raw and canonical spelling against both the raw and canonical working directory, and any visited path inside the project refuses that candidate. This covers a candidate spelled inside the project, a parent directory symlinked into it, a project file linking outward, and a middle hop through a project-owned symlink, so a project-owned pointer cannot select a trusted library. The check is bounded (at most 40 symlinks) and has the same TOCTOU window as the rest of the walk; it says nothing about paths outside the candidate's walk (N11769).
 - Remove internal drafts, private review instructions, server-specific acceptance material and personal identifiers from published probe records and design notes. Retain the technical probe verdicts with redacted host, account and home path. Add a public-content check to CI and store only exact historical finding fingerprints in the secret-scan baseline (N11824).
 
 ### Added

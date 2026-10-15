@@ -819,6 +819,12 @@ func runProbeUnderWrap(ctx context.Context, cfg *config.Config, configPath, fenc
 	for _, deny := range cfg.Filesystem.Deny {
 		forbidden = append(forbidden, absConfigPath(projectRoot, deny))
 	}
+	// Exclude the original project's audit-state directory so staging the probe
+	// never places scratch or a grant inside the developer's real audit state.
+	// (The probe's own wrap runs against the temporary DB and state paths set
+	// below, not this directory.)
+	state, _ := config.AuditStateDir(projectRoot)
+	forbidden = append(forbidden, resolveExistingPrefix(state))
 	tmp, cleanup, ok := createScratchOutside(forbidden)
 	if !ok {
 		return probeResult{Fence: fence}, fmt.Errorf("could not create verification scratch directory outside configured filesystem grants")
@@ -855,7 +861,23 @@ func runProbeUnderWrap(ctx context.Context, cfg *config.Config, configPath, fenc
 	// installed executable would conflict with a deny that contains it and can
 	// also widen the policy being verified.
 	probeBin := filepath.Join(tmp, "bin")
-	if err := os.Mkdir(probeBin, 0o755); err != nil {
+	if runtime.GOOS == "linux" && cfgCopy.Filesystem.Root != "" {
+		// The state/canary scratch may be under /var/tmp or /dev/shm, whose
+		// shared writable ancestors cannot be trusted for an LD_PRELOAD file.
+		// Put the executable pair in private scratch outside the same grants
+		// and denies, then validate its complete ancestry before using it.
+		// The state fallback is the state root (the parent of nocklock/<key>),
+		// never the excluded original-project audit directory itself.
+		home, _ := os.UserHomeDir()
+		stateRoot := filepath.Dir(filepath.Dir(state))
+		var cleanupBin func()
+		var ok bool
+		probeBin, cleanupBin, ok = createTrustedScratchOutsideBases(forbidden, []string{home, stateRoot})
+		if !ok {
+			return probeResult{Fence: fence}, errors.New("cannot create trusted verification executable scratch outside filesystem grants and denies; provide a safe home or audit-state directory")
+		}
+		defer cleanupBin()
+	} else if err := os.Mkdir(probeBin, 0o755); err != nil {
 		return probeResult{Fence: fence}, err
 	}
 	probeExe := filepath.Join(probeBin, "nocklock-probe")
@@ -868,6 +890,9 @@ func runProbeUnderWrap(ctx context.Context, cfg *config.Config, configPath, fenc
 	}
 	cfgCopy.Filesystem.Allow = append(cfgCopy.Filesystem.Allow, probeBin)
 	if runtime.GOOS == "linux" && cfgCopy.Filesystem.Root != "" {
+		if _, err := trustedInterposerPath(probeExe); err != nil {
+			return probeResult{Fence: fence}, fmt.Errorf("unsafe verification executable scratch: %w", err)
+		}
 		libPath, err := verifyFilesystemBackend()
 		if err != nil {
 			return probeResult{Fence: fence}, err
@@ -996,7 +1021,11 @@ var verifyScratchBases = []string{"/var/tmp", "/dev/shm", os.TempDir()}
 var verifyWriteFile = os.WriteFile
 
 func createScratchOutside(roots []string) (string, func(), bool) {
-	for _, base := range verifyScratchBases {
+	return createScratchOutsideBases(roots, verifyScratchBases)
+}
+
+func createScratchOutsideBases(roots, bases []string) (string, func(), bool) {
+	for _, base := range bases {
 		if base == "" || pathWithinAny(base, roots) {
 			continue
 		}
@@ -1009,6 +1038,29 @@ func createScratchOutside(roots []string) (string, func(), bool) {
 			continue
 		}
 		return dir, func() { os.RemoveAll(dir) }, true
+	}
+	return "", nil, false
+}
+
+// createTrustedScratchOutsideBases tries every safe base before refusing. Check
+// ancestry before copying executable bytes, including when HOME is unsafe but
+// the audit-state directory is safe. Recheck the created directory as well.
+func createTrustedScratchOutsideBases(roots, bases []string) (string, func(), bool) {
+	for _, base := range bases {
+		base, err := trustedInterposerDirectory(base)
+		if err != nil {
+			continue
+		}
+		dir, cleanup, ok := createScratchOutsideBases(roots, []string{base})
+		if !ok {
+			continue
+		}
+		canonical, err := trustedInterposerDirectory(dir)
+		if err != nil || pathWithinAny(canonical, roots) {
+			cleanup()
+			continue
+		}
+		return canonical, cleanup, true
 	}
 	return "", nil, false
 }

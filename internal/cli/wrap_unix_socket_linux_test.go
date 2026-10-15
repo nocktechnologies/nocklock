@@ -130,6 +130,17 @@ func TestWrapUnixSocketReachability(t *testing.T) {
 		t.Fatalf("locate Go module cache before isolating HOME: %v", err)
 	}
 	t.Setenv("GOMODCACHE", strings.TrimSpace(string(moduleCache)))
+	// A library under /tmp is intentionally refused, even in a private child
+	// directory. Keep only the disposable executable pair under the real home.
+	trustedHome, err := os.UserHomeDir()
+	if err != nil {
+		t.Fatal(err)
+	}
+	binDir, err := os.MkdirTemp(trustedHome, ".nocklock-socket-probe-")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { os.RemoveAll(binDir) })
 	home := t.TempDir()
 	t.Setenv("HOME", home)
 	t.Setenv("XDG_CONFIG_HOME", filepath.Join(home, ".config"))
@@ -139,7 +150,7 @@ func TestWrapUnixSocketReachability(t *testing.T) {
 	}
 	abi, abiErr := landlock.DetectABI()
 	_, boundaryReason := unixSocketBoundaryStatus(abi, abiErr)
-	bin, projectDir, probePath := buildUnixSocketWrapFixture(t)
+	bin, projectDir, probePath := buildUnixSocketWrapFixture(t, binDir)
 	listeners, stopServers := startThrowawayUnixSocketServers(t)
 	defer stopServers()
 	proveThrowawaySocketControls(t, listeners)
@@ -386,11 +397,10 @@ func proveThrowawaySocketControls(t *testing.T, servers throwawaySocketListeners
 	}
 }
 
-func buildUnixSocketWrapFixture(t *testing.T) (bin, projectDir, probePath string) {
+func buildUnixSocketWrapFixture(t *testing.T, binDir string) (bin, projectDir, probePath string) {
 	t.Helper()
 	testDir := t.TempDir()
 	projectDir = filepath.Join(testDir, "project")
-	binDir := filepath.Join(testDir, "bin")
 	if err := os.MkdirAll(filepath.Join(projectDir, ".nock"), 0o700); err != nil {
 		t.Fatalf("create fixture project: %v", err)
 	}
