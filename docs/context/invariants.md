@@ -9,5 +9,6 @@ These hold for every change. [AGENTS.md](../../AGENTS.md) summarizes them; this 
 - **Say only what is enforced.** Docs, `doctor`, `wrap` banners and the README state the real boundary, including the limits (`docs/how-it-works/`). Egress levels are defined once, in `internal/cli/egress_level.go`.
 - **Exit codes**: `doctor` uses 0/2/3/4 for PROTECTED/GAPS FOUND/PARTIAL/UNPROTECTED; `wrap` returns 2 when startup fails or the child's exit code (`docs/reference/cli.md`). Use `exec.ExitError.ExitCode()`, never `syscall.WaitStatus` (`.claude/lessons/cross-platform-exit-codes.md`).
 - **Exported functions need doc comments; error messages must be actionable.**
-- **No new dependencies without discussion.** The stack is Go 1.26+, cobra, BurntSushi/toml and SQLite via modernc.org/sqlite.
-- **Do not weaken `.claude/hooks/branch-lock.sh`.** It runs as a PreToolUse hook on every Bash call (5s timeout, `.claude/settings.json`) and blocks `git checkout` / `git switch` away from the branch first touched in the session, recorded in the gitignored `.branch-lock`; delete that file to unlock. `git merge` and `git rebase` are out of scope.
+- **No new dependencies without discussion.**
+- **Pull requests target `next`, never `main`.** A maintainer promotes `next` to `main` in a release PR (`docs/runbooks/release.md`, `CONTRIBUTING.md`).
+- **Do not weaken `.claude/hooks/branch-lock.sh`** (Claude Code only). It runs as a PreToolUse hook on every Bash call (5s timeout, `.claude/settings.json`) and blocks `git checkout` / `git switch` away from the branch first touched in the session, recorded in the gitignored `.branch-lock`; delete that file to unlock. `git merge` and `git rebase` are out of scope.

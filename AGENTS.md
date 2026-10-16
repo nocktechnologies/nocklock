@@ -17,9 +17,9 @@ Follows Engineering Standards v4.
 | The syscall fence | `internal/fence/syscallfence/`, `docs/how-it-works/syscall-fence.md` |
 | The audit log, signing, anchors, verification | `internal/logging/`, `internal/anchorclient/`, `pkg/receipt/` (public verifier), `docs/how-it-works/audit-log.md` |
 | `doctor` and `verify` verdicts | `internal/cli/doctor.go`, `internal/cli/verify.go`, `docs/how-it-works/doctor-and-verify.md` |
-| End-to-end tests | `integration/` (`go test -tags=integration ./...`) |
+| End-to-end tests | `integration/` |
 | The red-team bench | `bench/redteam/` |
-| CI | `.github/workflows/` (`test.yml`, `network-egress.yml`, `gitleaks.yml`) |
+| CI | `.github/workflows/` |
 | A release | `docs/runbooks/release.md`, `CHANGELOG.md` |
 | User-facing docs | `README.md`, `docs/setup.md`, `docs/how-it-works/` |
 
@@ -47,7 +47,7 @@ CI (`.github/workflows/test.yml`) also runs the darwin cross-vet, race regressio
 
 ## Rules that bite
 
-The full list, with the reasons, is in [docs/context/invariants.md](docs/context/invariants.md).
+Full list: [docs/context/invariants.md](docs/context/invariants.md).
 
 - Fences fail closed. If a fence cannot initialize, the agent does not start; never fall back to passthrough.
 - Unknown TOML keys are a hard error, and config changes stay backwards compatible.
