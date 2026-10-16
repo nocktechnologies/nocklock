@@ -242,8 +242,12 @@ var wrapCmd = &cobra.Command{
 		// stderr and the run exits 2 whatever the child's own code was, because the
 		// audit trail no longer records how the run ended. No close is attempted —
 		// the close's last_id is only meaningful once session_end is the run's last
-		// ordinary row — and the run reads unclosed.
+		// ordinary row — and the run reads unclosed. Every caller is the run's last
+		// return and reports its own result, so cobra's error and usage printing is
+		// silenced here.
 		endSession := func(detail string, blocked bool, reason string, result error) error {
+			cmd.SilenceErrors = true
+			cmd.SilenceUsage = true
 			runEndReason = reason
 			if err := logger.Log(logging.Event{
 				Timestamp: time.Now(),
@@ -255,8 +259,6 @@ var wrapCmd = &cobra.Command{
 			}); err != nil {
 				runSessionEndFailed = true
 				fmt.Fprintf(cmd.ErrOrStderr(), "NockLock: fatal: failed to record session_end (%s) for run %s: %v — the run will read unclosed; exiting 2\n", detail, sessionID, err)
-				cmd.SilenceErrors = true
-				cmd.SilenceUsage = true
 				return &exitCodeError{code: 2}
 			}
 			runSessionEnded = true
@@ -1015,8 +1017,6 @@ var wrapCmd = &cobra.Command{
 			// The child never launched, but the proxy and its watchdog did; join them
 			// before session_end so it stays the run's last ordinary row on this path.
 			drainProxy()
-			cmd.SilenceErrors = true
-			cmd.SilenceUsage = true
 			return endSession("exit_code=1", false, "refused", resolveErr)
 		}
 		childArgv := composeChildArgv(resolved, landlockPrefix, fsSandboxPrefix)
@@ -1224,22 +1224,16 @@ var wrapCmd = &cobra.Command{
 		// verdict wins. The reader goroutine has finished (Wait above), establishing
 		// happens-before for decisionFailErr.
 		if decisionFailed.Load() {
-			cmd.SilenceErrors = true
-			cmd.SilenceUsage = true
 			return endSession(fmt.Sprintf("exit_code=2 decision_audit_failed=true err=%v", decisionFailErr), true, "audit_failed", &exitCodeError{code: 2})
 		}
 		// The same verdict for a blocked event (filesystem denial, network error)
 		// that could not be written: the record of what the fence stopped is
 		// incomplete, so the child's own exit code is not reported.
 		if err := audit.failure(); err != nil {
-			cmd.SilenceErrors = true
-			cmd.SilenceUsage = true
 			return endSession(fmt.Sprintf("exit_code=2 audit_write_failed=true err=%v", err), true, "audit_failed", &exitCodeError{code: 2})
 		}
 
 		if childErr != nil {
-			cmd.SilenceErrors = true
-			cmd.SilenceUsage = true
 			if proxyFailed.Load() {
 				return endSession("exit_code=2 proxy_failed=true", true, "refused", &exitCodeError{code: 2})
 			}
@@ -1256,8 +1250,6 @@ var wrapCmd = &cobra.Command{
 		}
 
 		if proxyFailed.Load() {
-			cmd.SilenceErrors = true
-			cmd.SilenceUsage = true
 			return endSession("exit_code=2 proxy_failed=true", true, "refused", &exitCodeError{code: 2})
 		}
 

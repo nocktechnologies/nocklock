@@ -112,29 +112,33 @@ func assertExitCode(t *testing.T, err error, want int) {
 	}
 }
 
-// A session_end that cannot be written must fail the run (exit 2) and say why,
-// even though the child exited 0; the run is left without a signed close. The
-// control run with a writable log still exits 0 with session_end and close.
-func TestWrapFailsWhenSessionEndCannotBeWritten(t *testing.T) {
+// A failed session_end or blocked-secret write fails the run with exit 2 and
+// names the error. The control run with a writable log exits 0 and records the
+// blocked secret, session_end and the signed close.
+func TestWrapFailsWhenAuditWritesFail(t *testing.T) {
 	t.Setenv("XDG_STATE_HOME", trustedStateRoot(t))
+	t.Setenv(auditFailTestSecret, "not-for-the-child")
+	newRun := func(t *testing.T) (string, string) {
+		projectRoot := resolvedTempDir(t)
+		return projectRoot, filepath.Join(projectRoot, "fresh", ".nock", "events.db")
+	}
 
 	t.Run("writable log", func(t *testing.T) {
-		projectRoot := resolvedTempDir(t)
-		db := filepath.Join(projectRoot, "fresh", ".nock", "events.db")
+		projectRoot, db := newRun(t)
 		marker, stderr, err := runWrapWithFailingAudit(t, projectRoot, db)
 		if err != nil {
 			t.Fatalf("wrap error = %v, want nil; stderr:\n%s", err, stderr)
 		}
 		assertChildMarker(t, marker)
 		counts := auditEventCounts(t, projectRoot, db)
-		if counts["session_end"] != 1 || counts["session_close"] != 1 {
-			t.Fatalf("event counts = %v, want one session_end and one session_close", counts)
+		if counts["secret_blocked/"+auditFailTestSecret] != 1 || counts["session_end"] != 1 || counts["session_close"] != 1 {
+			t.Fatalf("event counts = %v, want one secret_blocked row for %s, one session_end and one session_close", counts, auditFailTestSecret)
 		}
 	})
 
+	// The child exits 0, but the run fails and is left without a signed close.
 	t.Run("session_end write fails", func(t *testing.T) {
-		projectRoot := resolvedTempDir(t)
-		db := filepath.Join(projectRoot, "fresh", ".nock", "events.db")
+		projectRoot, db := newRun(t)
 		installAuditWriteFailure(t, projectRoot, db, logging.EventSessionEnd)
 		marker, stderr, err := runWrapWithFailingAudit(t, projectRoot, db)
 		assertExitCode(t, err, 2)
@@ -147,30 +151,10 @@ func TestWrapFailsWhenSessionEndCannotBeWritten(t *testing.T) {
 			t.Fatalf("event counts = %v, want no session_close after a failed session_end", counts)
 		}
 	})
-}
 
-// A blocked-secret batch that cannot be written must refuse to launch the child
-// (exit 2) and say why. The control run records the blocked secret.
-func TestWrapRefusesWhenBlockedSecretsCannotBeWritten(t *testing.T) {
-	t.Setenv("XDG_STATE_HOME", trustedStateRoot(t))
-	t.Setenv(auditFailTestSecret, "not-for-the-child")
-
-	t.Run("writable log", func(t *testing.T) {
-		projectRoot := resolvedTempDir(t)
-		db := filepath.Join(projectRoot, "fresh", ".nock", "events.db")
-		marker, stderr, err := runWrapWithFailingAudit(t, projectRoot, db)
-		if err != nil {
-			t.Fatalf("wrap error = %v, want nil; stderr:\n%s", err, stderr)
-		}
-		assertChildMarker(t, marker)
-		if counts := auditEventCounts(t, projectRoot, db); counts["secret_blocked/"+auditFailTestSecret] != 1 {
-			t.Fatalf("event counts = %v, want one secret_blocked row for %s", counts, auditFailTestSecret)
-		}
-	})
-
+	// The blocked-secret rows are written before launch, so wrap refuses to start.
 	t.Run("secret_blocked write fails", func(t *testing.T) {
-		projectRoot := resolvedTempDir(t)
-		db := filepath.Join(projectRoot, "fresh", ".nock", "events.db")
+		projectRoot, db := newRun(t)
 		installAuditWriteFailure(t, projectRoot, db, logging.EventSecretBlocked)
 		marker, stderr, err := runWrapWithFailingAudit(t, projectRoot, db)
 		assertExitCode(t, err, 2)
