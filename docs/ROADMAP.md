@@ -1,34 +1,26 @@
 # Roadmap to 1.0
 
-Released baseline: `v0.11.0`. The four 1.0 bars are approved. This page tracks the code and tests that must support each claim.
+Updated 2026-10-16. Released baseline: `v0.11.0`. Release history is in `CHANGELOG.md`. The planned 0.7.1 step was split across 0.8.0 and 0.9.0; there is no `v0.7.1` tag. A gap is closed only when its fix is released from `main`, the red-team case runs in CI with an allowed-action negative control, and the docs describe the tested boundary.
 
-## The 1.0 bar
+## Now: the four 1.0 bars
 
-| # | Bar | Current evidence and remaining work |
+| # | Bar | State and remaining work |
 |---|---|---|
-| 1 | Close the Linux `CONFINED` Unix-socket and `io_uring` gaps, with red-team coverage | `io_uring_setup`, `io_uring_enter` and `io_uring_register` are denied in `internal/fence/syscallfence/denylist.go` (N11655, v0.8.0); `TestEnforce_IORingSocketConnectDenied` covers the path. Unix sockets: below Landlock ABI 9 (every kernel tested) they stay reachable, and since #174 `wrap` records that in a signed row and `doctor` reports `PARTIAL`; `network.require_unix_socket_isolation` refuses instead. The ABI 9 rules that block them have not run on a real kernel (`docs/design/unix-socket-reachability.md`, `docs/probes/n11650/`). The `bench/redteam/kernel_cases.py` companion (v0.10.0) runs real Unix-socket and `io_uring` probes with allowed-action controls and records capability gaps separately from the main bench score (#205). ABI 9 and unavailable `io_uring` checks remain explicit gaps; the added harness does not close this bar without real capable-kernel receipts and a release. |
-| 2 | Ship honest `doctor` verdicts | The verdict model shipped in v0.8.0 (#168); v0.9.0 added the Unix-socket limitation and v0.9.2 added the managed signing-key boundary. `internal/cli/doctor.go` maps `PROTECTED`/`GAPS FOUND`/`PARTIAL`/`UNPROTECTED` to exits 0/2/3/4; tests are beside it in `internal/cli/doctor_test.go`. Keep `docs/how-it-works/doctor-and-verify.md` and the README aligned with that contract. |
-| 3 | Complete the Linux install | Open. Source installation still needs a manual `sudo install` of the binary, a manual copy of `libfence_fs.so` to a trusted library path on Linux, and a separate privileged `make install-egress-helper` (`Makefile`, `docs/setup.md`). The signed packaging and OS acceptance design landed in PR #172 and is in `docs/design/linux-packaging.md`; installer/release-asset implementation and clean-host verification remain open. |
-| 4 | Write down the CLI, config schema and exit codes as the contract to keep | `docs/reference/cli.md` records current behavior, including the doctor exits and the v0.9.2 signing-key posture. Before 1.0, audit every public command, flag and config key against `internal/cli/` and `internal/config/`, resolve the child-exit overlap with CLI errors, and pin the chosen contract in tests. The page is a snapshot until that review is complete. |
+| 1 | Close the Linux `CONFINED` Unix-socket and `io_uring` gaps, with red-team coverage | `io_uring` syscalls are denied (`internal/fence/syscallfence/denylist.go`, v0.8.0). Below Landlock ABI 9, Unix sockets stay reachable: `wrap` signs that limitation, `doctor` reports `PARTIAL`, and `network.require_unix_socket_isolation` refuses instead. The ABI 9 rules have not run on a real kernel (`docs/design/unix-socket-reachability.md`). `bench/redteam/kernel_cases.py` records the probes and gaps. Open until capable-kernel receipts ship in a release; `CONFINED` must not claim Unix-socket isolation before then. |
+| 2 | Ship honest `doctor` verdicts | Shipped in v0.8.0 and extended through v0.9.2 (`internal/cli/doctor.go`, exits 0/2/3/4). Keep `docs/how-it-works/doctor-and-verify.md` and the README aligned with that contract. |
+| 3 | Complete the Linux install | Open. Source install still needs a manual `sudo install`, a manual copy of `libfence_fs.so`, and a separate `make install-egress-helper` (`docs/setup.md`). The packaging design is in `docs/design/linux-packaging.md`; the installer, release assets and clean-host verification remain. |
+| 4 | Pin the CLI, config schema and exit codes as a contract | `docs/reference/cli.md` records current behavior. Remaining: audit every command, flag and config key against `internal/cli/` and `internal/config/`, resolve the child-exit overlap with CLI errors, and pin the contract in tests. |
 
-Card PRs target `next`; a maintainer reviews and squash-merges them, then promotes a batch through one squashed `next` → `main` release PR ([release runbook](runbooks/release.md)). Work on `next` is not yet shipped.
+## Next: 1.0
 
-A gap is closed only when its fix is released from `main`, the red-team case runs in CI with an allowed-action negative control, and the documentation describes the tested boundary. In particular, `CONFINED` must not claim Unix-socket isolation until the ABI 9 rules have run on a real kernel.
+All four bars verified. `docs/reference/cli.md` becomes the compatibility contract for the public CLI, config schema, exit codes, egress levels and `verify --audit` states. Add contract tests and update `CONTRIBUTING.md` and `AGENTS.md` when that promise takes effect.
 
-## Release path
+## Later: outside the 1.0 bar
 
-- **0.7.1 (planned, skipped):** the original no-breaking-change step for honesty and Linux gaps. Those changes were split instead: doctor and `io_uring` shipped in v0.8.0; Unix-socket enforcement rules and strict refusal shipped in v0.9.0, but real ABI 9 validation is still open. There is no `v0.7.1` tag.
-- **0.8.0 (released):** the breaking doctor exit-code change is recorded under `### Breaking` in `CHANGELOG.md`; the first red-team bench slice and the `io_uring` deny landed. The complete Linux install and full CLI/config/exit-code contract did not land with this release. Further changes on the way to 1.0 need explicit changelog entries and upgrade instructions.
-- **0.9.0 (released):** `doctor` now returns `PARTIAL` (exit 3) for Linux `CONFINED` below Landlock ABI 9. Default `wrap` warns and signs the Unix-socket limitation; `network.require_unix_socket_isolation = true` refuses when it cannot enforce the boundary. ABI 9 rules are implemented but untested on a real kernel. The release also hardens the red-team harness and adds the documentation map and install corrections.
-- **0.9.1 (released):** protect the managed signing-key directory, including relocated `XDG_CONFIG_HOME`, and keep Linux netns child privilege changes on one OS thread.
-- **0.9.2 (released):** add signing-key posture to `doctor`, repair macOS `verify`, serialize proxy shutdown, improve onboarding and document signing-key replacement. The Linux packaging design landed; no installer or binary assets shipped with it.
-- **0.9.3 (released):** clear supplementary groups process-wide in Linux netns proxy sidecars, fix dead-port test reuse, and document the remote-anchor identity limitation and proposed v2 design. That released version uses v1 anchors; it does not contain the per-chain v2 implementation.
-- **0.10.0 (released):** per-chain remote v2 anchors are implemented. Explicit `anchor enroll` / `anchor migrate`, `anchor push`, and `verify --against-remote-anchor` work against an upgraded v2 anchor store, with durable retry, expected-pair verification and conditional remote updates; trusted external chain identity makes prune refuse pending, enrolled or incompletely registered chains; `anchor emit` refuses unsigned or stripped databases. Remote push/verify never fall back to v1, so projects must enroll or migrate first. Text verification output now carries a `COVERAGE: LIMITED` notice. Two security fixes also ship: Linux netns bridge allocation skips the `169.254.169.0/24` and `169.254.170.0/24` metadata ranges, and `wrap` resolves the command on the caller's PATH and refuses the current directory. See the [audit-log guide](how-it-works/audit-log.md). No Linux installer or release assets ship with this release.
-- **0.11.0 (released):** `wrap` ends each run with a signed close row and `verify --audit` reports per-run lifecycle states, with `--require-closed` for strict checks. A signed verification receipt lets repeat verification skip signatures it already checked, and `--walk-timeout` bounds long verification walks. The signed `session_start` row records the command's SHA-256. On Linux, `wrap` refuses an interposer library the project could control. No Linux installer or release assets ship with this release.
-- **1.0:** all four bars above are verified. `docs/reference/cli.md` becomes the compatibility contract for the public CLI, config schema, exit codes, egress levels and `verify --audit` states. Add contract tests and update `CONTRIBUTING.md` and `CLAUDE.md` when that promise takes effect.
+- macOS read confinement outside `filesystem.root` (`ARCHITECTURE.md`)
+- A Windows fence (`docs/design/windows-feasibility.md`)
+- Look-back rules beyond slice 1 (`docs/design/look-back-rules.md`)
+- Default off-box audit anchoring (`docs/how-it-works/audit-log.md`); per-chain v2 anchors shipped in v0.10.0 and stay opt-in
+- Kernel-drop observation (`docs/design/kernel-floor-denial-evidence.md`), design only
 
-## Outside this bar
-
-macOS read confinement outside `filesystem.root` (`ARCHITECTURE.md`), a Windows fence (`docs/design/windows-feasibility.md`), look-back rules beyond slice 1 (`docs/design/look-back-rules.md`), and default off-box audit anchoring (`docs/how-it-works/audit-log.md`) are separate work. Per-chain remote-anchor v2 (`docs/design/anchor-chain-identity.md`) is implemented in v0.10.0 as described above and remains opt-in. Kernel-drop observation (`docs/design/kernel-floor-denial-evidence.md`) remains design-only; its design does not close an implementation or evidence gap by itself.
-
-When a bar closes, replace its remaining-work text with the merge commit and the test that proves it. Record any scope change with its approval source.
+When a bar closes, replace its remaining work with the merge commit and the test that proves it.

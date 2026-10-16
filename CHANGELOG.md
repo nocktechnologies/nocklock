@@ -4,6 +4,10 @@ All notable changes to NockLock will be documented in this file.
 
 ## [Unreleased]
 
+### Changed
+
+- Docs: `AGENTS.md` is now the canonical contributor and agent map (task-to-location table, build and test, required checks, rules) and `CLAUDE.md` imports it. The full invariant list moved to `docs/context/invariants.md`. `docs/ROADMAP.md` is trimmed to one dated now / next / later page; release history stays in this file.
+
 ## [0.11.0] - 2026-10-15
 
 v0.11.0 makes each run's audit trail provably complete or provably cut short. `wrap` now ends every run with a signed close row, and `nocklock verify --audit` reports whether each run closed cleanly, was cut short, was pruned, or fails its close check. Repeat verification is much faster on large trails: a signed receipt lets the verifier skip re-checking signatures it already checked, and a new `--walk-timeout` flag bounds long walks. The signed `session_start` row now records the SHA-256 of the command that ran. On Linux, `wrap` refuses an interposer library that is unsafe to load. Older audit databases verify as before.
@@ -71,7 +75,7 @@ v0.10.0 gives each project its own remote audit chain: anchor v2 requires explic
 
 - `nocklock wrap -- <cmd>` now resolves `<cmd>` on the caller's PATH and no longer runs an executable from the current directory. A command that relied on being found in the current directory must be given as an explicit path such as `./<cmd>` (N11777).
 
-- Document the card-to-`next` and batched `next`-to-`main` review/release workflow, verified ruleset checks and Mira's exact-head gate; run test and network-egress CI on pushes to `next` as well as `main`. Refresh the roadmap to v0.9.3 while retaining the unimplemented packaging and anchor-protocol limits (N11740).
+- Document the card-to-`next` and batched `next`-to-`main` review/release workflow, verified ruleset checks and the maintainers' exact-head review gate; run test and network-egress CI on pushes to `next` as well as `main`. Refresh the roadmap to v0.9.3 while retaining the unimplemented packaging and anchor-protocol limits (N11740).
 
 ### Documentation
 
