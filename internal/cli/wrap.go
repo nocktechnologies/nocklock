@@ -218,7 +218,9 @@ var wrapCmd = &cobra.Command{
 		// logEvent records one event. logger is guaranteed non-nil here (the open
 		// above fails closed), so no nil guard is needed. A failed blocked-event
 		// write cancels the child and fails the session (audit.failure below).
-		audit := &auditRecorder{log: logger.Log, sessionID: sessionID, stderr: cmd.ErrOrStderr(), cancel: childCancel}
+		// LogImmediate waits out busy_timeout on a write lock held by another
+		// process, so lock contention does not kill the child.
+		audit := &auditRecorder{log: logger.LogImmediate, sessionID: sessionID, stderr: cmd.ErrOrStderr(), cancel: childCancel}
 		logEvent := audit.record
 
 		// Run-lifecycle teardown state (docs/design/run-lifecycle-contract.md). A run
@@ -249,7 +251,7 @@ var wrapCmd = &cobra.Command{
 			cmd.SilenceErrors = true
 			cmd.SilenceUsage = true
 			runEndReason = reason
-			if err := logger.Log(logging.Event{
+			if err := logger.LogImmediate(logging.Event{
 				Timestamp: time.Now(),
 				EventType: logging.EventSessionEnd,
 				Category:  "session",
@@ -259,6 +261,12 @@ var wrapCmd = &cobra.Command{
 			}); err != nil {
 				runSessionEndFailed = true
 				fmt.Fprintf(cmd.ErrOrStderr(), "NockLock: fatal: failed to record session_end (%s) for run %s: %v — the run will read unclosed; exiting 2\n", detail, sessionID, err)
+				// Exit 2 replaces result, so print a result that carries its own
+				// diagnostic (an unresolvable command, a failed launch).
+				var exitErr *exitCodeError
+				if result != nil && !errors.As(result, &exitErr) {
+					fmt.Fprintf(cmd.ErrOrStderr(), "NockLock: run result: %v\n", result)
+				}
 				return &exitCodeError{code: 2}
 			}
 			runSessionEnded = true
@@ -1230,7 +1238,11 @@ var wrapCmd = &cobra.Command{
 		// that could not be written: the record of what the fence stopped is
 		// incomplete, so the child's own exit code is not reported.
 		if err := audit.failure(); err != nil {
-			return endSession(fmt.Sprintf("exit_code=2 audit_write_failed=true err=%v", err), true, "audit_failed", &exitCodeError{code: 2})
+			detail := fmt.Sprintf("exit_code=2 audit_write_failed=true err=%v", err)
+			if proxyFailed.Load() {
+				detail += " proxy_failed=true"
+			}
+			return endSession(detail, true, "audit_failed", &exitCodeError{code: 2})
 		}
 
 		if childErr != nil {

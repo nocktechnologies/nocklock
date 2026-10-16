@@ -40,7 +40,7 @@ func (r *auditRecorder) record(eventType logging.EventType, category, detail str
 	}
 	first := err // only the failure path takes an address, so a success does not allocate
 	if r.failed.CompareAndSwap(nil, &first) {
-		fmt.Fprintf(r.stderr, "NockLock: fatal: could not record a blocked %s event in the audit log: %v — terminating session\n", eventType, err)
+		fmt.Fprintf(r.stderr, "NockLock: fatal: could not record a blocked %s event in the audit log: %v — failing the run\n", eventType, err)
 		r.cancel()
 	}
 }
