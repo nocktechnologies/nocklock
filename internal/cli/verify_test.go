@@ -409,3 +409,66 @@ func TestRunVerifySyscallUnattemptedFencedProbeFailsNotSkips(t *testing.T) {
 		t.Fatalf("report succeeded despite an unattempted syscall probe: %+v", report.Summary)
 	}
 }
+
+func TestRunVerifySkipsSyscallOnDarwin(t *testing.T) {
+	dir := t.TempDir()
+	writeTestConfig(t, dir, doctorTestTOML(true))
+	withWorkingDir(t, dir)
+
+	restoreFS := stubVerifyFilesystemBackend(nil)
+	defer restoreFS()
+	restoreControl := stubVerifyPositiveControl(nil)
+	defer restoreControl()
+
+	caps := doctorCapabilities{
+		goos:           "darwin",
+		fsBackend:      func() error { return nil },
+		landlockABI:    func() (int, error) { return 0, nil },
+		syscallBackend: func() bool { return true },
+		networkBackend: func() error { return nil },
+		sandboxExec:    func() error { return nil },
+		now:            func() time.Time { return time.Date(2026, 7, 23, 12, 0, 0, 0, time.UTC) },
+	}
+	syscallRuns := 0
+	runner := func(_ context.Context, _ *config.Config, _ string, fence string, _ map[string]string) (probeResult, error) {
+		if fence == "syscall" {
+			syscallRuns++
+		}
+		return probeResult{Fence: fence, Attempted: true, Blocked: true, Detail: "blocked"}, nil
+	}
+
+	report, err := runVerify(context.Background(), caps, runner)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if syscallRuns != 0 {
+		t.Fatalf("runner invoked %d times for syscall on darwin, want 0", syscallRuns)
+	}
+	var found bool
+	for _, check := range report.Checks {
+		if check.Fence != "syscall" {
+			continue
+		}
+		found = true
+		if check.Result != verifySkip {
+			t.Fatalf("syscall check = %s (%s), want %s", check.Result, check.Detail, verifySkip)
+		}
+	}
+	if !found {
+		t.Fatal("report has no syscall check")
+	}
+}
+
+func TestVerifyCheckFromProbeUnattemptedSyscallIsInconclusive(t *testing.T) {
+	got := verifyCheckFromProbe("syscall", probeResult{Fence: "syscall"}, nil)
+	if got.Result != verifyFail {
+		t.Fatalf("result = %s, want %s", got.Result, verifyFail)
+	}
+	if got.Detail != "syscall probe inconclusive" {
+		t.Fatalf("detail = %q, want exactly %q", got.Detail, "syscall probe inconclusive")
+	}
+	withDetail := verifyCheckFromProbe("syscall", probeResult{Fence: "syscall", Detail: "EINVAL"}, nil)
+	if withDetail.Detail != "syscall probe inconclusive: EINVAL" {
+		t.Fatalf("detail = %q", withDetail.Detail)
+	}
+}

@@ -808,7 +808,11 @@ func verifyCheckFromProbe(fence string, result probeResult, err error) verifyChe
 		if fence == "syscall" {
 			// The syscall control must prove the fence. An unattempted probe is
 			// inconclusive, never a skip that a passing report could hide.
-			return verifyCheck{Fence: fence, Result: verifyFail, Detail: firstNonEmpty("syscall probe inconclusive: "+result.Detail, "syscall probe inconclusive")}
+			detail := "syscall probe inconclusive"
+			if result.Detail != "" {
+				detail += ": " + result.Detail
+			}
+			return verifyCheck{Fence: fence, Result: verifyFail, Detail: detail}
 		}
 		return verifyCheck{Fence: fence, Result: verifySkip, Detail: firstNonEmpty(result.Detail, "probe was not attempted")}
 	}
