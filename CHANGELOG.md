@@ -75,7 +75,7 @@ v0.10.0 gives each project its own remote audit chain: anchor v2 requires explic
 
 - `nocklock wrap -- <cmd>` now resolves `<cmd>` on the caller's PATH and no longer runs an executable from the current directory. A command that relied on being found in the current directory must be given as an explicit path such as `./<cmd>` (N11777).
 
-- Document the card-to-`next` and batched `next`-to-`main` review/release workflow, verified ruleset checks and Mira's exact-head gate; run test and network-egress CI on pushes to `next` as well as `main`. Refresh the roadmap to v0.9.3 while retaining the unimplemented packaging and anchor-protocol limits (N11740).
+- Document the card-to-`next` and batched `next`-to-`main` review/release workflow, verified ruleset checks and the maintainers' exact-head review gate; run test and network-egress CI on pushes to `next` as well as `main`. Refresh the roadmap to v0.9.3 while retaining the unimplemented packaging and anchor-protocol limits (N11740).
 
 ### Documentation
 
