@@ -458,9 +458,9 @@ func LoadOverlay(base Config, path string) (*Config, error) {
 }
 
 func loadInto(cfg *Config, path string) error {
-	data, err := os.ReadFile(path)
+	data, err := readTrustedConfig(path)
 	if err != nil {
-		return fmt.Errorf("failed to read config at %s: %w", path, err)
+		return err
 	}
 
 	md, err := toml.Decode(string(data), cfg)

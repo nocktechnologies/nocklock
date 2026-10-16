@@ -36,6 +36,15 @@ func TestMain(m *testing.M) {
 		fmt.Fprintf(os.Stderr, "set XDG_STATE_HOME: %v\n", err)
 		os.Exit(1)
 	}
+	// These tests run real `wrap` invocations against projects under a
+	// world-writable t.TempDir(), which the config trust walk refuses. Accept the
+	// known-safe test layout here; the walk itself is covered with crafted fakes
+	// in internal/config, and TestWrapRefusesUntrustedConfig below turns the hatch
+	// off to prove the end-to-end refusal.
+	if err := os.Setenv(config.AllowUntrustedConfigEnv, "1"); err != nil {
+		fmt.Fprintf(os.Stderr, "set %s: %v\n", config.AllowUntrustedConfigEnv, err)
+		os.Exit(1)
+	}
 	code := m.Run()
 	os.RemoveAll(stateHome)
 	os.Exit(code)

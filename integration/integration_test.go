@@ -411,7 +411,11 @@ func runNocklock(t *testing.T, dir string, env []string, args ...string) (stdout
 	t.Helper()
 	cmd := exec.Command(nocklockBin, args...)
 	cmd.Dir = dir
-	cmd.Env = append(os.Environ(), env...)
+	// Integration projects live under a world-writable t.TempDir(), which the
+	// config trust walk refuses; accept the known-safe test layout. The walk is
+	// covered by unprivileged unit tests in internal/config and internal/cli.
+	cmd.Env = append(os.Environ(), "NOCKLOCK_ALLOW_UNTRUSTED_CONFIG=1")
+	cmd.Env = append(cmd.Env, env...)
 
 	var outBuf, errBuf strings.Builder
 	cmd.Stdout = &outBuf

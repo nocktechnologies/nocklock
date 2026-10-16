@@ -927,7 +927,14 @@ func runProbeUnderWrap(ctx context.Context, cfg *config.Config, configPath, fenc
 	if fence == "secret" {
 		cmd.Env = envWithOverrides(cmd.Env, extraEnv)
 	}
-	cmd.Env = envWithOverrides(cmd.Env, map[string]string{"XDG_STATE_HOME": probeStateHome})
+	// The probe config sits in scratch this process just created (MkdirTemp,
+	// 0700, invoker-owned) under a sticky world-writable base such as /var/tmp,
+	// which the config trust walk refuses. Accept that known-safe layout for the
+	// probe's own wrap only.
+	cmd.Env = envWithOverrides(cmd.Env, map[string]string{
+		"XDG_STATE_HOME":               probeStateHome,
+		config.AllowUntrustedConfigEnv: "1",
+	})
 	var stdout, stderr bytes.Buffer
 	cmd.Stdout = &stdout
 	cmd.Stderr = &stderr
