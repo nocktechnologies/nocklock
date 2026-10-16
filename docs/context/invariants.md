@@ -7,7 +7,7 @@ These hold for every change. [AGENTS.md](../../AGENTS.md) summarizes them; this 
 - **Tests carry negative controls.** A test that proves a block also proves the allowed case still passes.
 - **Audit rows are loud and signed.** Fence decisions are written to the hash-chained, Ed25519-signed event log. Do not add a decision path that skips it. See `docs/how-it-works/audit-log.md`.
 - **Say only what is enforced.** Docs, `doctor`, `wrap` banners and the README state the real boundary, including the limits (`docs/how-it-works/`). Egress levels are defined once, in `internal/cli/egress_level.go`.
-- **Exit codes**: `doctor` uses 0/2/3/4 for PROTECTED/GAPS FOUND/PARTIAL/UNPROTECTED; `wrap` returns 2 when startup fails or the child's exit code (`docs/reference/cli.md`). Use `exec.ExitError.ExitCode()`, never `syscall.WaitStatus` (`.claude/lessons/cross-platform-exit-codes.md`).
+- **Exit codes**: `doctor` uses 0/2/3/4 for PROTECTED/GAPS FOUND/PARTIAL/UNPROTECTED; `wrap` returns 2 when startup fails or a blocked-event or `session_end` audit write fails, otherwise the child's exit code (`docs/reference/cli.md`). Use `exec.ExitError.ExitCode()`, never `syscall.WaitStatus` (`.claude/lessons/cross-platform-exit-codes.md`).
 - **Exported functions need doc comments; error messages must be actionable.**
 - **No new dependencies without discussion.**
 - **Pull requests target `next`, never `main`.** A maintainer promotes `next` to `main` in a release PR (`docs/runbooks/release.md`, `CONTRIBUTING.md`).

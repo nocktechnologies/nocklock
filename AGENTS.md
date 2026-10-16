@@ -54,7 +54,7 @@ Full list: [docs/context/invariants.md](docs/context/invariants.md).
 - A test that proves a block also proves the allowed case still passes.
 - Every fence decision is written to the signed, hash-chained event log. No decision path skips it.
 - Docs, `doctor`, `wrap` banners and the README say only what is enforced, with the limits next to the claim.
-- `doctor` exits 0/2/3/4; `wrap` exits 2 on startup failure, otherwise with the child's code. Use `exec.ExitError.ExitCode()`, never `syscall.WaitStatus`.
+- `doctor` exits 0/2/3/4; `wrap` exits 2 on startup failure or a failed blocked-event or `session_end` audit write, otherwise with the child's code. Use `exec.ExitError.ExitCode()`, never `syscall.WaitStatus`.
 - Exported functions have doc comments; error messages are actionable.
 - No new dependencies without discussion.
 - Pull requests target `next`, never `main`. A maintainer promotes `next` to `main` in a release PR (`docs/runbooks/release.md`).
