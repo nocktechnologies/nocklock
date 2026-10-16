@@ -337,3 +337,75 @@ func TestPrepareSecretProbePreservesFilteringSemantics(t *testing.T) {
 		})
 	}
 }
+
+// syscallCheck returns the syscall row of a verify report.
+func syscallCheck(t *testing.T, report verifyReport) verifyCheck {
+	t.Helper()
+	for _, check := range report.Checks {
+		if check.Fence == "syscall" {
+			return check
+		}
+	}
+	t.Fatalf("report has no syscall check: %+v", report.Checks)
+	return verifyCheck{}
+}
+
+func runVerifyWithSyscallProbe(t *testing.T, controlErr error, probe probeResult) verifyReport {
+	t.Helper()
+	dir := t.TempDir()
+	writeTestConfig(t, dir, doctorTestTOML(true))
+	withWorkingDir(t, dir)
+	restore := stubDoctorCapabilities(doctorCapabilities{
+		goos:           "linux",
+		fsBackend:      func() error { return nil },
+		landlockABI:    func() (int, error) { return 3, nil },
+		syscallBackend: func() bool { return true },
+		networkBackend: func() error { return nil },
+		sandboxExec:    func() error { return nil },
+		now:            func() time.Time { return time.Date(2026, 10, 16, 12, 0, 0, 0, time.UTC) },
+	})
+	defer restore()
+	restoreFS := stubVerifyFilesystemBackend(nil)
+	defer restoreFS()
+	orig := verifyPositiveControlRunner
+	defer func() { verifyPositiveControlRunner = orig }()
+	verifyPositiveControlRunner = func(_ context.Context, fence string, _ map[string]string) error {
+		if fence == "syscall" {
+			return controlErr
+		}
+		return nil
+	}
+	runner := func(_ context.Context, _ *config.Config, _ string, fence string, _ map[string]string) (probeResult, error) {
+		if fence == "syscall" {
+			return probe, nil
+		}
+		return probeResult{Fence: fence, Attempted: true, Blocked: true, Detail: "blocked"}, nil
+	}
+	report, err := runVerify(context.Background(), currentDoctorCapabilities, runner)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return report
+}
+
+func TestRunVerifySyscallInconclusiveControlFailsReport(t *testing.T) {
+	report := runVerifyWithSyscallProbe(t, errors.New("syscall positive control was inconclusive"), probeResult{Fence: "syscall", Attempted: true, Blocked: true, Detail: "denied"})
+	check := syscallCheck(t, report)
+	if check.Result != verifyFail || !strings.Contains(check.Detail, "inconclusive") {
+		t.Fatalf("syscall check = %+v, want FAIL mentioning inconclusive", check)
+	}
+	if verifyReportSucceeded(report) {
+		t.Fatalf("report succeeded despite an inconclusive syscall control: %+v", report.Summary)
+	}
+}
+
+func TestRunVerifySyscallUnattemptedFencedProbeFailsNotSkips(t *testing.T) {
+	report := runVerifyWithSyscallProbe(t, nil, probeResult{Fence: "syscall", Attempted: false, Blocked: false, Detail: "clone(CLONE_NEWUSER) inconclusive: EINVAL, not a denial"})
+	check := syscallCheck(t, report)
+	if check.Result != verifyFail || !strings.Contains(check.Detail, "inconclusive") {
+		t.Fatalf("syscall check = %+v, want FAIL mentioning inconclusive, not SKIP", check)
+	}
+	if verifyReportSucceeded(report) {
+		t.Fatalf("report succeeded despite an unattempted syscall probe: %+v", report.Summary)
+	}
+}

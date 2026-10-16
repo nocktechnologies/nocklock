@@ -132,6 +132,26 @@ func runScenario(scenario string) int {
 		err := unix.Unshare(unix.CLONE_NEWUSER)
 		return classifyErr(err)
 
+	case "clone_newuser":
+		if err := Apply(canaryPolicy); err != nil {
+			return exitApplyFailed
+		}
+		if !fenceInstalled() {
+			return exitFenceNotInstalled
+		}
+		// Fork/exec with CLONE_NEWUSER sends clone(SIGCHLD|CLONE_NEWUSER), the
+		// same arg0 the production probe uses. The fence must refuse it with
+		// EPERM before any namespace is created.
+		pid, err := syscall.ForkExec("/bin/true", []string{"true"}, &syscall.ProcAttr{
+			Sys: &syscall.SysProcAttr{Cloneflags: uintptr(unix.CLONE_NEWUSER)},
+		})
+		if err != nil {
+			return classifyErr(err)
+		}
+		var ws unix.WaitStatus
+		_, _ = unix.Wait4(pid, &ws, 0, nil)
+		return exitAllowed
+
 	case "ptrace":
 		if err := Apply(canaryPolicy); err != nil {
 			return exitApplyFailed
@@ -574,5 +594,13 @@ func TestEnforce_PthreadCreateStillWorks(t *testing.T) {
 	requireSupported(t, code)
 	if code != exitAllowed {
 		t.Errorf("pthread_create under fence: exit %d, want ALLOWED(%d) — clone3->ENOSYS fallback must keep threads working", code, exitAllowed)
+	}
+}
+
+func TestEnforce_CloneNewUserDenied(t *testing.T) {
+	code := runHelper(t, "clone_newuser")
+	requireSupported(t, code)
+	if code != exitDeniedEPERM {
+		t.Errorf("clone(SIGCHLD|CLONE_NEWUSER): exit %d, want EPERM(%d)", code, exitDeniedEPERM)
 	}
 }
