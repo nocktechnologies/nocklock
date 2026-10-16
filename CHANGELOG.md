@@ -17,6 +17,10 @@ All notable changes to NockLock will be documented in this file.
 
 - `allow_private_ranges` no longer permits Alibaba Cloud's instance-metadata address (100.100.100.200). It stays blocked unconditionally, like AWS's metadata endpoints; the rest of the CGNAT range it sits in remains reachable under the option.
 
+### Fixed
+
+- `verify`: the syscall check's positive control now runs an operation that succeeds without the fence, and an unfenced EINVAL is reported as inconclusive, which fails verify.
+
 ## [0.11.0] - 2026-10-15
 
 v0.11.0 makes each run's audit trail provably complete or provably cut short. `wrap` now ends every run with a signed close row, and `nocklock verify --audit` reports whether each run closed cleanly, was cut short, was pruned, or fails its close check. Repeat verification is much faster on large trails: a signed receipt lets the verifier skip re-checking signatures it already checked, and a new `--walk-timeout` flag bounds long walks. The signed `session_start` row now records the SHA-256 of the command that ran. On Linux, `wrap` refuses an interposer library that is unsafe to load. Older audit databases verify as before.

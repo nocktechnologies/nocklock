@@ -404,3 +404,21 @@ func TestProgram_WithinInstructionCap(t *testing.T) {
 		t.Errorf("program is %d instructions, exceeds 4096 cap", len(prog))
 	}
 }
+
+// TestProgram_ForkExecCloneFlagsDenied pins the exact clone(2) arg0 that Go's
+// fork/exec with Cloneflags=CLONE_NEWUSER sends (SIGCHLD|CLONE_NEWUSER). The
+// production verify probe uses that operation, so the deny must match it too.
+func TestProgram_ForkExecCloneFlagsDenied(t *testing.T) {
+	p := Policy{Mode: ModeRequired}
+	prog, native := buildTestProgram(t, p)
+	cloneNr, _ := syscallNr("clone", native.arch)
+
+	arg0 := uint32(unix.SIGCHLD | unix.CLONE_NEWUSER)
+	got, err := simulate(prog, seccompData{nr: cloneNr, arch: native.auditArch, args: [6]uint32{arg0}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got != eperm() {
+		t.Errorf("clone(SIGCHLD|CLONE_NEWUSER): got %#x, want EPERM", got)
+	}
+}
