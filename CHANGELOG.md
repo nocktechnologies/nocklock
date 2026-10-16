@@ -4,6 +4,10 @@ All notable changes to NockLock will be documented in this file.
 
 ## [Unreleased]
 
+### Fixed
+
+- `wrap` now exits 2 with a fatal message naming the error when it cannot write one of its own blocked-event rows (filesystem denials, macOS denial rows, network fence errors), the blocked environment variable rows or `session_end` to the audit log. A blocked-event write failure while the child runs stops the child. Previously these write errors were ignored and the run could exit 0. Rows the network proxy writes for individual requests are not yet covered.
+
 ### Changed
 
 - Docs: `AGENTS.md` is now the canonical contributor and agent map (task-to-location table, build and test, required checks, rules) and `CLAUDE.md` imports it. The full invariant list moved to `docs/context/invariants.md`. `docs/ROADMAP.md` is trimmed to one dated now / next / later page; release history stays in this file.

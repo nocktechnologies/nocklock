@@ -209,18 +209,19 @@ var wrapCmd = &cobra.Command{
 			return errors.Join(err, logErr)
 		}
 
+		// childCtx is cancelled by the proxy watchdog if the proxy dies unexpectedly,
+		// or by the audit recorder if a blocked-event row cannot be written. This
+		// terminates the child process, enforcing fail-closed behaviour.
+		childCtx, childCancel := context.WithCancel(cmd.Context())
+		defer childCancel()
+
 		// logEvent records one event. logger is guaranteed non-nil here (the open
-		// above fails closed), so no nil guard is needed.
-		logEvent := func(eventType logging.EventType, category, detail string, blocked bool) {
-			_ = logger.Log(logging.Event{
-				Timestamp: time.Now(),
-				EventType: eventType,
-				Category:  category,
-				Detail:    detail,
-				Blocked:   blocked,
-				SessionID: sessionID,
-			})
-		}
+		// above fails closed), so no nil guard is needed. A failed blocked-event
+		// write cancels the child and fails the session (audit.failure below).
+		// LogImmediate waits out busy_timeout on a write lock held by another
+		// process, so lock contention does not kill the child.
+		audit := &auditRecorder{log: logger.LogImmediate, sessionID: sessionID, stderr: cmd.ErrOrStderr(), cancel: childCancel}
+		logEvent := audit.record
 
 		// Run-lifecycle teardown state (docs/design/run-lifecycle-contract.md). A run
 		// that writes a lifecycle=1 session_start owes exactly one signed
@@ -237,15 +238,20 @@ var wrapCmd = &cobra.Command{
 			joinWatchdog          func()       // set when a proxy watchdog is started
 		)
 
-		// endSession writes the run's session_end, capturing the write error loudly
-		// instead of discarding it: a dropped end row would otherwise leave the run
-		// looking like a crash. reason is the writer's own close reason (clean,
-		// child_exit, refused, audit_failed). A failed end row means no close is
-		// attempted — the close's last_id is only meaningful once session_end is the
-		// run's last ordinary row — and the run reads unclosed.
-		endSession := func(detail string, blocked bool, reason string) {
+		// endSession writes the run's session_end and returns result, the run's
+		// verdict. reason is the writer's own close reason (clean, child_exit,
+		// refused, audit_failed). A failed end row FAILS CLOSED: it is announced on
+		// stderr and the run exits 2 whatever the child's own code was, because the
+		// audit trail no longer records how the run ended. No close is attempted —
+		// the close's last_id is only meaningful once session_end is the run's last
+		// ordinary row — and the run reads unclosed. Every caller is the run's last
+		// return and reports its own result, so cobra's error and usage printing is
+		// silenced here.
+		endSession := func(detail string, blocked bool, reason string, result error) error {
+			cmd.SilenceErrors = true
+			cmd.SilenceUsage = true
 			runEndReason = reason
-			if err := logger.Log(logging.Event{
+			if err := logger.LogImmediate(logging.Event{
 				Timestamp: time.Now(),
 				EventType: logging.EventSessionEnd,
 				Category:  "session",
@@ -254,10 +260,17 @@ var wrapCmd = &cobra.Command{
 				SessionID: sessionID,
 			}); err != nil {
 				runSessionEndFailed = true
-				fmt.Fprintf(cmd.ErrOrStderr(), "NockLock: warning: failed to record session_end for run %s: %v — the run will read unclosed\n", sessionID, err)
-				return
+				fmt.Fprintf(cmd.ErrOrStderr(), "NockLock: fatal: failed to record session_end (%s) for run %s: %v — the run will read unclosed; exiting 2\n", detail, sessionID, err)
+				// Exit 2 replaces result, so print a result that carries its own
+				// diagnostic (an unresolvable command, a failed launch).
+				var exitErr *exitCodeError
+				if result != nil && !errors.As(result, &exitErr) {
+					fmt.Fprintf(cmd.ErrOrStderr(), "NockLock: run result: %v\n", result)
+				}
+				return &exitCodeError{code: 2}
 			}
 			runSessionEnded = true
+			return result
 		}
 
 		// drainProxy joins any producer that can still write under the run's
@@ -356,7 +369,12 @@ var wrapCmd = &cobra.Command{
 					SessionID: sessionID,
 				}
 			}
-			_ = logger.LogBatch(batch)
+			if err := logger.LogBatch(batch); err != nil {
+				fmt.Fprintf(cmd.ErrOrStderr(), "NockLock: fatal: could not record %d blocked environment variable(s) in the audit log: %v — refusing to start\n", len(batch), err)
+				cmd.SilenceUsage = true
+				cmd.SilenceErrors = true
+				return &exitCodeError{code: 2}
+			}
 		}
 
 		// Log all passed env var names as one event.
@@ -770,10 +788,6 @@ var wrapCmd = &cobra.Command{
 			"NO_PROXY", "no_proxy",
 		)
 
-		// childCtx is cancelled by the proxy watchdog if the proxy dies unexpectedly.
-		// This terminates the child process, enforcing fail-closed behaviour.
-		childCtx, childCancel := context.WithCancel(cmd.Context())
-		defer childCancel()
 		var proxyFailed atomic.Bool
 		var netnsEgress *netns.EgressConfig
 
@@ -1011,10 +1025,7 @@ var wrapCmd = &cobra.Command{
 			// The child never launched, but the proxy and its watchdog did; join them
 			// before session_end so it stays the run's last ordinary row on this path.
 			drainProxy()
-			endSession("exit_code=1", false, "refused")
-			cmd.SilenceErrors = true
-			cmd.SilenceUsage = true
-			return resolveErr
+			return endSession("exit_code=1", false, "refused", resolveErr)
 		}
 		childArgv := composeChildArgv(resolved, landlockPrefix, fsSandboxPrefix)
 		// Export this run's session id to the child (N10647) so a co-located tool
@@ -1039,7 +1050,9 @@ var wrapCmd = &cobra.Command{
 			// --net-fence=netns keeps its input stream (N10711).
 			nc, err := buildNetnsChild(childCtx, childArgv, childEnv, netnsEgress, decisionLogDir)
 			if err != nil {
-				return err
+				// As with resolveErr above: the run started, so it owes a session_end.
+				drainProxy()
+				return endSession("exit_code=1", false, "refused", err)
 			}
 			child = nc
 		} else {
@@ -1221,18 +1234,22 @@ var wrapCmd = &cobra.Command{
 		// verdict wins. The reader goroutine has finished (Wait above), establishing
 		// happens-before for decisionFailErr.
 		if decisionFailed.Load() {
-			endSession(fmt.Sprintf("exit_code=2 decision_audit_failed=true err=%v", decisionFailErr), true, "audit_failed")
-			cmd.SilenceErrors = true
-			cmd.SilenceUsage = true
-			return &exitCodeError{code: 2}
+			return endSession(fmt.Sprintf("exit_code=2 decision_audit_failed=true err=%v", decisionFailErr), true, "audit_failed", &exitCodeError{code: 2})
+		}
+		// The same verdict for a blocked event (filesystem denial, network error)
+		// that could not be written: the record of what the fence stopped is
+		// incomplete, so the child's own exit code is not reported.
+		if err := audit.failure(); err != nil {
+			detail := fmt.Sprintf("exit_code=2 audit_write_failed=true err=%v", err)
+			if proxyFailed.Load() {
+				detail += " proxy_failed=true"
+			}
+			return endSession(detail, true, "audit_failed", &exitCodeError{code: 2})
 		}
 
 		if childErr != nil {
 			if proxyFailed.Load() {
-				endSession("exit_code=2 proxy_failed=true", true, "refused")
-				cmd.SilenceErrors = true
-				cmd.SilenceUsage = true
-				return &exitCodeError{code: 2}
+				return endSession("exit_code=2 proxy_failed=true", true, "refused", &exitCodeError{code: 2})
 			}
 			if exitErr, ok := childErr.(*exec.ExitError); ok {
 				code := exitErr.ExitCode()
@@ -1241,26 +1258,16 @@ var wrapCmd = &cobra.Command{
 					// Fall back to 1 for cross-platform safety.
 					code = 1
 				}
-				endSession(fmt.Sprintf("exit_code=%d", code), false, "child_exit")
-				cmd.SilenceErrors = true
-				cmd.SilenceUsage = true
-				return &exitCodeError{code: code}
+				return endSession(fmt.Sprintf("exit_code=%d", code), false, "child_exit", &exitCodeError{code: code})
 			}
-			endSession("exit_code=1", false, "child_exit")
-			cmd.SilenceErrors = true
-			cmd.SilenceUsage = true
-			return fmt.Errorf("failed to run %q: %w", args[0], childErr)
+			return endSession("exit_code=1", false, "child_exit", fmt.Errorf("failed to run %q: %w", args[0], childErr))
 		}
 
 		if proxyFailed.Load() {
-			endSession("exit_code=2 proxy_failed=true", true, "refused")
-			cmd.SilenceErrors = true
-			cmd.SilenceUsage = true
-			return &exitCodeError{code: 2}
+			return endSession("exit_code=2 proxy_failed=true", true, "refused", &exitCodeError{code: 2})
 		}
 
-		endSession("exit_code=0", false, "clean")
-		return nil
+		return endSession("exit_code=0", false, "clean", nil)
 	},
 }
 
