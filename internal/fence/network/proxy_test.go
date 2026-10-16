@@ -276,13 +276,17 @@ func TestIsBlockedIP(t *testing.T) {
 		ip      string
 		blocked bool
 	}{
-		{"127.0.0.1", true},             // loopback
-		{"::1", true},                   // IPv6 loopback
-		{"10.0.0.1", true},              // RFC-1918
-		{"172.16.5.5", true},            // RFC-1918
-		{"192.168.1.1", true},           // RFC-1918
-		{"169.254.10.1", true},          // link-local
-		{"100.64.0.1", true},            // CGNAT
+		{"127.0.0.1", true},    // loopback
+		{"::1", true},          // IPv6 loopback
+		{"10.0.0.1", true},     // RFC-1918
+		{"172.16.5.5", true},   // RFC-1918
+		{"192.168.1.1", true},  // RFC-1918
+		{"169.254.10.1", true}, // link-local
+		{"100.64.0.1", true},   // CGNAT
+		// Alibaba Cloud metadata endpoint: already caught by the CGNAT range
+		// check here (allowPrivateRanges=false); the dedicated carve-out below
+		// is what keeps this blocked once allowPrivateRanges permits CGNAT.
+		{"100.100.100.200", true},
 		{"0.0.0.0", true},               // unspecified
 		{"224.0.0.1", true},             // multicast
 		{"ff02::1", true},               // IPv6 link-local multicast
@@ -307,7 +311,7 @@ func TestIsBlockedIP(t *testing.T) {
 // With allowPrivateRanges=true, RFC-1918 / loopback / CGNAT become reachable for
 // local dev — but link-local (especially the cloud-metadata endpoint
 // 169.254.169.254) and multicast MUST stay blocked. A blunt private-ranges flag
-// must not silently re-open the AWS/GCP/Azure credential-SSRF target.
+// must not silently re-open the AWS/GCP/Azure/Alibaba credential-SSRF target.
 func TestIsBlockedIPAllowPrivateStillBlocksLinkLocalMetadata(t *testing.T) {
 	cases := []struct {
 		ip      string
@@ -318,13 +322,14 @@ func TestIsBlockedIPAllowPrivateStillBlocksLinkLocalMetadata(t *testing.T) {
 		{"169.254.10.1", true, "link-local unicast must stay blocked"},
 		{"fe80::1", true, "IPv6 link-local must stay blocked"},
 		{"fd00:ec2::254", true, "AWS IPv6 metadata endpoint (ULA) must stay blocked"},
+		{"100.100.100.200", true, "Alibaba Cloud metadata endpoint (inside CGNAT) must stay blocked"},
 		{"224.0.0.1", true, "multicast must stay blocked"},
 		{"ff02::1", true, "IPv6 link-local multicast must stay blocked"},
 		// These ARE the point of allowPrivateRanges — now reachable.
 		{"10.0.0.1", false, "RFC-1918 permitted for local dev"},
 		{"192.168.1.10", false, "RFC-1918 permitted for local dev"},
 		{"127.0.0.1", false, "loopback permitted for local dev"},
-		{"100.64.0.1", false, "CGNAT permitted for local dev"},
+		{"100.64.0.1", false, "another CGNAT address is still permitted for local dev"},
 		{"fd12:3456:789a::1", false, "a normal IPv6 ULA (not the metadata endpoint) is still reachable — we don't over-block fc00::/7"},
 		{"8.8.8.8", false, "public still reachable"},
 	}

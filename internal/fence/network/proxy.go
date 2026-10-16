@@ -37,6 +37,15 @@ var cgnat = &net.IPNet{
 // reachable under allowPrivateRanges.
 var awsMetadataIPv6 = net.ParseIP("fd00:ec2::254")
 
+// alibabaMetadataIP is Alibaba Cloud's instance metadata service
+// (100.100.100.200). It sits inside 100.64.0.0/10 (CGNAT), so IsPrivate() is
+// false but allowPrivateRanges still permits the whole CGNAT block — meaning
+// the option would otherwise re-open this credential-SSRF target. It is
+// blocked unconditionally, like the AWS metadata endpoints. Blocking only this
+// exact address — not all of CGNAT — keeps the rest of 100.64.0.0/10 reachable
+// under allowPrivateRanges.
+var alibabaMetadataIP = net.ParseIP("100.100.100.200")
+
 // isBlockedIP reports whether ip should never be dialed by the proxy.
 //
 // By default blocks: loopback, unspecified (0.0.0.0/::), link-local unicast,
@@ -46,19 +55,22 @@ var awsMetadataIPv6 = net.ParseIP("fd00:ec2::254")
 // are permitted (useful for local development). Multicast AND link-local unicast
 // remain blocked regardless: link-local (169.254.0.0/16, fe80::/10) covers the
 // cloud-metadata endpoint 169.254.169.254 — the AWS/GCP/Azure credential-SSRF
-// target — so a blunt "local dev" flag must never silently re-open it.
+// target — so a blunt "local dev" flag must never silently re-open it. The same
+// holds for 100.100.100.200, Alibaba Cloud's metadata endpoint inside CGNAT.
 func isBlockedIP(ip net.IP, allowPrivateRanges bool) bool {
 	// Multicast is always blocked regardless of allowPrivateRanges.
 	if ip.IsMulticast() || ip.IsLinkLocalMulticast() {
 		return true
 	}
 
-	// Link-local unicast (incl. the IPv4 metadata endpoint 169.254.169.254) and
-	// the AWS IPv6 metadata endpoint (fd00:ec2::254, a ULA that IsPrivate would
-	// otherwise permit) are ALWAYS blocked, even with allowPrivateRanges.
-	// Permitting RFC-1918/loopback/CGNAT for local development is a separate,
-	// lower-risk decision than exposing instance-credential metadata.
-	if ip.IsLinkLocalUnicast() || ip.Equal(awsMetadataIPv6) {
+	// Link-local unicast (incl. the IPv4 metadata endpoint 169.254.169.254), the
+	// AWS IPv6 metadata endpoint (fd00:ec2::254, a ULA that IsPrivate would
+	// otherwise permit), and the Alibaba Cloud metadata endpoint
+	// (100.100.100.200, inside CGNAT which allowPrivateRanges would otherwise
+	// permit) are ALWAYS blocked, even with allowPrivateRanges. Permitting
+	// RFC-1918/loopback/CGNAT for local development is a separate, lower-risk
+	// decision than exposing instance-credential metadata.
+	if ip.IsLinkLocalUnicast() || ip.Equal(awsMetadataIPv6) || ip.Equal(alibabaMetadataIP) {
 		return true
 	}
 
