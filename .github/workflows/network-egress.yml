@@ -527,7 +527,9 @@ jobs:
       # egress-helper check is severity ok.
       - name: assert nocklock doctor reports egress-helper ok
         run: |
-          work=$(mktemp -d)
+          # The project lives in $HOME, not under the world-writable /tmp that
+          # the config trust walk refuses.
+          work=$(mktemp -d "$HOME/nocklock-doctor.XXXXXX")
           cd "$work"
           nocklock init
           nocklock doctor --json > doctor.json || true

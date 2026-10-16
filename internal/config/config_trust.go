@@ -1,6 +1,9 @@
 package config
 
-import "os"
+import (
+	"fmt"
+	"os"
+)
 
 // AllowUntrustedConfigEnv is the operator escape hatch for a config file that
 // lives in a layout the trust walk would otherwise refuse -- a shared build
@@ -14,12 +17,23 @@ import "os"
 // is a POSIX-ownership concept and lives in the unix-tagged file.
 const AllowUntrustedConfigEnv = "NOCKLOCK_ALLOW_UNTRUSTED_CONFIG"
 
-// Seams for deterministic, unprivileged tests. Production uses the real
-// filesystem and the invoking user's real UID; tests swap in a fake view so
-// crafted ownership and permission cases need no chmod, no chown and no root.
-// configTrustUID uses the REAL uid, not the effective one and never SUDO_UID,
-// matching the deliberate choice in the interposer trust walk.
-var (
-	configTrustLstat = os.Lstat
-	configTrustUID   = func() uint32 { return uint32(os.Getuid()) }
-)
+// configTrustLstat is a seam for deterministic, unprivileged tests. Production
+// uses the real filesystem; tests swap in a fake view so crafted ownership and
+// permission cases need no chmod, no chown and no root.
+var configTrustLstat = os.Lstat
+
+// readConfigFile reads path with no trust walk, wrapping a failure in the
+// loader's error message.
+func readConfigFile(path string) ([]byte, error) {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return nil, configReadError(path, err)
+	}
+	return data, nil
+}
+
+// configReadError wraps an I/O failure reading the config at path, keeping the
+// cause matchable with errors.Is.
+func configReadError(path string, err error) error {
+	return fmt.Errorf("failed to read config at %s: %w", path, err)
+}

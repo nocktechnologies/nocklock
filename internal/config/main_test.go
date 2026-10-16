@@ -21,10 +21,19 @@ func (permissiveTrustInfo) Sys() any           { return nil }
 
 // TestMain installs a permissive config trust seam for the whole package test
 // binary. Existing tests load configs from t.TempDir() under a world-writable
-// /tmp, which the real trust walk refuses; the fake lets those tests exercise
-// parsing and validation instead of the walk. The dedicated trust tests
-// (config_trust_test.go) swap in crafted fakes and restore this default.
+// /tmp, which the real trust walk refuses; the seam reports every real directory
+// as trusted so those tests exercise parsing and validation instead of the walk.
+// Files and symlinks keep their real Lstat info, and the config file itself is
+// still checked on its open handle, so a fixture written group- or
+// world-writable is refused. The dedicated trust tests (config_trust_test.go)
+// swap in their own seams and restore this default.
 func TestMain(m *testing.M) {
-	configTrustLstat = func(string) (os.FileInfo, error) { return permissiveTrustInfo{}, nil }
+	configTrustLstat = func(path string) (os.FileInfo, error) {
+		info, err := os.Lstat(path)
+		if err != nil || !info.IsDir() {
+			return info, err
+		}
+		return permissiveTrustInfo{}, nil
+	}
 	os.Exit(m.Run())
 }

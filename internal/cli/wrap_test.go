@@ -211,16 +211,14 @@ func TestWrapDryRunValidatesConfigWithoutCommand(t *testing.T) {
 
 // TestWrapRefusesUntrustedConfig turns the escape hatch off (the package
 // TestMain sets it on for the other tests) and proves wrap refuses a config
-// whose directory chain is world-writable before it starts the child. The
-// project sits under t.TempDir(), so a world-writable ancestor (/tmp) is reached
-// during the walk without any chmod here.
+// whose directory chain is world-writable before it starts the child. The test
+// makes the project root world-writable itself rather than relying on the
+// permissions of the temp directory it sits in.
 func TestWrapRefusesUntrustedConfig(t *testing.T) {
 	t.Setenv(config.AllowUntrustedConfigEnv, "")
 	t.Setenv("XDG_STATE_HOME", trustedStateRoot(t))
 	dir := t.TempDir()
 	writeTestConfig(t, dir, dryRunTestTOML())
-	// Make the project root itself world-writable so the refusal does not depend
-	// on the permissions of the enclosing temp directory in CI.
 	if err := os.Chmod(dir, 0o777); err != nil {
 		t.Fatalf("chmod project root: %v", err)
 	}
@@ -231,10 +229,8 @@ func TestWrapRefusesUntrustedConfig(t *testing.T) {
 	if err == nil {
 		t.Fatal("wrap should refuse a config under a world-writable directory, but returned nil")
 	}
-	// Assert the shared refusal prefix, not which rule fired: on macOS the temp
-	// dir is reached through /private symlinks, so the walk may refuse on the
-	// symlink rule rather than the write-bit rule. The test proves wrap refused
-	// before launching, either way.
+	// Assert the shared refusal prefix, not which component fired: depending on
+	// the host, the temp directory above the project may be refused first.
 	if !strings.Contains(err.Error(), "refusing to use the config file") {
 		t.Fatalf("expected a config trust refusal, got: %v", err)
 	}
