@@ -7,6 +7,7 @@ All notable changes to NockLock will be documented in this file.
 ### Changed
 
 - Docs: `AGENTS.md` is now the canonical contributor and agent map (task-to-location table, build and test, required checks, rules) and `CLAUDE.md` imports it. The full invariant list moved to `docs/context/invariants.md`. `docs/ROADMAP.md` is trimmed to one dated now / next / later page; release history stays in this file.
+- Red-team bench: a proof path or match containing a `..` component no longer counts as a match.
 
 ## [0.11.0] - 2026-10-15
 

@@ -230,6 +230,21 @@ class NockLockProofTest(unittest.TestCase):
             with self.subTest(path=path):
                 self.assertFalse(matches("canary.txt", path))
 
+    def test_dotdot_components_never_match(self):
+        match = redteam.path_component_matches
+        self.assertTrue(match("/tmp/canary.txt", "canary.txt"))
+        self.assertTrue(match("/x/canary.txt", "canary.txt", suffix=True))
+        self.assertFalse(match("/tmp/canary.txt/../other", "canary.txt"))
+        self.assertFalse(match("/x/../canary.txt", "canary.txt", suffix=True))
+        self.assertFalse(match("/x/../canary.txt", "canary.txt"))
+        self.assertFalse(match("/tmp/canary.txt", "../canary.txt"))
+        for path in ("/tmp/canary.txt/../other", "/x/../canary.txt"):
+            envelope = self.envelope()
+            envelope["report"]["path"] = path
+            for detail in (json.dumps(envelope), f"op=open path={path} reason=outside allowed directory"):
+                with self.subTest(path=path, detail=detail[:20]):
+                    self.assertIsNone(self.proof(detail))
+
     def test_collector_metadata_cannot_supply_action_proof(self):
         envelope = self.envelope()
         envelope["report"].update(path="/unrelated", reason="different reason")
