@@ -1,6 +1,6 @@
 # Roadmap to 1.0
 
-Updated 2026-10-16. Released baseline: `v0.11.0`. Release history is in `CHANGELOG.md`. A gap is closed only when its fix is released from `main`, the red-team case runs in CI with an allowed-action negative control, and the docs describe the tested boundary.
+Updated 2026-10-16. Released baseline: `v0.11.0`. Release history is in `CHANGELOG.md`. The planned 0.7.1 step was split across 0.8.0 and 0.9.0; there is no `v0.7.1` tag. A gap is closed only when its fix is released from `main`, the red-team case runs in CI with an allowed-action negative control, and the docs describe the tested boundary.
 
 ## Now: the four 1.0 bars
 
