@@ -60,7 +60,7 @@ Each closure writes a `network_blocked` row after the mutex is released, under t
 
 ## 3. Failure modes
 
-- **History unreadable** (query error after the busy timeout, `Prune` removed the trigger). With a look-back rule configured, deny egress, surface on stderr, and record best-effort, per "fences fail closed" (`CLAUDE.md`). A pruned trigger cannot be detected, so `Prune` should refuse to delete rows from a live session (a follow-up).
+- **History unreadable** (query error after the busy timeout, `Prune` removed the trigger). With a look-back rule configured, deny egress, surface on stderr, and record best-effort, per "fences fail closed" (`docs/context/invariants.md`). A pruned trigger cannot be detected, so `Prune` should refuse to delete rows from a live session (a follow-up).
 - **Clock skew.** Count a negative age (trigger "in the future") as within the window, so it denies. A forward step expires `within` early and fails open, so a finite `within` trusts the host clock. Order by row id (`ByID`), not timestamp.
 - **Noisy agent.** There is no "N events" window, since N harmless requests would launder the trigger. Spamming denied opens cuts the agent's own egress, which is availability, not an escape. A flood of denied requests writes a signed row each (`handler.go:107`), so cap it as `DefaultMaxDenialEvents = 500` does (`internal/fence/fs/denylog.go:114`): the first N per rule, then one summary row. The key is the rule, since the agent picks hostnames.
 - **Rule name.** The name is written into the signed denial row's key=value detail, so a name with spaces, `=` or a newline could forge fields. A name must match `^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$` and be unique, or it is a config error at start-up.
