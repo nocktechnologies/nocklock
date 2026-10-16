@@ -193,9 +193,14 @@ def check_setup(config, evidence):
 
 
 def path_component_matches(path, value, *, suffix=False):
-    """Match a slash-delimited path sequence on component boundaries."""
+    """Match a slash-delimited path sequence on component boundaries.
+
+    A path or value with a '..' component never matches: the sequence would
+    name a different file than its text suggests."""
     path_parts = PurePosixPath(path).parts
     value_parts = PurePosixPath(value).parts
+    if ".." in path_parts or ".." in value_parts:
+        return False
     width = len(value_parts)
     return bool(width) and any(
         path_parts[start:start + width] == value_parts
