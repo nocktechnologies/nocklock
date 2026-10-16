@@ -1050,7 +1050,9 @@ var wrapCmd = &cobra.Command{
 			// --net-fence=netns keeps its input stream (N10711).
 			nc, err := buildNetnsChild(childCtx, childArgv, childEnv, netnsEgress, decisionLogDir)
 			if err != nil {
-				return err
+				// As with resolveErr above: the run started, so it owes a session_end.
+				drainProxy()
+				return endSession("exit_code=1", false, "refused", err)
 			}
 			child = nc
 		} else {
