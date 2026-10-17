@@ -731,12 +731,12 @@ func TestDefaultConfigSystemPathsAreReadOnly(t *testing.T) {
 }
 
 func TestDefaultTOMLMatchesDefaultConfig(t *testing.T) {
-	var parsed Config
-	if err := toml.Unmarshal([]byte(DefaultTOML()), &parsed); err != nil {
-		t.Fatalf("DefaultTOML is invalid TOML: %v", err)
+	parsed, err := Load(writeTempConfig(t, DefaultTOML()))
+	if err != nil {
+		t.Fatalf("DefaultTOML cannot be loaded: %v", err)
 	}
 	expected := DefaultConfig()
-	if !reflect.DeepEqual(parsed, expected) {
+	if !reflect.DeepEqual(*parsed, expected) {
 		t.Error("DefaultTOML() does not produce the same config as DefaultConfig()")
 	}
 }

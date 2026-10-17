@@ -4,6 +4,12 @@ All notable changes to NockLock will be documented in this file.
 
 ## [Unreleased]
 
+### Changed
+
+- `LogImmediate` uses the same immediate SQLite transaction as ordinary event writes, preserving write-lock waiting, committed-event callbacks, and signed run-close accounting without an unused predecessor lookup.
+- Removed the unused internal HTTP client for ordinary v1 anchor pushes and fetches. Remote v2 enrollment, migration, and conditional updates, plus local v1 anchor-file verification, are unchanged.
+- Newly generated configs, runtime presets, and examples omit the inert `[cloud]` section. Existing cloud settings still decode and validate as before; optional delivery uses `[audit.forward]`.
+
 ## [0.12.0] - 2026-10-17
 
 v0.12.0 refuses a `.nock/config.toml` that another user could rewrite, and `nocklock doctor` now lists deputies: more-privileged helpers the wrapped agent can reach and ask to act for it. `wrap` now fails the run when it cannot record one of its own blocks, including a blocked network request, and can push the committed audit head off-box during a run instead of only at teardown. CI now builds signed Linux install candidates; no release assets ship with this release. Read the upgrade notes under Breaking before you upgrade: a config in a directory other users can write is refused, and some `doctor` verdicts move from `PROTECTED` to `PARTIAL`.
