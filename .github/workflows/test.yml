@@ -59,6 +59,7 @@ jobs:
         run: |
           git fetch origin next --depth=1
           python3 scripts/check-public-content.py
+          python3 scripts/check-agents-paths.py
           python3 -m unittest discover -s scripts -p test_public_checks.py -v
 
       - name: test
