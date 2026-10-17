@@ -23,24 +23,20 @@ def named_paths(text):
 
 
 def bad_paths(text, root, tracked):
-    """Return the paths text names that are outside root or not tracked by git."""
+    """Return the paths text names that are outside root or not in tracked (files and their directories)."""
     bad = []
     for path in named_paths(text):
         target = (root / path).resolve()
-        if not target.is_relative_to(root):
+        if not target.is_relative_to(root) or target.relative_to(root).as_posix() not in tracked:
             bad.append(path)
-            continue
-        rel = target.relative_to(root).as_posix()
-        if rel not in tracked and not any(t.startswith(rel + "/") for t in tracked):
-            bad.append(path)
-    return bad
+    return list(dict.fromkeys(bad))
 
 
 def main():
     """Check the classifier, then every path AGENTS.md names."""
     root = pathlib.Path(subprocess.check_output(("git", "rev-parse", "--show-toplevel"), text=True).strip()).resolve()
-    tracked = set(subprocess.check_output(("git", "ls-files", "-z"), cwd=root, text=True).split("\0"))
-    tracked.discard("")
+    files = filter(None, subprocess.check_output(("git", "ls-files", "-z"), cwd=root, text=True).split("\0"))
+    tracked = {str(p) for f in files for p in (pathlib.PurePosixPath(f), *pathlib.PurePosixPath(f).parents)}
 
     allowed = "`scripts/` `AGENTS.md` `go test ./... -v` `<home>/x` `docs/*.md` `t.TempDir()` [a](AGENTS.md#x) [b](https://example.com/a)"
     if bad_paths(allowed, root, tracked):
