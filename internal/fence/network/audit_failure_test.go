@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/nocktechnologies/nocklock/internal/config"
 	"github.com/nocktechnologies/nocklock/internal/logging"
@@ -110,5 +111,58 @@ func TestProxyPassedRowWriteFailureIsNotReported(t *testing.T) {
 	p.logEvent(logging.EventNetworkPassed, http.MethodGet, "allowed.example", false)
 	if sink.count() != 0 {
 		t.Fatalf("reported failures = %d, want 0 for a non-blocked row", sink.count())
+	}
+}
+
+// A blocked row written while another connection holds the write lock waits
+// out busy_timeout and lands. Ordinary lock contention must not read as a lost
+// row, because a lost blocked row fails the run.
+func TestProxyBlockedRowWaitsOutWriteLock(t *testing.T) {
+	cases := []struct {
+		name  string
+		write func(p *ProxyServer)
+	}{
+		{"allowlist denial", func(p *ProxyServer) {
+			p.logEvent(logging.EventNetworkBlocked, http.MethodGet, "blocked.example", true)
+		}},
+		{"DNS rebind", func(p *ProxyServer) {
+			p.logDNSRebind(&dnsRebindError{host: "allowed.example", pinned: []net.IP{net.ParseIP("93.184.216.34")}, current: []net.IP{net.ParseIP("192.168.1.20")}})
+		}},
+		{"degrade", func(p *ProxyServer) { p.MarkDegraded("test degrade") }},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			dbPath := filepath.Join(t.TempDir(), "events.db")
+			logger, err := logging.NewLogger(dbPath, "")
+			if err != nil {
+				t.Fatalf("NewLogger: %v", err)
+			}
+			t.Cleanup(func() { logger.Close() })
+			// A first row, so the logger's connection is warm and the chain
+			// has a predecessor to read.
+			if err := logger.Log(logging.Event{Timestamp: time.Now(), EventType: logging.EventNetworkPassed, Category: "network", Detail: "warm", SessionID: "sid"}); err != nil {
+				t.Fatalf("warm-up row: %v", err)
+			}
+			p := NewProxyServer(config.NetworkConfig{Allow: []string{"allowed.example"}}, logger, "sid")
+			sink := &failureSink{}
+			p.SetBlockedWriteFailureHandler(sink.record)
+
+			wait := holdWriteLock(t, dbPath, 300*time.Millisecond)
+			tc.write(p)
+			wait()
+
+			if sink.count() != 0 {
+				t.Fatalf("failure hook fired %d time(s) under a 300 ms write lock (first: %v); want the write to wait out busy_timeout", sink.count(), sink.errs[0])
+			}
+			blocked := true
+			sid := "sid"
+			rows, err := logger.Query(logging.QueryOptions{Blocked: &blocked, SessionID: &sid})
+			if err != nil {
+				t.Fatalf("Query: %v", err)
+			}
+			if len(rows) != 1 {
+				t.Fatalf("blocked rows = %d, want 1", len(rows))
+			}
+		})
 	}
 }

@@ -183,11 +183,14 @@ func (p *ProxyServer) SetBlockedWriteFailureHandler(fn func(logging.EventType, e
 	p.onBlockedWriteFailure = fn
 }
 
-// writeBlockedRow writes a blocked audit row with write (the logger's Log or
-// LogImmediate) and reports a write error to the failure handler. The caller
-// has already refused the request; only the run verdict depends on this.
-func (p *ProxyServer) writeBlockedRow(write func(logging.Event) error, ev logging.Event) {
-	if err := write(ev); err != nil && p.onBlockedWriteFailure != nil {
+// writeBlockedRow writes a blocked audit row and reports a write error to the
+// failure handler. The caller has already refused the request; only the run
+// verdict depends on this. It always uses LogImmediate: a lost blocked row
+// fails the run, so the write must wait out busy_timeout when another
+// connection holds the write lock. Log's deferred transaction would fail at
+// once with SQLITE_BUSY and turn ordinary lock contention into a failed run.
+func (p *ProxyServer) writeBlockedRow(ev logging.Event) {
+	if err := p.logger.LogImmediate(ev); err != nil && p.onBlockedWriteFailure != nil {
 		p.onBlockedWriteFailure(ev.EventType, err)
 	}
 }
@@ -445,7 +448,7 @@ func (p *ProxyServer) MarkDegraded(reason string) {
 	if reason == "" {
 		reason = "proxy degraded"
 	}
-	p.writeBlockedRow(p.logger.Log, logging.Event{
+	p.writeBlockedRow(logging.Event{
 		Timestamp: time.Now(),
 		EventType: logging.EventNetworkError,
 		Category:  "network",
@@ -608,7 +611,7 @@ func (p *ProxyServer) logDNSRebind(err *dnsRebindError) {
 	if p.logger == nil || err == nil {
 		return
 	}
-	p.writeBlockedRow(p.logger.Log, logging.Event{
+	p.writeBlockedRow(logging.Event{
 		Timestamp: time.Now(),
 		EventType: logging.EventNetworkBlocked,
 		Category:  "network",

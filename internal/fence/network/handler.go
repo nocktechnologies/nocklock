@@ -196,7 +196,7 @@ func (p *ProxyServer) logEvent(eventType logging.EventType, method, host string,
 		SessionID: p.sessionID,
 	}
 	if blocked {
-		p.writeBlockedRow(p.logger.Log, ev)
+		p.writeBlockedRow(ev)
 		return
 	}
 	_ = p.logger.Log(ev)

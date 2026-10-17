@@ -224,7 +224,7 @@ func (p *ProxyServer) recordLookbackBlock(desc, rule, trigger string) {
 	default:
 		return
 	}
-	p.writeBlockedRow(p.logger.LogImmediate, logging.Event{
+	p.writeBlockedRow(logging.Event{
 		Timestamp: time.Now(),
 		EventType: logging.EventNetworkBlocked,
 		Category:  "network",
