@@ -1,6 +1,7 @@
 package config
 
 import (
+	"errors"
 	"os"
 	"testing"
 	"time"
@@ -27,7 +28,17 @@ func (permissiveTrustInfo) Sys() any           { return nil }
 // still checked on its open handle, so a fixture written group- or
 // world-writable is refused. The dedicated trust tests (config_trust_test.go)
 // swap in their own seams and restore this default.
+//
+// The account seam defaults to failing every lookup, so no group counts as the
+// invoker's private group and a group-writable fixture is refused whatever the
+// host's account files say. Tests that need a private group install one.
 func TestMain(m *testing.M) {
+	noAccounts := errors.New("account lookups are disabled in tests")
+	configTrustAccounts = accountLookups{
+		user:    func(uint32) (string, uint32, error) { return "", 0, noAccounts },
+		group:   func(uint32) (string, error) { return "", noAccounts },
+		members: func(uint32) ([]string, error) { return nil, noAccounts },
+	}
 	configTrustLstat = func(path string) (os.FileInfo, error) {
 		info, err := os.Lstat(path)
 		if err != nil || !info.IsDir() {

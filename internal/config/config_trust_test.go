@@ -19,6 +19,7 @@ import (
 type trustTestInfo struct {
 	mode os.FileMode
 	uid  uint32
+	gid  uint32
 }
 
 func (i trustTestInfo) Name() string       { return "fixture" }
@@ -26,7 +27,7 @@ func (i trustTestInfo) Size() int64        { return 0 }
 func (i trustTestInfo) Mode() os.FileMode  { return i.mode }
 func (i trustTestInfo) ModTime() time.Time { return time.Time{} }
 func (i trustTestInfo) IsDir() bool        { return i.mode.IsDir() }
-func (i trustTestInfo) Sys() any           { s := syscall.Stat_t{Uid: i.uid}; return &s }
+func (i trustTestInfo) Sys() any           { s := syscall.Stat_t{Uid: i.uid, Gid: i.gid}; return &s }
 
 // trustFixture is a fake filesystem for the config trust walk. Every path
 // component defaults to a safe, invoker-owned directory; a test overrides only
@@ -113,6 +114,100 @@ func TestResolveTrustedConfigPath(t *testing.T) {
 				t.Fatalf("expected a trust refusal, got an I/O error: %v", err)
 			}
 		})
+	}
+}
+
+// fakeAccounts installs an account layout for the private-group rule: uid
+// trustTestUID is "user" with primary gid trustTestUID, the group's name and
+// member list are as given, and memberErr fails the member lookup.
+func fakeAccounts(t *testing.T, groupName string, members []string, memberErr error) {
+	t.Helper()
+	prev := configTrustAccounts
+	configTrustAccounts = accountLookups{
+		user: func(uid uint32) (string, uint32, error) {
+			if uid != trustTestUID {
+				return "", 0, fmt.Errorf("unknown uid %d", uid)
+			}
+			return "user", trustTestUID, nil
+		},
+		group: func(gid uint32) (string, error) {
+			if gid != trustTestUID {
+				return "", fmt.Errorf("unknown gid %d", gid)
+			}
+			return groupName, nil
+		},
+		members: func(uint32) ([]string, error) { return members, memberErr },
+	}
+	t.Cleanup(func() { configTrustAccounts = prev })
+}
+
+// TestGroupWriteInUserPrivateGroup is the Ubuntu default: a login user whose
+// primary group is their own private group gets umask 002, so every project
+// directory they create is 0775. Group write is accepted only in that group.
+func TestGroupWriteInUserPrivateGroup(t *testing.T) {
+	const project = "/home/user/project"
+	for _, tc := range []struct {
+		name      string
+		mode      os.FileMode
+		gid       uint32
+		groupName string
+		members   []string
+		memberErr error
+		errSub    string
+	}{
+		{name: "private group accepted", mode: 0o775, gid: trustTestUID, groupName: "user"},
+		{name: "private group listing the user accepted", mode: 0o775, gid: trustTestUID, groupName: "user", members: []string{"user"}},
+		{name: "group name differs refused", mode: 0o775, gid: trustTestUID, groupName: "devs", errSub: "group- or world-writable"},
+		{name: "extra member refused", mode: 0o775, gid: trustTestUID, groupName: "user", members: []string{"user", "bob"}, errSub: "group- or world-writable"},
+		{name: "not the primary gid refused", mode: 0o775, gid: 1001, groupName: "user", errSub: "group- or world-writable"},
+		{name: "world-writable in the private group refused", mode: 0o777, gid: trustTestUID, groupName: "user", errSub: "group- or world-writable"},
+		{name: "member lookup failure refused", mode: 0o775, gid: trustTestUID, groupName: "user", memberErr: errors.New("no group entry"), errSub: "group- or world-writable"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			f := newTrustFixture()
+			f.nodes[project] = trustTestInfo{mode: os.ModeDir | tc.mode, uid: trustTestUID, gid: tc.gid}
+			f.install(t)
+			fakeAccounts(t, tc.groupName, tc.members, tc.memberErr)
+			_, _, err := resolveTrustedConfigPath(configLeaf, trustTestUID)
+			if tc.errSub == "" {
+				if err != nil {
+					t.Fatalf("expected the layout to be accepted, got: %v", err)
+				}
+				return
+			}
+			if err == nil || !strings.Contains(err.Error(), tc.errSub) {
+				t.Fatalf("expected a refusal containing %q, got: %v", tc.errSub, err)
+			}
+		})
+	}
+}
+
+// TestLocalGroupMembers reads members from both account files: the group's
+// listed members and any user whose primary group it is.
+func TestLocalGroupMembers(t *testing.T) {
+	dir := t.TempDir()
+	groupFile := filepath.Join(dir, "group")
+	passwdFile := filepath.Join(dir, "passwd")
+	if err := os.WriteFile(groupFile, []byte("# comment\nuser:x:1000:\ndevs:x:1002:user, bob\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(passwdFile, []byte("user:x:1000:1000::/home/user:/bin/sh\nbob:x:1001:1000::/home/bob:/bin/sh\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	prevGroup, prevPasswd := groupFilePath, passwdFilePath
+	groupFilePath, passwdFilePath = groupFile, passwdFile
+	t.Cleanup(func() { groupFilePath, passwdFilePath = prevGroup, prevPasswd })
+
+	got, err := localGroupMembers(1000)
+	if err != nil || strings.Join(got, ",") != "user,bob" {
+		t.Fatalf("gid 1000 members = %v, %v; want [user bob] from the primary-group users", got, err)
+	}
+	got, err = localGroupMembers(1002)
+	if err != nil || strings.Join(got, ",") != "user,bob" {
+		t.Fatalf("gid 1002 members = %v, %v; want [user bob] from the member list", got, err)
+	}
+	if got, err := localGroupMembers(1003); err == nil {
+		t.Fatalf("gid 1003 has no group entry; want an error, got members %v", got)
 	}
 }
 
