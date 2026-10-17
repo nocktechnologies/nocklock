@@ -13,11 +13,11 @@ Most coding-agent escapes do not break the sandbox. The agent asks a helper with
 | Service directories | Linux: `~/.config/systemd/user`. macOS: `~/Library/LaunchAgents` | A unit or agent placed here runs as you, outside the fence. |
 | Shell startup files | `~/.bashrc`, `~/.bash_profile`, `~/.bash_login`, `~/.profile`, `~/.zshenv`, `~/.zprofile`, `~/.zshrc`, `~/.zlogin`, `~/.config/fish/config.fish` | Your shell runs it the next time you open a terminal. |
 | Agent config and hooks | Claude Code (`~/.claude.json`, `~/.claude/settings.json`, `~/.claude/hooks`, and in the project `.mcp.json`, `.claude/settings.json`, `.claude/settings.local.json`, `.claude/hooks`), Codex (`config.toml` under `~/.codex` and the project's `.codex`), Cursor (`mcp.json` and `hooks.json` under `~/.cursor` and the project's `.cursor`), Gemini CLI (`settings.json` under `~/.gemini` and the project's `.gemini`) | The tool loads it on its next run, and it can name commands to run. |
-| sudo without a password prompt | `sudo -n true`, which fails at once instead of asking for a password, with a 3 second limit | A command run through sudo acts as root. |
+| sudo without a password prompt | `/usr/bin/sudo -k -n true`, which fails at once instead of asking for a password, with a 3 second limit. Doctor runs only `/usr/bin/sudo`, never a `sudo` found on `PATH`, and skips the check when that file is not a root-owned executable | A command run through sudo acts as root. |
 
-Doctor lists a socket only if it exists and you can connect to it. It lists a file or directory if you can write to it, or if you can write to the folder that holds it, because then the agent can delete the entry and put its own in place. A symlink counts both ways: a link to a file outside the fence is still reachable when the link sits in a folder the agent can write. Doctor lists only paths on disk at scan time, so a path the agent could create later is not listed.
+Doctor lists a socket only if it exists and you can connect to it. It lists a file or directory if you can write to it, or if you can write to the folder that holds it, because then the agent can delete the entry and put its own in place. A symlink counts both ways: a link to a file outside the fence is still reachable when the link sits in a folder the agent can write. The same holds for a linked folder: if the path as listed (for example `.claude/settings.json` in the project, with `.claude` a link to `~/.claude`) is inside a write grant, the agent can delete the link and create a real folder in its place, so the row is reachable. Doctor lists only paths on disk at scan time, so a path the agent could create later is not listed.
 
-The sudo row is a point-in-time check. It passes when sudo runs without a prompt right now. That can be a NOPASSWD rule, or a cached sudo login from a recent `sudo` where you typed your password (5 minutes by default). Both count, because the agent can use either while the cache lasts. Run doctor again later and a cached login may have expired. Run `sudo -k` first to clear it if you want to check the rule alone.
+The sudo row passes only for a NOPASSWD rule. The `-k` flag makes sudo ignore a cached sudo login from a recent `sudo` where you typed your password, so that cache does not count, and the check does not refresh it.
 
 ## When the fence blocks a deputy
 
@@ -39,7 +39,7 @@ A deputy the fence does not block keeps the verdict at `PARTIAL` (exit 3), and t
 Deputies
 ⚠ docker-socket [reachable]: Docker daemon socket /var/run/docker.sock: not blocked by the fence, because Landlock Unix-socket isolation needs CONFINED egress and Landlock ABI v9. Whoever can talk to it can start a privileged container that mounts the host.
 ✓ shell-startup [blocked]: shell startup file /home/you/.bashrc: blocked by the fence. Your shell runs it the next time you open a terminal, outside the fence.
-✓ sudo-no-prompt [blocked]: sudo runs without a password prompt right now (a NOPASSWD rule or a cached sudo login): blocked by the fence. A command run through sudo acts as root.
+✓ sudo-no-prompt [blocked]: sudo runs without a password prompt (a NOPASSWD rule): blocked by the fence. A command run through sudo acts as root.
 
 VERDICT: PARTIAL
 - unix-sockets: advisory

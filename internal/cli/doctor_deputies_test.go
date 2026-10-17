@@ -7,7 +7,9 @@ import (
 	"errors"
 	"net"
 	"os"
+	"os/exec"
 	"path/filepath"
+	"runtime"
 	"slices"
 	"strconv"
 	"strings"
@@ -514,44 +516,83 @@ func TestDeputyTargetsPerPlatform(t *testing.T) {
 	}
 }
 
-// TestPasswordlessSudoProbeCannotHang runs the production probe against a fake
-// sudo on a private PATH: it passes exactly `-n true`, and a sudo that never
-// returns is cut off by the timeout. Real sudo is never run.
+// TestPasswordlessSudoProbeCannotHang runs the probe against a fake sudo: it
+// passes exactly `-k -n true`, and a sudo that never returns is cut off by the
+// timeout. Real sudo is never run.
 func TestPasswordlessSudoProbeCannotHang(t *testing.T) {
 	bin := t.TempDir()
 	argsFile := filepath.Join(bin, "args")
+	fake := filepath.Join(bin, "sudo")
 	write := func(body string) {
-		if err := os.WriteFile(filepath.Join(bin, "sudo"), []byte("#!/bin/sh\n"+body), 0o700); err != nil {
+		if err := os.WriteFile(fake, []byte("#!/bin/sh\n"+body), 0o700); err != nil {
 			t.Fatal(err)
 		}
 	}
-	t.Setenv("PATH", bin)
 
 	write("printf '%s ' \"$@\" > " + argsFile + "\nexit 0\n")
-	if err := passwordlessSudoProbe(context.Background()); err != nil {
+	if err := runSudoProbe(context.Background(), fake); err != nil {
 		t.Fatalf("fake passwordless sudo: %v", err)
 	}
-	if b, _ := os.ReadFile(argsFile); strings.TrimSpace(string(b)) != "-n true" {
-		t.Fatalf("sudo args = %q, want -n true", b)
+	// -k ignores a cached sudo login for this call and does not refresh it;
+	// -n fails at once instead of prompting.
+	if b, _ := os.ReadFile(argsFile); strings.TrimSpace(string(b)) != "-k -n true" {
+		t.Fatalf("sudo args = %q, want -k -n true", b)
 	}
 
 	write("exit 1\n")
-	if err := passwordlessSudoProbe(context.Background()); err == nil {
+	if err := runSudoProbe(context.Background(), fake); err == nil {
 		t.Fatal("a sudo that needs a password must not count as passwordless")
 	}
 
 	write("exec /bin/sleep 30\n")
 	start := time.Now()
-	if err := passwordlessSudoProbe(context.Background()); err == nil {
+	if err := runSudoProbe(context.Background(), fake); err == nil {
 		t.Fatal("a hung sudo must not count as passwordless")
 	}
 	if d := time.Since(start); d > 10*time.Second {
 		t.Fatalf("probe took %s; the timeout must cut it off", d)
 	}
+}
 
-	t.Setenv("PATH", t.TempDir())
+// TestPasswordlessSudoProbeIgnoresPATH: the probe runs sudo only from its fixed
+// absolute path, never a sudo found on PATH, and skips the probe when that path
+// is missing or not a root-owned executable. Real sudo is never run.
+func TestPasswordlessSudoProbeIgnoresPATH(t *testing.T) {
+	bin := t.TempDir()
+	marker := filepath.Join(bin, "ran")
+	planted := "#!/bin/sh\ntouch " + marker + "\nexit 0\n"
+	if err := os.WriteFile(filepath.Join(bin, "sudo"), []byte(planted), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", bin)
+	orig := sudoBinary
+	t.Cleanup(func() { sudoBinary = orig })
+
+	// Missing absolute sudo: skipped, the PATH sudo is not run.
+	sudoBinary = filepath.Join(t.TempDir(), "sudo")
 	if err := passwordlessSudoProbe(context.Background()); err == nil {
-		t.Fatal("missing sudo must not count as passwordless")
+		t.Fatal("a missing sudo must not count as passwordless")
+	}
+	if _, err := os.Stat(marker); err == nil {
+		t.Fatal("the probe ran a sudo found on PATH")
+	}
+
+	// A sudo at the fixed path that this user owns is not trusted or run.
+	sudoBinary = filepath.Join(bin, "sudo")
+	if _, err := trustedSudoPath(); err == nil {
+		t.Fatal("a sudo owned by this user must not be trusted")
+	}
+	if err := passwordlessSudoProbe(context.Background()); err == nil {
+		t.Fatal("an untrusted sudo must not count as passwordless")
+	}
+	if _, err := os.Stat(marker); err == nil {
+		t.Fatal("the probe ran an untrusted sudo")
+	}
+
+	// A directory is not a regular executable.
+	sudoBinary = bin
+	if _, err := trustedSudoPath(); err == nil {
+		t.Fatal("a directory must not be trusted as sudo")
 	}
 }
 
@@ -648,6 +689,40 @@ func TestDoctorDeputyProjectLinkToHomeFileNotDeduplicated(t *testing.T) {
 	}
 }
 
+// TestDoctorDeputySymlinkedProjectConfigDir: a project config folder that is a
+// symlink to a folder outside every write grant is still reachable. The agent
+// can unlink project/.claude, which sits inside the project write grant, and
+// create a real folder holding its own settings.json. Both routes through the
+// symlink resolve outside the grant, so only the listed path shows this. The
+// home file behind the link keeps its own blocked row.
+func TestDoctorDeputySymlinkedProjectConfigDir(t *testing.T) {
+	f := newDeputyFixture(t)
+	homeSettings := f.file(t, f.home, ".claude/settings.json")
+	if err := os.Symlink(filepath.Join(f.home, ".claude"), filepath.Join(f.project, ".claude")); err != nil {
+		t.Fatal(err)
+	}
+	projSettings := filepath.Join(f.project, ".claude", "settings.json")
+	// A linked folder whose target is no home candidate.
+	cursorHooks := f.file(t, f.home, "dotfiles/cursor/hooks.json")
+	if err := os.Symlink(filepath.Dir(cursorHooks), filepath.Join(f.project, ".cursor")); err != nil {
+		t.Fatal(err)
+	}
+	projCursor := filepath.Join(f.project, ".cursor", "hooks.json")
+
+	got, code := f.run(t, config.DefaultTOML(), "linux", 9)
+	requireDeputyStatus(t, deputyRow(t, got, "agent-config", homeSettings), true)
+	for _, p := range []string{projSettings, projCursor} {
+		row := deputyRow(t, got, "agent-config", p)
+		requireDeputyStatus(t, row, false)
+		if !strings.Contains(row.Message, "a folder on its path") {
+			t.Fatalf("linked folder row must name the folder route: %+v", row)
+		}
+	}
+	if got.Verdict != doctorVerdictPartial || code != doctorExitPartial {
+		t.Fatalf("verdict=%q exit=%d, want PARTIAL/%d; rows=%+v", got.Verdict, code, doctorExitPartial, deputyRows(got))
+	}
+}
+
 // TestDoctorDeputySymlinkedSocketCountsOnce: two candidate paths that resolve
 // to one socket (macOS Docker Desktop: /var/run/docker.sock links to the
 // daemon socket under the home directory) are one deputy, not two.
@@ -675,19 +750,19 @@ func TestDoctorDeputySymlinkedSocketCountsOnce(t *testing.T) {
 	}
 }
 
-// TestPasswordlessSudoProbeKillsDescendants: a sudo (or a wrapper earlier in
-// PATH) that starts a helper and waits must not leave that helper running after
-// the timeout. Real sudo is never run.
+// TestPasswordlessSudoProbeKillsDescendants: a sudo that starts a helper and
+// waits must not leave that helper running after the timeout. Real sudo is
+// never run.
 func TestPasswordlessSudoProbeKillsDescendants(t *testing.T) {
 	bin := t.TempDir()
 	pidFile := filepath.Join(bin, "child.pid")
+	fake := filepath.Join(bin, "sudo")
 	script := "#!/bin/sh\n/bin/sleep 30 &\necho $! > " + pidFile + "\nwait\n"
-	if err := os.WriteFile(filepath.Join(bin, "sudo"), []byte(script), 0o700); err != nil {
+	if err := os.WriteFile(fake, []byte(script), 0o700); err != nil {
 		t.Fatal(err)
 	}
-	t.Setenv("PATH", bin)
 	start := time.Now()
-	if err := passwordlessSudoProbe(context.Background()); err == nil {
+	if err := runSudoProbe(context.Background(), fake); err == nil {
 		t.Fatal("a hung sudo must not count as passwordless")
 	}
 	if d := time.Since(start); d > 10*time.Second {
@@ -701,17 +776,79 @@ func TestPasswordlessSudoProbeKillsDescendants(t *testing.T) {
 	if err != nil || pid <= 0 {
 		t.Fatalf("bad child pid %q", b)
 	}
-	t.Cleanup(func() { _ = syscall.Kill(pid, syscall.SIGKILL) })
+	// Once ESRCH is seen the pid may be reused, so the cleanup must not kill it.
+	exited := false
+	t.Cleanup(func() {
+		if !exited {
+			_ = syscall.Kill(pid, syscall.SIGKILL)
+		}
+	})
 	// The killed child is reaped by its new parent; allow a moment for that.
 	deadline := time.Now().Add(5 * time.Second)
 	for {
-		err := syscall.Kill(pid, 0)
-		if errors.Is(err, syscall.ESRCH) {
+		gone, esrch := processGone(pid)
+		if esrch {
+			exited = true
+		}
+		if gone {
 			return
 		}
 		if time.Now().After(deadline) {
-			t.Fatalf("helper pid %d still exists after the probe timed out (kill 0: %v)", pid, err)
+			t.Fatalf("helper pid %d still exists after the probe timed out", pid)
 		}
 		time.Sleep(50 * time.Millisecond)
+	}
+}
+
+// processGone reports whether pid has exited. An unreaped zombie counts as
+// gone: it runs nothing, and a parent that never reaps it (a minimal PID 1 or a
+// subreaper) would otherwise fail the check. esrch reports that the pid no
+// longer exists at all, after which it may be reused.
+func processGone(pid int) (gone, esrch bool) {
+	if errors.Is(syscall.Kill(pid, 0), syscall.ESRCH) {
+		return true, true
+	}
+	if runtime.GOOS == "linux" {
+		b, err := os.ReadFile(filepath.Join("/proc", strconv.Itoa(pid), "stat"))
+		if err == nil {
+			// The state follows the parenthesised command name, which may
+			// itself contain ") ".
+			s := string(b)
+			if i := strings.LastIndexByte(s, ')'); i >= 0 && strings.HasPrefix(strings.TrimSpace(s[i+1:]), "Z") {
+				return true, false
+			}
+		}
+	}
+	return false, false
+}
+
+// TestProcessGoneTreatsZombieAsGone: an exited child its parent has not reaped
+// is a zombie, which processGone must count as gone.
+func TestProcessGoneTreatsZombieAsGone(t *testing.T) {
+	if runtime.GOOS != "linux" {
+		t.Skip("zombie state is read from /proc on Linux")
+	}
+	cmd := exec.Command("/bin/true")
+	if err := cmd.Start(); err != nil {
+		t.Fatal(err)
+	}
+	pid := cmd.Process.Pid
+	t.Cleanup(func() { _ = cmd.Wait() })
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		b, err := os.ReadFile(filepath.Join("/proc", strconv.Itoa(pid), "stat"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if s := string(b); strings.HasPrefix(strings.TrimSpace(s[strings.LastIndexByte(s, ')')+1:]), "Z") {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("child %d never became a zombie: %s", pid, b)
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	if gone, esrch := processGone(pid); !gone || esrch {
+		t.Fatalf("processGone(zombie %d) = gone %v, esrch %v; want gone, no ESRCH", pid, gone, esrch)
 	}
 }

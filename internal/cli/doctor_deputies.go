@@ -53,7 +53,8 @@ type deputyTarget struct {
 }
 
 // defaultDeputyHost reads the invoking user's environment. It touches nothing:
-// paths are only stat'ed and access(2)-checked, and sudo runs only as `sudo -n`.
+// paths are only stat'ed and access(2)-checked, and sudo runs only as
+// `/usr/bin/sudo -k -n true`.
 func defaultDeputyHost(goos string) deputyHost {
 	home, _ := os.UserHomeDir()
 	xdgConfig := os.Getenv("XDG_CONFIG_HOME")
@@ -90,21 +91,46 @@ func pathWritableByUser(path string) bool {
 	return unix.Access(path, unix.W_OK) == nil
 }
 
-// passwordlessSudoProbe runs `sudo -n true` with a short timeout and no stdin.
-// -n makes sudo fail at once instead of prompting, so it cannot hang on a
-// password; the timeout covers a slow PAM or directory lookup. Success means
-// sudo runs without a prompt right now: a NOPASSWD rule or a cached sudo login
-// both count, because both are reachable at scan time. The probe runs in its
-// own process group and a timeout kills the whole group, so a helper that sudo
-// (or a wrapper earlier in PATH) started cannot outlive the probe.
+// sudoBinary is the only sudo the probe runs. PATH is never searched: a sudo
+// earlier in PATH could be any program the user (or the agent) placed there.
+var sudoBinary = "/usr/bin/sudo"
+
+// passwordlessSudoProbe runs `sudo -k -n true` with a short timeout and no
+// stdin, using sudo at its fixed absolute path, and only when that path is a
+// regular executable owned by root; otherwise the probe is skipped and nothing
+// is recorded. -n makes sudo fail at once instead of prompting, so it cannot
+// hang on a password; the timeout covers a slow PAM or directory lookup. -k
+// ignores a cached sudo login for this call and does not refresh it, so only a
+// NOPASSWD rule passes and the check never extends a cached login.
 func passwordlessSudoProbe(ctx context.Context) error {
-	sudo, err := exec.LookPath("sudo")
+	sudo, err := trustedSudoPath()
 	if err != nil {
 		return err
 	}
+	return runSudoProbe(ctx, sudo)
+}
+
+// trustedSudoPath returns sudoBinary when it is a regular executable file owned
+// by root.
+func trustedSudoPath() (string, error) {
+	fi, err := os.Stat(sudoBinary)
+	if err != nil {
+		return "", err
+	}
+	st, ok := fi.Sys().(*syscall.Stat_t)
+	if !fi.Mode().IsRegular() || fi.Mode().Perm()&0o111 == 0 || !ok || st.Uid != 0 {
+		return "", fmt.Errorf("%s is not a root-owned executable file", sudoBinary)
+	}
+	return sudoBinary, nil
+}
+
+// runSudoProbe runs `sudo -k -n true`. The probe runs in its own process group
+// and a timeout kills the whole group, so a helper that sudo started cannot
+// outlive the probe.
+func runSudoProbe(ctx context.Context, sudo string) error {
 	ctx, cancel := context.WithTimeout(ctx, 3*time.Second)
 	defer cancel()
-	cmd := exec.CommandContext(ctx, sudo, "-n", "true")
+	cmd := exec.CommandContext(ctx, sudo, "-k", "-n", "true")
 	cmd.Stdin = nil
 	cmd.Stdout = nil
 	cmd.Stderr = nil
@@ -322,36 +348,46 @@ func canonicalPathWithin(p, dir string) bool {
 }
 
 // fileDeputyAccess decides whether the agent can change what a file or
-// directory deputy at path holds. There are two routes: write through path to
-// its resolved target, or replace the entry itself through its parent
-// directory (unlink a symlink or rename the file, then create a new one). A
-// symlink to a target outside every write grant is therefore still reachable
-// when its folder is inside one. listed reports whether this user has either
+// directory deputy at path holds. There are three routes: write through path
+// to its resolved target; replace the entry itself through its parent
+// directory (unlink a symlink or rename the file, then create a new one); or
+// replace a folder on the listed path. A symlink to a target outside every
+// write grant is therefore still reachable when its folder is inside one, and
+// so is a file under a symlinked folder (project/.claude linked to
+// ~/.claude) when the listed path is inside a grant: the agent can unlink the
+// linked folder and create a real one. listed reports whether this user has a
 // route on the host; blocked reports whether the fence stops every route the
-// user has; reason names the first open route.
-func (f deputyFence) fileDeputyAccess(path string, writable func(string) bool) (listed, blocked bool, reason string) {
+// user has; reason names the first open route. lexical reports that only the
+// listed path is open, so the row must be keyed on that path. Only paths that
+// exist are judged.
+func (f deputyFence) fileDeputyAccess(path string, writable func(string) bool) (listed, blocked, lexical bool, reason string) {
 	if _, err := os.Lstat(path); err != nil {
-		return false, false, ""
+		return false, false, false, ""
 	}
 	_, statErr := os.Stat(path)
 	targetW := statErr == nil && writable(path)
 	parent := filepath.Dir(path)
 	parentW := writable(parent)
-	if !targetW && !parentW {
-		return false, false, ""
+	// Every entry on the listed path inside a grant can be renamed or replaced.
+	lexicalOpen := f.writesConfined && !f.writeBlocked(filepath.Clean(path))
+	if !targetW && !parentW && !lexicalOpen {
+		return false, false, false, ""
 	}
 	if !f.writesConfined {
-		return true, false, f.fsReason
+		return true, false, false, f.fsReason
 	}
 	if targetW && !f.writeBlocked(resolvePathBestEffort(path)) {
-		return true, false, "the path is inside a write grant"
+		return true, false, false, "the path is inside a write grant"
 	}
 	// The entry itself, not where a final symlink points.
 	entry := filepath.Join(resolvePathBestEffort(parent), filepath.Base(path))
 	if parentW && !f.writeBlocked(entry) {
-		return true, false, "its folder is inside a write grant, so the agent can replace it"
+		return true, false, false, "its folder is inside a write grant, so the agent can replace it"
 	}
-	return true, true, ""
+	if lexicalOpen {
+		return true, false, true, "the path as listed is inside a write grant, so the agent can replace a folder on its path"
+	}
+	return true, true, false, ""
 }
 
 // deputyDoctorChecks lists each reachable deputy as a check in the Deputies
@@ -411,14 +447,20 @@ func deputyDoctorChecks(cfg *config.Config, caps doctorCapabilities, checks []do
 		row(s.name, s.what, s.path, resolvePathBestEffort(s.path), s.why, f.socketsBlocked, f.socketReason)
 	}
 	for _, w := range writableDeputyTargets(caps.goos, h) {
-		listed, blocked, reason := f.fileDeputyAccess(w.path, writable)
+		listed, blocked, lexical, reason := f.fileDeputyAccess(w.path, writable)
 		if !listed {
 			continue
 		}
-		row(w.name, w.what, w.path, entryKey(w.path), w.why, blocked, reason)
+		key := entryKey(w.path)
+		if lexical {
+			// Open only through the listed path (a linked folder above the
+			// entry), so it is not the same deputy as the entry it resolves to.
+			key = filepath.Clean(w.path)
+		}
+		row(w.name, w.what, w.path, key, w.why, blocked, reason)
 	}
 	if h.sudo != nil && h.sudo(context.Background()) == nil {
-		row("sudo-no-prompt", "sudo runs without a password prompt right now (a NOPASSWD rule or a cached sudo login)", "", "",
+		row("sudo-no-prompt", "sudo runs without a password prompt (a NOPASSWD rule)", "", "",
 			"A command run through sudo acts as root.", f.noNewPrivs, f.sudoReason)
 	}
 	if len(out) == 0 {
