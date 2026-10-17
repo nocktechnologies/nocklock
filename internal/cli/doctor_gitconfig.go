@@ -57,20 +57,48 @@ var gitConfigExecKeys = map[string]bool{
 	"sendemail.sendmailcmd":     true,
 }
 
+// gitConfigScanTimeout bounds doctor's git calls (an include can name a FIFO).
+var gitConfigScanTimeout = 3 * time.Second
+
 // gitConfigExecDoctorChecks lists the repository git config entries for dir
 // (.git/config, config.worktree and the files they include) that make git run
 // a program, one warning each. Doctor only reads the config: `git config
-// --list` runs no hook. It reports nothing when git is missing, times out (an
-// include can name a FIFO), or dir is not in a repository.
+// --list` runs no hook. It reports nothing when git is missing or dir is not in
+// a repository; inside a repository, a config it cannot fully read is itself a
+// warning, so a hostile repo cannot hide its keys by stalling or breaking git.
 func gitConfigExecDoctorChecks(dir string) []doctorCheck {
-	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), gitConfigScanTimeout)
 	defer cancel()
-	cmd := exec.CommandContext(ctx, "git", "-C", dir, "--no-pager", "config", "--includes", "--show-scope", "--show-origin", "--null", "--list")
-	// An inherited GIT_DIR or GIT_WORK_TREE would point git at another repo.
-	cmd.Env = removeEnvVars(os.Environ(), "GIT_DIR", "GIT_WORK_TREE", "GIT_COMMON_DIR")
-	out, err := cmd.Output()
-	if err != nil {
+	// An inherited GIT_DIR, GIT_WORK_TREE or GIT_CONFIG would point git at
+	// another repo or config file.
+	env := removeEnvVars(os.Environ(), "GIT_DIR", "GIT_WORK_TREE", "GIT_COMMON_DIR", "GIT_CONFIG")
+	git := func(args ...string) ([]byte, error) {
+		// CommandContext kills git at the deadline; WaitDelay bounds the
+		// reap if a descendant still holds the output pipe.
+		cmd := exec.CommandContext(ctx, "git", append([]string{"-C", dir, "--no-pager"}, args...)...)
+		cmd.Env = env
+		cmd.WaitDelay = time.Second
+		return cmd.Output()
+	}
+	// rev-parse reads the repo config too, so a timeout here is a stalled
+	// repository, not a missing one; the scan below then fails as a timeout.
+	if _, err := git("rev-parse", "--git-dir"); err != nil && ctx.Err() == nil {
 		return nil
+	}
+	out, err := git("config", "--includes", "--show-scope", "--show-origin", "--null", "--list")
+	if err != nil {
+		reason := "git error: " + err.Error()
+		if ctx.Err() != nil {
+			reason = "timeout"
+		}
+		return []doctorCheck{{
+			Group:    "Sanity",
+			Name:     "git-config-exec",
+			Severity: doctorWarning,
+			Status:   "incomplete",
+			Message:  fmt.Sprintf("Repo git config could not be fully read (%s); programs it sets may run under git. Inspect .git/config and its includes.", reason),
+			Fix:      "inspect .git/config, config.worktree and every included file",
+		}}
 	}
 	// "<scope>\0file:<origin>\0<key>\n<value>\0" per entry; a key set
 	// without "=" has no "\n<value>". Only the repository's own scopes count:

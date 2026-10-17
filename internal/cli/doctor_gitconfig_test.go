@@ -6,6 +6,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
 
@@ -143,5 +144,63 @@ func TestDoctorCleanGitRepoHasNoGitConfigWarning(t *testing.T) {
 	}
 	if strings.Contains(out, "git-config-exec") {
 		t.Fatalf("clean repo must not warn on git config:\n%s", out)
+	}
+}
+
+// A repo that stalls git (an include naming a FIFO blocks the read) must not
+// hide its keys: doctor warns that the config is incomplete, within the
+// deadline, and the verdict stays PROTECTED.
+func TestDoctorWarnsWhenGitConfigCannotBeRead(t *testing.T) {
+	dir := t.TempDir()
+	gitInitRepo(t, dir, "[core]\n\tfsmonitor = ./trap.sh\n[include]\n\tpath = stall\n")
+	if err := syscall.Mkfifo(filepath.Join(dir, ".git", "stall"), 0o600); err != nil {
+		t.Fatalf("mkfifo: %v", err)
+	}
+	orig := gitConfigScanTimeout
+	gitConfigScanTimeout = 300 * time.Millisecond
+	t.Cleanup(func() { gitConfigScanTimeout = orig })
+	writeTestConfig(t, dir, doctorTestTOML(false))
+	withWorkingDir(t, dir)
+
+	start := time.Now()
+	out, err := runProtectedDoctor(t)
+	if elapsed := time.Since(start); elapsed > 3*time.Second {
+		t.Fatalf("doctor took %s; the git scan must stop at its deadline", elapsed)
+	}
+	if err != nil || !strings.Contains(out, "VERDICT: PROTECTED") {
+		t.Fatalf("an unreadable git config must not change the verdict: %v\n%s", err, out)
+	}
+	if !strings.Contains(out, "⚠ git-config-exec [incomplete]: Repo git config could not be fully read (timeout)") {
+		t.Fatalf("doctor did not warn on a git config it could not read:\n%s", out)
+	}
+}
+
+func TestDoctorOutsideGitRepoHasNoGitConfigWarning(t *testing.T) {
+	dir := t.TempDir()
+	// Stop git's repository discovery at dir, so an enclosing repo cannot leak in.
+	t.Setenv("GIT_CEILING_DIRECTORIES", filepath.Dir(dir))
+	writeTestConfig(t, dir, doctorTestTOML(false))
+	withWorkingDir(t, dir)
+	out, err := runProtectedDoctor(t)
+	if err != nil || strings.Contains(out, "git-config-exec") {
+		t.Fatalf("outside a repository doctor must stay quiet on git config: %v\n%s", err, out)
+	}
+}
+
+// GIT_CONFIG in the caller's environment must not redirect the scan away from
+// the repo's own .git/config.
+func TestDoctorGitConfigScanIgnoresGitConfigEnv(t *testing.T) {
+	dir := t.TempDir()
+	gitInitRepo(t, dir, "[core]\n\tfsmonitor = ./trap.sh\n")
+	other := filepath.Join(t.TempDir(), "other.cfg")
+	if err := os.WriteFile(other, []byte("[core]\n\tbare = false\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("GIT_CONFIG", other)
+	writeTestConfig(t, dir, doctorTestTOML(false))
+	withWorkingDir(t, dir)
+	out, _ := runProtectedDoctor(t)
+	if !strings.Contains(out, `Repo git config "core.fsmonitor" = "./trap.sh"`) {
+		t.Fatalf("GIT_CONFIG hid the repo's core.fsmonitor:\n%s", out)
 	}
 }
