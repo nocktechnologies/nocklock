@@ -1,7 +1,10 @@
 name: Linux candidate artifact
 
 on:
+  # No required check lives here, so a plain filter is safe: docs-only PRs
+  # (the same rule as scripts/ci-code-changed.sh) do not start this workflow.
   pull_request:
+    paths-ignore: ['**.md', 'docs/**']
   workflow_dispatch:
 
 permissions:

@@ -29,8 +29,24 @@ permissions:
   contents: read
 
 jobs:
+  # Docs-only pull requests skip the suites (scripts/ci-code-changed.sh).
+  changes:
+    name: change detect (docs-only PRs skip the suites)
+    runs-on: ubuntu-latest
+    outputs:
+      code: ${{ steps.changes.outputs.code }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+          fetch-depth: 2
+      - id: changes
+        run: bash scripts/ci-code-changed.sh
+
   egress-probe:
     name: egress-probe · Q1 CI-runner coverage (receipt)
+    needs: changes
+    if: needs.changes.outputs.code == 'true'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -99,6 +115,8 @@ jobs:
 
   q6-acceptance:
     name: Q6 netns bypass-resistance · post-drop mutation (root)
+    needs: changes
+    if: needs.changes.outputs.code == 'true'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -130,6 +148,8 @@ jobs:
 
   netns-foundation:
     name: netns Phase-1 foundation · default-drop denies all egress (root)
+    needs: changes
+    if: needs.changes.outputs.code == 'true'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -164,6 +184,8 @@ jobs:
 
   netns-protocol-matrix:
     name: netns Phase-1b protocol matrix · tproxy allowlist and DNS stub (root)
+    needs: changes
+    if: needs.changes.outputs.code == 'true'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -197,6 +219,8 @@ jobs:
 
   proxy-supplementary-groups:
     name: netns proxy supplementary groups · all threads (root)
+    needs: changes
+    if: needs.changes.outputs.code == 'true'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -251,6 +275,8 @@ jobs:
 
   child-post-exec-credentials:
     name: child post-exec credentials · stress + mutation (hosted only)
+    needs: changes
+    if: needs.changes.outputs.code == 'true'
     runs-on: ubuntu-24.04
     timeout-minutes: 15
     defaults:
@@ -324,6 +350,8 @@ jobs:
 
   netns-egress-audit:
     name: netns egress decision audit · signed rows via `nocklock wrap` (root)
+    needs: changes
+    if: needs.changes.outputs.code == 'true'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -393,13 +421,22 @@ jobs:
       - uses: actions/checkout@v4
         with:
           persist-credentials: false
+          fetch-depth: 2
+
+      # Required check: it always reports. On a docs-only PR the steps below skip
+      # and the job still goes green (scripts/ci-code-changed.sh).
+      - name: change detect (docs-only PRs skip the suite)
+        id: changes
+        run: bash scripts/ci-code-changed.sh
 
       - uses: actions/setup-go@v5
+        if: steps.changes.outputs.code == 'true'
         with:
           go-version-file: go.mod
           cache: true
 
       - name: provision iproute2 + nftables + curl + gcc
+        if: steps.changes.outputs.code == 'true'
         run: |
           sudo apt-get update
           sudo apt-get install -y iproute2 nftables curl build-essential
@@ -408,6 +445,7 @@ jobs:
       # test drives and install the privileged helper the way the HOST INSTALLER
       # would (fixed root-owned entry mapping the sudoers vectors onto the binary).
       - name: build nocklock and install the privileged egress helper
+        if: steps.changes.outputs.code == 'true'
         run: |
           go build -o nocklock ./cmd/nocklock
           sudo install -m 0755 nocklock /usr/local/bin/nocklock
@@ -423,6 +461,7 @@ jobs:
       # netns-egress-audit, which sets linux_enforcement="off"), so wrap needs the
       # trusted LD_PRELOAD interposer installed to a trusted search path.
       - name: build and install the filesystem-fence interposer (libfence_fs.so)
+        if: steps.changes.outputs.code == 'true'
         run: |
           make build-fence-fs
           sudo mkdir -p /usr/local/lib/nocklock
@@ -436,12 +475,15 @@ jobs:
       # HARD-FAILS instead of green-skipping. The test bakes the composed default
       # (Landlock required + seccomp required + netns + audit) into its own config.
       - name: run composed-default acceptance test (runner user, skips forbidden)
+        if: steps.changes.outputs.code == 'true'
         run: |
           NOCKLOCK_AUDIT_REQUIRE=1 NOCKLOCK_TEST_BIN=/usr/local/bin/nocklock \
             go test ./internal/cli/ -run '^TestWrapComposedDefaultEgressAudit$' -v -count=1
 
   gitspawn-proof:
     name: GitSpawn · core.fsmonitor trap vs claude-code preset + netns (root)
+    needs: changes
+    if: needs.changes.outputs.code == 'true'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -488,6 +530,8 @@ jobs:
 
   egress-helper-install-readme:
     name: egress helper install · shipped installer (README path)
+    needs: changes
+    if: needs.changes.outputs.code == 'true'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -585,6 +629,8 @@ jobs:
 
   dns-escape-netns:
     name: netns DNS-escape · three July tricks vs egress floor (root)
+    needs: changes
+    if: needs.changes.outputs.code == 'true'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -649,8 +695,16 @@ jobs:
       - uses: actions/checkout@v4
         with:
           persist-credentials: false
+          fetch-depth: 2
+
+      # Required check: it always reports. On a docs-only PR the steps below skip
+      # and the job still goes green (scripts/ci-code-changed.sh).
+      - name: change detect (docs-only PRs skip the suite)
+        id: changes
+        run: bash scripts/ci-code-changed.sh
 
       - uses: actions/setup-go@v5
+        if: steps.changes.outputs.code == 'true'
         with:
           go-version-file: go.mod
           cache: true
@@ -659,6 +713,7 @@ jobs:
       # the proxy for a literal "localhost", so the test uses a real name mapped to
       # loopback here and binds its allowed upstream there.
       - name: map the allowlisted test host to loopback
+        if: steps.changes.outputs.code == 'true'
         run: echo "127.0.0.1 nocklock-allowed.test" | sudo tee -a /etc/hosts
 
       # NOCKLOCK_DNS_ESCAPE_REQUIRE=1 turns a would-be skip (sandbox-exec missing,
@@ -668,11 +723,13 @@ jobs:
       # TCP gets EPERM, curl via the proxy works, curl --noproxy fails, a direct
       # resolver query is denied; a proxied disallowed host is denied and signed.
       - name: run macOS DNS-escape + network-floor tests (skips forbidden)
+        if: steps.changes.outputs.code == 'true'
         run: NOCKLOCK_DNS_ESCAPE_REQUIRE=1 go test ./internal/cli/ -run '^(TestWrapMacOSDNSEscapeRecordsProxyEnforcement|TestWrapMacOSNetworkFloor)$' -v -count=1
 
       # No `if: always()`: this verdict records the asserted + recorded outcomes,
       # so it must render only when the recording test above actually passed.
       - name: record the macOS per-trick verdict
+        if: steps.changes.outputs.code == 'true'
         run: |
           {
             echo "### DNS-escape — macOS Seatbelt network floor (egress level SEATBELT)"
@@ -689,6 +746,8 @@ jobs:
 
   redteam-bench:
     name: red-team bench · scripted attacks vs NockLock + NockGuard, signed receipt report
+    needs: changes
+    if: needs.changes.outputs.code == 'true'
     runs-on: ubuntu-latest
     env:
       # Exact NockGuard release; bump deliberately. Never built from a sibling checkout.
