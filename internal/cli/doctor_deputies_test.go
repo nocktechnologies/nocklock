@@ -9,7 +9,9 @@ import (
 	"os"
 	"path/filepath"
 	"slices"
+	"strconv"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
 
@@ -339,7 +341,7 @@ func TestDoctorDeputyLinuxRows(t *testing.T) {
 			{"agent-config", projCursor, false},
 			{"agent-config", projGemini, false},
 			// Landlock and seccomp set no_new_privs, so sudo cannot elevate.
-			{"passwordless-sudo", "", true},
+			{"sudo-no-prompt", "", true},
 		} {
 			requireDeputyStatus(t, deputyRow(t, got, tc.name, tc.path), tc.blocked)
 		}
@@ -372,14 +374,14 @@ func TestDoctorDeputyLinuxRows(t *testing.T) {
 		}
 		requireDeputyStatus(t, deputyRow(t, got, "systemd-user-units", units), false)
 		// The syscall fence still sets no_new_privs.
-		requireDeputyStatus(t, deputyRow(t, got, "passwordless-sudo", ""), true)
+		requireDeputyStatus(t, deputyRow(t, got, "sudo-no-prompt", ""), true)
 	})
 
 	t.Run("no Landlock and no seccomp leaves sudo reachable", func(t *testing.T) {
 		f := newDeputyFixture(t)
 		f.sudoOK = true
 		got, _ := f.run(t, noNNP, "linux", 9)
-		row := deputyRow(t, got, "passwordless-sudo", "")
+		row := deputyRow(t, got, "sudo-no-prompt", "")
 		requireDeputyStatus(t, row, false)
 		if !strings.Contains(row.Message, "acts as root") {
 			t.Fatalf("sudo row must say why it matters: %+v", row)
@@ -397,7 +399,9 @@ func TestDoctorDeputyLinuxRows(t *testing.T) {
 	t.Run("not writable, missing, or failed sudo is not listed", func(t *testing.T) {
 		f := newDeputyFixture(t)
 		ro := f.file(t, f.home, ".profile")
+		// Neither the file nor its folder: no write route and no replace route.
 		f.notWritable[ro] = true
+		f.notWritable[f.home] = true
 		notSock := f.file(t, f.sockDir, "plain/docker.sock")
 		f.sockets = append(f.sockets, deputyTarget{name: "docker-socket", path: notSock, what: "not a socket", why: whyContainerSocket})
 		f.sockets = append(f.sockets, deputyTarget{name: "docker-socket", path: filepath.Join(f.sockDir, "missing.sock"), what: "missing", why: whyContainerSocket})
@@ -435,7 +439,7 @@ func TestDoctorDeputyDarwinRows(t *testing.T) {
 		requireDeputyStatus(t, deputyRow(t, got, "shell-startup", zprofile), true)
 		requireDeputyStatus(t, deputyRow(t, got, "shell-startup", fish), true)
 		requireDeputyStatus(t, deputyRow(t, got, "agent-config", projCursor), false)
-		sudo := deputyRow(t, got, "passwordless-sudo", "")
+		sudo := deputyRow(t, got, "sudo-no-prompt", "")
 		requireDeputyStatus(t, sudo, false)
 		if !strings.Contains(sudo.Message, "Seatbelt does not stop sudo") {
 			t.Fatalf("macOS sudo row must say why: %+v", sudo)
@@ -564,10 +568,97 @@ func TestDoctorDeputyHumanOutput(t *testing.T) {
 	var out bytes.Buffer
 	renderDoctorHuman(&out, report)
 	s := out.String()
-	for _, want := range []string{"\nDeputies\n", "docker-socket [reachable]", "shell-startup [blocked]", "passwordless-sudo [blocked]", "VERDICT: PARTIAL", "- deputies: 2 reachable and not blocked by the fence"} {
+	for _, want := range []string{"\nDeputies\n", "docker-socket [reachable]", "shell-startup [blocked]", "sudo-no-prompt [blocked]", "VERDICT: PARTIAL", "- deputies: 2 reachable and not blocked by the fence"} {
 		if !strings.Contains(s, want) {
 			t.Fatalf("human output missing %q:\n%s", want, s)
 		}
 	}
 	t.Logf("sample report:\n%s", s)
+}
+
+// TestDoctorDeputySymlinkedConfigIsReplaceable: a project config that is a
+// symlink to a file outside every write grant is still reachable, because the
+// project folder is granted read-write and the agent can unlink the symlink and
+// create a regular file in its place. The controls show the other routes.
+func TestDoctorDeputySymlinkedConfigIsReplaceable(t *testing.T) {
+	link := func(t *testing.T, target, path string) {
+		t.Helper()
+		if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Symlink(target, path); err != nil {
+			t.Fatal(err)
+		}
+	}
+	f := newDeputyFixture(t)
+	outside := f.file(t, f.home, "dotfiles/claude-settings.json")
+	projClaude := filepath.Join(f.project, ".claude", "settings.json")
+	link(t, outside, projClaude)
+	// A home startup file linked into the project is writable through its
+	// target, which sits inside the root grant.
+	inProject := f.file(t, f.project, "shared/bashrc")
+	bashrc := filepath.Join(f.home, ".bashrc")
+	link(t, inProject, bashrc)
+	// A home startup file linked to another home file: both routes are
+	// outside every grant.
+	zshrcTarget := f.file(t, f.home, "dotfiles/zshrc")
+	zshrc := filepath.Join(f.home, ".zshrc")
+	link(t, zshrcTarget, zshrc)
+
+	got, code := f.run(t, config.DefaultTOML(), "linux", 9)
+	row := deputyRow(t, got, "agent-config", projClaude)
+	requireDeputyStatus(t, row, false)
+	if !strings.Contains(row.Message, "can replace it") {
+		t.Fatalf("symlinked config row must name the replace route: %+v", row)
+	}
+	if got.Verdict != doctorVerdictPartial || code != doctorExitPartial {
+		t.Fatalf("verdict=%q exit=%d, want PARTIAL/%d", got.Verdict, code, doctorExitPartial)
+	}
+	row = deputyRow(t, got, "shell-startup", bashrc)
+	requireDeputyStatus(t, row, false)
+	if !strings.Contains(row.Message, "the path is inside a write grant") {
+		t.Fatalf("symlink into the root must name the write route: %+v", row)
+	}
+	requireDeputyStatus(t, deputyRow(t, got, "shell-startup", zshrc), true)
+}
+
+// TestPasswordlessSudoProbeKillsDescendants: a sudo (or a wrapper earlier in
+// PATH) that starts a helper and waits must not leave that helper running after
+// the timeout. Real sudo is never run.
+func TestPasswordlessSudoProbeKillsDescendants(t *testing.T) {
+	bin := t.TempDir()
+	pidFile := filepath.Join(bin, "child.pid")
+	script := "#!/bin/sh\n/bin/sleep 30 &\necho $! > " + pidFile + "\nwait\n"
+	if err := os.WriteFile(filepath.Join(bin, "sudo"), []byte(script), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", bin)
+	start := time.Now()
+	if err := passwordlessSudoProbe(context.Background()); err == nil {
+		t.Fatal("a hung sudo must not count as passwordless")
+	}
+	if d := time.Since(start); d > 10*time.Second {
+		t.Fatalf("probe took %s; the timeout must cut it off", d)
+	}
+	b, err := os.ReadFile(pidFile)
+	if err != nil {
+		t.Fatal(err)
+	}
+	pid, err := strconv.Atoi(strings.TrimSpace(string(b)))
+	if err != nil || pid <= 0 {
+		t.Fatalf("bad child pid %q", b)
+	}
+	t.Cleanup(func() { _ = syscall.Kill(pid, syscall.SIGKILL) })
+	// The killed child is reaped by its new parent; allow a moment for that.
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		err := syscall.Kill(pid, 0)
+		if errors.Is(err, syscall.ESRCH) {
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("helper pid %d still exists after the probe timed out (kill 0: %v)", pid, err)
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
 }

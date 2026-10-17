@@ -6,6 +6,8 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
+	"syscall"
 	"time"
 
 	"github.com/nocktechnologies/nocklock/internal/config"
@@ -90,7 +92,11 @@ func pathWritableByUser(path string) bool {
 
 // passwordlessSudoProbe runs `sudo -n true` with a short timeout and no stdin.
 // -n makes sudo fail at once instead of prompting, so it cannot hang on a
-// password; the timeout covers a slow PAM or directory lookup.
+// password; the timeout covers a slow PAM or directory lookup. Success means
+// sudo runs without a prompt right now: a NOPASSWD rule or a cached sudo login
+// both count, because both are reachable at scan time. The probe runs in its
+// own process group and a timeout kills the whole group, so a helper that sudo
+// (or a wrapper earlier in PATH) started cannot outlive the probe.
 func passwordlessSudoProbe(ctx context.Context) error {
 	sudo, err := exec.LookPath("sudo")
 	if err != nil {
@@ -102,6 +108,11 @@ func passwordlessSudoProbe(ctx context.Context) error {
 	cmd.Stdin = nil
 	cmd.Stdout = nil
 	cmd.Stderr = nil
+	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	cmd.Cancel = func() error {
+		// The group id is the child's pid (Setpgid with Pgid 0).
+		return syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
+	}
 	cmd.WaitDelay = time.Second
 	return cmd.Run()
 }
@@ -253,7 +264,6 @@ func doctorDeputyFence(cfg *config.Config, caps doctorCapabilities, checks []doc
 			f.writeGrants = append(f.writeGrants, h.tempWriteDirs...)
 			f.writeDenies = append(f.writeDenies, fsfence.DefaultSensitivePaths()...)
 		}
-		f.fsReason = "the path is inside a write grant"
 	default:
 		f.fsReason = "this platform has no filesystem fence"
 	}
@@ -277,23 +287,71 @@ func doctorDeputyFence(cfg *config.Config, caps doctorCapabilities, checks []doc
 	return f
 }
 
-// writeBlocked reports whether the fence stops the agent writing path.
-func (f deputyFence) writeBlocked(path string) bool {
+// writeBlocked reports whether the fence stops the agent writing p, which the
+// caller has already made canonical (callers decide whether to follow a final
+// symlink).
+func (f deputyFence) writeBlocked(p string) bool {
 	if !f.writesConfined {
 		return false
 	}
-	p := resolvePathBestEffort(path)
 	for _, d := range f.writeDenies {
-		if pathIsWithinDir(p, resolvePathBestEffort(d)) {
+		if canonicalPathWithin(p, d) {
 			return true
 		}
 	}
 	for _, g := range f.writeGrants {
-		if pathIsWithinDir(p, resolvePathBestEffort(g)) {
+		if canonicalPathWithin(p, g) {
 			return false
 		}
 	}
 	return true
+}
+
+// canonicalPathWithin is pathIsWithinDir without resolving p, so a final
+// symlink in p is judged by its own location rather than its target.
+func canonicalPathWithin(p, dir string) bool {
+	d := resolvePathBestEffort(dir)
+	if d == "" || d == filepath.Dir(d) {
+		return false
+	}
+	rel, err := filepath.Rel(d, filepath.Clean(p))
+	if err != nil {
+		return false
+	}
+	return rel == "." || (rel != ".." && !strings.HasPrefix(rel, ".."+string(os.PathSeparator)))
+}
+
+// fileDeputyAccess decides whether the agent can change what a file or
+// directory deputy at path holds. There are two routes: write through path to
+// its resolved target, or replace the entry itself through its parent
+// directory (unlink a symlink or rename the file, then create a new one). A
+// symlink to a target outside every write grant is therefore still reachable
+// when its folder is inside one. listed reports whether this user has either
+// route on the host; blocked reports whether the fence stops every route the
+// user has; reason names the first open route.
+func (f deputyFence) fileDeputyAccess(path string, writable func(string) bool) (listed, blocked bool, reason string) {
+	if _, err := os.Lstat(path); err != nil {
+		return false, false, ""
+	}
+	_, statErr := os.Stat(path)
+	targetW := statErr == nil && writable(path)
+	parent := filepath.Dir(path)
+	parentW := writable(parent)
+	if !targetW && !parentW {
+		return false, false, ""
+	}
+	if !f.writesConfined {
+		return true, false, f.fsReason
+	}
+	if targetW && !f.writeBlocked(resolvePathBestEffort(path)) {
+		return true, false, "the path is inside a write grant"
+	}
+	// The entry itself, not where a final symlink points.
+	entry := filepath.Join(resolvePathBestEffort(parent), filepath.Base(path))
+	if parentW && !f.writeBlocked(entry) {
+		return true, false, "its folder is inside a write grant, so the agent can replace it"
+	}
+	return true, true, ""
 }
 
 // deputyDoctorChecks lists each reachable deputy as a check in the Deputies
@@ -346,17 +404,19 @@ func deputyDoctorChecks(cfg *config.Config, caps doctorCapabilities, checks []do
 		row(s.name, s.what, s.path, s.why, f.socketsBlocked, f.socketReason)
 	}
 	for _, w := range writableDeputyTargets(caps.goos, h) {
-		if _, err := os.Stat(w.path); err != nil || !writable(w.path) {
+		listed, blocked, reason := f.fileDeputyAccess(w.path, writable)
+		if !listed {
 			continue
 		}
-		row(w.name, w.what, w.path, w.why, f.writeBlocked(w.path), f.fsReason)
+		row(w.name, w.what, w.path, w.why, blocked, reason)
 	}
 	if h.sudo != nil && h.sudo(context.Background()) == nil {
-		row("passwordless-sudo", "passwordless sudo for this user", "", "A command run through sudo acts as root.", f.noNewPrivs, f.sudoReason)
+		row("sudo-no-prompt", "sudo runs without a password prompt right now (a NOPASSWD rule or a cached sudo login)", "",
+			"A command run through sudo acts as root.", f.noNewPrivs, f.sudoReason)
 	}
 	if len(out) == 0 {
 		out = append(out, doctorCheck{Group: doctorDeputyGroup, Name: "deputies", Severity: doctorInfo, Status: "none-found",
-			Message: "No reachable container socket, user service path, writable startup or agent config file, or passwordless sudo found."})
+			Message: "No reachable container socket, user service path, writable startup or agent config file, or sudo without a password prompt found."})
 	}
 	return out
 }

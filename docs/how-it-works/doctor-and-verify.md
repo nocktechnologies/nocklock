@@ -7,7 +7,7 @@ Static check of the configuration plus host capabilities (`internal/cli/doctor.g
 
 Since v0.9.0, `doctor` reports `PARTIAL` (exit 3) for Linux `CONFINED` below Landlock ABI 9 because the Unix-socket boundary is unavailable. Default `wrap` warns and records that limitation; `network.require_unix_socket_isolation = true` refuses launch instead. The ABI 9 enforcement branch has not yet run on a real kernel. See [the network boundary](network-fence.md).
 
-`doctor` also lists deputies: more-privileged helpers the wrapped agent can ask to act for it, such as a reachable `docker.sock`, a writable shell startup file or agent config, or passwordless sudo. Each row says whether the fence blocks it. A deputy the fence does not block keeps the verdict at `PARTIAL`; doctor fixes nothing (`internal/cli/doctor_deputies.go`). See [deputies](deputies.md).
+`doctor` also lists deputies: more-privileged helpers the wrapped agent can ask to act for it, such as a reachable `docker.sock`, a writable shell startup file or agent config, or sudo that runs without a password prompt. Each row says whether the fence blocks it. A deputy the fence does not block keeps the verdict at `PARTIAL`; doctor fixes nothing (`internal/cli/doctor_deputies.go`). See [deputies](deputies.md).
 
 Limit: `doctor` reports configuration and host capability, not proof that a particular session ran with every fence. Use `verify` for an active self-test and inspect that session's signed fence-state rows for evidence.
 
