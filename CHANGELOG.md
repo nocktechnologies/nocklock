@@ -8,6 +8,10 @@ All notable changes to NockLock will be documented in this file.
 
 v0.13.0 adds repo git-config execution warnings to `doctor` and a Linux netns proof for GitSpawn. It also simplifies audit appends, retires unused internal v1 HTTP routes, and removes inert cloud settings from newly generated configs. Existing config files and audit formats remain compatible. GitSpawn warnings leave doctor verdicts and exit codes unchanged; the new enforcement proof covers Linux netns mode only.
 
+### Fixed
+
+- Integration fixtures now explicitly disable syscall enforcement when the shared fixture disables filesystem fencing, check the generated syscall section, and resolve the audit DB through the current config API. The runner keeps audit state in its temporary directory. Product enforcement and existing fence proofs are unchanged.
+
 ### Added
 
 - `doctor` warns about repo git config that runs code ("GitSpawn"). Run inside a git repository, it lists each local config key whose value is a program git runs, such as `core.fsmonitor`, `core.hooksPath`, `core.sshCommand`, `core.pager`, diff `textconv`, filter and merge drivers, credential helpers and `!` aliases. It reads `.git/config`, `config.worktree` and the files they include (not your system or global config) for the repository doctor runs in, and names the key, its value and the file it came from. A repository config doctor cannot read (an include that stalls the read past the timeout, such as a FIFO, or git older than 2.26) is reported as an incomplete warning, not skipped; a config git cannot parse or open gets no doctor warning, because every git command then fails with git's own error and runs nothing. The warning leaves the verdict and exit code unchanged, and doctor runs no hook and removes nothing.
