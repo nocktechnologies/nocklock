@@ -8,6 +8,7 @@ No internal host names, personal names or absolute home paths: `scripts/check-pu
 
 - 2026-10-17: `AGENTS.md` became the full agent index, this file was added, and CI checks that every path `AGENTS.md` names is tracked by git (`scripts/check-agents-paths.py`). `docs/REPO-MAP.md` was re-verified at next 13fa7a6. Release-level changes are in `CHANGELOG.md`.
 - 2026-10-17: the path check also reads angle-bracketed and titled link targets, and no longer treats version strings as paths.
+- 2026-10-17: docs-only PRs (only `*.md` or `docs/`) skip the test suites in CI. The required jobs run the detector as a step and skip their own steps, so they still report; a new step in a required job needs `if: steps.changes.outputs.code == 'true'`. A new optional test job needs `needs: changes` and the matching job `if:`.
 
 ## What bit us
 
