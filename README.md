@@ -391,11 +391,6 @@ block = [
 # an absolute path must be inside this project or its audit state directory. See "Event log".
 db = "events.db"
 level = "info"
-
-[cloud]
-enabled = false
-api_key = ""
-endpoint = "https://cc.nocktechnologies.io/api/fence/events/"
 ```
 
 The defaults are deliberately restrictive. Adjust them per project. `[cloud]` is a legacy section and sends nothing, even with `enabled = true` and a key; an enabled section without a key fails validation. Use `[audit.forward]` for optional Command delivery.

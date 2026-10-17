@@ -200,10 +200,5 @@ level = "info"
 # api_key_env = "NOCKLOCK_FORWARD_KEY"
 # The operator must also set NOCKLOCK_FORWARD_URL to the same URL and
 # NOCKLOCK_FORWARD_KEY to a dedicated credential. Project config cannot redirect it.
-
-[cloud]
-enabled = false
-api_key = ""
-endpoint = "https://cc.nocktechnologies.io/api/fence/events/"
 `
 }

@@ -804,13 +804,10 @@ func (l *Logger) appendAfterLatestLocked(eventType EventType, build func(*Event)
 	return previous, event, hash, nil
 }
 
-// LogImmediate records an event like Log, but opens a BEGIN IMMEDIATE
-// transaction, so busy_timeout applies when another process holds the write
-// lock. Log's deferred transaction reads before it writes and fails at once
-// with SQLITE_BUSY in that case.
+// LogImmediate records an event through Log's BEGIN IMMEDIATE transaction,
+// preserving the entry point used by callers that require write-lock waiting.
 func (l *Logger) LogImmediate(event Event) error {
-	_, err := l.LogAfterLatest(event.EventType, func(*Event) (Event, error) { return event, nil })
-	return err
+	return l.Log(event)
 }
 
 // LatestBlockedEvent returns the newest blocked=1 row of eventType in
