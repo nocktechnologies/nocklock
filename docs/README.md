@@ -1,11 +1,11 @@
 # NockLock docs
 
-The root [README](../README.md) is the user-facing guide; [CLAUDE.md](../CLAUDE.md) is the contributor map. This set backs them up. If a page and the code disagree, the code wins; fix the page.
+The root [README](../README.md) is the user-facing guide; [AGENTS.md](../AGENTS.md) is the contributor map, with the full rule list in [invariants](context/invariants.md). This set backs them up. If a page and the code disagree, the code wins; fix the page.
 
 | Need | Go to |
 |---|---|
 | Install, first run, verify | [Setup](setup.md) |
-| What a fence does and where it stops | [Secrets](how-it-works/secret-fence.md), [filesystem](how-it-works/filesystem-fence.md), [network](how-it-works/network-fence.md), [syscalls](how-it-works/syscall-fence.md), [audit log](how-it-works/audit-log.md), [secret preflight](how-it-works/secret-preflight.md), [doctor and verify](how-it-works/doctor-and-verify.md) |
+| What a fence does and where it stops | [Secrets](how-it-works/secret-fence.md), [filesystem](how-it-works/filesystem-fence.md), [network](how-it-works/network-fence.md), [syscalls](how-it-works/syscall-fence.md), [audit log](how-it-works/audit-log.md), [secret preflight](how-it-works/secret-preflight.md), [doctor and verify](how-it-works/doctor-and-verify.md), [deputies](how-it-works/deputies.md) |
 | Commands, exit codes, config keys | [CLI reference](reference/cli.md) |
 | Where code and tests live | [Repo map](REPO-MAP.md), [architecture](../ARCHITECTURE.md) |
 | Cut a release, handle a fence failure | [Release runbook](runbooks/release.md), [incident runbook](runbooks/incident.md) |

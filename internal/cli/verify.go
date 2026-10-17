@@ -805,6 +805,15 @@ func verifyCheckFromProbe(fence string, result probeResult, err error) verifyChe
 		return verifyCheck{Fence: fence, Result: verifyFail, Detail: firstNonEmpty(result.Detail, "probe failed before attempting escape")}
 	}
 	if !result.Attempted {
+		if fence == "syscall" {
+			// The syscall control must prove the fence. An unattempted probe is
+			// inconclusive, never a skip that a passing report could hide.
+			detail := "syscall probe inconclusive"
+			if result.Detail != "" {
+				detail += ": " + result.Detail
+			}
+			return verifyCheck{Fence: fence, Result: verifyFail, Detail: detail}
+		}
 		return verifyCheck{Fence: fence, Result: verifySkip, Detail: firstNonEmpty(result.Detail, "probe was not attempted")}
 	}
 	if result.Blocked && err == nil {
@@ -823,7 +832,10 @@ func runProbeUnderWrap(ctx context.Context, cfg *config.Config, configPath, fenc
 	// never places scratch or a grant inside the developer's real audit state.
 	// (The probe's own wrap runs against the temporary DB and state paths set
 	// below, not this directory.)
-	state, _ := config.AuditStateDir(projectRoot)
+	state, err := verificationAuditStateDir(projectRoot, config.AuditStateDir)
+	if err != nil {
+		return probeResult{Fence: fence}, err
+	}
 	forbidden = append(forbidden, resolveExistingPrefix(state))
 	tmp, cleanup, ok := createScratchOutside(forbidden)
 	if !ok {
@@ -918,7 +930,14 @@ func runProbeUnderWrap(ctx context.Context, cfg *config.Config, configPath, fenc
 	if fence == "secret" {
 		cmd.Env = envWithOverrides(cmd.Env, extraEnv)
 	}
-	cmd.Env = envWithOverrides(cmd.Env, map[string]string{"XDG_STATE_HOME": probeStateHome})
+	// The probe config sits in scratch this process just created (MkdirTemp,
+	// 0700, invoker-owned) under a sticky world-writable base such as /var/tmp,
+	// which the config trust walk refuses. Accept that known-safe layout for the
+	// probe's own wrap only.
+	cmd.Env = envWithOverrides(cmd.Env, map[string]string{
+		"XDG_STATE_HOME":               probeStateHome,
+		config.AllowUntrustedConfigEnv: "1",
+	})
 	var stdout, stderr bytes.Buffer
 	cmd.Stdout = &stdout
 	cmd.Stderr = &stderr
@@ -1126,6 +1145,21 @@ func filesystemRootOnly(cfg *config.Config, projectRoot string) []string {
 		root = resolved
 	}
 	return []string{filepath.Clean(root)}
+}
+
+// verificationAuditStateDir returns the original project's audit-state directory
+// that verification scratch must stay out of. It fails probe setup on a resolver
+// error or an empty path instead of dropping the exclusion: an ignored error
+// leaves "", and resolveExistingPrefix("") is ".", which matches no scratch path.
+func verificationAuditStateDir(projectRoot string, auditStateDir func(string) (string, error)) (string, error) {
+	state, err := auditStateDir(projectRoot)
+	if err != nil {
+		return "", fmt.Errorf("cannot resolve the project's audit-state directory to keep verification scratch out of it: %w", err)
+	}
+	if state == "" {
+		return "", errors.New("cannot resolve the project's audit-state directory to keep verification scratch out of it: resolved to an empty path")
+	}
+	return state, nil
 }
 
 // resolveExistingPrefix resolves symlinks in the longest existing prefix of p

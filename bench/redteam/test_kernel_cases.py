@@ -198,6 +198,7 @@ class KernelReceiptTest(TestCase):
                      mock.patch("kernel_cases.CASES", cases), \
                      mock.patch("kernel_cases.CASE_TIMEOUT_SECONDS", 0.3), \
                      mock.patch("kernel_cases.CLEANUP_TIMEOUT_SECONDS", 1.5), \
+                     mock.patch("kernel_cases.platform.system", return_value="Linux"), \
                      mock.patch("sys.argv", ["kernel_cases.py", "--out", str(root / "out")]):
                     with self.assertRaises(SystemExit) as raised:
                         kernel_cases.main()

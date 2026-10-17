@@ -570,7 +570,7 @@ granting the package SID write access. AF_UNIX exists on Windows 10 1803+, but
 Go's support for it on Windows is **UNVERIFIED** and named pipes are the native
 idiom. Note that Go's standard library has no named-pipe support — the usual
 answer is `github.com/Microsoft/go-winio`, which would be a **new external
-dependency and needs discussion** per CLAUDE.md. Flagging, not assuming.
+dependency and needs discussion** per `docs/context/invariants.md`. Flagging, not assuming.
 
 **The real gap:** there is no Windows equivalent of
 `internal/fence/fs/interposer`. The file fence is purely token + ACL, enforced by

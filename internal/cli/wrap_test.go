@@ -209,6 +209,33 @@ func TestWrapDryRunValidatesConfigWithoutCommand(t *testing.T) {
 	}
 }
 
+// TestWrapRefusesUntrustedConfig turns the escape hatch off (the package
+// TestMain sets it on for the other tests) and proves wrap refuses a config
+// whose directory chain is world-writable before it starts the child. The test
+// makes the project root world-writable itself rather than relying on the
+// permissions of the temp directory it sits in.
+func TestWrapRefusesUntrustedConfig(t *testing.T) {
+	t.Setenv(config.AllowUntrustedConfigEnv, "")
+	t.Setenv("XDG_STATE_HOME", trustedStateRoot(t))
+	dir := t.TempDir()
+	writeTestConfig(t, dir, dryRunTestTOML())
+	if err := os.Chmod(dir, 0o777); err != nil {
+		t.Fatalf("chmod project root: %v", err)
+	}
+	withWorkingDir(t, dir)
+
+	cmd := &cobra.Command{}
+	err := wrapCmd.RunE(cmd, []string{"--dry-run"})
+	if err == nil {
+		t.Fatal("wrap should refuse a config under a world-writable directory, but returned nil")
+	}
+	// Assert the shared refusal prefix, not which component fired: depending on
+	// the host, the temp directory above the project may be refused first.
+	if !strings.Contains(err.Error(), "refusing to use the config file") {
+		t.Fatalf("expected a config trust refusal, got: %v", err)
+	}
+}
+
 // The audit trail is the product's core promise ("every fence decision is
 // recorded"), so a logger that cannot open must FAIL CLOSED — the agent does not
 // start — rather than silently continue unrecorded. Same posture as the network
@@ -567,6 +594,43 @@ func TestFindTrustedLibFenceFSRejectsProjectRelativeLibrary(t *testing.T) {
 	}
 	if got != "" {
 		t.Fatalf("project-relative libfence_fs.so must never be selected for LD_PRELOAD, got %q", got)
+	}
+}
+
+func TestFindTrustedLibFenceFSVersionedReleaseIgnoresFixedFallbacks(t *testing.T) {
+	fixed := map[string]bool{
+		"/usr/local/lib/nocklock/libfence_fs.so": true,
+		"/usr/lib/nocklock/libfence_fs.so":       true,
+	}
+	var inspected []string
+	inspect := func(path string, _ []string) (string, error) {
+		inspected = append(inspected, path)
+		if fixed[path] {
+			return path, nil
+		}
+		return "", os.ErrNotExist
+	}
+	release := "/usr/local/lib/nocklock/releases/nocklock-candidate-abc-linux-amd64/nocklock"
+	got, err := findTrustedLibFenceFS(release, "/project", nil, inspect)
+	if err == nil || got != "" {
+		t.Fatalf("release layout selected a fixed-path fallback %q (err=%v)", got, err)
+	}
+	if !strings.Contains(err.Error(), "trusted filesystem fence library not found") {
+		t.Fatalf("release layout refused for another reason: %v", err)
+	}
+	for _, path := range inspected {
+		if fixed[path] {
+			t.Fatalf("release layout inspected fixed fallback %q", path)
+		}
+	}
+	if len(inspected) != 1 || inspected[0] != filepath.Join(filepath.Dir(release), "libfence_fs.so") {
+		t.Fatalf("release layout must inspect only the adjacent library, inspected %v", inspected)
+	}
+
+	inspected = nil
+	got, err = findTrustedLibFenceFS("/usr/local/bin/nocklock", "/project", nil, inspect)
+	if err != nil || got != "/usr/local/lib/nocklock/libfence_fs.so" {
+		t.Fatalf("non-release layout must keep the fixed fallback, got %q err=%v", got, err)
 	}
 }
 

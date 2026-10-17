@@ -1934,7 +1934,7 @@ func TestLatestBlockedEventAgreesWithQueryOnTimestamps(t *testing.T) {
 }
 
 // LogImmediate waits for another connection's write lock, up to busy_timeout,
-// where Log's read-then-write transaction fails at once. Control: Log fails.
+// where a deferred read-then-write transaction would fail at once.
 func TestLogImmediateWaitsForWriteLock(t *testing.T) {
 	l, dbPath := mustNewLogger(t)
 	defer l.Close()
@@ -1961,13 +1961,6 @@ func TestLogImmediateWaitsForWriteLock(t *testing.T) {
 	}
 
 	release := hold()
-	if err := l.Log(sampleEvent(EventFileBlocked, "filesystem", "d", true, "s")); err == nil {
-		release()
-		t.Fatal("control: Log succeeded while another connection held the write lock")
-	}
-	release()
-
-	release = hold()
 	go func() {
 		time.Sleep(200 * time.Millisecond)
 		release()
@@ -1982,5 +1975,118 @@ func TestLogImmediateWaitsForWriteLock(t *testing.T) {
 	res, err := l.VerifyChain()
 	if err != nil || !res.Intact {
 		t.Fatalf("chain after LogImmediate: %+v, %v", res, err)
+	}
+}
+
+// TestLogWaitsForConcurrentWriter holds the write lock on a second connection,
+// as another wrap process or a checkpoint verifier would, while Log runs. Log
+// must wait on busy_timeout and commit once the lock is released, instead of
+// failing at once with SQLITE_BUSY on a read-to-write upgrade.
+func TestLogWaitsForConcurrentWriter(t *testing.T) {
+	l, dbPath := mustNewLogger(t)
+	defer l.Close()
+	if err := l.Log(sampleEvent(EventSessionStart, "session", "seed", false, "s")); err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+
+	ctx := context.Background()
+	other, err := sql.Open("sqlite", dbPath)
+	if err != nil {
+		t.Fatalf("open second connection: %v", err)
+	}
+	t.Cleanup(func() { other.Close() })
+	holder, err := other.Conn(ctx)
+	if err != nil {
+		t.Fatalf("reserve second connection: %v", err)
+	}
+	t.Cleanup(func() { holder.Close() })
+	if _, err := holder.ExecContext(ctx, "BEGIN IMMEDIATE"); err != nil {
+		t.Fatalf("take write lock on second connection: %v", err)
+	}
+
+	done := make(chan error, 1)
+	go func() { done <- l.Log(sampleEvent(EventFileBlocked, "filesystem", "d", true, "s")) }()
+
+	select {
+	case err := <-done:
+		t.Fatalf("Log returned while another connection held the write lock (err=%v); it should wait on busy_timeout", err)
+	case <-time.After(300 * time.Millisecond):
+	}
+	if _, err := holder.ExecContext(ctx, "ROLLBACK"); err != nil {
+		t.Fatalf("release write lock: %v", err)
+	}
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("Log after lock release: %v", err)
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatal("Log did not return within 10 s of the lock release")
+	}
+	var n int
+	if err := l.db.QueryRow("SELECT COUNT(*) FROM events WHERE event_type = ?", string(EventFileBlocked)).Scan(&n); err != nil || n != 1 {
+		t.Fatalf("blocked rows = %d, err %v; want 1", n, err)
+	}
+}
+
+// TestLogBatchWaitsForConcurrentWriter holds the write lock on a second
+// connection, as another wrap process would, while LogBatch runs. The batch
+// must wait on busy_timeout and commit once the lock is released, instead of
+// failing at once with SQLITE_BUSY on a read-to-write upgrade.
+func TestLogBatchWaitsForConcurrentWriter(t *testing.T) {
+	l, dbPath := mustNewLogger(t)
+	defer l.Close()
+
+	ctx := context.Background()
+	other, err := sql.Open("sqlite", dbPath)
+	if err != nil {
+		t.Fatalf("open second connection: %v", err)
+	}
+	t.Cleanup(func() { other.Close() })
+	holder, err := other.Conn(ctx)
+	if err != nil {
+		t.Fatalf("reserve second connection: %v", err)
+	}
+	t.Cleanup(func() { holder.Close() })
+	if _, err := holder.ExecContext(ctx, "BEGIN IMMEDIATE"); err != nil {
+		t.Fatalf("take write lock on second connection: %v", err)
+	}
+
+	events := []Event{
+		sampleEvent(EventSecretBlocked, "secret", "API_KEY", true, "sess-batch"),
+		sampleEvent(EventSecretBlocked, "secret", "DB_PASSWORD", true, "sess-batch"),
+	}
+	done := make(chan error, 1)
+	go func() { done <- l.LogBatch(events) }()
+
+	// Hold the lock well under busy_timeout (5 s).
+	select {
+	case err := <-done:
+		t.Fatalf("LogBatch returned while another connection held the write lock (err=%v); it should wait on busy_timeout", err)
+	case <-time.After(300 * time.Millisecond):
+	}
+	if _, err := holder.ExecContext(ctx, "ROLLBACK"); err != nil {
+		t.Fatalf("release write lock: %v", err)
+	}
+
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("LogBatch after lock release: %v", err)
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatal("LogBatch did not return within 10 s of the lock release")
+	}
+
+	var n int
+	if err := l.db.QueryRow("SELECT COUNT(*) FROM events WHERE session_id = ? AND event_type = ?", "sess-batch", string(EventSecretBlocked)).Scan(&n); err != nil {
+		t.Fatalf("count batch rows: %v", err)
+	}
+	if n != len(events) {
+		t.Fatalf("batch rows = %d, want %d", n, len(events))
+	}
+	res, err := l.VerifyChain()
+	if err != nil || !res.Intact {
+		t.Fatalf("chain after contended LogBatch: %+v, %v", res, err)
 	}
 }

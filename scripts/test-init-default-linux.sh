@@ -1,6 +1,10 @@
 #!/usr/bin/env bash
 # Exercise the generated default policy with a new home and the full Linux fence.
 set -euo pipefail
+# The interposer trust walk refuses group/world-writable ancestors. Under a
+# caller umask of 002 the probe dirs below (and cp's copies) would be created
+# group-writable and refused, so pin the mask before creating anything.
+umask 022
 
 if [[ "$(uname -s)" != Linux ]]; then
     echo "Linux only" >&2

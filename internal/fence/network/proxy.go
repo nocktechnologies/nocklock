@@ -37,6 +37,15 @@ var cgnat = &net.IPNet{
 // reachable under allowPrivateRanges.
 var awsMetadataIPv6 = net.ParseIP("fd00:ec2::254")
 
+// alibabaMetadataIP is Alibaba Cloud's instance metadata service
+// (100.100.100.200). It sits inside 100.64.0.0/10 (CGNAT), so IsPrivate() is
+// false but allowPrivateRanges still permits the whole CGNAT block — meaning
+// the option would otherwise re-open this credential-SSRF target. It is
+// blocked unconditionally, like the AWS metadata endpoints. Blocking only this
+// exact address — not all of CGNAT — keeps the rest of 100.64.0.0/10 reachable
+// under allowPrivateRanges.
+var alibabaMetadataIP = net.ParseIP("100.100.100.200")
+
 // isBlockedIP reports whether ip should never be dialed by the proxy.
 //
 // By default blocks: loopback, unspecified (0.0.0.0/::), link-local unicast,
@@ -46,19 +55,22 @@ var awsMetadataIPv6 = net.ParseIP("fd00:ec2::254")
 // are permitted (useful for local development). Multicast AND link-local unicast
 // remain blocked regardless: link-local (169.254.0.0/16, fe80::/10) covers the
 // cloud-metadata endpoint 169.254.169.254 — the AWS/GCP/Azure credential-SSRF
-// target — so a blunt "local dev" flag must never silently re-open it.
+// target — so a blunt "local dev" flag must never silently re-open it. The same
+// holds for 100.100.100.200, Alibaba Cloud's metadata endpoint inside CGNAT.
 func isBlockedIP(ip net.IP, allowPrivateRanges bool) bool {
 	// Multicast is always blocked regardless of allowPrivateRanges.
 	if ip.IsMulticast() || ip.IsLinkLocalMulticast() {
 		return true
 	}
 
-	// Link-local unicast (incl. the IPv4 metadata endpoint 169.254.169.254) and
-	// the AWS IPv6 metadata endpoint (fd00:ec2::254, a ULA that IsPrivate would
-	// otherwise permit) are ALWAYS blocked, even with allowPrivateRanges.
-	// Permitting RFC-1918/loopback/CGNAT for local development is a separate,
-	// lower-risk decision than exposing instance-credential metadata.
-	if ip.IsLinkLocalUnicast() || ip.Equal(awsMetadataIPv6) {
+	// Link-local unicast (incl. the IPv4 metadata endpoint 169.254.169.254), the
+	// AWS IPv6 metadata endpoint (fd00:ec2::254, a ULA that IsPrivate would
+	// otherwise permit), and the Alibaba Cloud metadata endpoint
+	// (100.100.100.200, inside CGNAT which allowPrivateRanges would otherwise
+	// permit) are ALWAYS blocked, even with allowPrivateRanges. Permitting
+	// RFC-1918/loopback/CGNAT for local development is a separate, lower-risk
+	// decision than exposing instance-credential metadata.
+	if ip.IsLinkLocalUnicast() || ip.Equal(awsMetadataIPv6) || ip.Equal(alibabaMetadataIP) {
 		return true
 	}
 
@@ -157,6 +169,30 @@ type ProxyServer struct {
 	lookback *lookbackGuard
 	// lookbackPause is a test seam called at named points on the request path.
 	lookbackPause func(stage string)
+	// onBlockedWriteFailure, when set, receives the event type and error of
+	// every blocked row the proxy could not write. Set once before Start.
+	onBlockedWriteFailure func(logging.EventType, error)
+}
+
+// SetBlockedWriteFailureHandler installs fn to receive the event type and
+// error of every blocked audit row (a denied request, a look-back denial, a DNS rebind, a
+// degrade) that the proxy could not write. wrap passes its run-level audit
+// recorder here, so a lost blocked row fails the run with exit 2. fn runs
+// inline on the request path and must not block. Call it before Start.
+func (p *ProxyServer) SetBlockedWriteFailureHandler(fn func(logging.EventType, error)) {
+	p.onBlockedWriteFailure = fn
+}
+
+// writeBlockedRow writes a blocked audit row and reports a write error to the
+// failure handler. The caller has already refused the request; only the run
+// verdict depends on this. It always uses LogImmediate: a lost blocked row
+// fails the run, so the write must wait out busy_timeout when another
+// connection holds the write lock. Log's deferred transaction would fail at
+// once with SQLITE_BUSY and turn ordinary lock contention into a failed run.
+func (p *ProxyServer) writeBlockedRow(ev logging.Event) {
+	if err := p.logger.LogImmediate(ev); err != nil && p.onBlockedWriteFailure != nil {
+		p.onBlockedWriteFailure(ev.EventType, err)
+	}
 }
 
 // NewProxyServer creates a ProxyServer from a NetworkConfig.
@@ -412,7 +448,7 @@ func (p *ProxyServer) MarkDegraded(reason string) {
 	if reason == "" {
 		reason = "proxy degraded"
 	}
-	_ = p.logger.Log(logging.Event{
+	p.writeBlockedRow(logging.Event{
 		Timestamp: time.Now(),
 		EventType: logging.EventNetworkError,
 		Category:  "network",
@@ -575,7 +611,7 @@ func (p *ProxyServer) logDNSRebind(err *dnsRebindError) {
 	if p.logger == nil || err == nil {
 		return
 	}
-	_ = p.logger.Log(logging.Event{
+	p.writeBlockedRow(logging.Event{
 		Timestamp: time.Now(),
 		EventType: logging.EventNetworkBlocked,
 		Category:  "network",

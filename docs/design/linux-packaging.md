@@ -2,9 +2,68 @@
 
 Date: 2026-10-13
 
-Status: **Proposed; design only, no installer or release assets added**
+Status: **Production contract proposed; N11746 implements CI candidates only**
 
 Nock: N11643
+
+## Candidate implementation boundary (N11746)
+
+The first implementation is `.github/workflows/linux-candidate.yml`, with
+build, validation and disposable-host acceptance tooling in `packaging/linux/`.
+It creates **CI candidates, not GitHub releases**. No release is published and
+no production support claim follows from a green candidate run. The workflow
+has no `contents: write` permission or release trigger.
+
+The maintainers approved keyless Cosign with GitHub Actions OIDC for this slice
+(2026-10-13). The current stable versions were verified against the
+primary GitHub release APIs on 2026-10-14 UTC:
+
+- [Cosign v3.1.3](https://github.com/sigstore/cosign/releases/tag/v3.1.3), exact
+  binary version; Linux amd64 SHA-256
+  `4629c757b7618056f8ddd7e2625ae9fdd94c0372a65049520bc7d9df9efc7f71`.
+- [cosign-installer v4.1.2](https://github.com/sigstore/cosign-installer/releases/tag/v4.1.2),
+  pinned to full commit `6f9f17788090df1f26f669e9d70d6ae9567deba6`.
+
+The action pin fixes the installer code; the exact binary version and checksum
+fix the tool executed again inside root-controlled staging. Updating either
+requires a reviewed change. No long-lived signing key is introduced. The
+candidate certificate identity is exactly
+`https://github.com/nocktechnologies/nocklock/.github/workflows/linux-candidate.yml@<run-ref>`
+with the GitHub Actions issuer, where `<run-ref>` is the actual branch or PR
+merge ref. Tag refs are refused. This is explicitly distinct from the proposed
+tag-specific `release.yml` identity below. Verification tests reject a candidate
+as a release identity and reject a changed manifest.
+
+Candidates use `nocklock-candidate-<full-commit>-linux-amd64.tar.gz` and version
+`0.0.0-candidate.<full-commit>`. Native builds require Ubuntu 24.04 amd64 and
+glibc 2.39; build-info records the full commit, Go/C toolchains, hosted image
+revision, symbol requirements and hashes for the paired payload. The hosted
+image is pinned by OS label, not an immutable image digest; final production
+builder reproducibility remains a later release gate.
+
+The candidate omits the proposed public `install.sh`. Its trusted CI checkout
+supplies a **CI-only provisioning harness**, never a public bootstrap. Only that
+harness runs privileged, on a disposable GitHub-hosted VM. It verifies staged
+bytes before executing any packaged script, installs adjacent CLI/library
+files under root-owned versioned paths, and refuses every pre-existing
+installation, including broken links and interrupted installations. This
+fresh-only boundary avoids making an unimplemented active-session upgrade or
+helper/version-handshake promise. The packaged helper script's ownership
+preconditions are enforced by the CI harness; the source script itself has not
+become a secure general-purpose package installer.
+
+A new dedicated account has only the two helper sudo vectors. Two fresh
+projects exercise version/path selection, filesystem allow/deny controls,
+exact doctor boundary reasons, AUTHENTIC audit verification and signed CONFINED
+and KERNEL session levels. The workflow also checks repeat-install refusal and
+missing-interposer refusal. Public evidence contains the recorded environment,
+doctor output, public verification key, audit verdict and events; it never
+uploads the private signing key or entire account home. The resulting run is
+the acceptance receipt and must be linked in the implementation PR.
+
+Public installation, upgrades, rollback, interrupted-update recovery, expanded
+network/OS acceptance and production release publication remain later slices.
+The contract below continues to describe those required production gates.
 
 Baseline: `89c1bb6e` (v0.9.1); refreshed after the v0.8/v0.9 doctor and Unix-socket changes and the v0.9.1 signing-key fence and netns child thread lock.
 
@@ -16,9 +75,9 @@ helper installer. Keep Homebrew as the macOS installation path. Expand the Linux
 matrix only after clean-machine acceptance on each added architecture and libc.
 Do not describe this first artifact as a portable binary for every Linux system.
 
-This decision is proposed for review. Signing introduces Cosign as release and
-verification tooling; it adds no Go runtime dependency. Approve that tooling and
-its pinned version before implementing the release workflow.
+Signing introduces Cosign as release and verification tooling; it adds no Go
+runtime dependency. The approved CI pins above cover candidates only. Production
+publication still requires the release workflow and identity gates below.
 
 The first implementation should cover packaging and installation only. It must
 not change fence policy, doctor semantics, init output, or signing-key format.
@@ -136,6 +195,9 @@ unwritable by group/other. `/usr/local/bin/nocklock` points to the installed CLI
 Confirm the real executable directory resolves correctly through that symlink
 in acceptance. The fixed-library fallbacks must not silently select an old
 interposer when the adjacent one is missing; packaging tests must detect this.
+`wrap` therefore skips the fixed locations when the executable runs from
+`/usr/local/lib/nocklock/releases/<version>/`, and the hosted acceptance plants
+root-owned decoys at both fixed paths before requiring the refusal.
 
 The proposed installer has two explicit entry points:
 
@@ -238,11 +300,13 @@ else:
     if boundaries["unix-sockets"] == "enforced":
         assert code == 0 and report["verdict"] == "PROTECTED", report
     else:
-        # v0.9 deliberately reports PARTIAL on pre-ABI-9 kernels. Accept
-        # only that named limitation, never a generic degraded install.
-        assert boundaries["unix-sockets"] == "unavailable", boundaries
+        # v0.9 deliberately reports PARTIAL on pre-ABI-9 kernels: the boundary
+        # posture is "advisory" and its backend check status is "unavailable".
+        # Accept only that named limitation, never a generic degraded install.
+        assert boundaries["unix-sockets"] == "advisory", boundaries
         assert code == 3 and report["verdict"] == "PARTIAL", report
         check = next(c for c in report["checks"] if c["name"] == "unix-sockets")
+        assert check["status"] == "unavailable", check
         assert re.search(r"reason=landlock_abi_[1-8]_below_9\b", check["message"]), check
 assert all(b["posture"] == "enforced" or
            (sys.platform == "linux" and b["name"] == "unix-sockets" and code == 3)
