@@ -12,12 +12,10 @@ import (
 	"github.com/spf13/cobra"
 )
 
-// runProtectedDoctorIn runs doctor in dir with every backend stubbed present,
-// so the verdict is PROTECTED unless a check changes it.
-func runProtectedDoctorIn(t *testing.T, dir string) (string, error) {
+// runProtectedDoctor runs doctor in the current directory with every backend
+// stubbed present, so the verdict is PROTECTED unless a check changes it.
+func runProtectedDoctor(t *testing.T) (string, error) {
 	t.Helper()
-	writeTestConfig(t, dir, doctorTestTOML(false))
-	withWorkingDir(t, dir)
 	restore := stubDoctorCapabilities(doctorCapabilities{
 		goos:           "linux",
 		fsBackend:      func() error { return nil },
@@ -74,20 +72,39 @@ func TestDoctorWarnsOnGitConfigThatRunsPrograms(t *testing.T) {
 	hooksPath = .githooks
 [credential "https://example.com"]
 	helper = !evil
+[credential]
+	helper =
+[gpg "ssh"]
+	defaultKeyCommand = ./key.sh
 [alias]
 	st = status
 	x = !sh -c id
 [pager]
 	log = false
+	diff = 10
+[extensions]
+	worktreeConfig = true
 [include]
 	path = extra.cfg
 `)
-	// The included file is read too: the trap does not have to sit in .git/config.
-	if err := os.WriteFile(filepath.Join(dir, ".git", "extra.cfg"), []byte("[diff \"bin\"]\n\ttextconv = ./conv.sh\n"), 0o600); err != nil {
+	// Included files and config.worktree are read too: the trap does not have
+	// to sit in .git/config.
+	for name, body := range map[string]string{
+		"extra.cfg":       "[diff \"bin\"]\n\ttextconv = ./conv.sh\n",
+		"config.worktree": "[filter \"lfs\"]\n\tsmudge = ./smudge.sh\n",
+	} {
+		if err := os.WriteFile(filepath.Join(dir, ".git", name), []byte(body), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	// Doctor scans the repo it runs in, below the project root holding .nock.
+	sub := filepath.Join(dir, "sub")
+	if err := os.Mkdir(sub, 0o700); err != nil {
 		t.Fatal(err)
 	}
-
-	out, err := runProtectedDoctorIn(t, dir)
+	writeTestConfig(t, dir, doctorTestTOML(false))
+	withWorkingDir(t, sub)
+	out, err := runProtectedDoctor(t)
 	if err != nil {
 		t.Fatalf("a git config warning must not change doctor's exit code (want 0): %v\n%s", err, out)
 	}
@@ -95,19 +112,21 @@ func TestDoctorWarnsOnGitConfigThatRunsPrograms(t *testing.T) {
 		t.Fatalf("a git config warning must not change the verdict:\n%s", out)
 	}
 	for _, want := range []string{
-		`core.fsmonitor = "./trap.sh"`,
-		`core.hookspath = ".githooks"`,
-		`credential.https://example.com.helper = "!evil"`,
-		`alias.x = "!sh -c id"`,
-		`diff.bin.textconv = "./conv.sh" (from .git/extra.cfg)`,
+		`"core.fsmonitor" = "./trap.sh" (from ".git/config")`,
+		`"core.hookspath" = ".githooks"`,
+		`"credential.https://example.com.helper" = "!evil"`,
+		`"gpg.ssh.defaultkeycommand" = "./key.sh"`,
+		`"alias.x" = "!sh -c id"`,
+		`"diff.bin.textconv" = "./conv.sh" (from ".git/extra.cfg")`,
+		`"filter.lfs.smudge" = "./smudge.sh" (from ".git/config.worktree")`,
 	} {
 		if !strings.Contains(out, "⚠ git-config-exec [warning]: Repo git config "+want) {
 			t.Errorf("doctor did not warn on %s:\n%s", want, out)
 		}
 	}
 	// Negative controls: keys that do not run a program stay quiet.
-	for _, quiet := range []string{"alias.st", "pager.log", "include.path"} {
-		if strings.Contains(out, "Repo git config "+quiet+" ") {
+	for _, quiet := range []string{"alias.st", "pager.log", "pager.diff", "credential.helper", "include.path"} {
+		if strings.Contains(out, "Repo git config \""+quiet+"\"") {
 			t.Errorf("doctor warned on %s, which runs no program:\n%s", quiet, out)
 		}
 	}
@@ -116,7 +135,9 @@ func TestDoctorWarnsOnGitConfigThatRunsPrograms(t *testing.T) {
 func TestDoctorCleanGitRepoHasNoGitConfigWarning(t *testing.T) {
 	dir := t.TempDir()
 	gitInitRepo(t, dir, "[core]\n\tfsmonitor = false\n")
-	out, err := runProtectedDoctorIn(t, dir)
+	writeTestConfig(t, dir, doctorTestTOML(false))
+	withWorkingDir(t, dir)
+	out, err := runProtectedDoctor(t)
 	if err != nil || !strings.Contains(out, "VERDICT: PROTECTED") {
 		t.Fatalf("clean repo must stay PROTECTED: %v\n%s", err, out)
 	}

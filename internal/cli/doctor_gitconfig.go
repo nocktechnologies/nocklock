@@ -4,7 +4,9 @@ import (
 	"bytes"
 	"context"
 	"fmt"
+	"os"
 	"os/exec"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -12,7 +14,8 @@ import (
 // gitConfigExecKeys are repo-settable git config keys whose value is a program
 // git runs: "GitSpawn" (a cloned repo's .git/config runs code on the next git
 // call). Keys are lowercased, with a subsection matched by "*"; alias.*,
-// pager.* and core.fsmonitor are judged by value in gitConfigKeyRunsProgram.
+// pager.*, core.fsmonitor, submodule.*.update and remote.*.url are judged by
+// value in gitConfigKeyRunsProgram.
 var gitConfigExecKeys = map[string]bool{
 	"core.hookspath":            true,
 	"core.sshcommand":           true,
@@ -37,39 +40,62 @@ var gitConfigExecKeys = map[string]bool{
 	"mergetool.*.cmd":           true,
 	"remote.*.uploadpack":       true,
 	"remote.*.receivepack":      true,
+	"interactive.difffilter":    true,
+	"gpg.ssh.defaultkeycommand": true,
+	"trailer.*.command":         true,
+	"trailer.*.cmd":             true,
+	"difftool.*.path":           true,
+	"mergetool.*.path":          true,
+	"browser.*.cmd":             true,
+	"man.*.cmd":                 true,
+	"sendemail.*.tocmd":         true,
+	"sendemail.*.cccmd":         true,
+	"sendemail.*.headercmd":     true,
+	"sendemail.tocmd":           true,
+	"sendemail.cccmd":           true,
+	"sendemail.headercmd":       true,
+	"sendemail.sendmailcmd":     true,
 }
 
-// gitConfigExecDoctorChecks lists the local git config entries (.git/config
-// and the files it includes) that make git run a program, one warning each.
-// Doctor only reads the config: `git config --list` runs no hook. It reports
-// nothing when git is missing, times out (an include can name a FIFO), or
-// projectRoot is not in a repository.
-func gitConfigExecDoctorChecks(projectRoot string) []doctorCheck {
+// gitConfigExecDoctorChecks lists the repository git config entries for dir
+// (.git/config, config.worktree and the files they include) that make git run
+// a program, one warning each. Doctor only reads the config: `git config
+// --list` runs no hook. It reports nothing when git is missing, times out (an
+// include can name a FIFO), or dir is not in a repository.
+func gitConfigExecDoctorChecks(dir string) []doctorCheck {
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 	defer cancel()
-	cmd := exec.CommandContext(ctx, "git", "-C", projectRoot, "--no-pager", "config", "--local", "--includes", "--show-origin", "--null", "--list")
+	cmd := exec.CommandContext(ctx, "git", "-C", dir, "--no-pager", "config", "--includes", "--show-scope", "--show-origin", "--null", "--list")
+	// An inherited GIT_DIR or GIT_WORK_TREE would point git at another repo.
+	cmd.Env = removeEnvVars(os.Environ(), "GIT_DIR", "GIT_WORK_TREE", "GIT_COMMON_DIR")
 	out, err := cmd.Output()
 	if err != nil {
 		return nil
 	}
-	// --null --show-origin: "file:<origin>\0<key>\n<value>\0" per entry; a key
-	// set without "=" has no "\n<value>".
+	// "<scope>\0file:<origin>\0<key>\n<value>\0" per entry; a key set
+	// without "=" has no "\n<value>". Only the repository's own scopes count:
+	// system, global and command-line config is not set by a cloned repo.
 	fields := bytes.Split(out, []byte{0})
 	var checks []doctorCheck
-	for i := 0; i+1 < len(fields); i += 2 {
-		origin := strings.TrimPrefix(string(fields[i]), "file:")
-		key, value, _ := strings.Cut(string(fields[i+1]), "\n")
+	for i := 0; i+2 < len(fields); i += 3 {
+		if scope := string(fields[i]); scope != "local" && scope != "worktree" {
+			continue
+		}
+		origin := strings.TrimPrefix(string(fields[i+1]), "file:")
+		key, value, _ := strings.Cut(string(fields[i+2]), "\n")
 		if !gitConfigKeyRunsProgram(key, value) {
 			continue
 		}
+		// %q on every repo-controlled string: a subsection name can carry
+		// terminal escapes, and none of it is spliced into a command.
 		checks = append(checks, doctorCheck{
 			Group:    "Sanity",
 			Name:     "git-config-exec",
 			Severity: doctorWarning,
 			Status:   "warning",
-			Message: fmt.Sprintf("Repo git config %s = %q (from %s) runs a program whenever git runs here, including git commands an agent runs without asking you.",
+			Message: fmt.Sprintf("Repo git config %q = %q (from %q) runs a program whenever git runs here, including git commands an agent runs without asking you. If you did not set it, remove it from that file.",
 				key, value, origin),
-			Fix: "if you did not set it, remove it with git config --local --unset " + key,
+			Fix: "remove the entry from the named file if you did not set it",
 		})
 	}
 	return checks
@@ -84,22 +110,28 @@ func gitConfigKeyRunsProgram(key, value string) bool {
 	}
 	section := key[:dot]
 	switch {
+	case value == "":
+		// An empty value resets a list (credential.helper) or means true.
+		return false
 	case section == "alias":
 		return strings.HasPrefix(value, "!")
+	case section == "submodule" && key[lastDot+1:] == "update":
+		return strings.HasPrefix(value, "!")
+	case section == "remote" && key[lastDot+1:] == "url":
+		return strings.HasPrefix(value, "ext::")
 	case section == "pager", key == "core.fsmonitor":
 		// A boolean picks git's default pager or built-in daemon, not a program.
 		return !isGitBool(value)
-	case dot != lastDot:
-		return gitConfigExecKeys[section+".*."+key[lastDot+1:]]
 	}
-	return gitConfigExecKeys[key]
+	return gitConfigExecKeys[key] || (dot != lastDot && gitConfigExecKeys[section+".*."+key[lastDot+1:]])
 }
 
 // isGitBool reports whether git reads value as a boolean.
 func isGitBool(value string) bool {
 	switch strings.ToLower(strings.TrimSpace(value)) {
-	case "", "true", "yes", "on", "false", "no", "off", "1", "0":
+	case "true", "yes", "on", "false", "no", "off":
 		return true
 	}
-	return false
+	_, err := strconv.Atoi(strings.TrimSpace(value))
+	return err == nil
 }

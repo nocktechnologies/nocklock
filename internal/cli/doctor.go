@@ -124,7 +124,7 @@ type doctorCapabilities struct {
 	// deputies returns the host view for the deputy scan; nil skips the scan.
 	deputies func(goos string) deputyHost
 	// gitConfigExec lists repo git config that runs a program; nil skips it.
-	gitConfigExec func(projectRoot string) []doctorCheck
+	gitConfigExec func(dir string) []doctorCheck
 	now           func() time.Time
 }
 
@@ -232,7 +232,12 @@ func runDoctor(caps doctorCapabilities) doctorReport {
 	checks = append(checks, sanityDoctorChecks(cfg, configPath, caps)...)
 	projectRoot := filepath.Dir(filepath.Dir(configPath))
 	if caps.gitConfigExec != nil {
-		checks = append(checks, caps.gitConfigExec(projectRoot)...)
+		// Scan the repo doctor runs in, which may sit below the project root.
+		dir, err := os.Getwd()
+		if err != nil {
+			dir = projectRoot
+		}
+		checks = append(checks, caps.gitConfigExec(dir)...)
 	}
 	if caps.deputies != nil {
 		host := caps.deputies(caps.goos)
