@@ -12,8 +12,14 @@ import (
 // session signed a specific allow/deny decision into .nock/events.db. Kept free
 // of a build tag so both platforms compile it.
 func hasDecisionRow(rows []logging.Event, needles ...string) bool {
+	return hasCategoryRow(rows, "network", needles...)
+}
+
+// hasCategoryRow reports whether any event of category has a Detail that
+// contains all of needles.
+func hasCategoryRow(rows []logging.Event, category string, needles ...string) bool {
 	for _, e := range rows {
-		if e.Category != "network" {
+		if e.Category != category {
 			continue
 		}
 		match := true

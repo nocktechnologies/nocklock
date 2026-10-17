@@ -11,6 +11,15 @@ Since v0.9.0, `doctor` reports `PARTIAL` (exit 3) for Linux `CONFINED` below Lan
 
 Limit: `doctor` reports configuration and host capability, not proof that a particular session ran with every fence. Use `verify` for an active self-test and inspect that session's signed fence-state rows for evidence.
 
+## Repo git config that runs code ("GitSpawn")
+A cloned repository can set git config keys whose value is a program, and git runs it on the next `git status`, `git diff` or `git fetch`: `core.fsmonitor`, `core.hooksPath`, `core.sshCommand`, `core.pager`, diff `textconv`, filter and merge drivers, credential helpers, `!` aliases and similar. An agent that runs git runs that program without any approval prompt of its own.
+
+`doctor` lists each such key in the config of the repository it runs in (`.git/config`, `config.worktree` and the files they include, so `core.hooksPath` too) as a `git-config-exec` warning with the key, its value and the file it came from (`internal/cli/doctor_gitconfig.go`). It reads the config with `git config --list`, ignores your system and global config, and runs no hook. Doctor scans the repository it is run from (the current directory), which can differ from the project root that holds `.nock/`. A config git cannot parse or open (a bad line, an unreadable include) makes every git command fail with git's own error (`fatal: bad config line N`, `fatal: unable to access`), and git then runs nothing, so no program it sets can execute; doctor stays silent in that case. A config doctor cannot read (an include such as a FIFO that stalls the read past 3 seconds, or git older than 2.26) is reported as an `incomplete` `git-config-exec` warning instead of silence. The key list covers the common program-running keys, not every key git or its helpers may honor. The warning does not change the verdict or the exit code, and doctor removes nothing.
+
+What the fence does about it is tested on Linux only. The `gitspawn-proof` job (`.github/workflows/network-egress.yml`, `internal/cli/wrap_gitspawn_linux_test.go`) plants a `core.fsmonitor` program that tries to reach a host the claude-code preset does not allow, read a file under `~/.ssh/` (denied by the preset and outside every grant, so the test does not separate the deny rule from the default deny) and write outside the project. Run unwrapped, `git status` fires it and all three succeed; that is the negative control. Under `nocklock wrap --profile claude-code --net-fence=netns -- git status`, on a GitHub-hosted Ubuntu runner with Landlock, seccomp and the netns egress floor, the program still runs and all three fail. The event log holds a signed `network_blocked` row for the host and a `file_blocked` row for each path, and `verify --audit` reports `AUTHENTIC`.
+
+Limits: the program runs inside the fence like any other child, so it keeps everything the agent has: it can change project files, read allowed paths and send data to allowlisted hosts. Only a git run under `wrap` is fenced; git run by you, your editor or an unwrapped tool runs the program with your full rights. Proxy-mode networking (without `--net-fence=netns`) and macOS Seatbelt are not covered by this test.
+
 ## `nocklock verify`: does the fence block?
 Runs an adversarial self-test through fenced child processes (`internal/cli/verify.go`, hidden `__probe` re-exec at `internal/cli/probe.go`). The report lists a result and reason for each filesystem, network, secret and syscall probe. `PASS` proves the tested operation was blocked; `SKIP` is not proof. Any failed probe, or a run with no passing probe, exits 1. A passing run with skipped probes covers only the tests that passed; read the per-probe results. Design: `.claude/design/003-verify-fence-selftest.md`.
 
@@ -20,4 +29,4 @@ Runs an adversarial self-test through fenced child processes (`internal/cli/veri
 Linux-only structured feasibility probe for the netns egress fence (`internal/cli/egress_probe.go`).
 
 ## Tests
-`internal/cli/doctor_test.go`, `doctor_deputies_test.go`, `verify_test.go`, `probe_test.go`, `egress_probe_test.go`.
+`internal/cli/doctor_test.go`, `doctor_deputies_test.go`, `doctor_gitconfig_test.go`, `verify_test.go`, `probe_test.go`, `egress_probe_test.go`. The GitSpawn proof is `wrap_gitspawn_linux_test.go` (CI job `gitspawn-proof`).
