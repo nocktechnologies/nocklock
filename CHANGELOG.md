@@ -9,6 +9,7 @@ All notable changes to NockLock will be documented in this file.
 - `LogImmediate` uses the same immediate SQLite transaction as ordinary event writes, preserving write-lock waiting, committed-event callbacks, and signed run-close accounting without an unused predecessor lookup.
 - Removed the unused internal HTTP client for ordinary v1 anchor pushes and fetches. Remote v2 enrollment, migration, and conditional updates, plus local v1 anchor-file verification, are unchanged.
 - Newly generated configs, runtime presets, and examples omit the inert `[cloud]` section. Existing cloud settings still decode and validate as before; optional delivery uses `[audit.forward]`.
+- Release runbook: one whole-repo cleanup pass before the release notes.
 
 ## [0.12.0] - 2026-10-17
 
