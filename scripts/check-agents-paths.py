@@ -13,7 +13,7 @@ import sys
 # and followed by a "title"; only the target is checked.
 SPAN = re.compile(r"`([^`\s]+)`")
 LINK = re.compile(r"\]\(\s*(?:<([^>]*)>|([^)\s]+))")
-EXTENSION = re.compile(r"\.(?=[0-9]*[a-z])[a-z0-9]{1,5}$")
+EXTENSION = re.compile(r"\.[0-9]*[a-z][a-z0-9]{0,4}$")
 PATTERN = re.compile(r"[<>*?\[\]]")
 
 
