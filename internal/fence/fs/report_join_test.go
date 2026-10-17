@@ -3,6 +3,7 @@ package fs
 import (
 	"context"
 	"net"
+	"os"
 	"path/filepath"
 	"sync"
 	"testing"
@@ -15,7 +16,14 @@ import (
 // before it drains the proxy and reads audit.failure() for the verdict, so a
 // look-back denial row the handler writes cannot land after the verdict.
 func TestListenChannelClosesOnlyAfterReportHandlerReturns(t *testing.T) {
-	ln, err := net.Listen("unix", filepath.Join(t.TempDir(), "f.sock"))
+	// A short directory: macOS caps Unix socket paths at 104 bytes, and
+	// t.TempDir() under /var/folders is longer than that.
+	dir, err := os.MkdirTemp("/tmp", "nlrj-test-*")
+	if err != nil {
+		t.Fatalf("MkdirTemp: %v", err)
+	}
+	t.Cleanup(func() { os.RemoveAll(dir) })
+	ln, err := net.Listen("unix", filepath.Join(dir, "f.sock"))
 	if err != nil {
 		t.Fatalf("listen: %v", err)
 	}
