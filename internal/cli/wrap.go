@@ -1805,6 +1805,12 @@ func validateUnixProxySocketPath(path string) error {
 	return nil
 }
 
+// inVersionedLinuxRelease reports whether exePath sits directly inside a
+// versioned release directory of the paired Linux layout.
+func inVersionedLinuxRelease(exePath string) bool {
+	return exePath != "" && filepath.Dir(filepath.Dir(exePath)) == "/usr/local/lib/nocklock/releases"
+}
+
 func findTrustedLibFenceFS(exePath, workingDir string, extraCandidates []string, inspect func(string, []string) (string, error)) (string, error) {
 	if inspect == nil {
 		inspect = trustedInterposerPathInProject
@@ -1814,10 +1820,15 @@ func findTrustedLibFenceFS(exePath, workingDir string, extraCandidates []string,
 	if exePath != "" {
 		candidates = append(candidates, filepath.Join(filepath.Dir(exePath), "libfence_fs.so"))
 	}
-	candidates = append(candidates,
-		filepath.Join("/usr/local/lib/nocklock", "libfence_fs.so"),
-		filepath.Join("/usr/lib/nocklock", "libfence_fs.so"),
-	)
+	// A paired Linux candidate installs the CLI and its library together under
+	// a versioned release directory. A missing adjacent library there must
+	// refuse rather than fall back to an older library at a fixed location.
+	if !inVersionedLinuxRelease(exePath) {
+		candidates = append(candidates,
+			filepath.Join("/usr/local/lib/nocklock", "libfence_fs.so"),
+			filepath.Join("/usr/lib/nocklock", "libfence_fs.so"),
+		)
+	}
 	candidates = append(candidates, extraCandidates...)
 
 	// A project-owned library pointer must never select a trusted library. The one

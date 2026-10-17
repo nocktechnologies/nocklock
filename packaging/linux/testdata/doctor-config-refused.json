@@ -1,0 +1,27 @@
+{
+  "verdict": "GAPS FOUND",
+  "checks": [
+    {
+      "group": "Config",
+      "name": "config",
+      "severity": "critical",
+      "status": "parse-error",
+      "message": "Config failed to load: refusing to use the config file /home/nocklock-candidate/nocklock-accept-proxy.MxDeCc/project/.nock/config.toml: /home/nocklock-candidate/nocklock-accept-proxy.MxDeCc/project is group- or world-writable (mode 0775); run 'chmod go-w /home/nocklock-candidate/nocklock-accept-proxy.MxDeCc/project', or set NOCKLOCK_ALLOW_UNTRUSTED_CONFIG to accept a known-safe layout",
+      "fix": "fix .nock/config.toml and rerun nocklock doctor"
+    }
+  ],
+  "gaps": [
+    {
+      "group": "Config",
+      "name": "config",
+      "severity": "critical",
+      "status": "parse-error",
+      "message": "Config failed to load: refusing to use the config file /home/nocklock-candidate/nocklock-accept-proxy.MxDeCc/project/.nock/config.toml: /home/nocklock-candidate/nocklock-accept-proxy.MxDeCc/project is group- or world-writable (mode 0775); run 'chmod go-w /home/nocklock-candidate/nocklock-accept-proxy.MxDeCc/project', or set NOCKLOCK_ALLOW_UNTRUSTED_CONFIG to accept a known-safe layout",
+      "fix": "fix .nock/config.toml and rerun nocklock doctor"
+    }
+  ],
+  "activity": {
+    "last24h_blocked": 0,
+    "all_time_blocked": 0
+  }
+}
