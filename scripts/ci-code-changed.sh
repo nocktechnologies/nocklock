@@ -12,9 +12,13 @@ set -euo pipefail
 
 code=true
 if [ "${GITHUB_EVENT_NAME:-}" = pull_request ]; then
-  files="$(git diff --name-only HEAD^1 HEAD)"
+  # --no-renames lists a moved file's source path too, so moving code into
+  # docs/ still counts as a code change.
+  files="$(git diff --no-renames --name-only HEAD^1 HEAD)"
   printf 'changed files:\n%s\n' "$files"
-  if [ -n "$files" ] && ! grep -qvE '\.md$|^docs/' <<<"$files"; then
+  # grep exits 1 when every path is docs; any other failure fails the step.
+  code_files="$(grep -vE '\.md$|^docs/' <<<"$files" || [ $? -eq 1 ])"
+  if [ -n "$files" ] && [ -z "$code_files" ]; then
     code=false
   fi
 fi

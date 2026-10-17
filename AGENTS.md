@@ -25,7 +25,7 @@ Follows Engineering Standards v4.
 
 Before you push:
 
-1. The tests for the packages you touched pass, plus lint: `go test -count=1 $(git diff --name-only origin/next... -- '*.go' | xargs -r -n1 dirname | sort -u | sed 's|^|./|')` (skip it when no Go file changed), then `go vet ./...` and `gofmt -l .` (prints nothing). Not the full suite; CI runs it.
+1. The tests for the packages you touched pass, plus lint: `go test -count=1 $(git diff --name-only origin/next... -- '*.go' | xargs -r -n1 dirname | sort -u | while read -r d; do [ -d "$d" ] && echo "./$d"; done)` (skip it when no Go file changed), then `go vet ./...` and `gofmt -l .` (prints nothing). Not the full suite; CI runs it.
 2. `python3 scripts/check-public-content.py` and `python3 scripts/check-agents-paths.py` pass.
 3. Self-review for hardcoded secrets, path traversal, race conditions and subprocess injection.
 4. The PR follows `CONTRIBUTING.md` and targets `next`.

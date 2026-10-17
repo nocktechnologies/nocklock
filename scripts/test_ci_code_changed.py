@@ -73,6 +73,22 @@ class CodeChangedTest(unittest.TestCase):
                 self.assertEqual(result.returncode, 0, result.stderr)
                 self.assertEqual(output, f'code={want}\n')
 
+    def test_renames(self):
+        self.write('docs/old.md', 'doc\n')
+        self.commit('doc')
+        for source, dest, want in (('main.go', 'docs/main.go', 'true'),
+                                   ('main.go', 'main.md', 'true'),
+                                   ('docs/old.md', 'docs/new.md', 'false')):
+            with self.subTest(source=source, dest=dest):
+                self.git('checkout', '-q', '-B', 'pr', 'base')
+                self.git('mv', source, dest)
+                self.commit('rename')
+                self.git('checkout', '-q', '--detach', 'base')
+                self.git('merge', '-q', '--no-ff', '-m', 'merge', 'pr')
+                result, output = self.run_script()
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertEqual(output, f'code={want}\n')
+
     def test_non_pr_events_always_run(self):
         self.merge_pr(['README.md'])
         for event in ('push', 'workflow_dispatch', ''):
