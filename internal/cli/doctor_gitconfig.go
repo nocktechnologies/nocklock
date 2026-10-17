@@ -63,9 +63,12 @@ var gitConfigScanTimeout = 3 * time.Second
 // gitConfigExecDoctorChecks lists the repository git config entries for dir
 // (.git/config, config.worktree and the files they include) that make git run
 // a program, one warning each. Doctor only reads the config: `git config
-// --list` runs no hook. It reports nothing when git is missing or dir is not in
-// a repository; inside a repository, a config it cannot fully read is itself a
-// warning, so a hostile repo cannot hide its keys by stalling or breaking git.
+// --list` runs no hook. It reports nothing when git is missing, dir is not in a
+// repository, or git cannot parse or open the config (a bad line, an unreadable
+// include): git then reports the error itself and runs nothing, so no program
+// the config sets can execute. A config doctor cannot read (a FIFO include that
+// stalls past the timeout, or git too old for --show-scope) is itself a
+// warning, so a hostile repo cannot hide its keys by stalling the scan.
 func gitConfigExecDoctorChecks(dir string) []doctorCheck {
 	ctx, cancel := context.WithTimeout(context.Background(), gitConfigScanTimeout)
 	defer cancel()
