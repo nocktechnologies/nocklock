@@ -1,0 +1,111 @@
+{
+  "verdict": "PARTIAL",
+  "boundaries": [
+    {
+      "name": "filesystem",
+      "posture": "enforced"
+    },
+    {
+      "name": "signing-key",
+      "posture": "enforced"
+    },
+    {
+      "name": "syscall",
+      "posture": "enforced"
+    },
+    {
+      "name": "network",
+      "posture": "enforced"
+    },
+    {
+      "name": "secrets",
+      "posture": "enforced"
+    },
+    {
+      "name": "unix-sockets",
+      "posture": "advisory"
+    }
+  ],
+  "egress_level": "CONFINED",
+  "checks": [
+    {
+      "group": "Config",
+      "name": "config",
+      "severity": "ok",
+      "status": "loaded",
+      "message": "Config loaded from /home/nocklock-candidate/nocklock-accept-proxy.XXXXXX/project/.nock/config.toml"
+    },
+    {
+      "group": "Fences",
+      "name": "filesystem",
+      "severity": "ok",
+      "status": "enforceable",
+      "message": "Filesystem fence enforceable with Linux Landlock ABI v8."
+    },
+    {
+      "group": "Fences",
+      "name": "signing-key",
+      "severity": "ok",
+      "status": "denied",
+      "message": "Managed signing key directory /home/nocklock-candidate/.config/nocklock is outside every Landlock read grant."
+    },
+    {
+      "group": "Fences",
+      "name": "unix-sockets",
+      "severity": "warning",
+      "status": "unavailable",
+      "message": "Landlock ABI v8 is below required ABI v9; pathname and abstract Unix sockets remain reachable (reason=landlock_abi_8_below_9).",
+      "fix": "use a Linux kernel with Landlock ABI v9 or later to enforce isolation, or set network.require_unix_socket_isolation = true to make wrap refuse below ABI 9"
+    },
+    {
+      "group": "Fences",
+      "name": "syscall",
+      "severity": "ok",
+      "status": "enforceable",
+      "message": "Syscall fence enforceable with Linux seccomp-BPF."
+    },
+    {
+      "group": "Fences",
+      "name": "network",
+      "severity": "ok",
+      "status": "enforceable",
+      "message": "Network fence proxy backend is available."
+    },
+    {
+      "group": "Fences",
+      "name": "secrets",
+      "severity": "ok",
+      "status": "enforceable",
+      "message": "Secret fence enforceable with 8 blocked pattern(s)."
+    },
+    {
+      "group": "Egress Helper",
+      "name": "egress-helper",
+      "severity": "ok",
+      "status": "installed",
+      "message": "Privileged egress helper installed at /usr/libexec/nocklock-egress-helper (regular, root-owned, executable) and reachable via passwordless sudo."
+    },
+    {
+      "group": "Sanity",
+      "name": "config-sanity",
+      "severity": "ok",
+      "status": "ok",
+      "message": "No obvious permissive config issues found."
+    },
+    {
+      "group": "Activity",
+      "name": "recent-enforcement",
+      "severity": "info",
+      "status": "observed",
+      "message": "No denials logged yet (either nothing tried, or fences not exercised)."
+    }
+  ],
+  "activity": {
+    "last24h_blocked": 0,
+    "all_time_blocked": 0
+  },
+  "signing_key": {
+    "directory": "/home/nocklock-candidate/.config/nocklock",
+    "posture": "enforced"
+  }
+}

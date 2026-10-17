@@ -14,8 +14,8 @@ It creates **CI candidates, not GitHub releases**. No release is published and
 no production support claim follows from a green candidate run. The workflow
 has no `contents: write` permission or release trigger.
 
-Mira approved keyless Cosign with GitHub Actions OIDC for this slice (NockCC
-87196, 2026-10-13 local). The current stable versions were verified against the
+The maintainers approved keyless Cosign with GitHub Actions OIDC for this slice
+(2026-10-13). The current stable versions were verified against the
 primary GitHub release APIs on 2026-10-14 UTC:
 
 - [Cosign v3.1.3](https://github.com/sigstore/cosign/releases/tag/v3.1.3), exact

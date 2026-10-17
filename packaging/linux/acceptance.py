@@ -7,6 +7,11 @@ import sys
 
 
 def check_doctor(report, code):
+    # doctor omits boundaries and egress_level when the config did not load;
+    # name that cause instead of failing on a missing key.
+    config = next((c for c in report.get("checks", []) if c.get("name") == "config"), None)
+    assert config is not None and config["status"] == "loaded", f"doctor config did not load: {config}"
+    assert "boundaries" in report, "doctor report has no boundaries"
     boundaries = {b["name"]: b["posture"] for b in report["boundaries"]}
     for name in ("filesystem", "syscall", "network", "secrets", "signing-key"):
         assert boundaries[name] == "enforced", boundaries

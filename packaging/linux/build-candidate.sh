@@ -11,7 +11,7 @@ source /etc/os-release
 [[ $(getconf GNU_LIBC_VERSION) == 'glibc 2.39' ]]
 [[ $(go env GOHOSTOS)/$(go env GOHOSTARCH) == linux/amd64 ]]
 [[ $# == 1 && $1 == /* && ! -e $1 ]] || { echo 'Pass a new absolute output directory' >&2; exit 1; }
-git diff --quiet HEAD
+git diff --quiet HEAD || { echo 'Candidate requires a clean, committed checkout' >&2; exit 1; }
 [[ -z $(git ls-files --others --exclude-standard) ]] || { echo 'Candidate requires a clean, committed checkout' >&2; exit 1; }
 commit=$(git rev-parse HEAD)
 version="0.0.0-candidate.$commit"

@@ -51,18 +51,27 @@ jobs:
           cosign verify-blob SHA256SUMS --bundle SHA256SUMS.sigstore.json \
             --certificate-identity "$CANDIDATE_IDENTITY" \
             --certificate-oidc-issuer https://token.actions.githubusercontent.com
+          # Each negative control must fail for its own reason, not any error.
           if cosign verify-blob SHA256SUMS --bundle SHA256SUMS.sigstore.json \
             --certificate-identity 'https://github.com/nocktechnologies/nocklock/.github/workflows/release.yml@refs/tags/v0.0.0' \
-            --certificate-oidc-issuer https://token.actions.githubusercontent.com; then
+            --certificate-oidc-issuer https://token.actions.githubusercontent.com \
+            > "$RUNNER_TEMP/wrong-identity.txt" 2>&1; then
             echo 'FAIL: candidate accepted as a release identity' >&2; exit 1
           fi
+          cat "$RUNNER_TEMP/wrong-identity.txt"
+          grep -Eq 'no matching CertificateIdentity found|none of the expected identities matched' \
+            "$RUNNER_TEMP/wrong-identity.txt" || { echo 'FAIL: wrong signer refused for another reason' >&2; exit 1; }
           cp SHA256SUMS changed-manifest.txt
           echo changed >> changed-manifest.txt
           if cosign verify-blob changed-manifest.txt --bundle SHA256SUMS.sigstore.json \
             --certificate-identity "$CANDIDATE_IDENTITY" \
-            --certificate-oidc-issuer https://token.actions.githubusercontent.com; then
+            --certificate-oidc-issuer https://token.actions.githubusercontent.com \
+            > "$RUNNER_TEMP/changed-manifest.txt" 2>&1; then
             echo 'FAIL: changed manifest authenticated' >&2; exit 1
           fi
+          cat "$RUNNER_TEMP/changed-manifest.txt"
+          grep -Eq 'failed to verify signature|could not verify message|invalid signature|artifact digest does not match|artifact does not match digest|does not match artifact' \
+            "$RUNNER_TEMP/changed-manifest.txt" || { echo 'FAIL: changed manifest refused for another reason' >&2; exit 1; }
           rm changed-manifest.txt
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
@@ -154,7 +163,7 @@ jobs:
           # shellcheck disable=SC2024
           if sudo -u nocklock-candidate env -i HOME=/home/nocklock-candidate \
             USER=nocklock-candidate PATH=/usr/bin:/bin /bin/bash -c \
-            'cd "$(mktemp -d "$HOME/missing-library.XXXXXX")" && /usr/local/bin/nocklock init && /usr/local/bin/nocklock wrap -- /bin/true' \
+            'umask 077 && cd "$(mktemp -d "$HOME/missing-library.XXXXXX")" && /usr/local/bin/nocklock init && /usr/local/bin/nocklock wrap -- /bin/true' \
             > "$RUNNER_TEMP/missing-interposer.txt" 2>&1; then
             echo 'FAIL: missing adjacent library allowed launch' >&2; exit 1
           fi

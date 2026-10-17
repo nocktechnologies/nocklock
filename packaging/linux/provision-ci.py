@@ -49,6 +49,12 @@ def stage_file(source, destination, limit):
     destination.chmod(0o600)
 
 
+def make_traversable_dir(path):
+    """Create a directory 0755; mkdir alone honors the private 077 umask."""
+    path.mkdir()
+    path.chmod(0o755)
+
+
 def provision(args):
     if (os.geteuid() != 0 or platform.system() != "Linux" or platform.machine() != "x86_64"
             or os.environ.get("GITHUB_ACTIONS") != "true" or os.environ.get("RUNNER_ENVIRONMENT") != "github-hosted"):
@@ -113,7 +119,7 @@ def provision(args):
         if Path("/usr/local/bin/nocklock").resolve(strict=True) != release / "nocklock":
             raise ValueError("installed CLI symlink does not resolve to candidate")
         if not Path("/usr/libexec").exists():
-            Path("/usr/libexec").mkdir(mode=0o755)
+            make_traversable_dir(Path("/usr/libexec"))
         trusted("/usr/libexec")
         run("/usr/sbin/useradd", "--create-home", "--shell", "/bin/bash", TEST_USER)
         # Preflight all executable ancestors before the packaged helper script

@@ -2,6 +2,8 @@
 # Run only as the new, unprivileged CI account, outside the source checkout.
 set -euo pipefail
 export LC_ALL=C
+# nocklock refuses a config under a group/other-writable project directory.
+umask 077
 [[ $(id -u) != 0 && $(id -un) == nocklock-candidate ]]
 [[ $# == 2 && $1 =~ ^[0-9a-f]{40}$ && $2 == /* ]]
 commit=$1
