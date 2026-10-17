@@ -65,6 +65,9 @@ func TestCommittedEventHookCarriesStoredHashes(t *testing.T) {
 	if err := l.Log(sampleEvent(EventNetworkBlocked, "network", "example.org", true, "session")); err != nil {
 		t.Fatal(err)
 	}
+	if err := l.LogImmediate(sampleEvent(EventNetworkBlocked, "network", "immediate.example.org", true, "session")); err != nil {
+		t.Fatal(err)
+	}
 	rows, err := l.db.Query("SELECT event_type, entry_hash FROM events ORDER BY id")
 	if err != nil {
 		t.Fatal(err)
