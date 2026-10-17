@@ -53,26 +53,27 @@ Each OpenTimestamps receipt (the reference service) is pending, upgraded, or ver
 
 **Upgraded.** The receipt now holds a Merkle path from `SHA-256(D)` to a Bitcoin block header. The `ots upgrade` step fetches this path from the calendar.
 
-- Proves: `SHA-256(D)` existed no later than the timestamp of the Bitcoin block that commits to it. Block time is approximate, usually to within hours.
-- Does not prove: the Merkle path is correct until the verifier checks it against a block header from a source it trusts. Until then the calendar is still in the trust chain.
+- Claims: `SHA-256(D)` existed no later than the timestamp of the Bitcoin block named in the receipt. Block time is approximate, usually to within hours.
+- Proves: nothing by itself. An upgraded receipt that nobody has checked can be fabricated: an arbitrary path plus a claimed block attestation looks the same. Until the full path is checked against a trusted block header, the claim is unverified.
 
-**Verified.** The verifier checks the Merkle path against a Bitcoin block header from a source it trusts, such as its own node or a trusted header source.
+**Verified.** The verifier checks the complete commitment path, from `SHA-256(D)` through every hash step to the Merkle root of a Bitcoin block header, against a header from a source it trusts, such as its own node or a trusted header source. Only this state is third-party-checkable evidence.
 
-- Proves: `SHA-256(D)` existed no later than that block. This removes the calendar from the trust chain for the existence claim.
+- Proves: `SHA-256(D)` existed no later than that block (block time bounds). This removes the calendar from the trust chain for the existence claim.
 - Does not prove: that the digest was a valid audit state, that the audit log was complete, or that the signing key was not compromised.
 
-**Calendar acceptance is not Bitcoin confirmation.** Pending is not upgraded, and upgraded is not verified. Show the state in every report.
+**Calendar acceptance is not Bitcoin confirmation.** Pending is not upgraded, and upgraded is not verified. Only a verified receipt is evidence. Show the state in every report.
 
 ### What a timestamp does not do
 
-Only an upgraded receipt proves that `SHA-256(D)` existed at a time. It does not prove that the audit state behind it was valid. A verifier must still:
+Only a verified receipt proves that `SHA-256(D)` existed at a time. A verified receipt is an upgraded receipt whose full commitment path has been checked against a trusted Bitcoin block header. It does not prove that the audit state behind it was valid. A verifier must still:
 
 1. Load the anchor record and its public key.
 2. Run `AnchorV2SnapshotDigest` with the expected `(agent_id, chain_id)` pair. This checks the signature, the fingerprint, the canonical fields, and the pair.
 3. Recompute `D`, the 32 digest bytes, and compute `SHA-256(D)`.
 4. Check that the receipt's file digest equals `SHA-256(D)`. Comparing it with `D` fails by design, because of the extra hash layer.
+5. Replay the complete commitment path in the receipt, every append, prepend, and hash step, starting from `SHA-256(D)`. Check that the result equals the Merkle root of a Bitcoin block header from a source you trust, and read the block time from that header. Do not accept the receipt on its claimed block attestation alone.
 
-Without steps 1 to 4 the timestamp binds nothing to a specific audit state.
+Without steps 1 to 5 the timestamp binds nothing to a specific audit state.
 
 ## Opt-in and disclosure
 
@@ -169,7 +170,7 @@ Calendar https://alice.btc.calendar.opentimestamps.org: Pending confirmation in 
 
 The exit code was 1, as expected for a receipt with no Bitcoin attestation.
 
-**State: pending.** This is calendar acceptance, not Bitcoin confirmation. The receipt holds only the four calendar URIs. It proves nothing to a third party until it is upgraded. The submission time above comes from the operator's own log.
+**State: pending.** This is calendar acceptance, not Bitcoin confirmation. The receipt holds only the four calendar URIs. It proves nothing to a third party until it is upgraded and verified. The submission time above comes from the operator's own log.
 
 To upgrade later, run this in the directory that holds the receipt, once the calendars have committed to a Bitcoin block (usually some hours after submission):
 
