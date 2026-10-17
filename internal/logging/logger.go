@@ -936,6 +936,8 @@ func (l *Logger) logInTransaction(tx eventTransaction, event *Event, hash *strin
 // LogBatch records multiple events in a single transaction for efficiency, with chain.
 // Thread-safe: the logger mutex is held from BEGIN through COMMIT and the
 // run-accumulator fold of every row, then released before the observer callbacks.
+// The transaction is BEGIN IMMEDIATE, like LogImmediate, so busy_timeout applies
+// when another process holds the write lock.
 func (l *Logger) LogBatch(events []Event) error {
 	if len(events) == 0 {
 		return nil
@@ -959,23 +961,36 @@ func (l *Logger) LogBatch(events []Event) error {
 // returns the committed events and their entry hashes for the observer callbacks
 // the public wrapper runs after releasing the mutex.
 func (l *Logger) appendBatchLocked(events []Event) ([]Event, []string, error) {
-	tx, err := l.db.Begin()
+	// Take the write lock up front. A deferred transaction reads first, and
+	// SQLite fails its later upgrade to write at once with SQLITE_BUSY when
+	// another process holds the lock; busy_timeout does not cover that case.
+	ctx := context.Background()
+	conn, err := l.db.Conn(ctx)
 	if err != nil {
+		return nil, nil, fmt.Errorf("failed to reserve log connection: %w", err)
+	}
+	defer conn.Close()
+	if _, err := conn.ExecContext(ctx, "BEGIN IMMEDIATE"); err != nil {
 		return nil, nil, fmt.Errorf("failed to begin batch transaction: %w", err)
 	}
-	defer tx.Rollback()
+	committed := false
+	defer func() {
+		if !committed {
+			_, _ = conn.ExecContext(ctx, "ROLLBACK")
+		}
+	}()
 
 	// Initialize chain_head if needed
-	if err := initChainHeadIfNeeded(tx); err != nil {
+	if err := initChainHeadIfNeeded(conn); err != nil {
 		return nil, nil, fmt.Errorf("failed to initialize chain_head: %w", err)
 	}
-	if err := l.ensureWritableSignerState(tx); err != nil {
+	if err := l.ensureWritableSignerState(conn); err != nil {
 		return nil, nil, err
 	}
 
 	// Get current head
 	var currentHeadHash string
-	err = tx.QueryRow("SELECT entry_hash FROM chain_head WHERE id = 1").Scan(&currentHeadHash)
+	err = conn.QueryRowContext(ctx, "SELECT entry_hash FROM chain_head WHERE id = 1").Scan(&currentHeadHash)
 	if err != nil {
 		currentHeadHash = chainGenesisHashHex
 	}
@@ -995,7 +1010,7 @@ func (l *Logger) appendBatchLocked(events []Event) ([]Event, []string, error) {
 			blocked = 1
 		}
 
-		result, err := tx.Exec(
+		result, err := conn.ExecContext(ctx,
 			`INSERT INTO events (timestamp, event_type, category, detail, blocked, session_id, prev_hash, entry_hash)
 			 VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
 			ts, string(event.EventType), event.Category, storedDetail, blocked, event.SessionID, prevHashHex, "",
@@ -1021,7 +1036,7 @@ func (l *Logger) appendBatchLocked(events []Event) ([]Event, []string, error) {
 		}
 
 		// Update with computed hash and signature
-		_, err = tx.Exec(
+		_, err = conn.ExecContext(ctx,
 			"UPDATE events SET entry_hash = ?, entry_sig = ? WHERE id = ?",
 			entryHash, entrySig, eventID,
 		)
@@ -1037,12 +1052,12 @@ func (l *Logger) appendBatchLocked(events []Event) ([]Event, []string, error) {
 	}
 
 	// Update chain_head with final state
-	count, err := countEvents(tx)
+	count, err := countEvents(conn)
 	if err != nil {
 		return nil, nil, fmt.Errorf("failed to count events: %w", err)
 	}
 
-	headMeta, err := readHeadSignatureMetadata(tx)
+	headMeta, err := readHeadSignatureMetadata(conn)
 	if err != nil {
 		return nil, nil, fmt.Errorf("failed to read chain head signing metadata: %w", err)
 	}
@@ -1050,7 +1065,7 @@ func (l *Logger) appendBatchLocked(events []Event) ([]Event, []string, error) {
 	if err != nil {
 		return nil, nil, fmt.Errorf("failed to sign chain head: %w", err)
 	}
-	_, err = tx.Exec(
+	_, err = conn.ExecContext(ctx,
 		"UPDATE chain_head SET entry_hash = ?, row_count = ?, head_sig = ? WHERE id = 1",
 		prevHashHex, count, headSig,
 	)
@@ -1058,9 +1073,10 @@ func (l *Logger) appendBatchLocked(events []Event) ([]Event, []string, error) {
 		return nil, nil, fmt.Errorf("failed to update chain_head: %w", err)
 	}
 
-	if err := tx.Commit(); err != nil {
+	if _, err := conn.ExecContext(ctx, "COMMIT"); err != nil {
 		return nil, nil, fmt.Errorf("failed to commit batch transaction: %w", err)
 	}
+	committed = true
 	if l.afterCommit != nil {
 		l.afterCommit()
 	}
