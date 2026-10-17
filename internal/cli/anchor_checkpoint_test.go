@@ -647,7 +647,9 @@ func TestWrapAnchorCheckpointOptIn(t *testing.T) {
 		t.Fatal("the child ran despite a malformed checkpoint setting")
 	}
 
-	t.Setenv(EnvAnchorCheckpointInterval, "1s")
+	// A long interval, so no tick fires however long the run takes. A tick on
+	// this unenrolled chain would stop the worker and change the summary line.
+	t.Setenv(EnvAnchorCheckpointInterval, "1h")
 	t.Setenv(EnvAnchorCheckpointDeadline, "500ms")
 	envOut := filepath.Join(t.TempDir(), "child-env.txt")
 	runErr, stderr := run(envOut)
