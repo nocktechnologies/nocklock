@@ -1,13 +1,13 @@
 # Roadmap to 1.0
 
-Updated 2026-10-17. Released baseline: `v0.12.0`. Release history is in `CHANGELOG.md`. The planned 0.7.1 step was split across 0.8.0 and 0.9.0; there is no `v0.7.1` tag. A gap is closed only when its fix is released from `main`, the red-team case runs in CI with an allowed-action negative control, and the docs describe the tested boundary.
+Updated 2026-10-17. Released baseline: `v0.13.0`. Release history is in `CHANGELOG.md`. The planned 0.7.1 step was split across 0.8.0 and 0.9.0; there is no `v0.7.1` tag. A gap is closed only when its fix is released from `main`, the red-team case runs in CI with an allowed-action negative control, and the docs describe the tested boundary.
 
 ## Now: the four 1.0 bars
 
 | # | Bar | State and remaining work |
 |---|---|---|
 | 1 | Close the Linux `CONFINED` Unix-socket and `io_uring` gaps, with red-team coverage | `io_uring` syscalls are denied (`internal/fence/syscallfence/denylist.go`, v0.8.0). Below Landlock ABI 9, Unix sockets stay reachable: `wrap` signs that limitation, `doctor` reports `PARTIAL`, and `network.require_unix_socket_isolation` refuses instead. The ABI 9 rules have not run on a real kernel (`docs/design/unix-socket-reachability.md`). `bench/redteam/kernel_cases.py` records the probes and gaps. Open until capable-kernel receipts ship in a release; `CONFINED` must not claim Unix-socket isolation before then. |
-| 2 | Ship honest `doctor` verdicts | Shipped in v0.8.0 and extended through v0.9.2; v0.12.0 adds the Deputies section (`internal/cli/doctor.go`, `docs/how-it-works/deputies.md`, exits 0/2/3/4). Keep `docs/how-it-works/doctor-and-verify.md` and the README consistent with that contract. |
+| 2 | Ship honest `doctor` verdicts | Shipped in v0.8.0 and extended through v0.9.2; v0.12.0 adds the Deputies section (`internal/cli/doctor.go`, `docs/how-it-works/deputies.md`, exits 0/2/3/4). v0.13.0 adds repo git-config execution warnings without changing those verdicts or exit codes; its GitSpawn enforcement proof covers Linux netns mode only. Keep `docs/how-it-works/doctor-and-verify.md` and the README consistent with that contract. |
 | 3 | Complete the Linux install | Open. Source install still needs a manual `sudo install`, a manual copy of `libfence_fs.so`, and a separate `make install-egress-helper` (`docs/setup.md`). The packaging design is in `docs/design/linux-packaging.md`. Since v0.12.0, CI builds signed Ubuntu 24.04 amd64 candidates that pair the CLI with its interposer and checks a fresh install of each on a disposable VM (`packaging/linux/`). Still to come: published release assets and a public installer that handles upgrades and rollback. |
 | 4 | Pin the CLI, config schema and exit codes as a contract | `docs/reference/cli.md` records current behavior. Remaining: audit every command, flag and config key against `internal/cli/` and `internal/config/`, resolve the child-exit overlap with CLI errors, and pin the contract in tests. |
 
