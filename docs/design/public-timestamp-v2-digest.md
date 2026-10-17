@@ -34,40 +34,43 @@ This is the only submitted object. Nothing else from the audit database, the anc
 
 The reference client is the OpenTimestamps `ots` tool (opentimestamps-client, installed in a throwaway virtual environment). Its `ots stamp --help` lists only `FILE` arguments, calendar options, and timeout options. There is no digest option for `stamp`. The `-d DIGEST` option exists only for `ots verify`. In `otsclient/cmds.py` the stamp command hashes the file with SHA-256, adds a random 16-byte nonce, hashes again, and sends that value to the calendars.
 
-So the client cannot stamp the 32 raw bytes as the leaf. The specified form is a file:
+So the client cannot stamp the 32 raw bytes as the leaf. The specified form is a file. Let `D` be the 32 raw digest bytes:
 
-- File content: the 32 raw digest bytes, no newline, no hex, no header.
-- The receipt leaf is `SHA-256(file)`, not the digest itself. A verifier recomputes `SHA-256(file)` and compares it with the leaf. This adds one extra hash layer, which the verifier must state explicitly. The file's hash existed at the stamped time, and the file's content is the digest.
+- File content equals `D`: the 32 raw bytes, no newline, no hex, no header.
+- `ots stamp file` commits to `SHA-256(file)`, which equals `SHA-256(D)`. It does not commit to `D`. The receipt's file digest (the `File sha256 hash` line of `ots info`) is `SHA-256(D)`.
+- This adds one hash layer. A verifier must compare the receipt's file digest with `SHA-256(D)`, never with `D`.
+
+Relation for each form: file form (the form used in the example below), receipt digest = `SHA-256(D)`. Raw-digest form (not available, because the client has no way to stamp it), receipt digest would equal `D`.
 
 ## Three states
 
 Each OpenTimestamps receipt (the reference service) is pending, upgraded, or verified. Each proves less than the next, and none proves that the audit state was valid.
 
-**Pending.** A calendar server acknowledged the digest and promised to anchor it in Bitcoin later. The receipt holds the calendar's signed claim that it saw the digest at a time.
+**Pending.** A calendar server acknowledged the submission and will anchor it in Bitcoin later. A pending receipt (`PendingAttestation`) holds only the calendar URI. It has no signature and no time.
 
-- Proves: the calendar operator claims it received this digest no later than the time it reports.
-- Does not prove: anything in Bitcoin. The trust rests entirely on the calendar operator.
+- Proves: nothing to a third party. It is a pointer that a later `ots upgrade` uses to fetch the Bitcoin proof from that calendar.
+- Does not prove: when the submission happened, or that the calendar saw it. Only the operator's own submission log records when it was submitted. The receipt has no Bitcoin content.
 
-**Upgraded.** The receipt now holds a Merkle path from the digest to a Bitcoin block header. The `ots upgrade` step fetches this path from the calendar.
+**Upgraded.** The receipt now holds a Merkle path from `SHA-256(D)` to a Bitcoin block header. The `ots upgrade` step fetches this path from the calendar.
 
-- Proves: the digest existed no later than the timestamp of the Bitcoin block that commits to it. Block time is approximate, usually to within hours.
+- Proves: `SHA-256(D)` existed no later than the timestamp of the Bitcoin block that commits to it. Block time is approximate, usually to within hours.
 - Does not prove: the Merkle path is correct until the verifier checks it against a block header from a source it trusts. Until then the calendar is still in the trust chain.
 
 **Verified.** The verifier checks the Merkle path against a Bitcoin block header from a source it trusts, such as its own node or a trusted header source.
 
-- Proves: the digest existed no later than that block. This removes the calendar from the trust chain for the existence claim.
+- Proves: `SHA-256(D)` existed no later than that block. This removes the calendar from the trust chain for the existence claim.
 - Does not prove: that the digest was a valid audit state, that the audit log was complete, or that the signing key was not compromised.
 
 **Calendar acceptance is not Bitcoin confirmation.** Pending is not upgraded, and upgraded is not verified. Show the state in every report.
 
 ### What a timestamp does not do
 
-A timestamp proves that a digest existed at a time. It does not prove that the audit state behind it was valid. A verifier must still:
+Only an upgraded receipt proves that `SHA-256(D)` existed at a time. It does not prove that the audit state behind it was valid. A verifier must still:
 
 1. Load the anchor record and its public key.
 2. Run `AnchorV2SnapshotDigest` with the expected `(agent_id, chain_id)` pair. This checks the signature, the fingerprint, the canonical fields, and the pair.
-3. Recompute the 32 digest bytes.
-4. Check that the digest in the receipt equals the recomputed digest.
+3. Recompute `D`, the 32 digest bytes, and compute `SHA-256(D)`.
+4. Check that the receipt's file digest equals `SHA-256(D)`. Comparing it with `D` fails by design, because of the extra hash layer.
 
 Without steps 1 to 4 the timestamp binds nothing to a specific audit state.
 
@@ -153,7 +156,7 @@ Timestamp:
     verify PendingAttestation('https://alice.btc.calendar.opentimestamps.org')
 ```
 
-The leaf is the file hash, not the raw digest. `sha256sum digest.bin` prints `9d3fc018bdf5a33ad8e8278225003ec12f02198822a81e7965302dd85b4a5741`, which equals the `File sha256 hash` line.
+Form used: the file form. The leaf is `SHA-256(D)`, not `D`. `sha256sum digest.bin` prints `9d3fc018bdf5a33ad8e8278225003ec12f02198822a81e7965302dd85b4a5741`, which equals the `File sha256 hash` line. The digest `D` itself (`be1b3e04...5d84`) does not appear as the receipt's file digest.
 
 ```
 $ ots verify digest.bin.ots
@@ -166,7 +169,7 @@ Calendar https://alice.btc.calendar.opentimestamps.org: Pending confirmation in 
 
 The exit code was 1, as expected for a receipt with no Bitcoin attestation.
 
-**State: pending.** This is calendar acceptance, not Bitcoin confirmation. The proof rests on the calendar operators until the receipt is upgraded.
+**State: pending.** This is calendar acceptance, not Bitcoin confirmation. The receipt holds only the four calendar URIs. It proves nothing to a third party until it is upgraded. The submission time above comes from the operator's own log.
 
 To upgrade later, run this in the directory that holds the receipt, once the calendars have committed to a Bitcoin block (usually some hours after submission):
 
@@ -180,7 +183,7 @@ An upgrade that reports no Bitcoin attestation means the calendar has not commit
 Record for this example:
 
 - Digest submitted (inside `digest.bin`): `be1b3e04aef5b071f2f7ab6596253626ec6149cf22420d374576e5b5f5945d84`
-- Leaf in the receipt: `9d3fc018bdf5a33ad8e8278225003ec12f02198822a81e7965302dd85b4a5741`
+- Leaf in the receipt (`SHA-256(D)`): `9d3fc018bdf5a33ad8e8278225003ec12f02198822a81e7965302dd85b4a5741`
 - Receipt: `docs/design/examples/valid_chain_a.ots`, pending
 
 ## Test plan (for the implementation PR, not this one)
@@ -188,4 +191,4 @@ Record for this example:
 - A Go test recomputes `AnchorV2SnapshotDigest` (or the domain-plus-bytes formula) for every successful case in `vectors.json` and compares it with `snapshot_digest`.
 - A test confirms that a record failing `VerifyAnchorV2` produces no digest and no stamp.
 - A test with the switch off asserts that no calendar client is constructed and no socket opens, including on `wrap` teardown.
-- A round-trip test writes the 32-byte file and checks that the receipt's stamped hash equals `SHA-256(file)`.
+- A round-trip test writes the 32-byte file and checks that the receipt's file digest equals `SHA-256(D)` and does not equal `D`.
