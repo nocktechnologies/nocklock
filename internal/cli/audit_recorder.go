@@ -25,7 +25,8 @@ type auditRecorder struct {
 
 // record writes one event under the recorder's session id. It is safe for
 // concurrent use: the fs-event goroutine, the denial tailer and the proxy
-// watchdog all write through it.
+// watchdog all write through it, and the proxy reports its own lost blocked
+// rows through fail.
 func (r *auditRecorder) record(eventType logging.EventType, category, detail string, blocked bool) {
 	err := r.log(logging.Event{
 		Timestamp: time.Now(),
@@ -38,6 +39,15 @@ func (r *auditRecorder) record(eventType logging.EventType, category, detail str
 	if err == nil || !blocked {
 		return
 	}
+	r.fail(eventType, err)
+}
+
+// fail records err as the session's blocked-event write failure. The first
+// failure is announced on stderr and cancels the child; later ones are
+// dropped. It is the network proxy's blocked-row write failure handler too, so
+// a denied request whose network_blocked row is lost fails the run the same
+// way. Safe for concurrent use.
+func (r *auditRecorder) fail(eventType logging.EventType, err error) {
 	first := err // only the failure path takes an address, so a success does not allocate
 	if r.failed.CompareAndSwap(nil, &first) {
 		fmt.Fprintf(r.stderr, "NockLock: fatal: could not record a blocked %s event in the audit log: %v — failing the run\n", eventType, err)

@@ -19,7 +19,7 @@ type failureSink struct {
 	errs []error
 }
 
-func (s *failureSink) record(err error) {
+func (s *failureSink) record(_ logging.EventType, err error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.errs = append(s.errs, err)

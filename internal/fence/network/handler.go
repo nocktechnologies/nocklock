@@ -180,17 +180,24 @@ func (p *ProxyServer) forwardHTTP(w http.ResponseWriter, r *http.Request) {
 	proxy.ServeHTTP(w, r)
 }
 
-// logEvent writes a network event if a logger is attached.
+// logEvent writes a network event if a logger is attached. A blocked row that
+// cannot be written goes to the failure handler; a non-blocked row stays
+// best-effort.
 func (p *ProxyServer) logEvent(eventType logging.EventType, method, host string, blocked bool) {
 	if p.logger == nil {
 		return
 	}
-	_ = p.logger.Log(logging.Event{
+	ev := logging.Event{
 		Timestamp: time.Now(),
 		EventType: eventType,
 		Category:  "network",
 		Detail:    fmt.Sprintf("method=%s host=%s", method, host),
 		Blocked:   blocked,
 		SessionID: p.sessionID,
-	})
+	}
+	if blocked {
+		p.writeBlockedRow(p.logger.Log, ev)
+		return
+	}
+	_ = p.logger.Log(ev)
 }

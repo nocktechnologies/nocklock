@@ -842,6 +842,9 @@ var wrapCmd = &cobra.Command{
 		} else if !cfg.Network.AllowAll {
 			proxyCfg := effectiveCfg.Network
 			proxy := network.NewProxyServer(proxyCfg, logger, sessionID)
+			// A denied request whose network_blocked row cannot be written fails
+			// the run (audit.failure below), like any other lost blocked row.
+			proxy.SetBlockedWriteFailureHandler(audit.fail)
 			if len(proxyCfg.Lookback) > 0 {
 				// lookbackLevelError guaranteed CONFINED, so fsFence is non-nil.
 				proxy.EnableLookback(proxyCfg.Lookback)
