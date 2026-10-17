@@ -628,3 +628,5 @@ See [CONTRIBUTING.md](CONTRIBUTING.md).
 ---
 
 Built by [Nock Technologies™](https://nocktechnologies.io).
+
+<!-- docs-only CI proof for #256; do not merge -->
