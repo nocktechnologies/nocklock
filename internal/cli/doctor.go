@@ -123,7 +123,9 @@ type doctorCapabilities struct {
 	egressHelper   func() egressHelperState
 	// deputies returns the host view for the deputy scan; nil skips the scan.
 	deputies func(goos string) deputyHost
-	now      func() time.Time
+	// gitConfigExec lists repo git config that runs a program; nil skips it.
+	gitConfigExec func(projectRoot string) []doctorCheck
+	now           func() time.Time
 }
 
 var currentDoctorCapabilities = doctorCapabilities{
@@ -135,6 +137,7 @@ var currentDoctorCapabilities = doctorCapabilities{
 	sandboxExec:    fsfence.EnsureSandboxExecAvailable,
 	egressHelper:   defaultEgressHelperState,
 	deputies:       defaultDeputyHost,
+	gitConfigExec:  gitConfigExecDoctorChecks,
 	now:            time.Now,
 }
 
@@ -227,10 +230,13 @@ func runDoctor(caps doctorCapabilities) doctorReport {
 	checks = append(checks, secretDoctorCheck(cfg))
 	checks = append(checks, egressHelperDoctorCheck(caps))
 	checks = append(checks, sanityDoctorChecks(cfg, configPath, caps)...)
-	checks = append(checks, gitConfigExecDoctorChecks(filepath.Dir(filepath.Dir(configPath)))...)
+	projectRoot := filepath.Dir(filepath.Dir(configPath))
+	if caps.gitConfigExec != nil {
+		checks = append(checks, caps.gitConfigExec(projectRoot)...)
+	}
 	if caps.deputies != nil {
 		host := caps.deputies(caps.goos)
-		host.projectRoot = filepath.Dir(filepath.Dir(configPath))
+		host.projectRoot = projectRoot
 		checks = append(checks, deputyDoctorChecks(cfg, caps, checks, host)...)
 	}
 

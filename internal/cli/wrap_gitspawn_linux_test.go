@@ -112,18 +112,7 @@ exit 1
 	if err := os.WriteFile(trap, []byte(trapScript), 0o700); err != nil {
 		t.Fatalf("write trap: %v", err)
 	}
-	gitConfig := filepath.Join(repo, ".git", "config")
-	f, err := os.OpenFile(gitConfig, os.O_APPEND|os.O_WRONLY, 0)
-	if err != nil {
-		t.Fatalf("open .git/config: %v", err)
-	}
-	_, err = f.WriteString("[core]\n\tfsmonitor = " + trap + "\n")
-	if cerr := f.Close(); err == nil {
-		err = cerr
-	}
-	if err != nil {
-		t.Fatalf("plant core.fsmonitor: %v", err)
-	}
+	appendFile(t, filepath.Join(repo, ".git", "config"), "[core]\n\tfsmonitor = "+trap+"\n")
 
 	readResults := func() string {
 		t.Helper()
@@ -199,14 +188,7 @@ exit 1
 		t.Errorf("no signed network_blocked row for example.com:80; got: %s", detailList(netRows))
 	}
 	for _, path := range []string{secret, outside} {
-		found := false
-		for _, e := range fileRows {
-			if e.Category == "filesystem" && strings.Contains(e.Detail, path) {
-				found = true
-				break
-			}
-		}
-		if !found {
+		if !hasCategoryRow(fileRows, "filesystem", path) {
 			t.Errorf("no signed file_blocked row naming %s; got: %s", path, detailList(fileRows))
 		}
 	}

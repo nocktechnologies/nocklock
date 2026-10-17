@@ -25,6 +25,7 @@ func runProtectedDoctorIn(t *testing.T, dir string) (string, error) {
 		syscallBackend: func() bool { return true },
 		networkBackend: func() error { return nil },
 		sandboxExec:    func() error { return nil },
+		gitConfigExec:  gitConfigExecDoctorChecks,
 		now:            func() time.Time { return time.Date(2026, 10, 17, 12, 0, 0, 0, time.UTC) },
 	})
 	t.Cleanup(restore)
@@ -47,13 +48,22 @@ func gitInitRepo(t *testing.T, dir, extra string) {
 	if out, err := exec.Command("git", "init", "-q", dir).CombinedOutput(); err != nil {
 		t.Fatalf("git init: %v\n%s", err, out)
 	}
-	f, err := os.OpenFile(filepath.Join(dir, ".git", "config"), os.O_APPEND|os.O_WRONLY, 0)
+	appendFile(t, filepath.Join(dir, ".git", "config"), extra)
+}
+
+// appendFile appends s to the existing file at path.
+func appendFile(t *testing.T, path, s string) {
+	t.Helper()
+	f, err := os.OpenFile(path, os.O_APPEND|os.O_WRONLY, 0)
 	if err != nil {
-		t.Fatal(err)
+		t.Fatalf("open %s: %v", path, err)
 	}
-	defer f.Close()
-	if _, err := f.WriteString(extra); err != nil {
-		t.Fatal(err)
+	_, err = f.WriteString(s)
+	if cerr := f.Close(); err == nil {
+		err = cerr
+	}
+	if err != nil {
+		t.Fatalf("append to %s: %v", path, err)
 	}
 }
 

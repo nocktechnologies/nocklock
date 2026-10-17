@@ -2,9 +2,11 @@ package cli
 
 import (
 	"bytes"
+	"context"
 	"fmt"
 	"os/exec"
 	"strings"
+	"time"
 )
 
 // gitConfigExecKeys are repo-settable git config keys whose value is a program
@@ -40,9 +42,12 @@ var gitConfigExecKeys = map[string]bool{
 // gitConfigExecDoctorChecks lists the local git config entries (.git/config
 // and the files it includes) that make git run a program, one warning each.
 // Doctor only reads the config: `git config --list` runs no hook. It reports
-// nothing when git is missing or projectRoot is not in a repository.
+// nothing when git is missing, times out (an include can name a FIFO), or
+// projectRoot is not in a repository.
 func gitConfigExecDoctorChecks(projectRoot string) []doctorCheck {
-	cmd := exec.Command("git", "-C", projectRoot, "--no-pager", "config", "--local", "--includes", "--show-origin", "--null", "--list")
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, "git", "-C", projectRoot, "--no-pager", "config", "--local", "--includes", "--show-origin", "--null", "--list")
 	out, err := cmd.Output()
 	if err != nil {
 		return nil
