@@ -6,9 +6,10 @@ import re
 import subprocess
 import sys
 
-# A backtick span with no whitespace that contains "/" is a path. Multi-word
-# spans are commands (`go test ./...`) and bare file names are prose; both are skipped.
-SPAN = re.compile(r"`([^`\s]*/[^`\s]*)`")
+# A backtick span with no whitespace that contains "/" is a repo path. Multi-word
+# spans are commands (`go test ./...`), bare file names are prose and absolute
+# paths name the host, not the repo; all three are skipped.
+SPAN = re.compile(r"`([^`\s/][^`\s]*/[^`\s]*)`")
 
 
 def missing_paths(text, root):
@@ -19,8 +20,8 @@ def missing_paths(text, root):
 def main():
     """Check the classifier, then every path AGENTS.md names."""
     root = pathlib.Path(subprocess.check_output(("git", "rev-parse", "--show-toplevel"), text=True).strip())
-    if missing_paths("`scripts/` `AGENTS.md` `go test ./... -v`", root):
-        raise SystemExit("agents-paths control failed: existing path or command rejected")
+    if missing_paths("`scripts/` `AGENTS.md` `go test ./... -v` `/no-such-host-path/`", root):
+        raise SystemExit("agents-paths control failed: existing path, command or host path rejected")
     if missing_paths("`docs/no-such-file.md`", root) != ["docs/no-such-file.md"]:
         raise SystemExit("agents-paths control failed: missing path accepted")
 

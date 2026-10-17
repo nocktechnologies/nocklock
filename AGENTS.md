@@ -2,7 +2,7 @@
 
 NockLock is an AI agent security fence: a Go CLI (`nocklock wrap -- <agent>`) that runs a coding agent behind filesystem, network, secret and syscall fences and writes every fence decision to a signed, hash-chained audit log. Linux uses Landlock, an `LD_PRELOAD` interposer, seccomp and an optional network namespace; macOS uses Seatbelt.
 
-This is the canonical agent and contributor file; `CLAUDE.md` imports it. If this file and the code disagree, the code wins; fix the file. CI fails when this file names a path that does not exist (`scripts/check-agents-paths.py`): any backticked span without spaces that contains a `/` must exist in the repo. Write refs, globs and paths outside the repo without backticks.
+This is the canonical agent and contributor file; `CLAUDE.md` imports it. If this file and the code disagree, the code wins; fix the file. CI fails when this file names a path that does not exist (`scripts/check-agents-paths.py`): any backticked span without spaces that contains a `/` and does not start with one must exist in the repo. Write refs and globs without backticks.
 
 Follows Engineering Standards v4.
 
@@ -19,7 +19,6 @@ Follows Engineering Standards v4.
 - `go test -tags=integration ./...`: end-to-end tests against the built binary
 - `GOOS=darwin GOARCH=arm64 go vet ./...`: compiles the darwin code and test files from Linux; CI runs it on every push
 - `go fmt ./...` / `go vet ./...`: format and lint; `make lint` runs both. CI fails if `gofmt -l .` prints anything.
-- `python3 scripts/check-public-content.py` and `python3 scripts/check-agents-paths.py`: the two repo-content gates CI runs
 - Stack: Go 1.26+, cobra, BurntSushi/toml, SQLite via modernc.org/sqlite. Python 3 for scripts and the red-team bench.
 
 ## Required checks
@@ -62,7 +61,7 @@ Things you cannot guess from the code layout:
 - **Linux `wrap` needs the interposer** at its trusted path, not just a built binary (`docs/setup.md`). The privileged egress helper for `--net-fence=netns` installs separately with `sudo make install-egress-helper`.
 - **The claude-code preset tests create preset-* directories in `internal/cli/`.** They are gitignored and normally cleaned up; delete leftovers from a crashed run, do not commit them.
 - **Run the suite with umask 022.** Under umask 002 the temp directories come out 0775, and the audit state trust check in `internal/logging/` refuses them, so prune and receipt tests fail with "group- or world-writable". CI runners use 022.
-- **Root netns tests are CI-only and run the installed binary.** They self-skip unless the egress helper is reachable through passwordless sudo, so a plain `go test ./...` on a host with the helper installed runs them. Do not run them on a shared host. The helper execs the root-owned nocklock in /usr/local/bin, not your build, so a stale install fails tests that the code under test passes; `make install` first.
+- **Root netns tests are CI-only and run the installed binary.** They self-skip unless the egress helper is reachable through passwordless sudo, so a plain `go test ./...` on a host with the helper installed runs them. Do not run them on a shared host. The helper execs the root-owned nocklock in `/usr/local/bin`, not your build, so a stale install fails tests that the code under test passes; `make install` first.
 - **Race-sensitive code has its own CI steps** (`go test -race -count=20` on the proxy and netns packages). Run them locally when you touch proxy shutdown.
 - **Decision records live in two places:** 001 to 005 in `.claude/decisions/`, 006 onward in `docs/decisions/`. New records go in `docs/decisions/`.
 
@@ -90,5 +89,5 @@ Things you cannot guess from the code layout:
 - Changelog: `CHANGELOG.md` (add to `[Unreleased]` in every PR).
 - Roadmap: `docs/ROADMAP.md` (the path to 1.0).
 - Architecture: `ARCHITECTURE.md` (deep package tree); `docs/REPO-MAP.md` (every package and where its tests are).
-- Pod notes: `docs/HANDOFF.md`; dated handoffs move to docs/archive (create it with the first one).
+- Pod notes: `docs/HANDOFF.md`.
 - Docs index: `docs/README.md`. Designs and specs: `docs/design/`, `docs/superpowers/specs/`. Lessons: `.claude/lessons/`.
