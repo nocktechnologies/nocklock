@@ -191,10 +191,13 @@ func checkedLstat(dir string, uid uint32) (os.FileInfo, error) {
 // The group/world-WRITE bit is the one that matters: it is what lets another
 // user replace the file or swap a directory out from under it. The sticky bit is
 // deliberately NOT treated as an exemption -- a planted .nock/config.toml under a
-// 1777 /tmp is the headline case.
+// 1777 /tmp is the headline case. Group write is accepted only when the
+// component's group is the invoking user's private group (isUserPrivateGroup),
+// since no other user is in that group; that is the 0775 project directory a
+// umask of 002 produces on Debian and Ubuntu. World write is never accepted.
 func checkConfigComponent(component string, info os.FileInfo, uid uint32) error {
 	mode := info.Mode()
-	if mode.Perm()&0o022 != 0 {
+	if perm := mode.Perm(); perm&0o002 != 0 || (perm&0o020 != 0 && !inUserPrivateGroup(info, uid)) {
 		return fmt.Errorf("%s is group- or world-writable (mode %04o); run 'chmod go-w %s', or set %s to accept a known-safe layout",
 			component, mode.Perm(), component, AllowUntrustedConfigEnv)
 	}
@@ -203,6 +206,13 @@ func checkConfigComponent(component string, info os.FileInfo, uid uint32) error 
 			component, owner, uid, AllowUntrustedConfigEnv)
 	}
 	return nil
+}
+
+// inUserPrivateGroup reports whether info's group is uid's private group. A
+// component whose group cannot be read is not.
+func inUserPrivateGroup(info os.FileInfo, uid uint32) bool {
+	stat, ok := info.Sys().(*syscall.Stat_t)
+	return ok && isUserPrivateGroup(uid, stat.Gid)
 }
 
 // isTruthyEnv reports whether an environment value opts in. It is deliberately
