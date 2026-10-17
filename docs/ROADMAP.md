@@ -1,13 +1,13 @@
 # Roadmap to 1.0
 
-Updated 2026-10-16. Released baseline: `v0.11.0`. Release history is in `CHANGELOG.md`. The planned 0.7.1 step was split across 0.8.0 and 0.9.0; there is no `v0.7.1` tag. A gap is closed only when its fix is released from `main`, the red-team case runs in CI with an allowed-action negative control, and the docs describe the tested boundary.
+Updated 2026-10-17. Released baseline: `v0.12.0`. Release history is in `CHANGELOG.md`. The planned 0.7.1 step was split across 0.8.0 and 0.9.0; there is no `v0.7.1` tag. A gap is closed only when its fix is released from `main`, the red-team case runs in CI with an allowed-action negative control, and the docs describe the tested boundary.
 
 ## Now: the four 1.0 bars
 
 | # | Bar | State and remaining work |
 |---|---|---|
 | 1 | Close the Linux `CONFINED` Unix-socket and `io_uring` gaps, with red-team coverage | `io_uring` syscalls are denied (`internal/fence/syscallfence/denylist.go`, v0.8.0). Below Landlock ABI 9, Unix sockets stay reachable: `wrap` signs that limitation, `doctor` reports `PARTIAL`, and `network.require_unix_socket_isolation` refuses instead. The ABI 9 rules have not run on a real kernel (`docs/design/unix-socket-reachability.md`). `bench/redteam/kernel_cases.py` records the probes and gaps. Open until capable-kernel receipts ship in a release; `CONFINED` must not claim Unix-socket isolation before then. |
-| 2 | Ship honest `doctor` verdicts | Shipped in v0.8.0 and extended through v0.9.2 (`internal/cli/doctor.go`, exits 0/2/3/4). Keep `docs/how-it-works/doctor-and-verify.md` and the README aligned with that contract. |
+| 2 | Ship honest `doctor` verdicts | Shipped in v0.8.0 and extended through v0.9.2; v0.12.0 adds the Deputies section (`internal/cli/doctor.go`, `docs/how-it-works/deputies.md`, exits 0/2/3/4). Keep `docs/how-it-works/doctor-and-verify.md` and the README consistent with that contract. |
 | 3 | Complete the Linux install | Open. Source install still needs a manual `sudo install`, a manual copy of `libfence_fs.so`, and a separate `make install-egress-helper` (`docs/setup.md`). The packaging design is in `docs/design/linux-packaging.md`; the installer, release assets and clean-host verification remain. |
 | 4 | Pin the CLI, config schema and exit codes as a contract | `docs/reference/cli.md` records current behavior. Remaining: audit every command, flag and config key against `internal/cli/` and `internal/config/`, resolve the child-exit overlap with CLI errors, and pin the contract in tests. |
 
@@ -20,7 +20,9 @@ All four bars verified. `docs/reference/cli.md` becomes the compatibility contra
 - macOS read confinement outside `filesystem.root` (`ARCHITECTURE.md`)
 - A Windows fence (`docs/design/windows-feasibility.md`)
 - Look-back rules beyond slice 1 (`docs/design/look-back-rules.md`)
-- Default off-box audit anchoring (`docs/how-it-works/audit-log.md`); per-chain v2 anchors shipped in v0.10.0 and stay opt-in
+- Default off-box audit anchoring (`docs/how-it-works/audit-log.md`); per-chain v2 anchors shipped in v0.10.0 and in-run checkpoints in v0.12.0, both opt-in
+- Signing-key rotation: the offline endorsement format and library verifier shipped in v0.12.0, but no command switches keys (`docs/design/rotation-endorsement.md`)
+- A public timestamp over the v2 snapshot digest (`docs/design/public-timestamp-v2-digest.md`), design only
 - Kernel-drop observation (`docs/design/kernel-floor-denial-evidence.md`), design only
 
 When a bar closes, replace its remaining work with the merge commit and the test that proves it.
