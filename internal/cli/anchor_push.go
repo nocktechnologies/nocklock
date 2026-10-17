@@ -26,10 +26,10 @@ var anchorWalkTimeout time.Duration
 
 // anchorEnvKeys are wrap's off-box anchor settings. They are removed from the
 // fenced child's environment so the agent can neither read the bearer token
-// nor learn where its anchors are pinned.
-var anchorEnvKeys = []string{anchorclient.EnvURL, anchorclient.EnvToken}
+// nor learn where its anchors are pinned or how often they are checkpointed.
+var anchorEnvKeys = []string{anchorclient.EnvURL, anchorclient.EnvToken, EnvAnchorCheckpointInterval, EnvAnchorCheckpointDeadline}
 
-// stripAnchorEnv returns env without the anchor URL/token entries.
+// stripAnchorEnv returns env without the anchor settings.
 func stripAnchorEnv(env []string) []string {
 	return removeEnvVars(env, anchorEnvKeys...)
 }

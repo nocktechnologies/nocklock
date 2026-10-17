@@ -76,6 +76,15 @@ var wrapCmd = &cobra.Command{
 			return fmt.Errorf("--net-fence=netns requires Linux kernel network namespaces; refusing to run without the kernel-enforced egress floor")
 		}
 
+		// In-run anchor checkpoints are an operator-environment opt-in. A
+		// malformed value refuses the run before anything starts, rather than
+		// running without the checkpoints the operator asked for.
+		checkpointCfg, checkpointErr := anchorCheckpointSettings()
+		if checkpointErr != nil {
+			cmd.SilenceUsage = true
+			return checkpointErr
+		}
+
 		// Generate a session ID for event logging.
 		sessionID := uuid.New().String()
 		loggerOpts := signingLoggerOpts()
@@ -189,7 +198,11 @@ var wrapCmd = &cobra.Command{
 		// a push failure prints a loud warning and never changes the exit code (this
 		// defer does not touch RunE's return value). With the URL unset nothing
 		// further happens.
-		defer func() { finishAnchorSession(os.Stderr, logger, dbPath) }()
+		//
+		// With in-run checkpoints enabled, the worker is stopped and joined first,
+		// so this push is the final flush and never races a checkpoint upload.
+		var checkpoints *anchorCheckpointer
+		defer func() { finishAnchorSessionWithCheckpoints(os.Stderr, logger, dbPath, checkpoints) }()
 
 		// Record the resolved policy before any child setup or launch. The config
 		// file lives inside the project root by default, so the fenced child can
@@ -208,6 +221,10 @@ var wrapCmd = &cobra.Command{
 			})
 			return errors.Join(err, logErr)
 		}
+		// Start periodic uploads of the committed head now that the trusted
+		// identity is protected. The worker uses its own log handle and never
+		// blocks the child or this logger; failures are reported at teardown.
+		checkpoints = startAnchorCheckpoints(os.Stderr, checkpointCfg, dbPath, projectRoot)
 
 		// childCtx is cancelled by the proxy watchdog if the proxy dies unexpectedly,
 		// or by the audit recorder if a blocked-event row cannot be written. This

@@ -6,6 +6,7 @@ All notable changes to NockLock will be documented in this file.
 
 ### Added
 
+- `wrap` can upload the committed audit head to the anchor store during a run, not only at teardown. Set `NOCKLOCK_ANCHOR_CHECKPOINT_INTERVAL` (and optionally `NOCKLOCK_ANCHOR_CHECKPOINT_DEADLINE`) in the operator environment; it is off by default. One background worker sends one upload at a time through the existing v2 push path and its compare-and-swap, each upload bounded by the deadline. A failed upload is recorded and retried and never fails the run. Teardown stops the worker, runs the unchanged final push, and prints the last confirmed checkpoint, the lag and the last failure. If `wrap` is killed, the remote pin stays at the last confirmed checkpoint. A checkpoint is not an independent signed timestamp and does not protect rows written after the last confirmed pin.
 - Offline rotation endorsement format and library verifier, with public accept/reject vectors and successor acceptance signatures. This binds an independently trusted first-key fingerprint, both chain IDs, the exact retiring tail/count and successor key. It does not implement key switching or remote migration, restore trust in a compromised retiring key, or replace the remote v2 pin.
 
 ### Breaking
