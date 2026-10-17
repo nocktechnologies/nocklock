@@ -14,6 +14,7 @@ All notable changes to NockLock will be documented in this file.
 
 ### Fixed
 
+- The config trust walk no longer refuses a group-writable directory or file whose group is the invoking user's private group: the user's primary group, named for the user, with no other members. On Debian and Ubuntu each user gets such a group and a umask of `002`, so every new project directory is mode 0775 and `nocklock init` followed by `wrap` or `doctor` refused the fresh project. World write is still refused everywhere, as is group write by a shared group or by a group whose members cannot be read.
 - `wrap` now exits 2 with a fatal message naming the error when it cannot write one of its own blocked-event rows (filesystem denials, macOS denial rows, network fence errors), the blocked environment variable rows or `session_end` to the audit log. A blocked-event write failure while the child runs stops the child. Previously these write errors were ignored and the run could exit 0. Rows the network proxy writes for individual requests are not yet covered.
 - Batched audit writes (the blocked environment variable rows and the secret preflight rows) now take the write lock up front with `BEGIN IMMEDIATE`, so a second concurrent `wrap` waits on `busy_timeout` instead of failing at once with `SQLITE_BUSY` and exiting 2.
 - `allow_private_ranges` no longer permits Alibaba Cloud's instance-metadata address (100.100.100.200). It stays blocked unconditionally, like AWS's metadata endpoints; the rest of the CGNAT range it sits in remains reachable under the option.
