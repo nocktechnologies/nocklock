@@ -4,6 +4,10 @@ All notable changes to NockLock will be documented in this file.
 
 ## [Unreleased]
 
+### Added
+
+- Offline rotation endorsement format and library verifier, with public accept/reject vectors and successor acceptance signatures. This binds an independently trusted first-key fingerprint, both chain IDs, the exact retiring tail/count and successor key. It does not implement key switching or remote migration, restore trust in a compromised retiring key, or replace the remote v2 pin.
+
 ### Breaking
 
 - Every command that reads `.nock/config.toml` (`wrap`, `doctor`, `validate`, `status`, `log`, `config`, `verify`) now refuses a config file when the file, or any directory its path passes through (including through symlinks), is group- or world-writable or owned by a user other than root or the invoker. A config under a writable directory, including a project under `/tmp` or `/var/tmp`, that loaded before is refused after upgrading. Set `NOCKLOCK_ALLOW_UNTRUSTED_CONFIG=1` to accept a known-safe layout.
