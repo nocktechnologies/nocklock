@@ -32,12 +32,12 @@ The stamped object is the 32 raw bytes of the SHA-256 output, not the 64-charact
 
 This is the only submitted object. Nothing else from the audit database, the anchor JSON, the key file, or the host is sent.
 
-The reference client is the OpenTimestamps `ots` tool. The `ots stamp FILE` command hashes the contents of a file. Submitting the raw 32-byte digest directly as the calendar's message therefore needs a client path that this design has not confirmed. Before any real submission, the exact calendar endpoint and request body must be confirmed against the OpenTimestamps client source. That confirmation is not made in this document.
+The reference client is the OpenTimestamps `ots` tool (opentimestamps-client, installed in a throwaway virtual environment). Its `ots stamp --help` lists only `FILE` arguments, calendar options, and timeout options. There is no digest option for `stamp`. The `-d DIGEST` option exists only for `ots verify`. In `otsclient/cmds.py` the stamp command hashes the file with SHA-256, adds a random 16-byte nonce, hashes again, and sends that value to the calendars.
 
-Until that path is confirmed, the only specified file form is:
+So the client cannot stamp the 32 raw bytes as the leaf. The specified form is a file:
 
 - File content: the 32 raw digest bytes, no newline, no hex, no header.
-- A verifier recomputes `SHA-256(file)` and compares it with the digest. This adds one extra hash layer, which the verifier must state explicitly. A receipt over this file proves the file's hash existed, and the file's hash is the digest.
+- The receipt leaf is `SHA-256(file)`, not the digest itself. A verifier recomputes `SHA-256(file)` and compares it with the leaf. This adds one extra hash layer, which the verifier must state explicitly. The file's hash existed at the stamped time, and the file's content is the digest.
 
 ## Three states
 
@@ -121,31 +121,67 @@ python3 -I -c 'import sys,binascii; sys.stdout.buffer.write(binascii.unhexlify(s
 
 Check that it is 32 bytes: `wc -c digest.bin` should print `32 digest.bin`.
 
-### Step 3: submission status
+### Step 3: submit, then inspect
 
-**Pending manual submission.**
-
-- The `ots` client is not installed on the machine that wrote this document.
-- No calendar request was made. No network call happened.
-- The calendar endpoint and request shape for a raw digest are not confirmed here (see "Exact bytes submitted").
-
-Commands an operator would run, once the client is installed and the opt-in is given:
+Submitted on 2026-10-17 at 05:46:51 UTC with `opentimestamps-client` and the client's default calendars. Only `digest.bin` (the 32 digest bytes of the public fixture) was given to the client.
 
 ```
-ots stamp digest.bin          # writes digest.bin.ots, state: pending
-ots info digest.bin.ots       # expected: shows a calendar attestation, no Bitcoin attestation yet
-ots upgrade digest.bin.ots    # expected: pending attestation becomes a Bitcoin attestation with a block height
-ots verify digest.bin.ots     # expected: prints the block header check; needs a trusted Bitcoin source
+$ ots -v stamp digest.bin
+Doing 2-of-4 request, timeout is 5 seconds
+Submitting to remote calendar https://a.pool.opentimestamps.org
+Submitting to remote calendar https://b.pool.opentimestamps.org
+Submitting to remote calendar https://a.pool.eternitywall.com
+Submitting to remote calendar https://ots.btc.catallaxy.com
+1.73 seconds elapsed
 ```
 
-The output shapes above are expected from the reference tool. They are not observed in this repository. An upgrade that prints no Bitcoin attestation means the calendar has not yet committed the digest, so the receipt stays pending.
+The command finished at 05:46:53 UTC and wrote `digest.bin.ots` (875 bytes). The receipt holds the leaf hash, the nonces and hash steps, and the calendar URLs. It holds no host data. A copy is at [examples/valid_chain_a.ots](examples/valid_chain_a.ots).
+
+All four default calendars accepted the digest. The receipt carries four pending attestations (the four pool hostnames above resolve to these calendar servers):
+
+```
+$ ots info digest.bin.ots
+File sha256 hash: 9d3fc018bdf5a33ad8e8278225003ec12f02198822a81e7965302dd85b4a5741
+Timestamp:
+...
+    verify PendingAttestation('https://btc.calendar.catallaxy.com')
+...
+    verify PendingAttestation('https://bob.btc.calendar.opentimestamps.org')
+...
+    verify PendingAttestation('https://finney.calendar.eternitywall.com')
+...
+    verify PendingAttestation('https://alice.btc.calendar.opentimestamps.org')
+```
+
+The leaf is the file hash, not the raw digest. `sha256sum digest.bin` prints `9d3fc018bdf5a33ad8e8278225003ec12f02198822a81e7965302dd85b4a5741`, which equals the `File sha256 hash` line.
+
+```
+$ ots verify digest.bin.ots
+Assuming target filename is 'digest.bin'
+Calendar https://btc.calendar.catallaxy.com: Pending confirmation in Bitcoin blockchain
+Calendar https://bob.btc.calendar.opentimestamps.org: Pending confirmation in Bitcoin blockchain
+Calendar https://finney.calendar.eternitywall.com: Pending confirmation in Bitcoin blockchain
+Calendar https://alice.btc.calendar.opentimestamps.org: Pending confirmation in Bitcoin blockchain
+```
+
+The exit code was 1, as expected for a receipt with no Bitcoin attestation.
+
+**State: pending.** This is calendar acceptance, not Bitcoin confirmation. The proof rests on the calendar operators until the receipt is upgraded.
+
+To upgrade later, run this in the directory that holds the receipt, once the calendars have committed to a Bitcoin block (usually some hours after submission):
+
+```
+ots upgrade digest.bin.ots    # replaces pending attestations with a Bitcoin block attestation
+ots verify digest.bin.ots     # checks the path against a Bitcoin source you trust
+```
+
+An upgrade that reports no Bitcoin attestation means the calendar has not committed the digest yet, and the receipt stays pending. This repository stores the pending receipt only. When an upgraded receipt exists, record its state, the Bitcoin block height and hash, and the verifier's header source here.
 
 Record for this example:
 
-- Digest submitted: `be1b3e04aef5b071f2f7ab6596253626ec6149cf22420d374576e5b5f5945d84`
-- Receipt `digest.bin.ots`: none. The example is pending manual submission.
-
-When a receipt exists, record its state (pending, upgraded, or verified), the Bitcoin block height and hash used, and the verifier's header source here.
+- Digest submitted (inside `digest.bin`): `be1b3e04aef5b071f2f7ab6596253626ec6149cf22420d374576e5b5f5945d84`
+- Leaf in the receipt: `9d3fc018bdf5a33ad8e8278225003ec12f02198822a81e7965302dd85b4a5741`
+- Receipt: `docs/design/examples/valid_chain_a.ots`, pending
 
 ## Test plan (for the implementation PR, not this one)
 
