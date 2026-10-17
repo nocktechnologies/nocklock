@@ -54,3 +54,4 @@ bench/redteam/REPORT.md
 bench/redteam/report.json
 bench/redteam/kernel-report/
 bench/redteam/__pycache__/
+scripts/__pycache__/
