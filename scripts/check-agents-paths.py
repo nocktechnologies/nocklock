@@ -1,34 +1,58 @@
 #!/usr/bin/env python3
-"""Fail when AGENTS.md names a repository path that does not exist."""
+"""Fail when AGENTS.md names a repository path that git does not track."""
 
 import pathlib
 import re
 import subprocess
 import sys
 
-# A backtick span with no whitespace that contains "/" is a repo path. Multi-word
-# spans are commands (`go test ./...`), bare file names are prose and absolute
-# paths name the host, not the repo; all three are skipped.
-SPAN = re.compile(r"`([^`\s/][^`\s]*/[^`\s]*)`")
+# A backtick span with no whitespace is a path when it contains "/" or ends in a
+# lowercase file extension. Multi-word spans are commands (`go test ./...`) and
+# spans with a <placeholder> or a glob are patterns; both are skipped.
+SPAN = re.compile(r"`([^`\s]+)`")
+LINK = re.compile(r"\]\(([^)\s]+)\)")
+EXTENSION = re.compile(r"\.[a-z0-9]{1,5}$")
+PATTERN = re.compile(r"[<>*?\[\]]")
 
 
-def missing_paths(text, root):
-    """Return the paths named in text that do not exist under root."""
-    return [path for path in SPAN.findall(text) if not (root / path).exists()]
+def named_paths(text):
+    """Return the repo paths text names in backtick spans and link targets."""
+    spans = [s for s in SPAN.findall(text) if ("/" in s or EXTENSION.search(s)) and not PATTERN.search(s)]
+    links = [t.split("#", 1)[0] for t in LINK.findall(text) if ":" not in t]
+    return spans + [t for t in links if t]
+
+
+def bad_paths(text, root, tracked):
+    """Return the paths text names that are outside root or not tracked by git."""
+    bad = []
+    for path in named_paths(text):
+        target = (root / path).resolve()
+        if not target.is_relative_to(root):
+            bad.append(path)
+            continue
+        rel = target.relative_to(root).as_posix()
+        if rel not in tracked and not any(t.startswith(rel + "/") for t in tracked):
+            bad.append(path)
+    return bad
 
 
 def main():
     """Check the classifier, then every path AGENTS.md names."""
-    root = pathlib.Path(subprocess.check_output(("git", "rev-parse", "--show-toplevel"), text=True).strip())
-    if missing_paths("`scripts/` `AGENTS.md` `go test ./... -v` `/no-such-host-path/`", root):
-        raise SystemExit("agents-paths control failed: existing path, command or host path rejected")
-    if missing_paths("`docs/no-such-file.md`", root) != ["docs/no-such-file.md"]:
-        raise SystemExit("agents-paths control failed: missing path accepted")
+    root = pathlib.Path(subprocess.check_output(("git", "rev-parse", "--show-toplevel"), text=True).strip()).resolve()
+    tracked = set(subprocess.check_output(("git", "ls-files", "-z"), cwd=root, text=True).split("\0"))
+    tracked.discard("")
 
-    missing = missing_paths((root / "AGENTS.md").read_text(encoding="utf-8"), root)
-    if missing:
-        print("AGENTS.md names paths that do not exist:", file=sys.stderr)
-        print("\n".join(missing), file=sys.stderr)
+    allowed = "`scripts/` `AGENTS.md` `go test ./... -v` `<home>/x` `docs/*.md` `t.TempDir()` [a](AGENTS.md#x) [b](https://example.com/a)"
+    if bad_paths(allowed, root, tracked):
+        raise SystemExit("agents-paths control failed: tracked path, command or pattern rejected")
+    planted = ["docs/no-such-file.md", "../AGENTS.md", "/tmp", ".git/HEAD", "docs/missing.md"]
+    if bad_paths("`docs/no-such-file.md` `../AGENTS.md` `/tmp` `.git/HEAD` [c](docs/missing.md)", root, tracked) != planted:
+        raise SystemExit("agents-paths control failed: missing, escaping or untracked path accepted")
+
+    bad = bad_paths((root / "AGENTS.md").read_text(encoding="utf-8"), root, tracked)
+    if bad:
+        print("AGENTS.md names paths that are missing, untracked or outside the repo:", file=sys.stderr)
+        print("\n".join(bad), file=sys.stderr)
         return 1
     print("AGENTS.md path check: PASS")
     return 0

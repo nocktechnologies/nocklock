@@ -6,7 +6,7 @@ No internal host names, personal names or absolute home paths: `scripts/check-pu
 
 ## What changed
 
-- 2026-10-17: `AGENTS.md` became the full agent index, this file was added, and CI checks the paths `AGENTS.md` names (`scripts/check-agents-paths.py`). Release-level changes are in `CHANGELOG.md`.
+- 2026-10-17: `AGENTS.md` became the full agent index, this file was added, and CI checks that every path `AGENTS.md` names is tracked by git (`scripts/check-agents-paths.py`). `docs/REPO-MAP.md` was re-verified at next 13fa7a6. Release-level changes are in `CHANGELOG.md`.
 
 ## What bit us
 
@@ -14,4 +14,4 @@ No internal host names, personal names or absolute home paths: `scripts/check-pu
 
 ## Still open
 
-- `docs/REPO-MAP.md` states the commit its paths were verified at; it predates v0.12.0. Re-verify and restamp it in the next change that touches it.
+- Nothing yet. `docs/REPO-MAP.md` states the commit its paths were verified at; restamp it whenever you touch it.

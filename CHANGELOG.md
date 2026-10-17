@@ -15,7 +15,7 @@ All notable changes to NockLock will be documented in this file.
 - Removed the unused internal HTTP client for ordinary v1 anchor pushes and fetches. Remote v2 enrollment, migration, and conditional updates, plus local v1 anchor-file verification, are unchanged.
 - Newly generated configs, runtime presets, and examples omit the inert `[cloud]` section. Existing cloud settings still decode and validate as before; optional delivery uses `[audit.forward]`.
 - Release runbook: one whole-repo cleanup pass before the release notes.
-- `AGENTS.md` is the full agent index, with build, checks, rules, gotchas and locations; `CLAUDE.md` only imports it and adds Claude Code notes. New `docs/HANDOFF.md` carries pod notes between runs. CI now fails when `AGENTS.md` names a path that does not exist (`scripts/check-agents-paths.py`).
+- `AGENTS.md` is the full agent index, with build, checks, rules, gotchas and locations; `CLAUDE.md` only imports it and adds Claude Code notes. New `docs/HANDOFF.md` carries pod notes between runs. CI now fails when `AGENTS.md` names a path git does not track, or one outside the repo (`scripts/check-agents-paths.py`).
 
 ## [0.12.0] - 2026-10-17
 
