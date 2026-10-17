@@ -4,6 +4,7 @@ package cli
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
@@ -193,8 +194,32 @@ func TestInterposerResolverDoesNotFallBackAfterUnsafeCandidate(t *testing.T) {
 	}
 }
 
+// The fixture lives in a private root under $HOME, not t.TempDir(): under /tmp
+// (mode 1777) the sticky world-writable ancestor refuses the candidate before
+// its own 0777 mode matters, so the row would pass with the per-file check
+// deleted. A 0644 sibling in the same root resolves, which proves no ancestor
+// is the refuser, and the refusal must name the candidate file itself.
 func TestInterposerTrustRealWritableFileAndLegacyNegativeControl(t *testing.T) {
-	candidate := filepath.Join(t.TempDir(), "libfence_fs.so")
+	root := homeResolvedTempDir(t)
+	if err := os.Chmod(root, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	control := filepath.Join(root, "trusted", "libfence_fs.so")
+	if err := os.Mkdir(filepath.Dir(control), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(control, []byte("inert fixture; never loaded"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	// Explicit chmod: os.WriteFile and os.Mkdir modes are masked by umask.
+	if err := os.Chmod(control, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if got, err := trustedInterposerPath(control); err != nil || got != control {
+		t.Fatalf("positive control in the same root was refused, so an ancestor is untrusted: path=%q err=%v", got, err)
+	}
+
+	candidate := filepath.Join(root, "libfence_fs.so")
 	if err := os.WriteFile(candidate, []byte("inert fixture; never loaded"), 0o600); err != nil {
 		t.Fatal(err)
 	}
@@ -208,8 +233,9 @@ func TestInterposerTrustRealWritableFileAndLegacyNegativeControl(t *testing.T) {
 	if _, err := os.Stat(candidate); err != nil || pathIsWithinDir(candidate, project) {
 		t.Fatalf("legacy negative control did not accept its unsafe fixture: %v", err)
 	}
-	if got, err := trustedInterposerPath(candidate); err == nil || got != "" || !strings.Contains(err.Error(), "group/world-writable") {
-		t.Fatalf("strict resolver accepted writable real file: path=%q err=%v", got, err)
+	want := fmt.Sprintf("%q is group/world-writable (mode 0777)", candidate)
+	if got, err := trustedInterposerPath(candidate); err == nil || got != "" || !strings.Contains(err.Error(), want) {
+		t.Fatalf("strict resolver did not refuse the writable file for its own mode: path=%q err=%v, want refusal containing %s", got, err, want)
 	}
 }
 
@@ -343,7 +369,9 @@ func TestTrustedVerificationScratchFallsBack(t *testing.T) {
 // against the project by its raw and canonical spelling against both working
 // directory spellings, and any in-project hit refuses that candidate. The table
 // covers every shape found so far, each refused for the project reason and not a
-// permission one — proven by the positive controls in the same tree resolving.
+// permission one — proven per row by the recorded refusal being the project
+// sentinel and the resolver reporting "not found" rather than a hard-fail, and by
+// the positive controls in the same tree resolving.
 //
 // It drives the real production walk (inspectTrustedPath on real files) so a
 // middle hop through a project-owned symlink is actually visited; a stub that
@@ -488,10 +516,40 @@ func TestResolverRefusesProjectOwnedLibraryPaths(t *testing.T) {
 		{"install via parent dir symlinked outside project resolves", proj, []string{filepath.Join(outerAlias, "libfence_fs.so")}, filepath.Join(outerInstall, "libfence_fs.so")},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			got, err := findTrustedLibFenceFS("", tc.workingDir, tc.candidates, inspect)
+			// Record each candidate's own refusal so a row can only pass for the
+			// project reason. A permission refusal would also leave err != nil and
+			// got == "", but it hard-fails the launch instead of skipping.
+			refusals := map[string]error{}
+			recording := func(path string, projectDirs []string) (string, error) {
+				got, err := inspect(path, projectDirs)
+				if err != nil {
+					refusals[path] = err
+				}
+				return got, err
+			}
+			got, err := findTrustedLibFenceFS("", tc.workingDir, tc.candidates, recording)
+			// Every fixture candidate the resolver refused before selecting one (all
+			// of them, for a negative row) must carry the project sentinel.
+			for _, candidate := range tc.candidates {
+				refusal, refused := refusals[candidate]
+				if !refused {
+					if tc.want == "" {
+						t.Fatalf("candidate %q was not refused by the trust walk: got %q err %v", candidate, got, err)
+					}
+					break // the selected candidate; later ones are never inspected
+				}
+				if !errors.Is(refusal, errTrustedPathWithinProject) {
+					t.Fatalf("candidate %q was refused for the wrong reason (want the project rule, not a permission hard-fail): %v", candidate, refusal)
+				}
+			}
 			if tc.want == "" {
 				if err == nil || got != "" {
 					t.Fatalf("project-owned library path was accepted: got %q err %v", got, err)
+				}
+				// A project skip falls through to "not found"; a hard-fail reports
+				// "cannot inspect ... candidate" and stops at that candidate.
+				if !strings.Contains(err.Error(), "trusted filesystem fence library not found") {
+					t.Fatalf("resolver did not skip the project-owned candidate: %v", err)
 				}
 				return
 			}
