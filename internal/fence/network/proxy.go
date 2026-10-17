@@ -169,6 +169,30 @@ type ProxyServer struct {
 	lookback *lookbackGuard
 	// lookbackPause is a test seam called at named points on the request path.
 	lookbackPause func(stage string)
+	// onBlockedWriteFailure, when set, receives the event type and error of
+	// every blocked row the proxy could not write. Set once before Start.
+	onBlockedWriteFailure func(logging.EventType, error)
+}
+
+// SetBlockedWriteFailureHandler installs fn to receive the event type and
+// error of every blocked audit row (a denied request, a look-back denial, a DNS rebind, a
+// degrade) that the proxy could not write. wrap passes its run-level audit
+// recorder here, so a lost blocked row fails the run with exit 2. fn runs
+// inline on the request path and must not block. Call it before Start.
+func (p *ProxyServer) SetBlockedWriteFailureHandler(fn func(logging.EventType, error)) {
+	p.onBlockedWriteFailure = fn
+}
+
+// writeBlockedRow writes a blocked audit row and reports a write error to the
+// failure handler. The caller has already refused the request; only the run
+// verdict depends on this. It always uses LogImmediate: a lost blocked row
+// fails the run, so the write must wait out busy_timeout when another
+// connection holds the write lock. Log's deferred transaction would fail at
+// once with SQLITE_BUSY and turn ordinary lock contention into a failed run.
+func (p *ProxyServer) writeBlockedRow(ev logging.Event) {
+	if err := p.logger.LogImmediate(ev); err != nil && p.onBlockedWriteFailure != nil {
+		p.onBlockedWriteFailure(ev.EventType, err)
+	}
 }
 
 // NewProxyServer creates a ProxyServer from a NetworkConfig.
@@ -424,7 +448,7 @@ func (p *ProxyServer) MarkDegraded(reason string) {
 	if reason == "" {
 		reason = "proxy degraded"
 	}
-	_ = p.logger.Log(logging.Event{
+	p.writeBlockedRow(logging.Event{
 		Timestamp: time.Now(),
 		EventType: logging.EventNetworkError,
 		Category:  "network",
@@ -587,7 +611,7 @@ func (p *ProxyServer) logDNSRebind(err *dnsRebindError) {
 	if p.logger == nil || err == nil {
 		return
 	}
-	_ = p.logger.Log(logging.Event{
+	p.writeBlockedRow(logging.Event{
 		Timestamp: time.Now(),
 		EventType: logging.EventNetworkBlocked,
 		Category:  "network",
