@@ -7,6 +7,7 @@ No internal host names, personal names or absolute home paths: `scripts/check-pu
 ## What changed
 
 - 2026-10-17: `AGENTS.md` became the full agent index, this file was added, and CI checks that every path `AGENTS.md` names is tracked by git (`scripts/check-agents-paths.py`). `docs/REPO-MAP.md` was re-verified at next 13fa7a6. Release-level changes are in `CHANGELOG.md`.
+- 2026-10-17: the path check also reads angle-bracketed and titled link targets, and no longer treats version strings as paths.
 
 ## What bit us
 

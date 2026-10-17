@@ -2,7 +2,7 @@
 
 NockLock is an AI agent security fence: a Go CLI (`nocklock wrap -- <agent>`) that runs a coding agent behind filesystem, network, secret and syscall fences and writes every fence decision to a signed, hash-chained audit log. Linux uses Landlock, an `LD_PRELOAD` interposer, seccomp and an optional network namespace; macOS uses Seatbelt.
 
-This is the canonical agent and contributor file; `CLAUDE.md` imports it. If this file and the code disagree, the code wins; fix the file. CI fails when this file names a path git does not track (`scripts/check-agents-paths.py`): every link target, and every backticked span without spaces that contains a slash or ends in a file extension, must be a tracked file or directory inside the repo. Spans with an angle-bracket placeholder or a glob are skipped; write host paths and git refs without backticks.
+This is the canonical agent and contributor file; `CLAUDE.md` imports it. If this file and the code disagree, the code wins; fix the file. CI fails when this file names a path git does not track (`scripts/check-agents-paths.py`): every link target (bare, angle-bracketed or titled), and every backticked span without spaces that contains a slash or ends in a file extension with a letter in it (so version strings pass), must be a tracked file or directory inside the repo. Spans with an angle-bracket placeholder or a glob are skipped; write host paths and git refs without backticks.
 
 Follows Engineering Standards v4.
 
