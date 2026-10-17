@@ -832,7 +832,10 @@ func runProbeUnderWrap(ctx context.Context, cfg *config.Config, configPath, fenc
 	// never places scratch or a grant inside the developer's real audit state.
 	// (The probe's own wrap runs against the temporary DB and state paths set
 	// below, not this directory.)
-	state, _ := config.AuditStateDir(projectRoot)
+	state, err := verificationAuditStateDir(projectRoot, config.AuditStateDir)
+	if err != nil {
+		return probeResult{Fence: fence}, err
+	}
 	forbidden = append(forbidden, resolveExistingPrefix(state))
 	tmp, cleanup, ok := createScratchOutside(forbidden)
 	if !ok {
@@ -1142,6 +1145,21 @@ func filesystemRootOnly(cfg *config.Config, projectRoot string) []string {
 		root = resolved
 	}
 	return []string{filepath.Clean(root)}
+}
+
+// verificationAuditStateDir returns the original project's audit-state directory
+// that verification scratch must stay out of. It fails probe setup on a resolver
+// error or an empty path instead of dropping the exclusion: an ignored error
+// leaves "", and resolveExistingPrefix("") is ".", which matches no scratch path.
+func verificationAuditStateDir(projectRoot string, auditStateDir func(string) (string, error)) (string, error) {
+	state, err := auditStateDir(projectRoot)
+	if err != nil {
+		return "", fmt.Errorf("cannot resolve the project's audit-state directory to keep verification scratch out of it: %w", err)
+	}
+	if state == "" {
+		return "", errors.New("cannot resolve the project's audit-state directory to keep verification scratch out of it: resolved to an empty path")
+	}
+	return state, nil
 }
 
 // resolveExistingPrefix resolves symlinks in the longest existing prefix of p

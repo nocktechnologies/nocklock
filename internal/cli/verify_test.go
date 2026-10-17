@@ -472,3 +472,38 @@ func TestVerifyCheckFromProbeUnattemptedSyscallIsInconclusive(t *testing.T) {
 		t.Fatalf("detail = %q", withDetail.Detail)
 	}
 }
+
+// An unresolvable audit-state directory must fail probe setup, not leave an
+// empty exclusion: resolveExistingPrefix("") is ".", which matches nothing.
+func TestVerificationAuditStateDirFailsInsteadOfDroppingExclusion(t *testing.T) {
+	const want = "cannot resolve the project's audit-state directory to keep verification scratch out of it"
+	resolverErr := errors.New("no usable state root")
+	for _, tc := range []struct {
+		name    string
+		resolve func(string) (string, error)
+		reason  string
+	}{
+		{"resolver error", func(string) (string, error) { return "", resolverErr }, "no usable state root"},
+		{"empty path", func(string) (string, error) { return "", nil }, "resolved to an empty path"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			state, err := verificationAuditStateDir("/project", tc.resolve)
+			if err == nil || state != "" || !strings.Contains(err.Error(), want) || !strings.Contains(err.Error(), tc.reason) {
+				t.Fatalf("got state=%q err=%v, want refusal containing %q and %q", state, err, want, tc.reason)
+			}
+			// runProbeUnderWrap returns this error before attempting the probe, so
+			// the fence reports FAIL with the message rather than a silent skip.
+			check := verifyCheckFromProbe("filesystem", probeResult{Fence: "filesystem"}, err)
+			if check.Result != verifyFail || check.Detail != err.Error() {
+				t.Fatalf("check = %+v, want FAIL with detail %q", check, err.Error())
+			}
+		})
+	}
+
+	got, err := verificationAuditStateDir("/project", func(root string) (string, error) {
+		return filepath.Join("/state/nocklock", filepath.Base(root)), nil
+	})
+	if err != nil || got != "/state/nocklock/project" {
+		t.Fatalf("resolved state = %q err %v, want /state/nocklock/project", got, err)
+	}
+}
