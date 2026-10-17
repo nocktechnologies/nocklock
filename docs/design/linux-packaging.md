@@ -300,11 +300,13 @@ else:
     if boundaries["unix-sockets"] == "enforced":
         assert code == 0 and report["verdict"] == "PROTECTED", report
     else:
-        # v0.9 deliberately reports PARTIAL on pre-ABI-9 kernels. Accept
-        # only that named limitation, never a generic degraded install.
-        assert boundaries["unix-sockets"] == "unavailable", boundaries
+        # v0.9 deliberately reports PARTIAL on pre-ABI-9 kernels: the boundary
+        # posture is "advisory" and its backend check status is "unavailable".
+        # Accept only that named limitation, never a generic degraded install.
+        assert boundaries["unix-sockets"] == "advisory", boundaries
         assert code == 3 and report["verdict"] == "PARTIAL", report
         check = next(c for c in report["checks"] if c["name"] == "unix-sockets")
+        assert check["status"] == "unavailable", check
         assert re.search(r"reason=landlock_abi_[1-8]_below_9\b", check["message"]), check
 assert all(b["posture"] == "enforced" or
            (sys.platform == "linux" and b["name"] == "unix-sockets" and code == 3)
