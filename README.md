@@ -608,7 +608,7 @@ Guardrails tell the agent what not to do. The agent can ignore them, work around
 |---|---|---|
 | 0 | PROTECTED | every reported boundary is enforced; the network is not `allow_all` and its proxy-mode egress level is CONFINED or SEATBELT. Linux CONFINED also requires the Unix-socket boundary to be available |
 | 2 | GAPS FOUND | a boundary is configured but its backend is missing |
-| 3 | PARTIAL | at least one boundary is enforced, but another is disabled, advisory or unavailable without requiring startup refusal; each is listed by name |
+| 3 | PARTIAL | at least one boundary is enforced, but another is disabled, advisory or unavailable without requiring startup refusal; each is listed by name. Also when a [deputy](docs/how-it-works/deputies.md) the fence does not block is reachable, such as `docker.sock`, a writable agent config, or sudo that runs without a password prompt |
 | 4 | UNPROTECTED | no boundary is enforced |
 
 A missing or unparseable `.nock/config.toml` also exits 2.

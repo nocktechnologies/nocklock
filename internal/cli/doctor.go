@@ -121,7 +121,9 @@ type doctorCapabilities struct {
 	networkBackend func() error
 	sandboxExec    func() error
 	egressHelper   func() egressHelperState
-	now            func() time.Time
+	// deputies returns the host view for the deputy scan; nil skips the scan.
+	deputies func(goos string) deputyHost
+	now      func() time.Time
 }
 
 var currentDoctorCapabilities = doctorCapabilities{
@@ -132,6 +134,7 @@ var currentDoctorCapabilities = doctorCapabilities{
 	networkBackend: localProxyBackendAvailable,
 	sandboxExec:    fsfence.EnsureSandboxExecAvailable,
 	egressHelper:   defaultEgressHelperState,
+	deputies:       defaultDeputyHost,
 	now:            time.Now,
 }
 
@@ -145,7 +148,8 @@ Exit codes:
   2  GAPS FOUND   a boundary is configured but its backend is missing,
                   egress is UNREACHABLE (wrap
                   refuses to start), or the config is missing or unparseable
-  3  PARTIAL      some boundary is disabled or advisory (listed by name)
+  3  PARTIAL      some boundary is disabled or advisory (listed by name),
+                  or a deputy the fence does not block is reachable
   4  UNPROTECTED  no boundary is enforced`,
 	RunE: func(cmd *cobra.Command, args []string) error {
 		asJSON, _ := cmd.Flags().GetBool("json")
@@ -223,6 +227,11 @@ func runDoctor(caps doctorCapabilities) doctorReport {
 	checks = append(checks, secretDoctorCheck(cfg))
 	checks = append(checks, egressHelperDoctorCheck(caps))
 	checks = append(checks, sanityDoctorChecks(cfg, configPath, caps)...)
+	if caps.deputies != nil {
+		host := caps.deputies(caps.goos)
+		host.projectRoot = filepath.Dir(filepath.Dir(configPath))
+		checks = append(checks, deputyDoctorChecks(cfg, caps, checks, host)...)
+	}
 
 	activity := doctorActivityCheck(cfg, configPath, caps.now())
 	checks = append(checks, doctorCheck{
@@ -235,6 +244,11 @@ func runDoctor(caps doctorCapabilities) doctorReport {
 
 	level := doctorEgressLevel(cfg, caps)
 	report := finishDoctorReport(checks, doctorBoundaries(cfg, caps.goos, level, checks), activity)
+	// A reachable deputy the fence does not block is a partial posture, never
+	// a gap: it cannot raise the verdict above PARTIAL, nor lower a worse one.
+	if report.Verdict == doctorVerdictProtected && reachableDeputies(checks) > 0 {
+		report.Verdict = doctorVerdictPartial
+	}
 	report.EgressLevel = level
 	report.SigningKey = signingKey
 	return report
@@ -878,6 +892,9 @@ func renderDoctorHuman(w io.Writer, report doctorReport) {
 					}
 				}
 			}
+		}
+		if n := reachableDeputies(report.Checks); n > 0 {
+			fmt.Fprintf(w, "- deputies: %d reachable and not blocked by the fence (listed under Deputies)\n", n)
 		}
 	}
 	if len(report.Gaps) > 0 {
