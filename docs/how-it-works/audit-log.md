@@ -162,7 +162,7 @@ How a checkpoint works:
 - A legacy or unenrolled chain stops the worker at its first tick, and teardown says so.
 - At teardown, `wrap` cancels any upload in flight and waits for the worker. Then the unchanged teardown push runs as the final flush. A cancelled upload counts as neither a success nor a failure. If it reached the store anyway, the final push fetches the newer pin and the compare-and-swap still applies.
 
-Teardown prints one summary line on stderr: confirmed and failed counts, the last confirmed `row_count`, head and time, the lag at the final emission (rows past the last confirmed pin, and the time since it), and whether the store confirmed the final flush. A second line gives the last failure, if any. `wrap` has no JSON output, so there is no JSON form.
+Teardown prints one summary line on stderr: confirmed and failed counts, the last confirmed `row_count`, head and time, the `lag at final emission` (rows past the last confirmed pin, and the time since it), and the final flush result: confirmed, failed with its error, or not attempted with the reason. If the worker stopped early, the warning that says why also gives the final flush result. A second line gives the last failure, if any. `wrap` has no JSON output, so there is no JSON form.
 
 What a confirmed checkpoint proves: when the upload was confirmed, our own store held this signed head and row count for this chain. If `wrap` is killed and teardown never runs, the remote pin stays at the last confirmed checkpoint. A later rollback below that pin is detectable with `verify --against-remote-anchor`.
 

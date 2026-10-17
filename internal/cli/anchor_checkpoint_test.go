@@ -255,9 +255,10 @@ func TestStripAnchorEnvRemovesCheckpointSettings(t *testing.T) {
 	}
 }
 
-// A kill after a confirmed pin: no teardown runs, so nothing past the pin is
-// pushed, and the remote stays exactly at the confirmed head. The local chain
-// still reproduces that pin; rows written after it have no off-box protection.
+// After a confirmed pin the run keeps writing, and no further upload or
+// teardown runs. The local chain, now longer than the pin, still reproduces the
+// confirmed pin. This checks the verify half of the kill story only: it does not
+// kill a process or run the worker loop.
 func TestAnchorCheckpointKillAfterConfirmedPinLeavesRemoteAtPin(t *testing.T) {
 	dbPath, store, wrapLog := checkpointFixture(t, 3)
 	c := openTestCheckpointer(t, dbPath, store, 5*time.Second)
@@ -274,14 +275,10 @@ func TestAnchorCheckpointKillAfterConfirmedPinLeavesRemoteAtPin(t *testing.T) {
 		t.Fatalf("store holds %d/%s, want the confirmed pin %d/%s", cur.RowCount, cur.HeadHash, s.LastPin.RowCount, s.LastPin.HeadHash)
 	}
 
-	// The run keeps writing, then wrap is killed: no further tick, no teardown.
+	// The run keeps writing past the pin; nothing uploads again.
 	appendRows(t, wrapLog, 5)
-	postsAtKill := store.posts.Load()
 
 	cur := store.current()
-	if cur.RowCount != 7 || cur.HeadHash != s.LastPin.HeadHash || store.posts.Load() != postsAtKill {
-		t.Fatalf("remote moved after the kill: %d/%s", cur.RowCount, cur.HeadHash)
-	}
 	remote, err := anchorclient.FetchLatestV2(context.Background(), store.srv.URL, remoteTestToken, cur.AgentID, cur.ChainID, store.pub)
 	if err != nil {
 		t.Fatal(err)
@@ -419,7 +416,7 @@ func TestAnchorCheckpointOutageRecordsLagAndRecovers(t *testing.T) {
 		"NockLock: warning: chain anchor NOT pushed off-box",
 		"NockLock: anchor checkpoints: 2 confirmed, 2 failed; last confirmed row_count=8",
 		"lag at final emission 1 row,",
-		"final flush not confirmed",
+		"final flush failed: ",
 		"NockLock: warning: last anchor checkpoint failure at",
 	} {
 		if !strings.Contains(out.String(), want) {
@@ -570,8 +567,9 @@ func TestAnchorCheckpointStopsOnUnenrolledChain(t *testing.T) {
 		t.Fatal("worker kept running on an unenrolled chain")
 	}
 	var out bytes.Buffer
-	c.report(&out, nil, false)
-	if !strings.Contains(out.String(), "anchor checkpoints did not run") || !strings.Contains(out.String(), "not enrolled") {
+	c.report(&out, anchorFlushResult{Skipped: "legacy chain"})
+	if !strings.Contains(out.String(), "anchor checkpoints did not run") || !strings.Contains(out.String(), "not enrolled") ||
+		!strings.Contains(out.String(), "final flush not attempted: legacy chain") {
 		t.Fatalf("unexpected report: %q", out.String())
 	}
 }
@@ -684,17 +682,17 @@ func TestAnchorCheckpointSummaryFailedFinalEmissionIsNotZeroLag(t *testing.T) {
 	}
 	appendRows(t, wrapLog, 2)
 	var out bytes.Buffer
-	c.report(&out, nil, false)
+	c.report(&out, anchorFlushResult{Err: errors.New("emission refused")})
 	got := out.String()
 	if strings.Contains(got, "lag at final emission 0 rows") || strings.Contains(got, "lag at stop") {
 		t.Fatalf("failed final emission reported a measured lag:\n%s", got)
 	}
-	if !strings.Contains(got, "lag at final emission unknown") || !strings.Contains(got, "final flush not confirmed") {
+	if !strings.Contains(got, "lag at final emission unknown") || !strings.Contains(got, "final flush failed: emission refused") {
 		t.Fatalf("unexpected summary:\n%s", got)
 	}
 	out.Reset()
 	c2 := openTestCheckpointer(t, dbPath, store, 5*time.Second)
-	c2.report(&out, nil, false)
+	c2.report(&out, anchorFlushResult{Err: errors.New("emission refused")})
 	if !strings.Contains(out.String(), "none confirmed; lag at final emission unknown") {
 		t.Fatalf("unexpected summary with no pin:\n%s", out.String())
 	}
@@ -739,4 +737,119 @@ func TestAnchorCheckpointOpenDoesNotWaitOnLiveWriter(t *testing.T) {
 	}
 	close(stop)
 	<-finished
+}
+
+// A worker that stopped early still leaves a teardown line that states the
+// final flush outcome: confirmed with its row count, or failed with its error.
+func TestAnchorCheckpointEarlyStopReportsFinalFlush(t *testing.T) {
+	dbPath, store, wrapLog := checkpointFixture(t, 3)
+	stopped := func() *anchorCheckpointer {
+		c := newAnchorCheckpointer(&anchorCheckpointConfig{Interval: time.Hour, Deadline: time.Second}, func() (*checkpointSession, error) {
+			return nil, errors.New("open refused")
+		})
+		c.start()
+		<-c.done
+		return c
+	}
+
+	appendRows(t, wrapLog, 2)
+	var out bytes.Buffer
+	finishAnchorSessionWithCheckpoints(&out, wrapLog, dbPath, stopped())
+	got := out.String()
+	if !strings.Contains(got, "anchor checkpoints did not run: cannot open the audit log for checkpoints: open refused") ||
+		!strings.Contains(got, "final flush confirmed row_count=5") {
+		t.Fatalf("early stop hid the confirmed final flush:\n%s", got)
+	}
+
+	appendRows(t, wrapLog, 1)
+	store.down.Store(true)
+	out.Reset()
+	finishAnchorSessionWithCheckpoints(&out, wrapLog, dbPath, stopped())
+	got = out.String()
+	if !strings.Contains(got, "anchor checkpoints did not run") || !strings.Contains(got, "final flush failed: ") ||
+		strings.Count(got, "503") < 2 {
+		t.Fatalf("early stop hid the failed final flush and its error:\n%s", got)
+	}
+	if strings.Contains(got, remoteTestToken) {
+		t.Error("teardown output leaks the token")
+	}
+}
+
+// A tick that arrives while an upload is in flight is dropped: when the upload
+// returns, the worker waits for the next tick instead of starting a second
+// upload at once. Ticks are delivered by hand on a one-slot channel, which
+// holds a missed tick the way time.Ticker does.
+func TestAnchorCheckpointTickDuringUploadIsDropped(t *testing.T) {
+	dbPath, store, wrapLog := checkpointFixture(t, 3)
+	root, err := os.Getwd()
+	if err != nil {
+		t.Fatal(err)
+	}
+	ticks := make(chan time.Time, 1)
+	c := newAnchorCheckpointer(&anchorCheckpointConfig{Interval: time.Hour, Deadline: 5 * time.Second}, func() (*checkpointSession, error) {
+		return openCheckpointSession(dbPath, root, store.srv.URL, remoteTestToken)
+	})
+	c.ticker = func(time.Duration) (<-chan time.Time, func()) { return ticks, func() {} }
+
+	// Every upload fetches the remote pin exactly once; hold each one there.
+	entered := make(chan struct{}, 8)
+	release := make(chan struct{})
+	store.setHooks(func(r *http.Request) {
+		if r.Method != http.MethodGet {
+			return
+		}
+		entered <- struct{}{}
+		select {
+		case <-release:
+		case <-r.Context().Done():
+		}
+	}, nil)
+	waitEntered := func(what string) {
+		t.Helper()
+		select {
+		case <-entered:
+		case <-time.After(10 * time.Second):
+			t.Fatalf("%s never reached the store", what)
+		}
+	}
+	waitTickTaken := func(what string) {
+		t.Helper()
+		deadline := time.Now().Add(10 * time.Second)
+		for len(ticks) != 0 {
+			if time.Now().After(deadline) {
+				t.Fatalf("worker never took %s", what)
+			}
+			time.Sleep(time.Millisecond)
+		}
+	}
+	c.start()
+	defer func() {
+		close(release)
+		c.stop()
+	}()
+
+	appendRows(t, wrapLog, 2)
+	ticks <- time.Now()
+	waitEntered("the first upload")
+	// A tick arrives during the upload and waits in the slot.
+	select {
+	case ticks <- time.Now():
+	default:
+		t.Fatal("tick slot already full")
+	}
+	release <- struct{}{}
+	// The slot empties either because the worker dropped the queued tick or
+	// because it used it to start a second upload at once.
+	waitTickTaken("the queued tick")
+	ticks <- time.Now()
+	waitEntered("the second upload")
+	// The second upload is held at the store. If it was started by the queued
+	// tick, the worker is still busy and the tick just sent waits in the slot.
+	// If the queued tick was dropped, the tick just sent started this upload.
+	if n := len(ticks); n != 0 {
+		t.Fatal("a tick that arrived during an upload started a second upload at once")
+	}
+	if s := c.snapshot(); s.Confirmed != 1 {
+		t.Fatalf("want the first upload confirmed, got %+v", s)
+	}
 }

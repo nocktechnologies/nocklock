@@ -160,6 +160,9 @@ type anchorCheckpointer struct {
 	deadline time.Duration
 	open     func() (*checkpointSession, error)
 	now      func() time.Time
+	// ticker returns the tick channel and its stop function. Tests replace it
+	// to deliver ticks by hand.
+	ticker func(time.Duration) (<-chan time.Time, func())
 
 	uploadMu sync.Mutex // held for each whole upload
 
@@ -173,7 +176,12 @@ type anchorCheckpointer struct {
 }
 
 func newAnchorCheckpointer(cfg *anchorCheckpointConfig, open func() (*checkpointSession, error)) *anchorCheckpointer {
-	return &anchorCheckpointer{interval: cfg.Interval, deadline: cfg.Deadline, open: open, now: time.Now}
+	return &anchorCheckpointer{interval: cfg.Interval, deadline: cfg.Deadline, open: open, now: time.Now, ticker: newTimeTicker}
+}
+
+func newTimeTicker(d time.Duration) (<-chan time.Time, func()) {
+	t := time.NewTicker(d)
+	return t.C, t.Stop
 }
 
 // startAnchorCheckpoints starts the worker when the opt-in is set and a store
@@ -224,14 +232,14 @@ func (c *anchorCheckpointer) run(ctx context.Context) {
 		_ = session.close()
 	}()
 
-	ticker := time.NewTicker(c.interval)
-	defer ticker.Stop()
+	ticks, stopTicks := c.ticker(c.interval)
+	defer stopTicks()
 	checked := false
 	for {
 		select {
 		case <-ctx.Done():
 			return
-		case <-ticker.C:
+		case <-ticks:
 		}
 		if !checked {
 			// Checked on the first tick, not at launch, and under the upload
@@ -252,6 +260,12 @@ func (c *anchorCheckpointer) run(ctx context.Context) {
 			checked = true
 		}
 		_ = c.uploadOnce(ctx)
+		// The tick channel holds one missed tick. Drop a tick that arrived
+		// during the upload, so a slow upload is not followed at once by another.
+		select {
+		case <-ticks:
+		default:
+		}
 	}
 }
 
@@ -331,17 +345,18 @@ func (c *anchorCheckpointer) snapshot() anchorCheckpointStatus {
 // report writes the teardown summary: confirmed and failed counts, the last
 // confirmed pin, the committed rows the checkpoints had not confirmed when wrap
 // stopped (the lag the final flush must close), the final flush result and the
-// last failure. final is the teardown anchor (nil if none was emitted) and
-// flushed says whether the store confirmed it. It is nil-safe.
-func (c *anchorCheckpointer) report(w io.Writer, final *logging.AnchorV2, flushed bool) {
+// last failure. flush is the teardown push outcome. The final flush result is
+// always stated, also when the worker stopped early. It is nil-safe.
+func (c *anchorCheckpointer) report(w io.Writer, flush anchorFlushResult) {
 	if c == nil {
 		return
 	}
 	s := c.snapshot()
 	if s.Stopped != "" {
-		fmt.Fprintf(w, "NockLock: warning: anchor checkpoints did not run: %s\n", s.Stopped)
+		fmt.Fprintf(w, "NockLock: warning: anchor checkpoints did not run: %s; %s\n", s.Stopped, flush.summary())
 		return
 	}
+	final := flush.Final
 	var b strings.Builder
 	fmt.Fprintf(&b, "NockLock: anchor checkpoints: %d confirmed, %d failed", s.Confirmed, s.Failed)
 	// Lag is measured against the teardown emission, which reads the committed
@@ -368,12 +383,7 @@ func (c *anchorCheckpointer) report(w io.Writer, final *logging.AnchorV2, flushe
 	} else {
 		fmt.Fprintf(&b, "; none confirmed; lag at final emission %s", lagText)
 	}
-	switch {
-	case final != nil && flushed:
-		fmt.Fprintf(&b, "; final flush confirmed row_count=%d", final.RowCount)
-	default:
-		b.WriteString("; final flush not confirmed")
-	}
+	b.WriteString("; " + flush.summary())
 	fmt.Fprintln(w, b.String())
 	if s.LastErr != "" {
 		fmt.Fprintf(w, "NockLock: warning: last anchor checkpoint failure at %s: %s\n", s.LastErrAt.Format(time.RFC3339), s.LastErr)
