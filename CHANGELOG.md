@@ -4,6 +4,11 @@ All notable changes to NockLock will be documented in this file.
 
 ## [Unreleased]
 
+### Added
+
+- `doctor` warns about repo git config that runs code ("GitSpawn"). Run inside a git repository, it lists each local config key whose value is a program git runs, such as `core.fsmonitor`, `core.hooksPath`, `core.sshCommand`, `core.pager`, diff `textconv`, filter and merge drivers, credential helpers and `!` aliases. It reads `.git/config` and the files it includes, and names the key, its value and the file it came from. The warning leaves the verdict and exit code unchanged, and doctor runs no hook and removes nothing.
+- A Linux CI proof for GitSpawn (`gitspawn-proof`). A planted `core.fsmonitor` program fires on `git status` and, unwrapped, reaches a host outside the allowlist, reads a file under `~/.ssh/` and writes outside the project. Under `wrap --profile claude-code --net-fence=netns` it still fires, all three are blocked, each block is a signed audit row, and `verify --audit` reports `AUTHENTIC`. Proxy-mode networking and macOS are not covered. See `docs/how-it-works/doctor-and-verify.md`.
+
 ### Changed
 
 - `LogImmediate` uses the same immediate SQLite transaction as ordinary event writes, preserving write-lock waiting, committed-event callbacks, and signed run-close accounting without an unused predecessor lookup.

@@ -440,6 +440,52 @@ jobs:
           NOCKLOCK_AUDIT_REQUIRE=1 NOCKLOCK_TEST_BIN=/usr/local/bin/nocklock \
             go test ./internal/cli/ -run '^TestWrapComposedDefaultEgressAudit$' -v -count=1
 
+  gitspawn-proof:
+    name: GitSpawn · core.fsmonitor trap vs claude-code preset + netns (root)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: provision iproute2 + nftables + curl + gcc
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y iproute2 nftables curl build-essential
+
+      # Same install shape as netns-composed-default: the binary, the
+      # privileged egress helper, and the trusted interposer the preset's
+      # required Linux filesystem fence loads.
+      - name: build nocklock, install the egress helper and the fs interposer
+        run: |
+          go build -o nocklock ./cmd/nocklock
+          sudo install -m 0755 nocklock /usr/local/bin/nocklock
+          sudo mkdir -p /usr/libexec
+          sudo tee /usr/libexec/nocklock-egress-helper >/dev/null <<'EOF'
+          #!/bin/sh
+          exec /usr/local/bin/nocklock __netns-helper "$@"
+          EOF
+          sudo chmod 0755 /usr/libexec/nocklock-egress-helper
+          sudo -n /usr/libexec/nocklock-egress-helper check && echo "helper preflight OK"
+          make build-fence-fs
+          sudo mkdir -p /usr/local/lib/nocklock
+          sudo install -m 0755 internal/fence/fs/interposer/libfence_fs.so \
+            /usr/local/lib/nocklock/libfence_fs.so
+
+      # Runner user, strict mode: a missing helper, binary or runner fails
+      # instead of skipping. The test log shows the unwrapped negative control
+      # (the trap succeeds at egress, the denied read and the outside write)
+      # before the wrapped run blocks all three.
+      - name: run GitSpawn acceptance proof (runner user, skips forbidden)
+        run: |
+          NOCKLOCK_AUDIT_REQUIRE=1 NOCKLOCK_TEST_BIN=/usr/local/bin/nocklock \
+            go test ./internal/cli/ -run '^TestWrapGitSpawnFsmonitorTrapIsFenced$' -v -count=1
+
   egress-helper-install-readme:
     name: egress helper install · shipped installer (README path)
     runs-on: ubuntu-latest

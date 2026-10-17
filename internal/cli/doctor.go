@@ -227,6 +227,7 @@ func runDoctor(caps doctorCapabilities) doctorReport {
 	checks = append(checks, secretDoctorCheck(cfg))
 	checks = append(checks, egressHelperDoctorCheck(caps))
 	checks = append(checks, sanityDoctorChecks(cfg, configPath, caps)...)
+	checks = append(checks, gitConfigExecDoctorChecks(filepath.Dir(filepath.Dir(configPath)))...)
 	if caps.deputies != nil {
 		host := caps.deputies(caps.goos)
 		host.projectRoot = filepath.Dir(filepath.Dir(configPath))
