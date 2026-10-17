@@ -17,10 +17,14 @@ endorsement.
 Results are `valid`, `root_mismatch`, `identity_mismatch`, `tail_mismatch`,
 `replay`, `missing`, `unused`, `bad_signature` or `malformed`. Each reject's
 `positive_control` names the entry that accepts when its single changed field
-(or transport spelling) is restored. `valid_independent_root` has a first-key
-root distinct from both retiring and successor fingerprints;
-`valid_first_rotation` uses the retiring key's own fingerprint as the root.
-Other accepts pin zero, 2^53 and maximum uint64 counts. Reject names enumerate each mutation.
+(or transport spelling) is restored. Two rejects are exceptions:
+`same_old_and_new_chain` and `same_retiring_and_successor_key` carry bundles
+re-signed and re-accepted over the changed field, so restoring that field alone
+leaves a signature mismatch; their control is the original signed bundle.
+`valid_independent_root` has a first-key root distinct from both retiring and
+successor fingerprints; `valid_first_rotation` uses the retiring key's own
+fingerprint as the root. Other accepts pin zero, 2^53 and maximum uint64 counts.
+Reject names enumerate each mutation.
 
 The test-only signer generates ephemeral Ed25519 keys in memory and never emits
 private material. To intentionally replace this fixture, run:

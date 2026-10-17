@@ -47,12 +47,14 @@ Canonical encoding and both signatures are verified before tail/count
 comparison. `errors.Is` distinguishes root mismatch, retiring identity mismatch,
 tail/count mismatch (including truncation), replay to another successor or new
 chain, missing endorsement, unused endorsement, bad signature and malformed
-encoding. Old and new chain IDs must differ. An absent bundle is missing; an
-absent JSON field is malformed. A missing acceptance is unused only when its
-field is present and empty. Rechecking the exact same transition is idempotent.
-No offline check can distinguish a replayed copy of an identical bundle from its
-first presentation, so the caller must record accepted transitions. There is no
-CLI command or state mutation.
+encoding. Old and new chain IDs must differ, and the successor key must differ
+from the retiring key; either collision is an identity mismatch even when both
+signatures verify. An absent bundle is missing; an absent JSON field is
+malformed. A missing acceptance is unused only when its field is present and
+empty. Rechecking the exact same transition is idempotent. No offline check can
+distinguish a replayed copy of an identical bundle from its first presentation,
+so the caller must record accepted transitions. There is no CLI command or state
+mutation.
 
 ## Vectors
 
@@ -60,18 +62,21 @@ CLI command or state mutation.
 pin canonical bytes, endorsement digests and acceptance bytes. Cases cover an
 independent root, a first rotation whose root is the retiring key's own
 fingerprint, zero/large/max counts, every signed-field tamper, substituted root,
-wrong retiring identity, a signed transition into the chain it retires, replay to
-another chain/key, old-tail divergence and count truncation/extension,
-missing (absent or whitespace-only) and unused endorsements, both bad signatures,
-and strict JSON/hex/base64 failures. Every rejection references a restored valid
-control. Keys are generated ephemerally in memory; only public material is saved.
+wrong retiring identity, a signed transition into the chain it retires, a signed
+transition whose successor is the retiring key itself, replay to another
+chain/key, old-tail divergence and count truncation/extension, missing (absent
+or whitespace-only) and unused endorsements, both bad signatures, and strict
+JSON/hex/base64 failures. Every rejection references a restored valid control.
+Keys are generated ephemerally in memory; only public material is saved.
 
 ## LIMITS
 
 An endorsement proves that the holder of the old key signed a transition from a
-specific lineage root and tail to the successor key. It cannot restore trust in
-an old key that was compromised before or during the rotation. It does not prove
-what the old key did after the tail. It is not key switching and not remote
-migration, and it does not replace the remote v2 pin. Successor acceptance proves
-possession and acceptance, not execution, enrollment, archive availability or
-uniqueness of the retiring key's endorsements.
+specific lineage root and tail to a different successor key. Rejecting a
+successor equal to the retiring key only stops a no-op rotation; it says nothing
+about who holds either key. It cannot restore trust in an old key that was
+compromised before or during the rotation. It does not prove what the old key
+did after the tail. It is not key switching and not remote migration, and it
+does not replace the remote v2 pin. Successor acceptance proves possession and
+acceptance, not execution, enrollment, archive availability or uniqueness of the
+retiring key's endorsements.

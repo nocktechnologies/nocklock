@@ -217,7 +217,9 @@ func VerifyRotationEndorsement(r *RotationEndorsement, root string, old, next *C
 	if next.AgentID != publicKeyFingerprint(successor) || r.SuccessorPublicKey != hex.EncodeToString(successor) || next.ChainID != r.NewChainID {
 		return ErrRotationReplay
 	}
-	if r.OldChainID == r.NewChainID {
+	// A rotation must change both the chain and the key; a successor equal to
+	// the retiring key proves no takeover.
+	if r.OldChainID == r.NewChainID || r.SuccessorPublicKey == r.OldPublicKey {
 		return ErrRotationIdentityMismatch
 	}
 	if r.HeadHash != head || r.RowCount != count {

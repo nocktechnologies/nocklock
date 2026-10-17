@@ -79,7 +79,7 @@ func TestRotationPublicVectors(t *testing.T) {
 	if err = json.Unmarshal(data, &f); err != nil {
 		t.Fatal(err)
 	}
-	if f.Format != "nocklock-rotation-endorsement-test-vectors-1" || len(f.Cases) < 40 {
+	if f.Format != "nocklock-rotation-endorsement-test-vectors-1" || len(f.Cases) < 53 {
 		t.Fatal("unexpected vector envelope")
 	}
 	cases := map[string]rotationVector{}
@@ -270,6 +270,17 @@ func TestGenerateRotationVectors(t *testing.T) {
 	same.Expected.Next.ChainID = same.Bundle.OldChainID
 	signRotation(t, same.Bundle, old, next)
 	add(same)
+
+	// A correctly signed and accepted transition to the retiring key itself is
+	// rejected: the successor must be a different key.
+	sameKey := clone()
+	sameKey.Name = "same_retiring_and_successor_key"
+	sameKey.Result = "identity_mismatch"
+	sameKey.Bundle.SuccessorPublicKey = sameKey.Bundle.OldPublicKey
+	sameKey.Expected.Successor = sameKey.Bundle.OldPublicKey
+	sameKey.Expected.Next.AgentID = publicKeyFingerprint(oldPub)
+	signRotation(t, sameKey.Bundle, old, old)
+	add(sameKey)
 
 	// Whitespace-only transport is an absent endorsement, not a malformed one.
 	empty := clone()
