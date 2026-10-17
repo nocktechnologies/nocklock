@@ -143,6 +143,36 @@ The upgraded store retains v1 migration history and freezes ordinary v1 access f
 
 `wrap` emits `chain-anchor.json` beside the DB and pushes enrolled v2 chains. Its five-second budget starts before the first identity read and bounds identity-lock waits and HTTP together. Failure warns and retains the child's exit code; interactive anchor commands and anchor verification use 30 seconds. Caller cancellation reaches identity-lock acquisition. Synchronous filesystem/SQLite work and in-progress durable writes complete on the caller; these deadlines do not interrupt them. Legacy chains emit local v1 files but require explicit enrollment/migration for any remote push. Package tests exercise the local chain state and client response handling; this repository no longer includes an external server acceptance harness.
 
+### In-run checkpoints (opt-in)
+
+By default the only push happens at teardown. `wrap` can also upload the committed head while the run is in progress (`internal/cli/anchor_checkpoint.go`). Both settings come from the operator environment, like the URL and token:
+
+- `NOCKLOCK_ANCHOR_CHECKPOINT_INTERVAL`: a duration of at least `1s`, such as `60s`. Unset, empty or `0` leaves checkpoints off, the default.
+- `NOCKLOCK_ANCHOR_CHECKPOINT_DEADLINE`: the limit for one whole upload. The default is 10 seconds or the interval, whichever is shorter. It cannot exceed the interval.
+
+A malformed value refuses the run before the child starts. They are not config-file keys, because the fenced child can write the project config. `wrap` strips both from the child with the URL and token, so the agent cannot turn checkpoints off or learn their cadence.
+
+How a checkpoint works:
+
+- One background worker uploads at each interval. It signs an anchor of the committed head and pushes it through the teardown path: candidate preflight, authenticated fetch of the remote pin, prefix proof, no downgrade and the store's compare-and-swap. The v2 wire format is unchanged.
+- Uploads are serialized. Two are never in flight; a tick that arrives during an upload is dropped.
+- The deadline covers the whole upload, including the local verification walk. Teardown leaves its walk unbounded; a checkpoint does not. On a large store the first walks can hit the deadline. Each interrupted walk still records its verified prefix in the signed `verify_receipt`, so later walks get shorter. As at teardown, synchronous SQLite work such as that receipt write completes on the caller; the deadline does not interrupt it, and stopping the worker waits for it.
+- The worker opens its own handle on the audit log. It never holds `wrap`'s log connection and never blocks the child. In WAL mode its read snapshot does not block the audit writer. A short receipt write can make one audit write wait, as an `anchor emit` from another process would.
+- A failed upload (outage, timeout, compare-and-swap conflict, refused preflight) is recorded and retried at the next tick. It never fails the run. An outage policy needs a separate design.
+- A legacy or unenrolled chain stops the worker at its first tick, and teardown says so.
+- At teardown, `wrap` cancels any upload in flight and waits for the worker. Then the unchanged teardown push runs as the final flush. A cancelled upload counts as neither a success nor a failure. If it reached the store anyway, the final push fetches the newer pin and the compare-and-swap still applies.
+
+Teardown prints one summary line on stderr: confirmed and failed counts, the last confirmed `row_count`, head and time, the lag at stop (rows past the last confirmed pin, and the time since it), and whether the store confirmed the final flush. A second line gives the last failure, if any. `wrap` has no JSON output, so there is no JSON form.
+
+What a confirmed checkpoint proves: when the upload was confirmed, our own store held this signed head and row count for this chain. If `wrap` is killed and teardown never runs, the remote pin stays at the last confirmed checkpoint. A later rollback below that pin is detectable with `verify --against-remote-anchor`.
+
+What it does not prove:
+
+- No independent signed time. The anchor's `created_at` is signed by the same key that signs the chain. The store's own receive time (`received_at`) is the store's record, not an independent signed timestamp.
+- No protection for rows written after the last confirmed pin. After a kill, those rows have only the local chain's protection. The interval bounds that window only while the store is reachable.
+- No acknowledgment from a witness before a row is committed locally. Witness acknowledgments, signed store time and an outage policy need a separate design.
+- Two writers on one chain follow the store's rules: each upload either advances the pin or gets a compare-and-swap conflict, and the stored history only moves forward.
+
 Prune requires explicit project context; rootless library calls refuse even for
 legacy databases. On Linux and macOS, neither identity copy may exist, or both
 must agree with registration `none`; neither case may have a retained original registration request. A request left before pending was durably written must remain replayable. The external state directory must be
@@ -251,6 +281,7 @@ The scratch directory is only a verification workspace: never run `wrap`, `log -
 
 ## Honest limits
 - Not externally anchored by default; v1 is tamper-evident, not an unforgeable receipt.
+- In-run checkpoints are opt-in. Rows written after the last confirmed pin have no off-box protection, and no checkpoint carries an independent signed time.
 - macOS records per-file denials best-effort (`filesystem-fence.md`). The HTTP proxy ignores audit-write errors on the allow path, while the netns path fails closed (`docs/design/look-back-rules.md` section 1, item 5).
 - Allowed file reads are never logged, only denials.
 - On legacy chains, `--prune` removes history and invalidates earlier anchors;

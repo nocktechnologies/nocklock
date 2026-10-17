@@ -246,7 +246,26 @@ func writeAnchorV2VerifyResult(w io.Writer, result *logging.AnchorV2VerifyResult
 	return &exitCodeError{code: 1}
 }
 
+// finishAnchorSession is wrap's teardown anchor: emit, write and (when a store
+// is configured and the chain is enrolled) push the final head, fail-open.
 func finishAnchorSession(w io.Writer, logger *logging.Logger, dbPath string) {
+	finishAnchorSessionWithCheckpoints(w, logger, dbPath, nil)
+}
+
+// finishAnchorSessionWithCheckpoints stops the in-run checkpoint worker (if
+// any) and waits for it, then runs the unchanged teardown push as the final
+// flush, then reports the checkpoint summary. Stopping first means the final
+// flush never races a checkpoint upload.
+func finishAnchorSessionWithCheckpoints(w io.Writer, logger *logging.Logger, dbPath string, cp *anchorCheckpointer) {
+	cp.stop()
+	final, flushed := flushAnchorSession(w, logger, dbPath)
+	cp.report(w, final, flushed)
+}
+
+// flushAnchorSession is the teardown push. It returns the v2 anchor it emitted
+// (nil for a legacy chain or a failed emission) and whether the store confirmed
+// it. Failures warn on w and never change the run's exit code.
+func flushAnchorSession(w io.Writer, logger *logging.Logger, dbPath string) (*logging.AnchorV2, bool) {
 	ctx, cancel := context.WithTimeout(context.Background(), anchorPushTimeout)
 	defer cancel()
 	// One walk budget covers every walk in this teardown: the emission walk and
@@ -270,11 +289,11 @@ func finishAnchorSession(w io.Writer, logger *logging.Logger, dbPath string) {
 		if baseURL, _ := anchorRemoteConfig(); baseURL != "" {
 			fmt.Fprintln(w, "NockLock: warning: chain anchor NOT pushed off-box: explicit anchor enroll or anchor migrate is required; no v1 fallback")
 		}
-		return
+		return nil, false
 	}
 	if err != nil {
 		fmt.Fprintf(w, "NockLock: warning: chain anchor not written: %v\n", err)
-		return
+		return nil, false
 	}
 	a, err := logger.EmitAnchorV2Walk(ctx, walkCtx)
 	if err == nil {
@@ -282,11 +301,11 @@ func finishAnchorSession(w io.Writer, logger *logging.Logger, dbPath string) {
 	}
 	if err != nil {
 		fmt.Fprintf(w, "NockLock: warning: chain anchor not written to %s: %v\n", path, err)
-		return
+		return nil, false
 	}
 	baseURL, token := anchorRemoteConfig()
 	if baseURL == "" {
-		return
+		return a, false
 	}
 	// Every lock wait and network step in the push gets its own fresh budget,
 	// created right before it, so the preflight walks (unbounded by walkCtx here)
@@ -297,5 +316,7 @@ func finishAnchorSession(w io.Writer, logger *logging.Logger, dbPath string) {
 	}
 	if err := pushAnchorV2(newStep, walkCtx, logger, a, logger.SigningPublicKey(), baseURL, token); err != nil {
 		fmt.Fprintf(w, "NockLock: warning: chain anchor NOT pushed off-box: %v\n", err)
+		return a, false
 	}
+	return a, true
 }

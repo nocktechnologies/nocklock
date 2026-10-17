@@ -4,6 +4,10 @@ All notable changes to NockLock will be documented in this file.
 
 ## [Unreleased]
 
+### Added
+
+- `wrap` can upload the committed audit head to the anchor store during a run, not only at teardown. Set `NOCKLOCK_ANCHOR_CHECKPOINT_INTERVAL` (and optionally `NOCKLOCK_ANCHOR_CHECKPOINT_DEADLINE`) in the operator environment; it is off by default. One background worker sends one upload at a time through the existing v2 push path and its compare-and-swap, each upload bounded by the deadline. A failed upload is recorded and retried and never fails the run. Teardown stops the worker, runs the unchanged final push, and prints the last confirmed checkpoint, the lag and the last failure. If `wrap` is killed, the remote pin stays at the last confirmed checkpoint. A checkpoint is not an independent signed timestamp and does not protect rows written after the last confirmed pin.
+
 ### Breaking
 
 - Every command that reads `.nock/config.toml` (`wrap`, `doctor`, `validate`, `status`, `log`, `config`, `verify`) now refuses a config file when the file, or any directory its path passes through (including through symlinks), is group- or world-writable or owned by a user other than root or the invoker. A config under a writable directory, including a project under `/tmp` or `/var/tmp`, that loaded before is refused after upgrading. Set `NOCKLOCK_ALLOW_UNTRUSTED_CONFIG=1` to accept a known-safe layout.

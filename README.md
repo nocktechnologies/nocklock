@@ -220,6 +220,7 @@ Configure an upgraded v2 anchor store:
 
 - `NOCKLOCK_ANCHOR_URL`: HTTPS base URL; plain HTTP is accepted only on loopback for development/tests.
 - `NOCKLOCK_ANCHOR_TOKEN`: bearer token from the environment only, never a flag or config key. Both variables are removed from the fenced child's environment.
+- `NOCKLOCK_ANCHOR_CHECKPOINT_INTERVAL` (optional): upload the committed head during the run at this interval, such as `60s`. Off by default. `NOCKLOCK_ANCHOR_CHECKPOINT_DEADLINE` bounds each upload. Both are removed from the child too. A checkpoint shows the store held that head when it confirmed the upload; it is not an independent signed timestamp, and rows after the last confirmed pin are not protected off-box. See [audit log](docs/how-it-works/audit-log.md#in-run-checkpoints-opt-in).
 
 After creating a signed audit trail with `wrap`, select the current project explicitly:
 
