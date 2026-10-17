@@ -225,6 +225,14 @@ jobs:
 
       # A fresh `nocklock init` config must pass its own `doctor` and wrap
       # under the syscall rule both apply on macOS (N11047).
+      #
+      # Hosted macOS runners let sudo run without a password prompt, and
+      # Seatbelt does not stop sudo, so doctor lists a reachable sudo-no-prompt
+      # deputy and reads PARTIAL (exit 3). Exit 3 passes only when deputies are
+      # the sole reason: no gaps, every boundary enforced, every warning in the
+      # Deputies group, and the sudo row present. That makes this step a live
+      # proof of the deputy scan. Exit 0 still requires PROTECTED with nothing
+      # reachable; any other exit fails.
       - name: init, doctor, wrap on the default config
         env:
           XDG_STATE_HOME: ${{ runner.temp }}/nocklock-state
@@ -234,7 +242,29 @@ jobs:
           proj="$(mktemp -d)"
           cd "$proj"
           "$RUNNER_TEMP/nocklock" init
-          "$RUNNER_TEMP/nocklock" doctor
+          rc=0
+          "$RUNNER_TEMP/nocklock" doctor --json > "$RUNNER_TEMP/doctor.json" || rc=$?
+          cat "$RUNNER_TEMP/doctor.json"
+          case "$rc" in
+            0)
+              jq -e '.verdict == "PROTECTED"
+                and ([.checks[] | select(.group == "Deputies" and .status == "reachable")] | length == 0)' \
+                "$RUNNER_TEMP/doctor.json"
+              ;;
+            3)
+              jq -e '.verdict == "PARTIAL"
+                and ((.gaps // []) | length == 0)
+                and (.boundaries | length > 0)
+                and all(.boundaries[]; .posture == "enforced")
+                and all(.checks[] | select(.severity == "warning" or .severity == "critical"); .group == "Deputies")
+                and any(.checks[]; .group == "Deputies" and .name == "sudo-no-prompt" and .status == "reachable")' \
+                "$RUNNER_TEMP/doctor.json"
+              ;;
+            *)
+              echo "doctor exited $rc; want 0 (PROTECTED) or 3 (PARTIAL from deputies only)" >&2
+              exit 1
+              ;;
+          esac
           "$RUNNER_TEMP/nocklock" wrap -- /bin/echo WRAP_OK
 
       # The full non-root unit suite, natively on darwin. The seven Linux
