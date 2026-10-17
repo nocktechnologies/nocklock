@@ -19,7 +19,4 @@ if [ "${GITHUB_EVENT_NAME:-}" = pull_request ]; then
   fi
 fi
 
-echo "code=$code"
-if [ -n "${GITHUB_OUTPUT:-}" ]; then
-  echo "code=$code" >>"$GITHUB_OUTPUT"
-fi
+echo "code=$code" | tee -a "${GITHUB_OUTPUT:-/dev/null}"

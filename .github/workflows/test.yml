@@ -225,8 +225,7 @@ jobs:
     #
     # Runs on a GitHub-hosted macos-latest runner (ephemeral + isolated), so PR
     # test code — even from forks — executes on an ephemeral runner.
-    # sandbox-exec ships on the hosted image. Runs beside the
-    # ubuntu `test` job (no `needs: test`), so it can neither delay nor skip it.
+    # sandbox-exec ships on the hosted image.
     needs: changes
     if: >-
       github.event_name == 'pull_request' && github.event.pull_request.draft == false &&

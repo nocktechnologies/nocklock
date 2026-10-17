@@ -11,6 +11,9 @@ SCRIPT = pathlib.Path(__file__).resolve().parent / 'ci-code-changed.sh'
 
 class CodeChangedTest(unittest.TestCase):
     def setUp(self):
+        self.fresh_repo()
+
+    def fresh_repo(self):
         self.temp = tempfile.TemporaryDirectory()
         self.addCleanup(self.temp.cleanup)
         self.root = pathlib.Path(self.temp.name)
@@ -64,7 +67,7 @@ class CodeChangedTest(unittest.TestCase):
         )
         for paths, want in cases:
             with self.subTest(paths=paths):
-                self.setUp()
+                self.fresh_repo()
                 self.merge_pr(paths)
                 result, output = self.run_script()
                 self.assertEqual(result.returncode, 0, result.stderr)
