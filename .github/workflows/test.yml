@@ -2,7 +2,7 @@ name: test
 
 on:
   push:
-    branches: [main]
+    branches: [main, next]
   pull_request:
     # ready_for_review is included so the macos-enforce job's
     # `draft == false` gate fires on the draft→ready transition. This applies
@@ -35,8 +35,8 @@ jobs:
 
       # Cheap cross-check that the CLI still compiles for darwin. The macOS
       # enforcement job is PR-and-non-draft-only, so it does not guard pushes to
-      # main; this step runs on every push and PR and is what actually catches a
-      # non-Linux build break (the exact gap that let wrap.go:413 ship — N10709).
+      # main or next; this step runs on every push and PR and catches a non-Linux
+      # build break (the exact gap that let wrap.go:413 ship — N10709).
       # `go vet` (not `go build`) because it compiles the non-test code AND
       # type-checks _test.go files, so a darwin-only test-file break is caught
       # here too rather than only in the PR-gated macOS job.
@@ -55,8 +55,27 @@ jobs:
             exit 1
           fi
 
+      - name: public content check
+        run: |
+          git fetch origin next --depth=1
+          python3 scripts/check-public-content.py
+          python3 -m unittest discover -s scripts -p test_public_checks.py -v
+
       - name: test
         run: go test ./... -count=1
+
+      - name: Landlock probe thread-affinity regression
+        run: |
+          for procs in 2 8 32; do
+            GOMAXPROCS="$procs" go test ./internal/fence/fs/landlock \
+              -run '^TestLandlock(AllowRWPaths|ChildCanMutateRootButNotRelocatedAudit|SocketOnlyPreservesCrossDirectoryOperations)$' \
+              -count=10 -v -timeout=3m
+          done
+
+      - name: deterministic cross-thread Landlock control
+        run: |
+          PYTHONDONTWRITEBYTECODE=1 python3 scripts/test_landlock_probe_thread_affinity.py
+          python3 scripts/test-landlock-probe-thread-affinity.py
 
       - name: concurrent proxy stop race regression
         run: go test -race -run '^TestProxyStopConcurrent$' -count=20 ./internal/fence/network
@@ -68,6 +87,22 @@ jobs:
         run: |
           make build-all
           bash scripts/test-init-default-linux.sh
+
+  unpinned-landlock-soak:
+    name: optional unpinned Landlock reproduction
+    if: github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    timeout-minutes: 12
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+      - name: attempt natural migration (inconclusive is not an enforcement pass)
+        run: python3 scripts/test-landlock-probe-thread-affinity.py --unpinned
 
   claude-code-preset:
     name: claude-code preset · Landlock enforcement (non-root)

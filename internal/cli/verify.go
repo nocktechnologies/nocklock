@@ -18,6 +18,7 @@ import (
 	"runtime"
 	"strings"
 	"time"
+	"unicode"
 
 	"github.com/BurntSushi/toml"
 	"github.com/nocktechnologies/nocklock/internal/config"
@@ -66,6 +67,7 @@ var verifyCmd = &cobra.Command{
 		"dial invalid/example hosts, check a canary " +
 		"environment variable is absent, and attempt one side-effect-free denied syscall.",
 	RunE: func(cmd *cobra.Command, args []string) error {
+		applyWalkTimeoutFlag(cmd)
 		asJSON, _ := cmd.Flags().GetBool("json")
 		asAudit, _ := cmd.Flags().GetBool("audit")
 		exportPub, _ := cmd.Flags().GetBool("export-pubkey")
@@ -86,10 +88,11 @@ var verifyCmd = &cobra.Command{
 			return runVerifyAgainstRemoteAnchor(ctx, cmd.OutOrStdout(), pubFlag)
 		}
 		if anchorFile != "" {
-			return runVerifyAgainstAnchor(cmd.OutOrStdout(), anchorFile, pubFlag)
+			return runVerifyAgainstAnchor(cmd.Context(), cmd.OutOrStdout(), anchorFile, pubFlag)
 		}
 		if asAudit {
-			return runAuditVerify(cmd.Context(), cmd.OutOrStdout(), pubFlag)
+			requireClosed, _ := cmd.Flags().GetBool("require-closed")
+			return runAuditVerify(cmd.Context(), cmd.OutOrStdout(), pubFlag, requireClosed)
 		}
 		report, err := runVerify(cmd.Context(), currentDoctorCapabilities, currentProbeRunner)
 		if err != nil {
@@ -119,7 +122,77 @@ func init() {
 	verifyCmd.Flags().String("ed25519-pub", "", "trusted Ed25519 public key (base64 or hex); requires the audit log to be signed")
 	verifyCmd.Flags().String("against-anchor", "", "verify the local audit chain against an external anchor file (detects tail truncation and rollback)")
 	verifyCmd.Flags().Bool("against-remote-anchor", false, "verify the local audit chain against the latest anchor in the off-box store at $NOCKLOCK_ANCHOR_URL (absence fails)")
+	verifyCmd.Flags().Bool("require-closed", false, "with --audit, fail verification when a run has no signed session_close (a neutral unclosed run; close_mismatch and rows_after_close fail regardless)")
+	verifyCmd.Flags().Duration("walk-timeout", 0, walkTimeoutFlagUsage)
 	rootCmd.AddCommand(verifyCmd)
+}
+
+// writeVerificationCoverage describes recording limits, not the current host
+// or historical enforcement. Public history-verification helpers defer it so
+// failures retain the same notice without changing their verdict or exit code.
+func writeVerificationCoverage(w io.Writer, unclosedRuns []string) {
+	fmt.Fprintln(w, "COVERAGE: LIMITED")
+	fmt.Fprintln(w, "Verification checks recorded events; it does not prove that every action was logged.")
+	fmt.Fprintln(w, "Individual allowed file accesses are not recorded. Some file denials, kernel-dropped packets, proxy bypasses and Linux CONFINED Unix-socket connections can leave no audit row.")
+	fmt.Fprintln(w, "This check does not establish past enforcement or recording coverage.")
+	if len(unclosedRuns) > 0 {
+		listed := unclosedRuns
+		suffix := ""
+		if len(listed) > maxListedUnclosedRuns {
+			suffix = fmt.Sprintf(", … and %d more", len(listed)-maxListedUnclosedRuns)
+			listed = listed[:maxListedUnclosedRuns]
+		}
+		safe := make([]string, len(listed))
+		for i, id := range listed {
+			safe[i] = sanitizeSessionID(id)
+		}
+		fmt.Fprintf(w, "%d run(s) have no signed session_close, so their recorded extent is unverified (an interrupted writer, crash, or failed close looks identical): %s%s\n",
+			len(unclosedRuns), strings.Join(safe, ", "), suffix)
+	}
+}
+
+// maxListedUnclosedRuns caps how many unclosed session ids the COVERAGE notice
+// names inline. The reported count is always exact; only the inline id list is
+// capped, so a chain with very many unclosed runs cannot emit an unbounded line.
+const maxListedUnclosedRuns = 20
+
+// sanitizeSessionID renders a session id safe to print on a single notice line.
+// Session ids are normally UUIDs, but the session_id column is attacker-shaped in
+// a tamper scenario, so control characters (newlines included) are replaced and
+// the id is truncated — one run's entry stays on one line and carries no terminal
+// escape sequence.
+func sanitizeSessionID(id string) string {
+	if id == "" {
+		return "(empty)"
+	}
+	return sanitizeLine(id, 64)
+}
+
+// maxRunReasonRunes caps a RUN line's reason. Reasons can quote audit-row text
+// (a parse error on a session_close detail), so they are sanitized like ids.
+const maxRunReasonRunes = 256
+
+// sanitizeLine replaces every non-printable rune (control characters, newlines
+// and escapes included) with '?' and truncates to maxRunes, so attacker-shaped
+// text stays on one output line and carries no terminal escape sequence.
+func sanitizeLine(s string, maxRunes int) string {
+	var b strings.Builder
+	n := 0
+	for _, r := range s {
+		if n >= maxRunes {
+			b.WriteString("…")
+			break
+		}
+		// unicode.IsPrint is false for every control rune (including <0x20 and
+		// 0x7f) and other non-graphic runes, so it covers newline/escape spoofs.
+		if unicode.IsPrint(r) {
+			b.WriteRune(r)
+		} else {
+			b.WriteRune('?')
+		}
+		n++
+	}
+	return b.String()
 }
 
 // runVerifyAgainstAnchor authenticates an external anchor and checks the local
@@ -128,15 +201,27 @@ func init() {
 // The anchor's own signature is authenticated with the same key resolution as
 // verify --audit (an explicit --ed25519-pub, else the local managed key). The
 // log is opened READ-ONLY (no signing option): verifying never writes.
-func runVerifyAgainstAnchor(w io.Writer, anchorFile, pubFlag string) error {
+func runVerifyAgainstAnchor(ctx context.Context, w io.Writer, anchorFile, pubFlag string) error {
+	defer writeVerificationCoverage(w, nil)
+	// lockCtx bounds the identity-lock wait at anchorCLITimeout; walkCtx bounds only
+	// the verification walk (both derived from the same parent, so the walk never
+	// inherits the 30 s lock cap — the N11800 regression).
+	lockCtx, walkCtx, cancel := anchorCLIContexts(ctx)
+	defer cancel()
 	dbPath, projectRoot, err := resolveAuditDBPath()
 	if err != nil {
 		return err
 	}
 
-	anchor, err := logging.ReadAnchor(anchorFile)
+	data, err := os.ReadFile(anchorFile)
 	if err != nil {
-		return fmt.Errorf("failed to read anchor file %s: %w", anchorFile, err)
+		return err
+	}
+	var version struct {
+		Version int `json:"version"`
+	}
+	if err := json.Unmarshal(data, &version); err != nil {
+		return err
 	}
 
 	pub, err := resolveVerifyPublicKey(pubFlag)
@@ -150,8 +235,30 @@ func runVerifyAgainstAnchor(w io.Writer, anchorFile, pubFlag string) error {
 	}
 	defer logger.Close()
 
-	result, err := logger.VerifyAgainstAnchor(anchor, pub)
+	if version.Version == logging.AnchorV2Version {
+		anchor, err := logging.UnmarshalAnchorV2(data)
+		if err != nil {
+			return err
+		}
+		result, err := logger.VerifyAgainstAnchorV2Walk(lockCtx, walkCtx, anchor, pub)
+		if err != nil {
+			return err
+		}
+		return writeAnchorV2VerifyResult(w, result)
+	}
+	anchor, err := logging.UnmarshalAnchor(data)
 	if err != nil {
+		return err
+	}
+
+	// Pass walkCtx so --walk-timeout bounds the v1 walk exactly as the v2 path
+	// above. An interrupted walk surfaces ErrVerifyInterrupted raw (the v2 branch
+	// returns it unwrapped too), keeping the neutral interrupt text from N11800.
+	result, err := logger.VerifyAgainstAnchorContext(walkCtx, anchor, pub)
+	if err != nil {
+		if errors.Is(err, logging.ErrVerifyInterrupted) {
+			return err
+		}
 		return fmt.Errorf("anchor verification failed: %w", err)
 	}
 	return writeAnchorVerifyResult(w, result)
@@ -234,7 +341,12 @@ func resolveAuditDBPath() (dbPath, projectRoot string, err error) {
 	return dbPath, projectRoot, nil
 }
 
-func runAuditVerify(ctx context.Context, w io.Writer, pubFlag string) error {
+func runAuditVerify(ctx context.Context, w io.Writer, pubFlag string, requireClosed bool) error {
+	// unclosedRuns is populated once the run-lifecycle pass runs, so the deferred
+	// coverage notice (which may also fire on an early tamper return) can name any
+	// run missing its close. The closure reads it at return time, not defer time.
+	var unclosedRuns []string
+	defer func() { writeVerificationCoverage(w, unclosedRuns) }()
 	dbPath, projectRoot, err := resolveAuditDBPath()
 	if err != nil {
 		return err
@@ -255,8 +367,15 @@ func runAuditVerify(ctx context.Context, w io.Writer, pubFlag string) error {
 	}
 	defer logger.Close()
 
-	// Verify the chain (signature-aware when a key is available).
-	result, err := logger.VerifyChainSigned(pub, pubFlag != "")
+	// Verify the chain (signature-aware when a key is available), bounding only the
+	// walk by the operator's --walk-timeout (unbounded by default) so the flag
+	// advertised on `verify` means the same thing in every mode.
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	walkCtx, cancelWalk := anchorCLIWalkContext(ctx)
+	defer cancelWalk()
+	result, err := logger.VerifyChainSignedContext(walkCtx, pub, pubFlag != "")
 	if err != nil {
 		return fmt.Errorf("verification failed: %w", err)
 	}
@@ -269,7 +388,69 @@ func runAuditVerify(ctx context.Context, w io.Writer, pubFlag string) error {
 	if err := writeAuditVerifyResult(w, result); err != nil {
 		return err
 	}
-	return writeConfigDigestVerifyResult(w, history)
+	if err := writeConfigDigestVerifyResult(w, history); err != nil {
+		return err
+	}
+
+	// Run-lifecycle verification: report each run's observed lifecycle (closed,
+	// unclosed, pruned, close_mismatch, rows_after_close, legacy) over the same
+	// intact chain. close_mismatch and rows_after_close are tamper failures
+	// regardless of --require-closed; a neutral unclosed run fails only with it.
+	runs, err := logger.VerifyRuns(walkCtx)
+	if err != nil {
+		// Surface an interrupted walk raw, matching the anchor paths and the
+		// N11800 neutral-interrupt convention (no "failed" wording, no verdict).
+		if errors.Is(err, logging.ErrVerifyInterrupted) {
+			return err
+		}
+		return fmt.Errorf("run lifecycle verification failed: %w", err)
+	}
+	lifecycleFailed, unclosed := writeRunLifecycleResult(w, runs)
+	unclosedRuns = unclosed
+	if lifecycleFailed {
+		// A lifecycle tamper (close_mismatch or rows_after_close) is a hard
+		// failure even though the chain itself is authentic. Print an explicit
+		// AUDIT verdict line so a script reading the first AUDIT: line cannot
+		// mistake the earlier AUTHENTIC/CONSISTENT verdict for the overall result.
+		fmt.Fprintln(w, "AUDIT: RUN INTEGRITY FAILURE")
+		return &exitCodeError{code: 1}
+	}
+	if requireClosed && len(unclosed) > 0 {
+		fmt.Fprintf(w, "AUDIT: UNCLOSED — %d run(s) have no signed session_close and --require-closed was set\n", len(unclosed))
+		return &exitCodeError{code: 1}
+	}
+	return nil
+}
+
+// writeRunLifecycleResult prints the per-run lifecycle verdicts and a summary
+// line, returning whether any run reported a tamper failure (close_mismatch or
+// rows_after_close) and the session ids of runs that are merely unclosed. The
+// unclosed ids feed the COVERAGE: LIMITED notice; a clean overall verdict must
+// never appear next to runs missing their close without that notice naming them.
+func writeRunLifecycleResult(w io.Writer, runs []logging.RunStatus) (failed bool, unclosed []string) {
+	if len(runs) == 0 {
+		return false, nil
+	}
+	var closed, pruned, legacy, failures int
+	for _, r := range runs {
+		switch r.Status {
+		case logging.RunClosed:
+			closed++
+		case logging.RunPruned:
+			pruned++
+		case logging.RunLegacy:
+			legacy++
+		case logging.RunUnclosed:
+			unclosed = append(unclosed, r.SessionID)
+		}
+		if r.Status.Failure() {
+			failures++
+			fmt.Fprintf(w, "RUN %s: %s — %s\n", sanitizeSessionID(r.SessionID), strings.ToUpper(string(r.Status)), sanitizeLine(r.Reason, maxRunReasonRunes))
+		}
+	}
+	fmt.Fprintf(w, "RUNS: %d closed, %d unclosed, %d pruned, %d legacy, %d integrity failure(s) across %d run(s)\n",
+		closed, len(unclosed), pruned, legacy, failures, len(runs))
+	return failures > 0, unclosed
 }
 
 // resolveVerifyPublicKey returns the Ed25519 public key to verify against, or
@@ -358,7 +539,14 @@ func writeAuditVerifyResult(w io.Writer, result *logging.ChainVerifyResult) erro
 	}
 
 	if result.SigState == "authentic" {
-		fmt.Fprintf(w, "AUDIT: AUTHENTIC — %d entries verified, %d Ed25519-signed and valid, chain_head signature valid\n", result.EntriesVerified, result.SigVerified)
+		if result.SigAttested > 0 {
+			// A signed verify_receipt attested a byte-identical prefix, so its
+			// signatures were re-proven unchanged, not re-verified in this run. Say
+			// exactly that ("say only what is enforced").
+			fmt.Fprintf(w, "AUDIT: AUTHENTIC — %d entries verified, %d Ed25519 signatures verified this run and %d attested by a prior signed verify_receipt (prefix re-proven byte-identical, not re-verified), chain_head signature valid\n", result.EntriesVerified, result.SigVerified, result.SigAttested)
+		} else {
+			fmt.Fprintf(w, "AUDIT: AUTHENTIC — %d entries verified, %d Ed25519-signed and valid, chain_head signature valid\n", result.EntriesVerified, result.SigVerified)
+		}
 		if result.SignedGenesisAt != nil && result.UnsignedEntries > 0 {
 			fmt.Fprintf(w, "NOTE: entries 1..%d predate signing adoption (%s); consistent but unsigned, not authenticated.\n", result.UnsignedThroughID, result.SignedGenesisAt.Format(time.RFC3339))
 		}
@@ -617,6 +805,15 @@ func verifyCheckFromProbe(fence string, result probeResult, err error) verifyChe
 		return verifyCheck{Fence: fence, Result: verifyFail, Detail: firstNonEmpty(result.Detail, "probe failed before attempting escape")}
 	}
 	if !result.Attempted {
+		if fence == "syscall" {
+			// The syscall control must prove the fence. An unattempted probe is
+			// inconclusive, never a skip that a passing report could hide.
+			detail := "syscall probe inconclusive"
+			if result.Detail != "" {
+				detail += ": " + result.Detail
+			}
+			return verifyCheck{Fence: fence, Result: verifyFail, Detail: detail}
+		}
 		return verifyCheck{Fence: fence, Result: verifySkip, Detail: firstNonEmpty(result.Detail, "probe was not attempted")}
 	}
 	if result.Blocked && err == nil {
@@ -631,6 +828,15 @@ func runProbeUnderWrap(ctx context.Context, cfg *config.Config, configPath, fenc
 	for _, deny := range cfg.Filesystem.Deny {
 		forbidden = append(forbidden, absConfigPath(projectRoot, deny))
 	}
+	// Exclude the original project's audit-state directory so staging the probe
+	// never places scratch or a grant inside the developer's real audit state.
+	// (The probe's own wrap runs against the temporary DB and state paths set
+	// below, not this directory.)
+	state, err := verificationAuditStateDir(projectRoot, config.AuditStateDir)
+	if err != nil {
+		return probeResult{Fence: fence}, err
+	}
+	forbidden = append(forbidden, resolveExistingPrefix(state))
 	tmp, cleanup, ok := createScratchOutside(forbidden)
 	if !ok {
 		return probeResult{Fence: fence}, fmt.Errorf("could not create verification scratch directory outside configured filesystem grants")
@@ -667,7 +873,23 @@ func runProbeUnderWrap(ctx context.Context, cfg *config.Config, configPath, fenc
 	// installed executable would conflict with a deny that contains it and can
 	// also widen the policy being verified.
 	probeBin := filepath.Join(tmp, "bin")
-	if err := os.Mkdir(probeBin, 0o755); err != nil {
+	if runtime.GOOS == "linux" && cfgCopy.Filesystem.Root != "" {
+		// The state/canary scratch may be under /var/tmp or /dev/shm, whose
+		// shared writable ancestors cannot be trusted for an LD_PRELOAD file.
+		// Put the executable pair in private scratch outside the same grants
+		// and denies, then validate its complete ancestry before using it.
+		// The state fallback is the state root (the parent of nocklock/<key>),
+		// never the excluded original-project audit directory itself.
+		home, _ := os.UserHomeDir()
+		stateRoot := filepath.Dir(filepath.Dir(state))
+		var cleanupBin func()
+		var ok bool
+		probeBin, cleanupBin, ok = createTrustedScratchOutsideBases(forbidden, []string{home, stateRoot})
+		if !ok {
+			return probeResult{Fence: fence}, errors.New("cannot create trusted verification executable scratch outside filesystem grants and denies; provide a safe home or audit-state directory")
+		}
+		defer cleanupBin()
+	} else if err := os.Mkdir(probeBin, 0o755); err != nil {
 		return probeResult{Fence: fence}, err
 	}
 	probeExe := filepath.Join(probeBin, "nocklock-probe")
@@ -680,6 +902,9 @@ func runProbeUnderWrap(ctx context.Context, cfg *config.Config, configPath, fenc
 	}
 	cfgCopy.Filesystem.Allow = append(cfgCopy.Filesystem.Allow, probeBin)
 	if runtime.GOOS == "linux" && cfgCopy.Filesystem.Root != "" {
+		if _, err := trustedInterposerPath(probeExe); err != nil {
+			return probeResult{Fence: fence}, fmt.Errorf("unsafe verification executable scratch: %w", err)
+		}
 		libPath, err := verifyFilesystemBackend()
 		if err != nil {
 			return probeResult{Fence: fence}, err
@@ -705,7 +930,14 @@ func runProbeUnderWrap(ctx context.Context, cfg *config.Config, configPath, fenc
 	if fence == "secret" {
 		cmd.Env = envWithOverrides(cmd.Env, extraEnv)
 	}
-	cmd.Env = envWithOverrides(cmd.Env, map[string]string{"XDG_STATE_HOME": probeStateHome})
+	// The probe config sits in scratch this process just created (MkdirTemp,
+	// 0700, invoker-owned) under a sticky world-writable base such as /var/tmp,
+	// which the config trust walk refuses. Accept that known-safe layout for the
+	// probe's own wrap only.
+	cmd.Env = envWithOverrides(cmd.Env, map[string]string{
+		"XDG_STATE_HOME":               probeStateHome,
+		config.AllowUntrustedConfigEnv: "1",
+	})
 	var stdout, stderr bytes.Buffer
 	cmd.Stdout = &stdout
 	cmd.Stderr = &stderr
@@ -808,7 +1040,11 @@ var verifyScratchBases = []string{"/var/tmp", "/dev/shm", os.TempDir()}
 var verifyWriteFile = os.WriteFile
 
 func createScratchOutside(roots []string) (string, func(), bool) {
-	for _, base := range verifyScratchBases {
+	return createScratchOutsideBases(roots, verifyScratchBases)
+}
+
+func createScratchOutsideBases(roots, bases []string) (string, func(), bool) {
+	for _, base := range bases {
 		if base == "" || pathWithinAny(base, roots) {
 			continue
 		}
@@ -821,6 +1057,29 @@ func createScratchOutside(roots []string) (string, func(), bool) {
 			continue
 		}
 		return dir, func() { os.RemoveAll(dir) }, true
+	}
+	return "", nil, false
+}
+
+// createTrustedScratchOutsideBases tries every safe base before refusing. Check
+// ancestry before copying executable bytes, including when HOME is unsafe but
+// the audit-state directory is safe. Recheck the created directory as well.
+func createTrustedScratchOutsideBases(roots, bases []string) (string, func(), bool) {
+	for _, base := range bases {
+		base, err := trustedInterposerDirectory(base)
+		if err != nil {
+			continue
+		}
+		dir, cleanup, ok := createScratchOutsideBases(roots, []string{base})
+		if !ok {
+			continue
+		}
+		canonical, err := trustedInterposerDirectory(dir)
+		if err != nil || pathWithinAny(canonical, roots) {
+			cleanup()
+			continue
+		}
+		return canonical, cleanup, true
 	}
 	return "", nil, false
 }
@@ -886,6 +1145,21 @@ func filesystemRootOnly(cfg *config.Config, projectRoot string) []string {
 		root = resolved
 	}
 	return []string{filepath.Clean(root)}
+}
+
+// verificationAuditStateDir returns the original project's audit-state directory
+// that verification scratch must stay out of. It fails probe setup on a resolver
+// error or an empty path instead of dropping the exclusion: an ignored error
+// leaves "", and resolveExistingPrefix("") is ".", which matches no scratch path.
+func verificationAuditStateDir(projectRoot string, auditStateDir func(string) (string, error)) (string, error) {
+	state, err := auditStateDir(projectRoot)
+	if err != nil {
+		return "", fmt.Errorf("cannot resolve the project's audit-state directory to keep verification scratch out of it: %w", err)
+	}
+	if state == "" {
+		return "", errors.New("cannot resolve the project's audit-state directory to keep verification scratch out of it: resolved to an empty path")
+	}
+	return state, nil
 }
 
 // resolveExistingPrefix resolves symlinks in the longest existing prefix of p

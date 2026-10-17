@@ -1,6 +1,7 @@
 package logging
 
 import (
+	"context"
 	"database/sql"
 	"os"
 	"path/filepath"
@@ -21,7 +22,8 @@ func tempDBPath(t *testing.T) string {
 func mustNewLogger(t *testing.T) (*Logger, string) {
 	t.Helper()
 	dbPath := tempDBPath(t)
-	l, err := NewLogger(dbPath, "")
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	l, err := NewLogger(dbPath, filepath.Dir(dbPath))
 	if err != nil {
 		t.Fatalf("NewLogger(%q) failed: %v", dbPath, err)
 	}
@@ -1199,7 +1201,7 @@ func TestVerifyChainMissingHeadWithEventsIsTampered(t *testing.T) {
 		t.Fatalf("delete chain_head: %v", err)
 	}
 
-	result, err := l.verifyChain(nil, false)
+	result, err := l.verifyChain(context.Background(), nil, false)
 	if err != nil {
 		t.Fatalf("verifyChain failed: %v", err)
 	}
@@ -1575,7 +1577,7 @@ func TestPruneReAnchorsChain(t *testing.T) {
 	l, dbPath := mustNewLogger(t)
 	l.Close()
 
-	l, _ = NewLogger(dbPath, "")
+	l, _ = NewLogger(dbPath, filepath.Dir(dbPath))
 
 	// Log an old event and several recent events
 	oldTime := time.Now().Add(-48 * time.Hour).UTC().Truncate(time.Second)
@@ -1671,7 +1673,7 @@ func TestTamperingAfterPruneDetected(t *testing.T) {
 	l, dbPath := mustNewLogger(t)
 	l.Close()
 
-	l, _ = NewLogger(dbPath, "")
+	l, _ = NewLogger(dbPath, filepath.Dir(dbPath))
 
 	// Log old event + new events
 	oldTime := time.Now().Add(-48 * time.Hour).UTC().Truncate(time.Second)
@@ -1729,7 +1731,7 @@ func TestTamperingAfterPruneDetected(t *testing.T) {
 	db.Close()
 
 	// Re-open and verify: should detect tampering
-	l, _ = NewLogger(dbPath, "")
+	l, _ = NewLogger(dbPath, filepath.Dir(dbPath))
 	defer l.Close()
 
 	result, err = l.VerifyChain()
@@ -1980,5 +1982,67 @@ func TestLogImmediateWaitsForWriteLock(t *testing.T) {
 	res, err := l.VerifyChain()
 	if err != nil || !res.Intact {
 		t.Fatalf("chain after LogImmediate: %+v, %v", res, err)
+	}
+}
+
+// TestLogBatchWaitsForConcurrentWriter holds the write lock on a second
+// connection, as another wrap process would, while LogBatch runs. The batch
+// must wait on busy_timeout and commit once the lock is released, instead of
+// failing at once with SQLITE_BUSY on a read-to-write upgrade.
+func TestLogBatchWaitsForConcurrentWriter(t *testing.T) {
+	l, dbPath := mustNewLogger(t)
+	defer l.Close()
+
+	ctx := context.Background()
+	other, err := sql.Open("sqlite", dbPath)
+	if err != nil {
+		t.Fatalf("open second connection: %v", err)
+	}
+	t.Cleanup(func() { other.Close() })
+	holder, err := other.Conn(ctx)
+	if err != nil {
+		t.Fatalf("reserve second connection: %v", err)
+	}
+	t.Cleanup(func() { holder.Close() })
+	if _, err := holder.ExecContext(ctx, "BEGIN IMMEDIATE"); err != nil {
+		t.Fatalf("take write lock on second connection: %v", err)
+	}
+
+	events := []Event{
+		sampleEvent(EventSecretBlocked, "secret", "API_KEY", true, "sess-batch"),
+		sampleEvent(EventSecretBlocked, "secret", "DB_PASSWORD", true, "sess-batch"),
+	}
+	done := make(chan error, 1)
+	go func() { done <- l.LogBatch(events) }()
+
+	// Hold the lock well under busy_timeout (5 s).
+	select {
+	case err := <-done:
+		t.Fatalf("LogBatch returned while another connection held the write lock (err=%v); it should wait on busy_timeout", err)
+	case <-time.After(300 * time.Millisecond):
+	}
+	if _, err := holder.ExecContext(ctx, "ROLLBACK"); err != nil {
+		t.Fatalf("release write lock: %v", err)
+	}
+
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("LogBatch after lock release: %v", err)
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatal("LogBatch did not return within 10 s of the lock release")
+	}
+
+	var n int
+	if err := l.db.QueryRow("SELECT COUNT(*) FROM events WHERE session_id = ? AND event_type = ?", "sess-batch", string(EventSecretBlocked)).Scan(&n); err != nil {
+		t.Fatalf("count batch rows: %v", err)
+	}
+	if n != len(events) {
+		t.Fatalf("batch rows = %d, want %d", n, len(events))
+	}
+	res, err := l.VerifyChain()
+	if err != nil || !res.Intact {
+		t.Fatalf("chain after contended LogBatch: %+v, %v", res, err)
 	}
 }

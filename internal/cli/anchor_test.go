@@ -2,6 +2,7 @@ package cli
 
 import (
 	"bytes"
+	"context"
 	"database/sql"
 	"os"
 	"path/filepath"
@@ -189,7 +190,7 @@ func TestAnchorEmitVerify_EndToEnd(t *testing.T) {
 	// Emit the anchor through the CLI handler.
 	anchorPath := filepath.Join(t.TempDir(), "chain-anchor.json")
 	var emitOut bytes.Buffer
-	if err := runAnchorEmit(&emitOut, anchorPath); err != nil {
+	if err := runAnchorEmit(context.Background(), &emitOut, anchorPath); err != nil {
 		t.Fatalf("runAnchorEmit: %v", err)
 	}
 	anchor, err := logging.ReadAnchor(anchorPath)
@@ -202,8 +203,8 @@ func TestAnchorEmitVerify_EndToEnd(t *testing.T) {
 
 	// Intact chain verifies OK through the CLI handler.
 	var okOut bytes.Buffer
-	if err := runVerifyAgainstAnchor(&okOut, anchorPath, ""); err != nil {
-		t.Fatalf("runVerifyAgainstAnchor(intact) should pass, got: %v", err)
+	if err := runVerifyAgainstAnchor(context.Background(), &okOut, anchorPath, ""); err != nil {
+		t.Fatalf("runVerifyAgainstAnchor(context.Background(), intact) should pass, got: %v", err)
 	}
 	if !strings.Contains(okOut.String(), "ANCHOR: OK") {
 		t.Errorf("intact chain: missing ANCHOR: OK:\n%s", okOut.String())
@@ -228,7 +229,7 @@ func TestAnchorEmitVerify_EndToEnd(t *testing.T) {
 
 	// The CLI now reports TRUNCATION and exits non-zero.
 	var badOut bytes.Buffer
-	err = runVerifyAgainstAnchor(&badOut, anchorPath, "")
+	err = runVerifyAgainstAnchor(context.Background(), &badOut, anchorPath, "")
 	var ece *exitCodeError
 	if !asExitCodeError(err, &ece) || ece.code != 1 {
 		t.Fatalf("truncated chain must exit 1, got %v", err)

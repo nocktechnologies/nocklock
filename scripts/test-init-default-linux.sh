@@ -1,6 +1,10 @@
 #!/usr/bin/env bash
 # Exercise the generated default policy with a new home and the full Linux fence.
 set -euo pipefail
+# The interposer trust walk refuses group/world-writable ancestors. Under a
+# caller umask of 002 the probe dirs below (and cp's copies) would be created
+# group-writable and refused, so pin the mask before creating anything.
+umask 022
 
 if [[ "$(uname -s)" != Linux ]]; then
     echo "Linux only" >&2
@@ -15,12 +19,16 @@ scratch=$(mktemp -d "${HOME}/nocklock-init-default.XXXXXX")
 read_only=$(mktemp -d /tmp/nocklock-init-read-only.XXXXXX)
 
 mkdir -p "$scratch/home" "$scratch/project" "$scratch/outside"
-cp "$repo/nocklock" "$read_only/nocklock"
-cp "$repo/internal/fence/fs/interposer/libfence_fs.so" "$read_only/libfence_fs.so"
+# The interposer must not have /tmp's world-writable ancestor. ~/.claude
+# already has a default read-only grant; retain /tmp for its separate deny test.
+probe_bin="$scratch/home/.claude/nocklock-test"
+mkdir -p "$probe_bin"
+cp "$repo/nocklock" "$probe_bin/nocklock"
+cp "$repo/internal/fence/fs/interposer/libfence_fs.so" "$probe_bin/libfence_fs.so"
 
 run_fenced() {
     (cd "$scratch/project" && env -i HOME="$scratch/home" PATH=/usr/bin:/bin USER=nocklock-test \
-        "$read_only/nocklock" "$@")
+        "$probe_bin/nocklock" "$@")
 }
 
 run_fenced init
@@ -66,4 +74,36 @@ for denied in "$scratch/outside/blocked" "$read_only/blocked"; do
     }
 done
 
-echo "PASS: init wraps /bin/sh; project write succeeds; Landlock denies sibling and read-only /tmp writes"
+# Verify must stage its own Linux executable pair under trusted ancestors too.
+# A skipped filesystem probe would hide the original /var/tmp staging regression.
+# Capture the exit status and JSON without letting -e end the script. This script
+# owns only the filesystem result, so it asserts exactly one filesystem check and
+# that it is PASS. The exit code is deliberately NOT asserted: verify exits
+# nonzero for any failing fence check, including ones outside this script's scope
+# (e.g. the syscall probe, which some hosted runners break independently of this
+# PR; carded as N11822). The full JSON and status are printed whenever the exit
+# is nonzero so any such result stays visible rather than silently tolerated.
+verify_status=0
+run_fenced verify --json > "$scratch/verify.json" 2> "$scratch/verify.err" || verify_status=$?
+python3 - "$scratch/verify.json" "$scratch/verify.err" "$verify_status" <<'PYVERIFY'
+import json, sys
+path, err_path, status = sys.argv[1], sys.argv[2], int(sys.argv[3])
+raw = open(path).read()
+err = open(err_path).read()
+def fail(message):
+    sys.exit("verify: %s (exit %d)\nstdout: %s\nstderr: %s" % (message, status, raw, err))
+# A nonzero exit is not asserted (see the shell comment above), but print the
+# full report and status so a surprising nonzero exit is never silent.
+if status != 0:
+    print("verify: exited %d; full report follows:\nstdout: %s\nstderr: %s"
+          % (status, raw, err), file=sys.stderr)
+try:
+    checks = json.loads(raw)["checks"]
+except (ValueError, KeyError):
+    fail("no parsable JSON report")
+filesystem = [c for c in checks if c["fence"] == "filesystem"]
+if len(filesystem) != 1 or filesystem[0]["result"] != "PASS":
+    fail("expected exactly one filesystem check with result PASS")
+PYVERIFY
+
+echo "PASS: init wraps /bin/sh; project write succeeds; Landlock denies sibling and read-only /tmp writes; verify filesystem PASS"

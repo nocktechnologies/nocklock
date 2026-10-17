@@ -6,9 +6,96 @@ All notable changes to NockLock will be documented in this file.
 
 ### Added
 
-- Build and sign Ubuntu 24.04 amd64 CI candidates containing the CLI and matching filesystem interposer, with manifest/build provenance and disposable-host fresh-install acceptance (N11746). Candidates are not releases; production installation, upgrades, rollback and publication remain staged.
+- Build and sign Ubuntu 24.04 amd64 CI candidates containing the CLI and matching filesystem interposer, with manifest/build provenance and disposable-host fresh-install acceptance (N11746). Candidates are not releases; production installation, upgrades, rollback and publication remain staged. On the disposable hosted VM the workflow prepares only `/usr/local`, `/usr/local/bin`, `/usr/local/lib` and the `/opt` staging directory (four exact paths) and keeps a before/after ownership and mode receipt. The installer continues to reject symlinks, non-root owners and group/other-writable ancestors. `wrap` no longer falls back to the fixed `/usr/local/lib/nocklock` and `/usr/lib/nocklock` libraries when the CLI runs from a versioned candidate release directory and the adjacent library is missing; it refuses instead.
 
-- Add opt-in v2 anchor record encoding, signature and expected-pair verification, snapshot digests, and public interoperability vectors (N11742). V2 signs an independent `chain_id` and legacy migration witness. This is record-format support only: v1 remains the default; CLI, chain enrollment, persistence, network routes and server behavior are unchanged.
+### Breaking
+
+- Every command that reads `.nock/config.toml` (`wrap`, `doctor`, `validate`, `status`, `log`, `config`, `verify`) now refuses a config file when the file, or any directory its path passes through (including through symlinks), is group- or world-writable or owned by a user other than root or the invoker. A config under a writable directory, including a project under `/tmp` or `/var/tmp`, that loaded before is refused after upgrading. Set `NOCKLOCK_ALLOW_UNTRUSTED_CONFIG=1` to accept a known-safe layout.
+
+### Security
+
+- Before reading `.nock/config.toml`, NockLock resolves its path one component at a time, the way the kernel does, and checks the ownership and permissions of the file and of every directory the resolution passes through: each ancestor, each directory holding a symlink, and each directory a symlink leads into. It refuses a config any other user could rewrite: group- or world-writable (the sticky bit is not an exemption) or owned by someone other than root or the invoking user. A trusted system symlink such as macOS's `/var -> /private/var` loads; a symlink planted in `/tmp`, or one leading into a writable directory, is refused. The file it checks is the file it reads: it opens the resolved file, checks the open handle, and reads from it, and `..` after a symlink is resolved against the link's target, not lexically. This stops a config planted in a world-writable directory, or one whose directory chain another user owns, from being picked up by the next run. The refusal names the offending path and its fix. `NOCKLOCK_ALLOW_UNTRUSTED_CONFIG=1` is a documented escape hatch for a known-safe layout and is read only from the operator environment. `nocklock verify` sets it only for the probe it runs in its own freshly created scratch directory.
+
+### Fixed
+
+- `wrap` now exits 2 with a fatal message naming the error when it cannot write one of its own blocked-event rows (filesystem denials, macOS denial rows, network fence errors), the blocked environment variable rows or `session_end` to the audit log. A blocked-event write failure while the child runs stops the child. Previously these write errors were ignored and the run could exit 0. Rows the network proxy writes for individual requests are not yet covered.
+- Batched audit writes (the blocked environment variable rows and the secret preflight rows) now take the write lock up front with `BEGIN IMMEDIATE`, so a second concurrent `wrap` waits on `busy_timeout` instead of failing at once with `SQLITE_BUSY` and exiting 2.
+- `allow_private_ranges` no longer permits Alibaba Cloud's instance-metadata address (100.100.100.200). It stays blocked unconditionally, like AWS's metadata endpoints; the rest of the CGNAT range it sits in remains reachable under the option.
+- `verify`: the syscall check's positive control now runs an operation that succeeds without the fence, and an unfenced EINVAL is reported as inconclusive, which fails verify.
+
+### Changed
+
+- Docs: `AGENTS.md` is now the canonical contributor and agent map (task-to-location table, build and test, required checks, rules) and `CLAUDE.md` imports it. The full invariant list moved to `docs/context/invariants.md`. `docs/ROADMAP.md` is trimmed to one dated now / next / later page; release history stays in this file.
+- Red-team bench: a proof path or match containing a `..` component no longer counts as a match.
+
+## [0.11.0] - 2026-10-15
+
+v0.11.0 makes each run's audit trail provably complete or provably cut short. `wrap` now ends every run with a signed close row, and `nocklock verify --audit` reports whether each run closed cleanly, was cut short, was pruned, or fails its close check. Repeat verification is much faster on large trails: a signed receipt lets the verifier skip re-checking signatures it already checked, and a new `--walk-timeout` flag bounds long walks. The signed `session_start` row now records the SHA-256 of the command that ran. On Linux, `wrap` refuses an interposer library that is unsafe to load. Older audit databases verify as before.
+
+### Breaking
+
+- Linux: `wrap` now refuses an interposer library with unsafe ownership or permissions, or one reached through a path inside the project. An install that worked before can be refused after upgrading. Run `nocklock doctor` to see which check fails.
+- A project overlay that loosened a `--profile` fence through unusual key or table-name spelling no longer takes effect; the stricter profile value applies.
+
+### Security
+
+- Linux: before launch, `wrap` checks the ownership, permissions and symlink path of the interposer library and refuses one the project could control. Any path the trust check visits that lies inside the project (the library path, a parent directory, a symlink or a symlink target) rejects that library, so a file in the project cannot point `wrap` at a library of its choosing. The check follows at most 40 symlinks and has the same time-of-check window as the rest of the path walk. `nocklock doctor` reports an unsafe installation.
+
+### Added
+
+- Signed run close. At teardown, `wrap` writes a signed `session_close` row that binds the run's first and last row, its row count and a rolling hash over its rows. `nocklock verify --audit` reports each run as `closed`, `unclosed`, `pruned`, `close_mismatch`, `rows_after_close` or `legacy`. A mismatched close, or rows written after the close, always fail verification. An `unclosed` run fails only with the new `--require-closed` flag; otherwise the `COVERAGE: LIMITED` notice names it. A missing close cannot tell a crash from a deliberate cut, so it is never reported as tampering. Audit trails written before this release verify as `legacy`. The design is in `docs/design/run-lifecycle-contract.md`.
+- Signed verification receipt. After a full verification, a key holder stores a signed receipt for the verified prefix of the chain. Later runs re-check that prefix byte for byte and verify signatures only for newer rows, which removes about 97% of the per-row cost on an unchanged prefix. Any change to the prefix, its signatures or the key discards the receipt and runs the full check with the same diagnostics. Output labels those prefix signatures as attested by the receipt, not verified in this run. A verifier with only the public key reads receipts but never writes them, and `prune` drops the receipt.
+- `--walk-timeout` on `anchor emit`, `anchor push`, `verify --against-anchor`, `verify --audit` and `verify --against-remote-anchor`. It bounds only the local verification walk, separately from the 30-second lock and network budget. The default is `0` (no limit). An interrupted walk reports that the chain was not judged; it never reports the chain authentic or tampered, and it writes no anchor.
+- Command fingerprint. The signed `session_start` row records the resolved path and SHA-256 of the command `wrap` runs, with a status (`hashed`, `unresolved`, `unreadable`, `not_regular` or `oversized`). Only regular files up to 256 MiB are hashed. The hash covers the command file only, not its interpreter, libraries or modules. The command is quoted in the signed row so its text cannot plant a fake hash field, and the hashed path is the path `wrap` runs. See `docs/how-it-works/audit-log.md`.
+
+### Fixed
+
+- Off-box anchor push no longer loses its time budget to its own preflight checks. Each step (identity read, preflight walks, fetch and push) gets its own budget, so a slow walk can no longer drop off-box delivery without notice.
+- `anchor enroll` and `anchor migrate` no longer skip the local anchor write when the follow-up verification runs out of time. The follow-up fetch gets its own budget and the walk runs unbounded.
+- `wrap` stops the network proxy before it writes `session_end`, so the close row is the run's last row. If the proxy takes longer than 5 seconds to drain, the run is left `unclosed` rather than risk a false `rows_after_close`. A failed `session_end` write now prints a warning that names the run. The child's exit code is unchanged.
+- `verify --audit` applies `--walk-timeout` to the whole run check, uses less memory on large trails, and reads in one snapshot so a concurrent `prune` cannot make an honest run show `close_mismatch`. A run integrity failure prints an `AUDIT: RUN INTEGRITY FAILURE` line. The list of unclosed runs in the coverage notice is capped and sanitized.
+- The network proxy watchdog no longer reports a failure after teardown has cancelled it.
+- A project overlay can no longer loosen a `--profile` fence through unusual key or table-name spelling.
+- Red-team bench: a `path=` rule matches the whole path or a path-component suffix, so a bare filename works and `xcanary.txt` no longer matches `canary.txt`. The kernel companion prints cleanup failures after an interrupt.
+
+### Changed
+
+- The repository no longer carries internal drafts, review instructions or personal identifiers in its probe records and design notes; probe verdicts remain with host, account and home paths redacted. CI now checks published content and fails closed on malformed input.
+- New design notes: `docs/design/run-lifecycle-contract.md` and `docs/design/anchor-verification-profile.md`, with an env-gated profiling test.
+
+## [0.10.0] - 2026-10-14
+
+v0.10.0 gives each project its own remote audit chain: anchor v2 requires explicit `nocklock anchor enroll` or `anchor migrate` before remote push and verify, and prune and `anchor emit` now refuse unsafe states. It fixes two security issues: cloud metadata addresses in Linux netns bridge allocation, and current-directory lookup in `nocklock wrap`. Text output of audit and anchor verification now ends with a `COVERAGE: LIMITED` notice that states what recorded history does and does not prove.
+
+### Breaking
+
+- Remote anchor push/verify now require explicit v2 enrollment or migration and an upgraded store. They never fall back to key-only v1 routes. Legacy files remain explicitly verifiable; legacy local teardown emission remains v1 until enrollment.
+
+- `anchor emit` requires existing signing adoption and the original key. It refuses unsigned or stripped databases instead of adopting/re-signing them. Normal wrap signing adoption is unchanged.
+
+### Added
+
+- Add per-chain remote v2 anchors with explicit `anchor enroll` / `anchor migrate`, durable exact-request retry, expected-pair verification, signed-prefix checks, conditional remote updates and actual NCC handler/CLI acceptance coverage (N11742–N11745). Independent projects may share one signing key. Trusted external identity and SQLite metadata must agree; pending/enrolled chains refuse prune and moved state requires explicit relocation and remote verification.
+
+- Add trusted external chain identities and monotonic local registration state for v2 enrollment (N11744). Registration and prune share a process-safe lock; pending/enrolled or incomplete identity state refuses prune. The existing wrap path protects that directory independently of the configured DB and refuses unenforced filesystem access. Legacy chains still prune normally. The offline move procedure is documented and tested.
+
+- Add opt-in v2 anchor record encoding, signature and expected-pair verification, snapshot digests, and public interoperability vectors (N11742). V2 signs an independent `chain_id` and legacy migration witness. This supplies the record-format foundation for the v2 lifecycle and remote commands described above.
+
+- Sign a versioned Linux interposer report detail containing separate child report and collector-observed connection peer sections. Linux `SO_PEERCRED` identifies the connector; executable paths are best-effort procfs observations with explicit unavailable statuses. Capture runs before parsing in each connection's goroutine so it cannot stall the shared accept loop. The red-team bench matches legacy and version 1 report fields while preserving signed detail bytes. This does not identify each action's writer or prove an action occurred; existing audit signatures and enforcement/ACK behavior are unchanged (N11762).
+
+### Security
+
+- Exclude `169.254.169.0/24` and `169.254.170.0/24` from private Linux netns bridge allocation so common instance/container metadata endpoints cannot become bridge addresses. Exhaustive pure mapping tests cover all original slots; reservation and fail-closed proxy readiness remain unchanged (N11776).
+
+- Resolve the requested command against the caller's PATH before adding Linux/macOS fence helpers, preserving arguments and refusing implicit current-directory lookup even with `GODEBUG=execerrdot=0`. Hosted bare-command and CWD-decoy controls cover Landlock/seccomp and composed netns launch (N11777).
+
+### Changed
+
+- Append `COVERAGE: LIMITED` to audit and local/remote anchor verification, including errors. The notice distinguishes verified recorded history from complete activity logging or past enforcement; verdicts, exit codes, protocol behavior and live-probe/JSON output remain unchanged (N11761).
+
+- `nocklock wrap -- <cmd>` now resolves `<cmd>` on the caller's PATH and no longer runs an executable from the current directory. A command that relied on being found in the current directory must be given as an explicit path such as `./<cmd>` (N11777).
+
+- Document the card-to-`next` and batched `next`-to-`main` review/release workflow, verified ruleset checks and the maintainers' exact-head review gate; run test and network-egress CI on pushes to `next` as well as `main`. Refresh the roadmap to v0.9.3 while retaining the unimplemented packaging and anchor-protocol limits (N11740).
 
 ### Documentation
 
@@ -16,8 +103,45 @@ All notable changes to NockLock will be documented in this file.
 
 ### Fixed
 
-- Linux candidate CI: prepare only the four exact `/usr/local` install parents and `/opt` staging directory on the disposable hosted VM and retain their before/after ownership and mode receipt. The installer continues to reject symlinks, non-root owners and group/other-writable ancestors.
+- Preserve original registration replay after interrupted writes: any retained request blocks prune, including state `none`. Strict anchor opens validate existing adoption, key fingerprint and signed head before database mutation and observe live WAL state. V2 file verification distinguishes a missing key from a forged signature; emit handles nil contexts and confirms written v2 files. The real NCC acceptance gate adds a same-head `already_stored` CLI case and scopes/redacts its receipts (N11745).
+
+- Anchor v2 identity-lock waits now honor command cancellation and share the existing HTTP deadline. Wrap teardown starts its five-second budget before reading identity; interactive anchor commands and verification use 30 seconds. Durable filesystem writes remain synchronous rather than being abandoned on timeout (N11745).
+
+- Harden trusted identity retries and pruning (N11744): every pending retry redoes file/directory durability barriers before registration; post-rename sync errors explicitly report a committed replacement with uncertain durability. Only trusted identity writes preflight the full state-root lineage before mutation; ordinary state resolution, reads and prune retain their no-fsync behavior. Post-rename barriers stop at the canonical state root, with a defensive filesystem-root stop. State directory and boundary come from one resolution. Prune requires project context after a database rollback and times out on the identity lock after five seconds. Filesystem-enabled wraps deny the future identity directory before enrollment, including custom DB locations and broad grant overlaps. Explicitly unfenced legacy behavior remains degraded; existing identities require enforcement.
+
+- Concurrent first-time chain identity initialization now creates its persistent lock exclusively, then opens the winning inode. This avoids a macOS `os.Root.OpenFile` creation race while retaining anchored path, ownership and symlink checks.
+
+### Testing
+
+- Linux CI coverage for post-exec child credentials under scheduler stress, full installed netns wrap credentials, and test-only cross-thread exec/proxy-group mutation controls (N11747). The red-team companion records real Unix-socket and io_uring controls separately; older Landlock ABIs and unavailable io_uring remain explicit coverage gaps, with no change to the main bench score or runtime behavior.
+
+- N11747 acceptance harnesses fail on every timeout, including earlier passing output; installed-wrap probes kill isolated process groups and bound output draining/reaping. Hanging-stub controls cover both harnesses. Hosted-only credential jobs check actual runner metadata, and a failed kernel companion stops the main bench and fails the job while preserving receipts.
+
+- Tests: pin three disposable Landlock probes to their OS threads so Go cannot move their checks away from the restricted thread. Production already pinned its launch thread; runtime behavior is unchanged. CI repeats the probes under scheduler variation and deterministically proves that a separate existing thread remains unrestricted. Natural unpinned reproduction is an optional manual soak (N11773).
+
 - CI: fail the scoped-sudoers artifact check when a blanket `NOPASSWD:ALL` grant is present or grep cannot read the file. Only grep's no-match exit code passes; the previous standalone negation could continue under Bash errexit (N11749).
+
+### Upgrading from 0.9.3
+
+Remote anchor push and verify (`nocklock anchor push`, `nocklock verify --against-remote-anchor`) need `nocklock anchor enroll` or `nocklock anchor migrate` first. There is no fallback to the v1 key-only routes. The anchor store at `NOCKLOCK_ANCHOR_URL` must be upgraded to v2 before enroll, migrate, push or verify will work.
+
+Pruning (`nocklock log --prune`) refuses a chain whose registration is pending, enrolled, or left incomplete by an interrupted enroll (any retained registration request). To move that state to another machine or path, follow `docs/runbooks/chain-identity-move.md`.
+
+`nocklock anchor emit` refuses an unsigned or stripped database. It needs existing signing adoption and the original key.
+
+The text output of audit and anchor verification now ends with a `COVERAGE: LIMITED` block, including on errors. Verdicts and exit codes are unchanged; JSON and live-probe output are unchanged.
+
+`nocklock wrap -- <cmd>` no longer finds an executable in the current directory. Use an explicit path such as `./<cmd>` where you relied on that.
+
+`nocklock wrap` now protects the trusted audit-chain state directory before it starts the child, and refuses to start when it cannot. The refusals from the protection step (the first, second and last bullets below) are also written to the audit log as a blocked `file_blocked` row. What you may see and what to do:
+
+- `trusted chain identity requires an enabled filesystem fence; refusing to start with a remote pin at risk`: the chain has a trusted identity but `[filesystem] root` is empty, so no filesystem fence is enabled. Set `filesystem.root` to enable the fence. Sessions with no trusted identity and no fence root still start unfenced.
+- `trusted chain identity requires Linux Landlock enforcement; refusing to start with a remote pin at risk` (Linux): the chain has a trusted identity and `filesystem.linux_enforcement` is `off`. Remove the `off` setting (the default, `required`, is enough), or do not use a trusted chain identity in that session.
+- `filesystem fence requires Linux Landlock, but this kernel does not support it` (Linux): the empty and `preferred` values of `filesystem.linux_enforcement` behave as `required`, so a kernel without Landlock refuses to start. Run on a kernel with Landlock, or set `linux_enforcement = "off"` if you accept an unenforced filesystem fence.
+- `failed to build Landlock rules: deny path "<dir>" overlaps Landlock-granted tree "<tree>" and cannot be enforced by Landlock (allow-only); narrow the root/allow grant so it does not include the deny path` (Linux): a `filesystem.root` or `allow` grant contains the audit state directory. Narrow the grant so it does not include that directory.
+- `cannot protect trusted chain identity; refusing to start: ...` and `cannot protect future trusted chain state; refusing to start: ...`: NockLock could not resolve the state directory; the wrapped error names the cause. Fix it and start again.
+
+`file_blocked` audit rows from the filesystem fence now carry a versioned JSON detail envelope when the fence knows the connecting peer. The envelope has `version` (currently `1`), `report` (the fence report), and `connection_peer` (`credentials_status`, optional `credentials`, `executable`). Rows without peer information keep the old `op=<op> path=<path> reason=<reason>` text. A log parser that reads the `detail` field must accept both forms.
 
 ## [0.9.3] - 2026-10-14
 

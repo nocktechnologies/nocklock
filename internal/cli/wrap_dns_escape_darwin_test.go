@@ -186,7 +186,7 @@ func assertMacOSEgressDecisionsSigned(t *testing.T, project string) {
 	// Authoritative "signed and chained" verdict: the audit-chain verifier exits
 	// clean only when the chain is intact AND every signature verifies.
 	var buf bytes.Buffer
-	if err := runAuditVerify(context.Background(), &buf, ""); err != nil {
+	if err := runAuditVerify(context.Background(), &buf, "", false); err != nil {
 		t.Fatalf("verify --audit did not pass (chain/signature failure): %v\n%s", err, buf.String())
 	}
 }

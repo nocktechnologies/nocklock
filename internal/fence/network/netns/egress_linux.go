@@ -74,7 +74,7 @@ func (e *SubnetCollisionError) Error() string {
 	return "subnet collision: candidate already reserved by another run"
 }
 
-// generateBridgeCandidate generates a candidate link-local /30 identity
+// GenerateBridgeCandidate generates a candidate link-local /30 identity
 // with random names and addresses, but does NOT attempt reservation.
 // Used by both NewBridgeSpec (unprivileged candidate generator) and by
 // SetupAndExec (privileged retry loop).
@@ -83,24 +83,9 @@ func GenerateBridgeCandidate() (BridgeSpec, error) {
 	if _, err := rand.Read(raw[:]); err != nil {
 		return BridgeSpec{}, fmt.Errorf("generate private netns bridge id: %w", err)
 	}
-	id := binary.BigEndian.Uint32(raw[:])
-	slot := id & 0x3fff // 16,384 non-overlapping /30s in 169.254.0.0/16.
-	octet3 := slot >> 6
-	octet4 := (slot & 0x3f) << 2
-	nameID := fmt.Sprintf("%08x", id)
-	reservationID := fmt.Sprintf("169.254.%d.%d", octet3, octet4+1)
-
 	// Generate the candidate bridge specification. Actual reservation is performed
 	// by the privileged helper (SetupAndExec) which has write access to /run/nocklock-subnets.
-	bridge := BridgeSpec{
-		Namespace:      "nln" + nameID,
-		HostInterface:  "nlh" + nameID,
-		ChildInterface: "nlc" + nameID,
-		HostAddress:    fmt.Sprintf("169.254.%d.%d", octet3, octet4+1),
-		ChildAddress:   fmt.Sprintf("169.254.%d.%d", octet3, octet4+2),
-		ReservationID:  reservationID,
-	}
-	return bridge, nil
+	return bridgeCandidateForID(binary.BigEndian.Uint32(raw[:])), nil
 }
 
 // NewBridgeSpec generates a candidate link-local /30 identity for one netns run.

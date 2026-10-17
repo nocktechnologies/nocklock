@@ -464,3 +464,70 @@ func TestLoadAcceptsAuditLogInProjectSubdirectory(t *testing.T) {
 		t.Fatalf("an audit log in a project subdirectory should load: %v", err)
 	}
 }
+
+func TestLegacyAuditStateResolutionWithExecuteOnlyParent(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("root bypasses parent read permissions")
+	}
+	base := resolvedTempDir(t)
+	parent := filepath.Join(base, "search-only")
+	state := filepath.Join(parent, "state")
+	if err := os.MkdirAll(state, 0700); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("XDG_STATE_HOME", state)
+	project := resolvedTempDir(t)
+	if _, err := EnsureAuditStateDir(project); err != nil {
+		t.Fatalf("readable parent control: %v", err)
+	}
+	if err := os.Chmod(parent, 0111); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { os.Chmod(parent, 0700) })
+	if _, err := EnsureAuditStateDir(project); err != nil {
+		t.Fatalf("legacy existing state requires only parent search permission: %v", err)
+	}
+	cfg := DefaultConfig()
+	if _, _, err := ResolveDBPath(&cfg, filepath.Join(project, Dir, File)); err != nil {
+		t.Fatalf("legacy log/status DB resolution: %v", err)
+	}
+}
+
+// Keep the directory and its sync boundary in the same resolution even if the
+// configured symlink changes before the caller starts operating on the paths.
+func TestEnsureAuditStateLocationResolvesRootOnce(t *testing.T) {
+	project := resolvedTempDir(t)
+	first, second := trustedStateRoot(t), trustedStateRoot(t)
+	link := filepath.Join(resolvedTempDir(t), "state-link")
+	if err := os.Symlink(first, link); err != nil {
+		t.Skipf("symlinks unsupported: %v", err)
+	}
+	t.Setenv("XDG_STATE_HOME", link)
+	original := evalAuditStateRoot
+	calls := 0
+	evalAuditStateRoot = func(path string) (string, error) {
+		calls++
+		resolved, err := original(path)
+		if err != nil || calls != 1 {
+			return resolved, err
+		}
+		if err := os.Remove(link); err != nil {
+			return "", err
+		}
+		if err := os.Symlink(second, link); err != nil {
+			return "", err
+		}
+		return resolved, nil
+	}
+	t.Cleanup(func() { evalAuditStateRoot = original })
+	dir, root, err := EnsureAuditStateLocation(project)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if calls != 1 || root != first || dir != filepath.Join(first, "nocklock", projectStateKey(project)) {
+		t.Fatalf("split state resolution: calls=%d dir=%q root=%q", calls, dir, root)
+	}
+	if _, err := os.Stat(filepath.Join(second, "nocklock")); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("used retargeted state root: %v", err)
+	}
+}

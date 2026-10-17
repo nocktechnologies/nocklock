@@ -732,3 +732,50 @@ func TestWriteExternalFixture(t *testing.T) {
 		t.Fatal(err)
 	}
 }
+
+// TestVerifySession_ToleratesVerifyReceiptTable confirms the external, pubkey-only
+// verifier accepts an events.db that carries a populated verify_receipt row: it
+// reads only events and chain_head, so the new table never looks like tampering or
+// a schema mismatch (the "every reader accepts the new table" acceptance line for
+// the offline reader other modules use).
+func TestVerifySession_ToleratesVerifyReceiptTable(t *testing.T) {
+	dir := t.TempDir()
+	dbPath, pub := buildSignedDB(t, dir)
+	keyPath := filepath.Join(dir, "keys", testKeyFile)
+
+	// A key holder's verification records a verify_receipt row in events.db.
+	signer, err := logging.NewLogger(dbPath, "", logging.WithExistingSigning(keyPath))
+	if err != nil {
+		t.Fatalf("reopen signing logger: %v", err)
+	}
+	if res, err := signer.VerifyChainSigned(pub, true); err != nil || res.SigState != "authentic" {
+		signer.Close()
+		t.Fatalf("recording verify: %+v %v", res, err)
+	}
+	if err := signer.Close(); err != nil {
+		t.Fatalf("close: %v", err)
+	}
+
+	var n int
+	func() {
+		db, err := sql.Open("sqlite", dbPath)
+		if err != nil {
+			t.Fatalf("raw open: %v", err)
+		}
+		defer db.Close()
+		if err := db.QueryRow("SELECT COUNT(*) FROM verify_receipt").Scan(&n); err != nil {
+			t.Fatalf("count verify_receipt: %v", err)
+		}
+	}()
+	if n != 1 {
+		t.Fatalf("precondition: expected one verify_receipt row, got %d", n)
+	}
+
+	r, err := VerifySession(dbPath, pub, sessA)
+	if err != nil {
+		t.Fatalf("VerifySession with a receipt present: %v", err)
+	}
+	if r.Verdict != VerdictIntact {
+		t.Fatalf("verdict = %s (%s), want INTACT with a verify_receipt present", r.Verdict, r.Reason)
+	}
+}

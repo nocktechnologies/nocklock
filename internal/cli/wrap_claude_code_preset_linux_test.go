@@ -155,7 +155,7 @@ func TestWrapClaudeCodePresetBlocksSiblingProcEnviron(t *testing.T) {
 }
 
 // TestWrapClaudeCodePresetBlocksDescendantParentProcEnviron is the regression
-// test for Gander's round-2 MAJOR finding on #10757: granting the whole
+// test for the earlier review finding on #10757: granting the whole
 // /proc/self DIRECTORY (rather than the specific files Node needs) binds
 // Landlock to the wrapped child's /proc/<pid> dir inode, and Landlock rules are
 // inherited by every future descendant — so a grandchild of the wrapped process
@@ -205,9 +205,8 @@ func TestWrapClaudeCodePresetBlocksDescendantParentProcEnviron(t *testing.T) {
 }
 
 // requireNode returns an absolute path to node, or self-skips (hard-fails under
-// NOCKLOCK_AUDIT_REQUIRE=1). The absolute path matters: with Landlock + seccomp
-// on, the child runs through the __landlock-exec shim, which execve's argv[0]
-// directly (no PATH search).
+// NOCKLOCK_AUDIT_REQUIRE=1). These runtime-introspection tests use the known
+// runtime explicitly; TestWrapClaudeCodePresetLaunchPath covers bare lookup.
 func requireNode(t *testing.T) string {
 	t.Helper()
 	node, err := exec.LookPath("node")

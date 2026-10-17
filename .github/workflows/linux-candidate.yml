@@ -144,7 +144,12 @@ jobs:
         run: |
           lib="/usr/local/lib/nocklock/releases/nocklock-candidate-$CANDIDATE_COMMIT-linux-amd64/libfence_fs.so"
           sudo mv "$lib" "$lib.disabled"
-          trap 'sudo mv "$lib.disabled" "$lib"' EXIT
+          # Plant a root-owned stale library at both fixed fallback locations.
+          # The release layout must ignore them, so refusal proves no fallback.
+          trap 'sudo rm -f /usr/local/lib/nocklock/libfence_fs.so /usr/lib/nocklock/libfence_fs.so; sudo rmdir /usr/lib/nocklock 2>/dev/null || true; sudo mv "$lib.disabled" "$lib"' EXIT
+          sudo install -d -o root -g root -m 0755 /usr/lib/nocklock
+          sudo install -o root -g root -m 0755 "$lib.disabled" /usr/local/lib/nocklock/libfence_fs.so
+          sudo install -o root -g root -m 0755 "$lib.disabled" /usr/lib/nocklock/libfence_fs.so
           # Captured diagnostics intentionally belong to the runner, not test user.
           # shellcheck disable=SC2024
           if sudo -u nocklock-candidate env -i HOME=/home/nocklock-candidate \

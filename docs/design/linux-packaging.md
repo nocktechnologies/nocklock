@@ -195,6 +195,9 @@ unwritable by group/other. `/usr/local/bin/nocklock` points to the installed CLI
 Confirm the real executable directory resolves correctly through that symlink
 in acceptance. The fixed-library fallbacks must not silently select an old
 interposer when the adjacent one is missing; packaging tests must detect this.
+`wrap` therefore skips the fixed locations when the executable runs from
+`/usr/local/lib/nocklock/releases/<version>/`, and the hosted acceptance plants
+root-owned decoys at both fixed paths before requiring the refusal.
 
 The proposed installer has two explicit entry points:
 

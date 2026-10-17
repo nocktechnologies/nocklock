@@ -19,7 +19,7 @@ import sys
 import time
 import tempfile
 import tomllib
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 
 ATTACK_DEADLINE = 120  # seconds per attack
 HEX64 = r"[0-9a-fA-F]{64}"
@@ -192,13 +192,71 @@ def check_setup(config, evidence):
         raise SetupFault("evidence reachable from inside the fence: " + "; ".join(bad))
 
 
+def path_component_matches(path, value, *, suffix=False):
+    """Match a slash-delimited path sequence on component boundaries.
+
+    A path or value with a '..' component never matches: the sequence would
+    name a different file than its text suggests."""
+    path_parts = PurePosixPath(path).parts
+    value_parts = PurePosixPath(value).parts
+    if ".." in path_parts or ".." in value_parts:
+        return False
+    width = len(value_parts)
+    return bool(width) and any(
+        path_parts[start:start + width] == value_parts
+        and (not suffix or start + width == len(path_parts))
+        for start in range(len(path_parts) - width + 1)
+    )
+
+
+def nocklock_detail_matches(detail, atk):
+    """Match file report fields, never collector provenance; retain legacy text support."""
+    if not isinstance(detail, str):
+        return False
+    if atk["event"] != "file_blocked":
+        return atk["rule"] in detail and (not atk.get("match") or atk["match"] in detail)
+    try:
+        envelope = json.loads(detail)
+    except json.JSONDecodeError:
+        # An invalid JSON-looking envelope is not a legacy proof string.
+        if detail.lstrip().startswith(("{", "[", '"')):
+            return False
+        if atk["rule"] not in detail:
+            return False
+        if not atk.get("match"):
+            return True
+        if " path=" not in detail or " reason=" not in detail:
+            return False
+        legacy_path = detail.split(" path=", 1)[1].rsplit(" reason=", 1)[0]
+        return path_component_matches(legacy_path, atk["match"])
+    if (not isinstance(envelope, dict) or type(envelope.get("version")) is not int
+            or envelope["version"] != 1 or not isinstance(envelope.get("connection_peer"), dict)):
+        return False
+    report = envelope.get("report")
+    fields = {"type", "action", "path", "operation", "reason", "timestamp"}
+    if (not isinstance(report, dict) or set(report) != fields
+            or not all(isinstance(value, str) for value in report.values())
+            or report["type"] != "fs" or report["action"] != "blocked"):
+        return False
+    field, separator, value = atk["rule"].partition("=")
+    report_field = {"op": "operation", "path": "path", "reason": "reason"}.get(field)
+    if not separator or report_field is None:
+        return False
+    # A path rule matches the whole report path or a path-component suffix, so
+    # a bare filename rule matches an absolute path but "xcanary.txt" does not.
+    # op and reason stay prefix matches.
+    if report_field == "path":
+        field_ok = path_component_matches(report["path"], value, suffix=True)
+    else:
+        field_ok = report[report_field].startswith(value)
+    return field_ok and (not atk.get("match") or path_component_matches(report["path"], atk["match"]))
+
+
 def nocklock_proof(rows, atk):
     """First row of this attack's session matching the attack's proof fields."""
     want_blocked = 1 if atk["expect"] == "blocked" and not atk.get("floor") else 0
     for r in rows:
-        if r["event_type"] != atk["event"] or atk["rule"] not in r["detail"]:
-            continue
-        if atk.get("match") and atk["match"] not in r["detail"]:
+        if r["event_type"] != atk["event"] or not nocklock_detail_matches(r["detail"], atk):
             continue
         if r["blocked"] != want_blocked:
             continue

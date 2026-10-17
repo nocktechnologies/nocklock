@@ -2,7 +2,6 @@
 
 **Status:** Accepted (scoped, ready to build)
 **Date:** 2026-07-23
-**Author:** Mira (owner)
 
 ## Problem
 `doctor` answers *"can the fences be enforced on this host?"* (capability: Landlock ABI present,

@@ -50,12 +50,24 @@ Some changes need a conversation first. Open an issue before building a new fenc
 
 ## How to contribute
 
-1. Fork the repo and create a branch from `main`.
-2. Write tests for any new functionality.
-3. Run the full test suite; `go test ./...` must pass.
-4. Follow the code style; `go fmt` and `go vet` must pass clean.
-5. Write a clear PR description: what it does, why, and how to test it.
-6. Keep each PR to one feature, so it stays focused and reviewable.
+Outside contributors can start with a GitHub issue and a fork. A maintainer reviews PRs and merges accepted changes. If a required check cannot run on a fork, a maintainer arranges an in-repository branch for review.
+
+1. Create a feature branch from current `next` (in your fork if contributing externally). Keep it scoped to one issue and open the PR with **base `next`**, even though GitHub's default branch is `main`.
+2. Write tests for behavior changes, including an allowed-action control for each expected denial. Update the relevant docs and `CHANGELOG.md` under `[Unreleased]`.
+3. Run `go test ./... -v`, `go vet ./...`, and `go fmt ./...`; confirm `gofmt -l .` prints nothing. Self-review for secrets, path traversal, races and subprocess injection.
+4. Describe the problem, final behavior and validation in the PR. For a security change, include a negative control showing the guard fails when removed or bypassed. Mark the PR ready when it can be reviewed: the native macOS SBPL/full-suite job runs only on ready PRs.
+5. Wait for maintainer review and all applicable CI, including the native macOS and root netns jobs. A skipped job is not an enforcement proof.
+6. Address review findings and rerun affected checks on the final head. A maintainer reviews and squash-merges accepted PRs into `next`. A batch ships through a separate `next` → `main` release PR; a merge into `next` is not a release.
+
+See the [release runbook](docs/runbooks/release.md) for promotion, tagging, GitHub release, tap update and installation smoke.
+
+## Review depth
+
+Use the highest applicable tier in the PR body; higher tiers include all requirements of lower tiers. A maintainer arranges three independent simplification reviews for every tier and reviews the final head with applicable CI before merging.
+
+- **Tier 1:** Default, including documentation changes. Resolve review findings before merge.
+- **Tier 2:** Changes to authentication, secrets, environment variables, subprocesses, file handling, networking, data deletion, dependencies, modules, fences, audit or signing, installation, or privilege code. Include a written scope and a security negative control; request adversarial review.
+- **Tier 3:** Changes to key custody, release signing, or a privilege boundary. Add a short threat note and a one-line rollback plan.
 
 ## Code standards
 

@@ -33,6 +33,9 @@ func Supported() bool {
 	return err == nil && abi > 0
 }
 
+// Apply restricts the calling OS thread. Callers must lock their goroutine to
+// that thread before calling Apply and keep it locked through the protected
+// operations or exec. Other existing threads are not restricted by this call.
 func Apply(spec Spec) error {
 	if spec.ABI <= 0 || spec.HandledAccessFS == 0 {
 		return fmt.Errorf("invalid Landlock ruleset")

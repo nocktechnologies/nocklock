@@ -1,6 +1,6 @@
 # NockLock docs
 
-The root [README](../README.md) is the user-facing guide; [CLAUDE.md](../CLAUDE.md) is the contributor map. This set backs them up. If a page and the code disagree, the code wins; fix the page.
+The root [README](../README.md) is the user-facing guide; [AGENTS.md](../AGENTS.md) is the contributor map, with the full rule list in [invariants](context/invariants.md). This set backs them up. If a page and the code disagree, the code wins; fix the page.
 
 | Need | Go to |
 |---|---|

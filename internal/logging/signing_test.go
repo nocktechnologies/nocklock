@@ -20,7 +20,8 @@ func newSigningLogger(t *testing.T) (*Logger, string, ed25519.PublicKey) {
 	t.Helper()
 	dbPath := filepath.Join(t.TempDir(), "events.db")
 	keyPath := filepath.Join(t.TempDir(), "keys", "audit.key")
-	l, err := NewLogger(dbPath, "", WithSigning(keyPath))
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	l, err := NewLogger(dbPath, filepath.Dir(dbPath), WithSigning(keyPath))
 	if err != nil {
 		t.Fatalf("NewLogger(WithSigning) failed: %v", err)
 	}
@@ -263,7 +264,7 @@ func TestSigning_SignsSameCanonicalBytesAsHash(t *testing.T) {
 }
 
 // TestSigning_RowSignatureVerifiesOverByteLiteral pins the SIGNING contract
-// independently of the encoder — the NCC #1902 lesson applied to signing. The
+// independently of the encoder — the prior integration lesson applied to signing. The
 // test above proves the signature covers whatever canonicalBytes returns; this
 // one proves what those bytes ARE, by verifying the stored entry_sig of a known
 // row against a hardcoded byte string that never passes through canonicalBytes.

@@ -1,11 +1,13 @@
 """Tests for the red-team driver's process handling. Run: python3 -m unittest bench/redteam/test_redteam.py"""
 import os
+import json
 import socket
 import subprocess
 import sys
 import tempfile
 import time
 import unittest
+import tomllib
 from unittest import mock
 from pathlib import Path
 
@@ -158,6 +160,162 @@ class ClassifyTest(unittest.TestCase):
         self.assertEqual(redteam.classify(0, atk), (True, False))
         self.assertEqual(redteam.classify(None, atk), (False, True))
         self.assertEqual(redteam.classify(1, {**atk, "blocked_exit": []}), (False, True))  # undeclared: no silent pass
+
+
+class NockLockProofTest(unittest.TestCase):
+    attack = {"event": "file_blocked", "expect": "blocked",
+              "rule": "reason=outside allowed directory", "match": "canary.txt"}
+
+    def envelope(self):
+        return {"version": 1,
+                "report": {"type": "fs", "action": "blocked", "path": "/tmp/canary.txt",
+                           "operation": "open", "reason": "outside allowed directory",
+                           "timestamp": "2026-10-14T09:00:00Z"},
+                "connection_peer": {"credentials_status": "captured",
+                                    "credentials": {"pid": 123, "uid": 1000, "gid": 1000},
+                                    "executable": {"status": "observed", "path": "/usr/bin/cat"}}}
+
+    def proof(self, detail, **row_fields):
+        row = {"event_type": "file_blocked", "detail": detail, "blocked": 1, "id": 7,
+               "entry_hash": "original-hash", "prev_hash": "previous-hash", "entry_sig": "signature"}
+        return redteam.nocklock_proof([{**row, **row_fields}], self.attack)
+
+    def test_legacy_and_v1_keep_original_signed_detail(self):
+        for detail in ("op=open path=/tmp/canary.txt reason=outside allowed directory",
+                       json.dumps(self.envelope(), indent=2) + "\n"):
+            with self.subTest(detail=detail):
+                proof = self.proof(detail)
+                self.assertIsNotNone(proof)
+                self.assertEqual(proof["detail"], detail)
+                self.assertEqual(proof["chain_hash"], "original-hash")
+                self.assertEqual(proof["prev_hash"], "previous-hash")
+                self.assertTrue(proof["signed"])
+        self.assertIsNone(self.proof(json.dumps(self.envelope()), blocked=0))
+        self.assertIsNone(self.proof(json.dumps(self.envelope()), event_type="network_blocked"))
+
+    def test_match_requires_path_component_boundaries(self):
+        for path, expected in (("/tmp/xcanary.txt", False), ("/tmp/canary.txt.bak", False),
+                               ("/tmp/canary.txt", True), ("canary.txt", True)):
+            envelope = self.envelope()
+            envelope["report"]["path"] = path
+            details = (json.dumps(envelope), f"op=open path={path} reason=outside allowed directory")
+            for detail in details:
+                with self.subTest(path=path, detail=detail[:20]):
+                    self.assertEqual(self.proof(detail) is not None, expected)
+
+    def test_all_four_existing_file_rules_match_both_formats(self):
+        attacks = tomllib.loads(Path(redteam.__file__).with_name("attacks.toml").read_text())["attack"]
+        files = [attack for attack in attacks if attack.get("event") == "file_blocked"]
+        self.assertEqual({attack["id"] for attack in files}, {
+            "secret-file-read", "write-outside-root", "nockguard-key-read", "nockguard-trail-append"})
+        for attack in files:
+            envelope = self.envelope()
+            envelope["report"]["path"] = "/fixture/" + attack["match"]
+            legacy = f'op=open path={envelope["report"]["path"]} reason=outside allowed directory'
+            for detail in (legacy, json.dumps(envelope)):
+                with self.subTest(attack=attack["id"], detail=detail):
+                    self.assertTrue(redteam.nocklock_detail_matches(detail, attack))
+
+    def test_path_rule_matches_whole_path_or_component_suffix(self):
+        def matches(rule, path):
+            envelope = self.envelope()
+            envelope["report"]["path"] = path
+            return redteam.nocklock_detail_matches(
+                json.dumps(envelope), {**self.attack, "rule": "path=" + rule, "match": ""})
+        for rule, path in (("canary.txt", "/tmp/canary.txt"), ("dir/canary.txt", "/a/dir/canary.txt"),
+                           ("/tmp/canary.txt", "/tmp/canary.txt")):
+            with self.subTest(rule=rule, path=path):
+                self.assertTrue(matches(rule, path))
+        for path in ("/tmp/xcanary.txt", "/tmp/canary.txt.bak", "/tmp/canary.txt.d/x", "/tmp/notcanary.txt"):
+            with self.subTest(path=path):
+                self.assertFalse(matches("canary.txt", path))
+
+    def test_dotdot_components_never_match(self):
+        match = redteam.path_component_matches
+        self.assertTrue(match("/tmp/canary.txt", "canary.txt"))
+        self.assertTrue(match("/x/canary.txt", "canary.txt", suffix=True))
+        self.assertFalse(match("/tmp/canary.txt/../other", "canary.txt"))
+        self.assertFalse(match("/x/../canary.txt", "canary.txt", suffix=True))
+        self.assertFalse(match("/x/../canary.txt", "canary.txt"))
+        self.assertFalse(match("/tmp/canary.txt", "../canary.txt"))
+        for path in ("/tmp/canary.txt/../other", "/x/../canary.txt"):
+            envelope = self.envelope()
+            envelope["report"]["path"] = path
+            for detail in (json.dumps(envelope), f"op=open path={path} reason=outside allowed directory"):
+                with self.subTest(path=path, detail=detail[:20]):
+                    self.assertIsNone(self.proof(detail))
+
+    def test_collector_metadata_cannot_supply_action_proof(self):
+        envelope = self.envelope()
+        envelope["report"].update(path="/unrelated", reason="different reason")
+        envelope["connection_peer"]["executable"]["path"] = "canary.txt reason=outside allowed directory"
+        self.assertIsNone(self.proof(json.dumps(envelope)), "collector fields supplied false action proof")
+
+    def test_report_fields_cannot_supply_each_others_proof(self):
+        for field, value in (("reason", "different reason"), ("path", "/unrelated")):
+            envelope = self.envelope()
+            envelope["report"][field] = value
+            envelope["report"]["timestamp"] = "canary.txt reason=outside allowed directory"
+            with self.subTest(field=field):
+                self.assertIsNone(self.proof(json.dumps(envelope)))
+        envelope = self.envelope()
+        envelope["report"].update(reason="different reason", path="canary.txt reason=outside allowed directory")
+        self.assertIsNone(self.proof(json.dumps(envelope)))
+        envelope = self.envelope()
+        envelope["report"].update(path="/unrelated", reason="outside allowed directory canary.txt")
+        self.assertIsNone(self.proof(json.dumps(envelope)))
+        envelope = self.envelope()
+        envelope["report"]["reason"] = "not outside allowed directory"
+        self.assertIsNone(self.proof(json.dumps(envelope)))
+        envelope["report"]["reason"] = "outside allowed directory (policy)"
+        self.assertIsNotNone(self.proof(json.dumps(envelope)))
+        for rule, field in (("op=open", "operation"), ("path=canary.txt", "path")):
+            envelope = self.envelope()
+            envelope["report"][field] = "wrong"
+            envelope["report"]["reason"] += " " + rule
+            with self.subTest(rule=rule):
+                self.assertFalse(redteam.nocklock_detail_matches(json.dumps(envelope), {**self.attack, "rule": rule}))
+
+    def test_malformed_unsupported_and_wrong_shaped_envelopes_refuse(self):
+        for detail in ('{"reason=outside allowed directory canary.txt"',
+                       '["reason=outside allowed directory canary.txt"]',
+                       '"reason=outside allowed directory canary.txt"', "null", None):
+            with self.subTest(detail=detail):
+                self.assertIsNone(self.proof(detail))
+        for field, values in (("version", [2, True, "1", None]),
+                              ("report", [None, [], "reason=outside allowed directory canary.txt"]),
+                              ("connection_peer", [None, [], "reason=outside allowed directory canary.txt"])):
+            for value in values:
+                envelope = self.envelope()
+                envelope[field] = value
+                with self.subTest(field=field, value=value):
+                    self.assertIsNone(self.proof(json.dumps(envelope)))
+        for field in self.envelope():
+            envelope = self.envelope()
+            del envelope[field]
+            with self.subTest(missing=field):
+                self.assertIsNone(self.proof(json.dumps(envelope)))
+        for field in self.envelope()["report"]:
+            for value in (None, 1, True, []):
+                envelope = self.envelope()
+                envelope["report"][field] = value
+                with self.subTest(field=field, value=value):
+                    self.assertIsNone(self.proof(json.dumps(envelope)))
+            envelope = self.envelope()
+            del envelope["report"][field]
+            with self.subTest(missing_report=field):
+                self.assertIsNone(self.proof(json.dumps(envelope)))
+        for field, value in (("type", "network"), ("action", "allowed"), ("collector", "spoof")):
+            envelope = self.envelope()
+            envelope["report"][field] = value
+            with self.subTest(field=field):
+                self.assertIsNone(self.proof(json.dumps(envelope)))
+
+    def test_non_file_event_matching_remains_literal(self):
+        detail = '{"rule=allowlisted": "host=example.com"}'
+        attack = {"event": "network_passed", "rule": "rule=allowlisted", "match": "host=example.com"}
+        self.assertTrue(redteam.nocklock_detail_matches(detail, attack))
+        self.assertFalse(redteam.nocklock_detail_matches(detail, {**attack, "match": "host=wrong"}))
 
 
 class McpClientTest(unittest.TestCase):

@@ -337,3 +337,173 @@ func TestPrepareSecretProbePreservesFilteringSemantics(t *testing.T) {
 		})
 	}
 }
+
+// syscallCheck returns the syscall row of a verify report.
+func syscallCheck(t *testing.T, report verifyReport) verifyCheck {
+	t.Helper()
+	for _, check := range report.Checks {
+		if check.Fence == "syscall" {
+			return check
+		}
+	}
+	t.Fatalf("report has no syscall check: %+v", report.Checks)
+	return verifyCheck{}
+}
+
+func runVerifyWithSyscallProbe(t *testing.T, controlErr error, probe probeResult) verifyReport {
+	t.Helper()
+	dir := t.TempDir()
+	writeTestConfig(t, dir, doctorTestTOML(true))
+	withWorkingDir(t, dir)
+	restore := stubDoctorCapabilities(doctorCapabilities{
+		goos:           "linux",
+		fsBackend:      func() error { return nil },
+		landlockABI:    func() (int, error) { return 3, nil },
+		syscallBackend: func() bool { return true },
+		networkBackend: func() error { return nil },
+		sandboxExec:    func() error { return nil },
+		now:            func() time.Time { return time.Date(2026, 10, 16, 12, 0, 0, 0, time.UTC) },
+	})
+	defer restore()
+	restoreFS := stubVerifyFilesystemBackend(nil)
+	defer restoreFS()
+	orig := verifyPositiveControlRunner
+	defer func() { verifyPositiveControlRunner = orig }()
+	verifyPositiveControlRunner = func(_ context.Context, fence string, _ map[string]string) error {
+		if fence == "syscall" {
+			return controlErr
+		}
+		return nil
+	}
+	runner := func(_ context.Context, _ *config.Config, _ string, fence string, _ map[string]string) (probeResult, error) {
+		if fence == "syscall" {
+			return probe, nil
+		}
+		return probeResult{Fence: fence, Attempted: true, Blocked: true, Detail: "blocked"}, nil
+	}
+	report, err := runVerify(context.Background(), currentDoctorCapabilities, runner)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return report
+}
+
+func TestRunVerifySyscallInconclusiveControlFailsReport(t *testing.T) {
+	report := runVerifyWithSyscallProbe(t, errors.New("syscall positive control was inconclusive"), probeResult{Fence: "syscall", Attempted: true, Blocked: true, Detail: "denied"})
+	check := syscallCheck(t, report)
+	if check.Result != verifyFail || !strings.Contains(check.Detail, "inconclusive") {
+		t.Fatalf("syscall check = %+v, want FAIL mentioning inconclusive", check)
+	}
+	if verifyReportSucceeded(report) {
+		t.Fatalf("report succeeded despite an inconclusive syscall control: %+v", report.Summary)
+	}
+}
+
+func TestRunVerifySyscallUnattemptedFencedProbeFailsNotSkips(t *testing.T) {
+	report := runVerifyWithSyscallProbe(t, nil, probeResult{Fence: "syscall", Attempted: false, Blocked: false, Detail: "clone(CLONE_NEWUSER) inconclusive: EINVAL, not a denial"})
+	check := syscallCheck(t, report)
+	if check.Result != verifyFail || !strings.Contains(check.Detail, "inconclusive") {
+		t.Fatalf("syscall check = %+v, want FAIL mentioning inconclusive, not SKIP", check)
+	}
+	if verifyReportSucceeded(report) {
+		t.Fatalf("report succeeded despite an unattempted syscall probe: %+v", report.Summary)
+	}
+}
+
+func TestRunVerifySkipsSyscallOnDarwin(t *testing.T) {
+	dir := t.TempDir()
+	writeTestConfig(t, dir, doctorTestTOML(true))
+	withWorkingDir(t, dir)
+
+	restoreFS := stubVerifyFilesystemBackend(nil)
+	defer restoreFS()
+	restoreControl := stubVerifyPositiveControl(nil)
+	defer restoreControl()
+
+	caps := doctorCapabilities{
+		goos:           "darwin",
+		fsBackend:      func() error { return nil },
+		landlockABI:    func() (int, error) { return 0, nil },
+		syscallBackend: func() bool { return true },
+		networkBackend: func() error { return nil },
+		sandboxExec:    func() error { return nil },
+		now:            func() time.Time { return time.Date(2026, 7, 23, 12, 0, 0, 0, time.UTC) },
+	}
+	syscallRuns := 0
+	runner := func(_ context.Context, _ *config.Config, _ string, fence string, _ map[string]string) (probeResult, error) {
+		if fence == "syscall" {
+			syscallRuns++
+		}
+		return probeResult{Fence: fence, Attempted: true, Blocked: true, Detail: "blocked"}, nil
+	}
+
+	report, err := runVerify(context.Background(), caps, runner)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if syscallRuns != 0 {
+		t.Fatalf("runner invoked %d times for syscall on darwin, want 0", syscallRuns)
+	}
+	var found bool
+	for _, check := range report.Checks {
+		if check.Fence != "syscall" {
+			continue
+		}
+		found = true
+		if check.Result != verifySkip {
+			t.Fatalf("syscall check = %s (%s), want %s", check.Result, check.Detail, verifySkip)
+		}
+	}
+	if !found {
+		t.Fatal("report has no syscall check")
+	}
+}
+
+func TestVerifyCheckFromProbeUnattemptedSyscallIsInconclusive(t *testing.T) {
+	got := verifyCheckFromProbe("syscall", probeResult{Fence: "syscall"}, nil)
+	if got.Result != verifyFail {
+		t.Fatalf("result = %s, want %s", got.Result, verifyFail)
+	}
+	if got.Detail != "syscall probe inconclusive" {
+		t.Fatalf("detail = %q, want exactly %q", got.Detail, "syscall probe inconclusive")
+	}
+	withDetail := verifyCheckFromProbe("syscall", probeResult{Fence: "syscall", Detail: "EINVAL"}, nil)
+	if withDetail.Detail != "syscall probe inconclusive: EINVAL" {
+		t.Fatalf("detail = %q", withDetail.Detail)
+	}
+}
+
+// An unresolvable audit-state directory must fail probe setup, not leave an
+// empty exclusion: resolveExistingPrefix("") is ".", which matches nothing.
+func TestVerificationAuditStateDirFailsInsteadOfDroppingExclusion(t *testing.T) {
+	const want = "cannot resolve the project's audit-state directory to keep verification scratch out of it"
+	resolverErr := errors.New("no usable state root")
+	for _, tc := range []struct {
+		name    string
+		resolve func(string) (string, error)
+		reason  string
+	}{
+		{"resolver error", func(string) (string, error) { return "", resolverErr }, "no usable state root"},
+		{"empty path", func(string) (string, error) { return "", nil }, "resolved to an empty path"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			state, err := verificationAuditStateDir("/project", tc.resolve)
+			if err == nil || state != "" || !strings.Contains(err.Error(), want) || !strings.Contains(err.Error(), tc.reason) {
+				t.Fatalf("got state=%q err=%v, want refusal containing %q and %q", state, err, want, tc.reason)
+			}
+			// runProbeUnderWrap returns this error before attempting the probe, so
+			// the fence reports FAIL with the message rather than a silent skip.
+			check := verifyCheckFromProbe("filesystem", probeResult{Fence: "filesystem"}, err)
+			if check.Result != verifyFail || check.Detail != err.Error() {
+				t.Fatalf("check = %+v, want FAIL with detail %q", check, err.Error())
+			}
+		})
+	}
+
+	got, err := verificationAuditStateDir("/project", func(root string) (string, error) {
+		return filepath.Join("/state/nocklock", filepath.Base(root)), nil
+	})
+	if err != nil || got != "/state/nocklock/project" {
+		t.Fatalf("resolved state = %q err %v, want /state/nocklock/project", got, err)
+	}
+}
