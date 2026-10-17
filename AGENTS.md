@@ -15,7 +15,7 @@ Follows Engineering Standards v4.
 ## Build and test
 
 - `go build ./cmd/nocklock`: build; `make build`: build with version ldflags; `make build-all`: also builds the Linux interposer (`internal/fence/fs/interposer/`, needs a C compiler)
-- `go test ./... -v`: all tests (CI runs `go test ./... -count=1`)
+- `go test ./... -count=1`: the full suite. CI runs it once on every code PR as the gate; do not run it locally before you push. A PR that changes only `*.md` files or `docs/` runs no tests in CI (`scripts/ci-code-changed.sh`); the required checks still report green.
 - `go test -tags=integration ./...`: end-to-end tests against the built binary
 - `GOOS=darwin GOARCH=arm64 go vet ./...`: compiles the darwin code and test files from Linux; CI runs it on every push
 - `go fmt ./...` / `go vet ./...`: format and lint; `make lint` runs both. CI fails if `gofmt -l .` prints anything.
@@ -25,7 +25,7 @@ Follows Engineering Standards v4.
 
 Before you push:
 
-1. `go test ./... -v`, `go vet ./...` and `go fmt ./...` are clean.
+1. The tests for the packages you touched pass, plus lint: `go test -count=1 $(git diff --name-only origin/next... -- '*.go' | xargs -r -n1 dirname | sort -u | sed 's|^|./|')` (skip it when no Go file changed), then `go vet ./...` and `gofmt -l .` (prints nothing). Not the full suite; CI runs it.
 2. `python3 scripts/check-public-content.py` and `python3 scripts/check-agents-paths.py` pass.
 3. Self-review for hardcoded secrets, path traversal, race conditions and subprocess injection.
 4. The PR follows `CONTRIBUTING.md` and targets `next`.

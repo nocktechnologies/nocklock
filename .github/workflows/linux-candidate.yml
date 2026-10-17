@@ -8,12 +8,28 @@ permissions:
   contents: read
 
 jobs:
+  # Docs-only pull requests skip the suites (scripts/ci-code-changed.sh).
+  changes:
+    name: change detect (docs-only PRs skip the suites)
+    runs-on: ubuntu-latest
+    outputs:
+      code: ${{ steps.changes.outputs.code }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+          fetch-depth: 2
+      - id: changes
+        run: bash scripts/ci-code-changed.sh
+
   build:
     # Candidate signing is confined to this repository's reviewed PR/workflow
     # refs. No release trigger, contents:write, release API or production key.
+    needs: changes
     if: >-
       !startsWith(github.ref, 'refs/tags/') &&
-      (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository)
+      (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) &&
+      needs.changes.outputs.code == 'true'
     runs-on: ubuntu-24.04
     timeout-minutes: 15
     permissions:
