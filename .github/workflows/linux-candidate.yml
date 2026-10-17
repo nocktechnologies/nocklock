@@ -163,7 +163,7 @@ jobs:
           # shellcheck disable=SC2024
           if sudo -u nocklock-candidate env -i HOME=/home/nocklock-candidate \
             USER=nocklock-candidate PATH=/usr/bin:/bin /bin/bash -c \
-            'umask 077 && cd "$(mktemp -d "$HOME/missing-library.XXXXXX")" && /usr/local/bin/nocklock init && /usr/local/bin/nocklock wrap -- /bin/true' \
+            'cd "$(mktemp -d "$HOME/missing-library.XXXXXX")" && /usr/local/bin/nocklock init && /usr/local/bin/nocklock wrap -- /bin/true' \
             > "$RUNNER_TEMP/missing-interposer.txt" 2>&1; then
             echo 'FAIL: missing adjacent library allowed launch' >&2; exit 1
           fi

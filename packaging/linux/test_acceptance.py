@@ -6,6 +6,7 @@ import stat
 import tempfile
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
 
 from acceptance import check_doctor
 
@@ -60,12 +61,36 @@ class DoctorReceiptTest(unittest.TestCase):
                 with self.assertRaises((AssertionError, KeyError)): check_doctor(report, code)
 
 
+def load_provision():
+    spec = importlib.util.spec_from_file_location(
+        "provision_ci", Path(__file__).resolve().parent / "provision-ci.py")
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+class PrivateGroupTest(unittest.TestCase):
+    def check(self, group_name, members=(), sharers=()):
+        module = load_provision()
+        user = SimpleNamespace(pw_name="cand", pw_gid=2000)
+        others = [SimpleNamespace(pw_name=n, pw_gid=2000) for n in sharers]
+        module.pwd = SimpleNamespace(getpwnam=lambda name: user, getpwall=lambda: [user, *others])
+        module.grp = SimpleNamespace(getgrgid=lambda gid: SimpleNamespace(gr_name=group_name, gr_mem=list(members)))
+        module.require_private_group("cand")
+
+    def test_private_group_accepted(self):
+        self.check("cand", members=["cand"])
+
+    def test_shared_groups_refused(self):
+        for case in (dict(group_name="users"), dict(group_name="cand", members=["other"]),
+                     dict(group_name="cand", sharers=["other"])):
+            with self.subTest(case=case), self.assertRaises(ValueError):
+                self.check(**case)
+
+
 class ProvisionDirectoryTest(unittest.TestCase):
     def test_libexec_fallback_is_traversable_under_private_umask(self):
-        spec = importlib.util.spec_from_file_location(
-            "provision_ci", Path(__file__).resolve().parent / "provision-ci.py")
-        module = importlib.util.module_from_spec(spec)
-        spec.loader.exec_module(module)
+        module = load_provision()
         with tempfile.TemporaryDirectory() as scratch:
             target = Path(scratch) / "libexec"
             previous = os.umask(0o077)

@@ -2,8 +2,6 @@
 # Run only as the new, unprivileged CI account, outside the source checkout.
 set -euo pipefail
 export LC_ALL=C
-# nocklock refuses a config under a group/other-writable project directory.
-umask 077
 [[ $(id -u) != 0 && $(id -un) == nocklock-candidate ]]
 [[ $# == 2 && $1 =~ ^[0-9a-f]{40}$ && $2 == /* ]]
 commit=$1
@@ -29,6 +27,31 @@ entries = {x.strip() for x in re.split(r',\s+(?=/)', entries.strip())}
 assert entries == {'/usr/libexec/nocklock-egress-helper check', '/usr/libexec/nocklock-egress-helper setup --request-file *'}, entries
 PY
 sudo -n /usr/libexec/nocklock-egress-helper check | tee "$evidence/helper-check.txt" >/dev/null
+
+# Stock Ubuntu login shape: umask 002 under a private group. A 0775 project
+# owned by this account's private group must load; the same project at 0777
+# must still be refused.
+trust=$(mktemp -d "$HOME/nocklock-accept-trust.XXXXXX")
+[[ $(stat --format=%G "$trust") == "$(id -un)" && $(id -gn) == "$(id -un)" ]]
+chmod 0775 "$trust"
+(cd "$trust" && "$bin" init > "$evidence/trust-init.txt")
+for trust_mode in 0775 0777; do
+  chmod "$trust_mode" "$trust"
+  stat --format='%n uid=%U gid=%G mode=%a' "$trust" > "$evidence/trust-$trust_mode.stat"
+  (cd "$trust" && "$bin" doctor --json > "$evidence/trust-$trust_mode.json") || true
+done
+/usr/bin/python3 -I - "$evidence/trust-0775.json" "$evidence/trust-0777.json" <<'PY'
+import json, sys
+def config(path):
+    report = json.load(open(path))
+    return next(c for c in report["checks"] if c["name"] == "config")
+loaded = config(sys.argv[1])
+assert loaded["status"] == "loaded", ("0775 private-group project refused", loaded)
+refused = config(sys.argv[2])
+assert refused["status"] != "loaded", ("0777 project loaded", refused)
+assert "group- or world-writable (mode 0777)" in refused["message"], refused
+PY
+chmod 0700 "$trust"
 
 for mode in proxy netns; do
   fixture=$(mktemp -d "$HOME/nocklock-accept-$mode.XXXXXX")

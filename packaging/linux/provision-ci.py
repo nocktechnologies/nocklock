@@ -7,6 +7,7 @@ not shipped as an installer: public bootstrap, upgrades and rollback are absent.
 
 import argparse
 import fcntl
+import grp
 import os
 from pathlib import Path
 import platform
@@ -47,6 +48,15 @@ def stage_file(source, destination, limit):
             raise ValueError(f"oversized input: {source.name}")
         dst.write(data)
     destination.chmod(0o600)
+
+
+def require_private_group(name):
+    """Require name's primary group to be named name with no other members."""
+    account = pwd.getpwnam(name)
+    group = grp.getgrgid(account.pw_gid)
+    sharers = [p.pw_name for p in pwd.getpwall() if p.pw_gid == account.pw_gid and p.pw_name != name]
+    if group.gr_name != name or set(group.gr_mem) - {name} or sharers:
+        raise ValueError(f"{name} does not have a private primary group")
 
 
 def make_traversable_dir(path):
@@ -121,7 +131,9 @@ def provision(args):
         if not Path("/usr/libexec").exists():
             make_traversable_dir(Path("/usr/libexec"))
         trusted("/usr/libexec")
-        run("/usr/sbin/useradd", "--create-home", "--shell", "/bin/bash", TEST_USER)
+        # Stock Ubuntu account shape: a private group named after the user.
+        run("/usr/sbin/useradd", "--create-home", "--user-group", "--shell", "/bin/bash", TEST_USER)
+        require_private_group(TEST_USER)
         # Preflight all executable ancestors before the packaged helper script
         # writes its constrained sudoers grant. Its fixed CLI link cannot change
         # during this fresh-only install, and this harness never upgrades it.
