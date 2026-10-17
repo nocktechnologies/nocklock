@@ -597,6 +597,43 @@ func TestFindTrustedLibFenceFSRejectsProjectRelativeLibrary(t *testing.T) {
 	}
 }
 
+func TestFindTrustedLibFenceFSVersionedReleaseIgnoresFixedFallbacks(t *testing.T) {
+	fixed := map[string]bool{
+		"/usr/local/lib/nocklock/libfence_fs.so": true,
+		"/usr/lib/nocklock/libfence_fs.so":       true,
+	}
+	var inspected []string
+	inspect := func(path string, _ []string) (string, error) {
+		inspected = append(inspected, path)
+		if fixed[path] {
+			return path, nil
+		}
+		return "", os.ErrNotExist
+	}
+	release := "/usr/local/lib/nocklock/releases/nocklock-candidate-abc-linux-amd64/nocklock"
+	got, err := findTrustedLibFenceFS(release, "/project", nil, inspect)
+	if err == nil || got != "" {
+		t.Fatalf("release layout selected a fixed-path fallback %q (err=%v)", got, err)
+	}
+	if !strings.Contains(err.Error(), "trusted filesystem fence library not found") {
+		t.Fatalf("release layout refused for another reason: %v", err)
+	}
+	for _, path := range inspected {
+		if fixed[path] {
+			t.Fatalf("release layout inspected fixed fallback %q", path)
+		}
+	}
+	if len(inspected) != 1 || inspected[0] != filepath.Join(filepath.Dir(release), "libfence_fs.so") {
+		t.Fatalf("release layout must inspect only the adjacent library, inspected %v", inspected)
+	}
+
+	inspected = nil
+	got, err = findTrustedLibFenceFS("/usr/local/bin/nocklock", "/project", nil, inspect)
+	if err != nil || got != "/usr/local/lib/nocklock/libfence_fs.so" {
+		t.Fatalf("non-release layout must keep the fixed fallback, got %q err=%v", got, err)
+	}
+}
+
 func TestFindTrustedLibFenceFSFailsClosedWhenNoTrustedLibraryExists(t *testing.T) {
 	got, err := findTrustedLibFenceFS(
 		filepath.Join(t.TempDir(), "nocklock"),
