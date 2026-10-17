@@ -198,7 +198,8 @@ func appendRows(t *testing.T, l *logging.Logger, n int) {
 	t.Helper()
 	for i := 0; i < n; i++ {
 		if err := l.LogImmediate(logging.Event{Timestamp: time.Now(), EventType: logging.EventFileBlocked, Category: "filesystem", Detail: "/etc/shadow", Blocked: true, SessionID: "run"}); err != nil {
-			t.Fatalf("append: %v", err)
+			t.Errorf("append: %v", err)
+			return
 		}
 	}
 }
@@ -211,6 +212,11 @@ func TestAnchorCheckpointSettings(t *testing.T) {
 	}{
 		{"", "", nil, ""},
 		{"0", "", nil, ""},
+		{"0s", "", nil, ""},
+		{"0m", "", nil, ""},
+		{"0ms", "", nil, ""},
+		{"0s", "5s", nil, EnvAnchorCheckpointInterval},
+		{"5s", "", &anchorCheckpointConfig{Interval: 5 * time.Second, Deadline: 5 * time.Second}, ""},
 		{"", "5s", nil, EnvAnchorCheckpointInterval},
 		{"60s", "", &anchorCheckpointConfig{Interval: time.Minute, Deadline: 10 * time.Second}, ""},
 		{"3s", "", &anchorCheckpointConfig{Interval: 3 * time.Second, Deadline: 3 * time.Second}, ""},
@@ -412,7 +418,7 @@ func TestAnchorCheckpointOutageRecordsLagAndRecovers(t *testing.T) {
 	for _, want := range []string{
 		"NockLock: warning: chain anchor NOT pushed off-box",
 		"NockLock: anchor checkpoints: 2 confirmed, 2 failed; last confirmed row_count=8",
-		"lag at stop 1 row,",
+		"lag at final emission 1 row,",
 		"final flush not confirmed",
 		"NockLock: warning: last anchor checkpoint failure at",
 	} {
@@ -583,7 +589,7 @@ func TestAnchorCheckpointTeardownSummaryAfterFinalFlush(t *testing.T) {
 	finishAnchorSessionWithCheckpoints(&out, wrapLog, dbPath, c)
 	got := out.String()
 	if !strings.Contains(got, "NockLock: anchor checkpoints: 1 confirmed, 0 failed; last confirmed row_count=3") ||
-		!strings.Contains(got, "lag at stop 2 rows") || !strings.Contains(got, "final flush confirmed row_count=5") {
+		!strings.Contains(got, "lag at final emission 2 rows") || !strings.Contains(got, "final flush confirmed row_count=5") {
 		t.Fatalf("unexpected summary:\n%s", got)
 	}
 	if strings.Contains(got, "warning") {
@@ -666,4 +672,71 @@ func TestWrapAnchorCheckpointOptIn(t *testing.T) {
 			t.Fatalf("the wrapped child can see %s", key)
 		}
 	}
+}
+
+// A failed final emission must not be reported as zero lag: there is no head
+// to measure against, so the summary says the lag is unknown.
+func TestAnchorCheckpointSummaryFailedFinalEmissionIsNotZeroLag(t *testing.T) {
+	dbPath, store, wrapLog := checkpointFixture(t, 3)
+	c := openTestCheckpointer(t, dbPath, store, 5*time.Second)
+	if err := c.uploadOnce(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	appendRows(t, wrapLog, 2)
+	var out bytes.Buffer
+	c.report(&out, nil, false)
+	got := out.String()
+	if strings.Contains(got, "lag at final emission 0 rows") || strings.Contains(got, "lag at stop") {
+		t.Fatalf("failed final emission reported a measured lag:\n%s", got)
+	}
+	if !strings.Contains(got, "lag at final emission unknown") || !strings.Contains(got, "final flush not confirmed") {
+		t.Fatalf("unexpected summary:\n%s", got)
+	}
+	out.Reset()
+	c2 := openTestCheckpointer(t, dbPath, store, 5*time.Second)
+	c2.report(&out, nil, false)
+	if !strings.Contains(out.String(), "none confirmed; lag at final emission unknown") {
+		t.Fatalf("unexpected summary with no pin:\n%s", out.String())
+	}
+}
+
+// Opening the worker's log handle while the run's writer is busy must neither
+// fail nor wait on the busy timeout: on an enrolled chain the identity table
+// already exists, so the open takes no write lock.
+func TestAnchorCheckpointOpenDoesNotWaitOnLiveWriter(t *testing.T) {
+	dbPath, store, wrapLog := checkpointFixture(t, 3)
+	root, err := os.Getwd()
+	if err != nil {
+		t.Fatal(err)
+	}
+	stop := make(chan struct{})
+	finished := make(chan struct{})
+	go func() {
+		defer close(finished)
+		for {
+			select {
+			case <-stop:
+				return
+			default:
+			}
+			if err := wrapLog.LogImmediate(logging.Event{Timestamp: time.Now(), EventType: logging.EventFileBlocked, Category: "filesystem", Detail: "/etc/shadow", Blocked: true, SessionID: "run"}); err != nil {
+				t.Errorf("append: %v", err)
+				return
+			}
+		}
+	}()
+	for i := 0; i < 15; i++ {
+		start := time.Now()
+		s, err := openCheckpointSession(dbPath, root, store.srv.URL, remoteTestToken)
+		if err != nil {
+			t.Errorf("open %d: %v", i, err)
+			break
+		}
+		s.close()
+		if elapsed := time.Since(start); elapsed > time.Second {
+			t.Errorf("open %d waited %s behind the live writer", i, elapsed)
+		}
+	}
+	close(stop)
+	<-finished
 }

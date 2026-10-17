@@ -20,8 +20,8 @@ import (
 // stripped from the child's environment with the other anchor settings.
 const (
 	// EnvAnchorCheckpointInterval enables in-run checkpoints when set to a
-	// positive Go duration (for example "60s" or "5m"). Unset, empty or "0"
-	// leaves checkpoints off, the default.
+	// positive Go duration (for example "60s" or "5m"). Unset, empty or a
+	// zero duration ("0", "0s") leaves checkpoints off, the default.
 	EnvAnchorCheckpointInterval = "NOCKLOCK_ANCHOR_CHECKPOINT_INTERVAL"
 	// EnvAnchorCheckpointDeadline bounds one whole checkpoint upload: the
 	// verification walk, every identity-lock wait and every network step.
@@ -47,18 +47,23 @@ type anchorCheckpointConfig struct {
 func anchorCheckpointSettings() (*anchorCheckpointConfig, error) {
 	rawInterval := strings.TrimSpace(os.Getenv(EnvAnchorCheckpointInterval))
 	rawDeadline := strings.TrimSpace(os.Getenv(EnvAnchorCheckpointDeadline))
-	if rawInterval == "" || rawInterval == "0" {
+	var interval time.Duration
+	if rawInterval != "" {
+		var err error
+		interval, err = time.ParseDuration(rawInterval)
+		if err != nil || interval < 0 || (interval > 0 && interval < minAnchorCheckpointInterval) {
+			return nil, fmt.Errorf("%s=%q must be a duration of at least %s, such as 60s or 5m (unset it or use 0 to turn checkpoints off)", EnvAnchorCheckpointInterval, rawInterval, minAnchorCheckpointInterval)
+		}
+	}
+	if interval == 0 {
 		if rawDeadline != "" {
 			return nil, fmt.Errorf("%s is set but %s is not; set an interval such as 60s to enable anchor checkpoints, or unset the deadline", EnvAnchorCheckpointDeadline, EnvAnchorCheckpointInterval)
 		}
 		return nil, nil
 	}
-	interval, err := time.ParseDuration(rawInterval)
-	if err != nil || interval < minAnchorCheckpointInterval {
-		return nil, fmt.Errorf("%s=%q must be a duration of at least %s, such as 60s or 5m (unset it to turn checkpoints off)", EnvAnchorCheckpointInterval, rawInterval, minAnchorCheckpointInterval)
-	}
 	deadline := min(defaultAnchorCheckpointDeadline, interval)
 	if rawDeadline != "" {
+		var err error
 		deadline, err = time.ParseDuration(rawDeadline)
 		if err != nil || deadline <= 0 || deadline > interval {
 			return nil, fmt.Errorf("%s=%q must be a positive duration no longer than the interval (%s)", EnvAnchorCheckpointDeadline, rawDeadline, interval)
@@ -339,19 +344,29 @@ func (c *anchorCheckpointer) report(w io.Writer, final *logging.AnchorV2, flushe
 	}
 	var b strings.Builder
 	fmt.Fprintf(&b, "NockLock: anchor checkpoints: %d confirmed, %d failed", s.Confirmed, s.Failed)
-	stopRows := s.SeenRows
-	if final != nil && final.RowCount > stopRows {
-		stopRows = final.RowCount
+	// Lag is measured against the teardown emission, which reads the committed
+	// head once the worker has stopped and before the flush pushes it. If that
+	// emission failed there is no head to measure against, and SeenRows only
+	// reflects the last tick, so the lag is reported as unknown rather than as
+	// zero or a stale number.
+	lagText := "unknown (no final head was emitted)"
+	if final != nil {
+		stopRows := max(s.SeenRows, final.RowCount)
+		var pinned uint64
+		if s.LastPin != nil {
+			pinned = s.LastPin.RowCount
+		}
+		lag := uint64(0)
+		if stopRows > pinned {
+			lag = stopRows - pinned
+		}
+		lagText = rowsLabel(lag)
 	}
 	if s.LastPin != nil {
 		fmt.Fprintf(&b, "; last confirmed row_count=%d head=%s at %s", s.LastPin.RowCount, s.LastPin.HeadHash, s.LastPinAt.Format(time.RFC3339))
-		lag := uint64(0)
-		if stopRows > s.LastPin.RowCount {
-			lag = stopRows - s.LastPin.RowCount
-		}
-		fmt.Fprintf(&b, "; lag at stop %s, %s since last confirmed", rowsLabel(lag), c.now().UTC().Sub(s.LastPinAt).Round(time.Second))
+		fmt.Fprintf(&b, "; lag at final emission %s, %s since last confirmed", lagText, c.now().UTC().Sub(s.LastPinAt).Round(time.Second))
 	} else {
-		fmt.Fprintf(&b, "; none confirmed; lag at stop %s", rowsLabel(stopRows))
+		fmt.Fprintf(&b, "; none confirmed; lag at final emission %s", lagText)
 	}
 	switch {
 	case final != nil && flushed:
