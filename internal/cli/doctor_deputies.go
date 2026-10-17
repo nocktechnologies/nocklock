@@ -368,7 +368,10 @@ func deputyDoctorChecks(cfg *config.Config, caps doctorCapabilities, checks []do
 	seen := map[string]bool{}
 	row := func(name, what, path, why string, blocked bool, reason string) {
 		if path != "" {
-			key := resolvePathBestEffort(path)
+			// Key on the entry's own location, not where a final symlink
+			// points: a project link to a home file is a separate, replaceable
+			// entry. Resolving the parent still merges /var/run with /run.
+			key := filepath.Join(resolvePathBestEffort(filepath.Dir(path)), filepath.Base(path))
 			if seen[key] {
 				return
 			}

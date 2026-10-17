@@ -622,6 +622,32 @@ func TestDoctorDeputySymlinkedConfigIsReplaceable(t *testing.T) {
 	requireDeputyStatus(t, deputyRow(t, got, "shell-startup", zshrc), true)
 }
 
+// TestDoctorDeputyProjectLinkToHomeFileNotDeduplicated: a project config that
+// is a symlink to the matching home file must keep its own row. Home targets
+// are listed first, so deduplicating on the resolved target dropped the
+// replaceable project entry behind the blocked home row and left PROTECTED.
+func TestDoctorDeputyProjectLinkToHomeFileNotDeduplicated(t *testing.T) {
+	f := newDeputyFixture(t)
+	homeSettings := f.file(t, f.home, ".claude/settings.json")
+	projSettings := filepath.Join(f.project, ".claude", "settings.json")
+	if err := os.MkdirAll(filepath.Dir(projSettings), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(homeSettings, projSettings); err != nil {
+		t.Fatal(err)
+	}
+	got, code := f.run(t, config.DefaultTOML(), "linux", 9)
+	requireDeputyStatus(t, deputyRow(t, got, "agent-config", homeSettings), true)
+	row := deputyRow(t, got, "agent-config", projSettings)
+	requireDeputyStatus(t, row, false)
+	if !strings.Contains(row.Message, "can replace it") {
+		t.Fatalf("project link row must name the replace route: %+v", row)
+	}
+	if got.Verdict != doctorVerdictPartial || code != doctorExitPartial {
+		t.Fatalf("verdict=%q exit=%d, want PARTIAL/%d; rows=%+v", got.Verdict, code, doctorExitPartial, deputyRows(got))
+	}
+}
+
 // TestPasswordlessSudoProbeKillsDescendants: a sudo (or a wrapper earlier in
 // PATH) that starts a helper and waits must not leave that helper running after
 // the timeout. Real sudo is never run.
