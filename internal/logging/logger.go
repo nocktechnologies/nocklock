@@ -699,19 +699,34 @@ func (l *Logger) Log(event Event) error {
 // invokes the observer callback (that runs after the mutex is released) so the
 // same helper can write the session_close row inside CloseRun's critical section.
 func (l *Logger) appendLocked(event *Event) (string, error) {
-	tx, err := l.db.Begin()
+	// Take the write lock up front. A deferred transaction reads the chain head
+	// first, and SQLite fails its later upgrade to write at once with
+	// SQLITE_BUSY when another process holds the lock; busy_timeout does not
+	// cover that case. BEGIN IMMEDIATE makes busy_timeout apply.
+	ctx := context.Background()
+	conn, err := l.db.Conn(ctx)
 	if err != nil {
+		return "", fmt.Errorf("failed to reserve log connection: %w", err)
+	}
+	defer conn.Close()
+	if _, err := conn.ExecContext(ctx, "BEGIN IMMEDIATE"); err != nil {
 		return "", fmt.Errorf("failed to begin log transaction: %w", err)
 	}
-	defer tx.Rollback()
+	committed := false
+	defer func() {
+		if !committed {
+			_, _ = conn.ExecContext(ctx, "ROLLBACK")
+		}
+	}()
 	var hash string
 	var cb []byte
-	if err := l.logInTransaction(tx, event, &hash, &cb); err != nil {
+	if err := l.logInTransaction(conn, event, &hash, &cb); err != nil {
 		return "", err
 	}
-	if err := tx.Commit(); err != nil {
+	if _, err := conn.ExecContext(ctx, "COMMIT"); err != nil {
 		return "", fmt.Errorf("failed to commit log transaction: %w", err)
 	}
+	committed = true
 	if l.afterCommit != nil {
 		l.afterCommit()
 	}

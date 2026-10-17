@@ -170,7 +170,7 @@ Calendar https://alice.btc.calendar.opentimestamps.org: Pending confirmation in 
 
 The exit code was 1, as expected for a receipt with no Bitcoin attestation.
 
-**State: pending.** This is calendar acceptance, not Bitcoin confirmation. The receipt holds only the four calendar URIs. It proves nothing to a third party until it is upgraded and verified. The submission time above comes from the operator's own log.
+**State: pending.** This is calendar acceptance, not Bitcoin confirmation. The receipt holds the leaf hash, the nonces and hash steps, and the four calendar URIs, with no Bitcoin attestation. It proves nothing to a third party until it is upgraded and verified. The submission time above comes from the operator's own log.
 
 To upgrade later, run this in the directory that holds the receipt, once the calendars have committed to a Bitcoin block (usually some hours after submission):
 
@@ -179,7 +179,7 @@ ots upgrade digest.bin.ots    # replaces pending attestations with a Bitcoin blo
 ots verify digest.bin.ots     # checks the path against a Bitcoin source you trust
 ```
 
-An upgrade that reports no Bitcoin attestation means the calendar has not committed the digest yet, and the receipt stays pending. This repository stores the pending receipt only. When an upgraded receipt exists, record its state, the Bitcoin block height and hash, and the verifier's header source here.
+An upgrade that reports no Bitcoin attestation means the calendar has not committed the digest yet, and the receipt stays pending. Nothing in this repository creates, upgrades or verifies receipts yet: the feature is design only. The repository holds one example receipt, `examples/valid_chain_a.ots`, which is still pending. When an upgraded receipt exists, record its state, the Bitcoin block height and hash, and the verifier's header source here.
 
 Record for this example:
 
