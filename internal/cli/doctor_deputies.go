@@ -366,12 +366,14 @@ func deputyDoctorChecks(cfg *config.Config, caps doctorCapabilities, checks []do
 	}
 	var out []doctorCheck
 	seen := map[string]bool{}
-	row := func(name, what, path, why string, blocked bool, reason string) {
+	// entryKey keys a file row on the entry's own location, not where a final
+	// symlink points: a project link to a home file is a separate, replaceable
+	// entry. Resolving the parent still merges /var/run with /run.
+	entryKey := func(path string) string {
+		return filepath.Join(resolvePathBestEffort(filepath.Dir(path)), filepath.Base(path))
+	}
+	row := func(name, what, path, key, why string, blocked bool, reason string) {
 		if path != "" {
-			// Key on the entry's own location, not where a final symlink
-			// points: a project link to a home file is a separate, replaceable
-			// entry. Resolving the parent still merges /var/run with /run.
-			key := filepath.Join(resolvePathBestEffort(filepath.Dir(path)), filepath.Base(path))
 			if seen[key] {
 				return
 			}
@@ -404,17 +406,19 @@ func deputyDoctorChecks(cfg *config.Config, caps doctorCapabilities, checks []do
 		if err != nil || fi.Mode()&os.ModeSocket == 0 || !writable(s.path) {
 			continue
 		}
-		row(s.name, s.what, s.path, s.why, f.socketsBlocked, f.socketReason)
+		// A socket is reached by connecting through any symlink, so paths
+		// that resolve to the same socket are one deputy.
+		row(s.name, s.what, s.path, resolvePathBestEffort(s.path), s.why, f.socketsBlocked, f.socketReason)
 	}
 	for _, w := range writableDeputyTargets(caps.goos, h) {
 		listed, blocked, reason := f.fileDeputyAccess(w.path, writable)
 		if !listed {
 			continue
 		}
-		row(w.name, w.what, w.path, w.why, blocked, reason)
+		row(w.name, w.what, w.path, entryKey(w.path), w.why, blocked, reason)
 	}
 	if h.sudo != nil && h.sudo(context.Background()) == nil {
-		row("sudo-no-prompt", "sudo runs without a password prompt right now (a NOPASSWD rule or a cached sudo login)", "",
+		row("sudo-no-prompt", "sudo runs without a password prompt right now (a NOPASSWD rule or a cached sudo login)", "", "",
 			"A command run through sudo acts as root.", f.noNewPrivs, f.sudoReason)
 	}
 	if len(out) == 0 {

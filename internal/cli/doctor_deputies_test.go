@@ -648,6 +648,33 @@ func TestDoctorDeputyProjectLinkToHomeFileNotDeduplicated(t *testing.T) {
 	}
 }
 
+// TestDoctorDeputySymlinkedSocketCountsOnce: two candidate paths that resolve
+// to one socket (macOS Docker Desktop: /var/run/docker.sock links to the
+// daemon socket under the home directory) are one deputy, not two.
+func TestDoctorDeputySymlinkedSocketCountsOnce(t *testing.T) {
+	f := newDeputyFixture(t)
+	real := f.socket(t, "docker-socket", "real/docker.sock")
+	link := filepath.Join(f.sockDir, "link.sock")
+	if err := os.Symlink(real, link); err != nil {
+		t.Fatal(err)
+	}
+	f.sockets = append(f.sockets, deputyTarget{name: "docker-socket", path: link, what: "docker-socket fixture", why: whyContainerSocket})
+
+	got, _ := f.run(t, config.DefaultTOML(), "linux", 8)
+	n := 0
+	for _, r := range deputyRows(got) {
+		if r.Name == "docker-socket" {
+			n++
+		}
+	}
+	if n != 1 {
+		t.Fatalf("one daemon reached through two paths must be one row, got %d: %+v", n, deputyRows(got))
+	}
+	if c := reachableDeputies(got.Checks); c != 1 {
+		t.Fatalf("reachableDeputies = %d, want 1", c)
+	}
+}
+
 // TestPasswordlessSudoProbeKillsDescendants: a sudo (or a wrapper earlier in
 // PATH) that starts a helper and waits must not leave that helper running after
 // the timeout. Real sudo is never run.
