@@ -4,6 +4,10 @@ All notable changes to NockLock will be documented in this file.
 
 ## [Unreleased]
 
+## [0.13.0] - 2026-10-17
+
+v0.13.0 adds repo git-config execution warnings to `doctor` and a Linux netns proof for GitSpawn. It also simplifies audit appends, retires unused internal v1 HTTP routes, and removes inert cloud settings from newly generated configs. Existing config files and audit formats remain compatible. GitSpawn warnings leave doctor verdicts and exit codes unchanged; the new enforcement proof covers Linux netns mode only.
+
 ### Fixed
 
 - Integration fixtures now explicitly disable syscall enforcement when the shared fixture disables filesystem fencing, check the generated syscall section, and resolve the audit DB through the current config API. The runner keeps audit state in its temporary directory. Product enforcement and existing fence proofs are unchanged.

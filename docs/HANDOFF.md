@@ -6,6 +6,7 @@ No internal host names, personal names or absolute home paths: `scripts/check-pu
 
 ## What changed
 
+- 2026-10-17: release notes and roadmap prepared for v0.13.0 from next 7ee2a6e: GitSpawn doctor warnings and Linux netns proof, audit/config cleanup, and contributor/CI updates. Cleanup PR #252 already removed the batch's unused compatibility paths; the later GitSpawn and CI changes need no further cleanup.
 - 2026-10-17: integration fixtures corrected for release validation: explicit syscall-off in the shared unfenced config, supported generated config sections, current audit DB resolution and temporary audit state. The existing integration package passes on macOS with live networking (10 top-level passes, seven Linux-only skips); actual filesystem/Landlock proof configs are unchanged.
 - 2026-10-17: `AGENTS.md` became the full agent index, this file was added, and CI checks that every path `AGENTS.md` names is tracked by git (`scripts/check-agents-paths.py`). `docs/REPO-MAP.md` was re-verified at next 13fa7a6. Release-level changes are in `CHANGELOG.md`.
 - 2026-10-17: the path check also reads angle-bracketed and titled link targets, and no longer treats version strings as paths.
@@ -17,4 +18,4 @@ No internal host names, personal names or absolute home paths: `scripts/check-pu
 
 ## Still open
 
-- Nothing yet. `docs/REPO-MAP.md` states the commit its paths were verified at; restamp it whenever you touch it.
+- v0.13.0 preparation still needs review and merge to next, then an exact-head next-to-main promotion with applicable platform CI. Tagging, main-to-next back-sync, Homebrew update and installation smoke follow the release runbook. `docs/REPO-MAP.md` states the commit its paths were verified at; restamp it whenever you touch it.
