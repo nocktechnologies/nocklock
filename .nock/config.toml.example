@@ -54,8 +54,3 @@ block = [
 [logging]
 db = ".nock/events.db"
 level = "info"
-
-[cloud]
-enabled = false
-api_key = ""
-endpoint = "https://cc.nocktechnologies.io/api/fence/events/"

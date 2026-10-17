@@ -14,6 +14,8 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/nocktechnologies/nocklock/internal/config"
+
 	_ "modernc.org/sqlite"
 )
 
@@ -31,6 +33,11 @@ func TestMain(m *testing.M) {
 	tmp, err := os.MkdirTemp("", "nocklock-integration-*")
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "failed to create temp dir: %v\n", err)
+		os.Exit(1)
+	}
+	if err := os.Setenv("XDG_STATE_HOME", filepath.Join(tmp, "state")); err != nil {
+		fmt.Fprintf(os.Stderr, "failed to isolate audit state: %v\n", err)
+		os.RemoveAll(tmp)
 		os.Exit(1)
 	}
 	binPath := filepath.Join(tmp, "nocklock")
@@ -357,6 +364,9 @@ deny = ["~/.ssh/", "~/.aws/", "~/.gnupg/"]
 allow = ["github.com", "api.github.com", "api.anthropic.com"]
 allow_all = false
 
+[syscall]
+enforcement = "off"
+
 [secrets]
 pass = ["HOME", "PATH", "SHELL", "USER", "LANG", "TERM"]
 block = ["AWS_*", "STRIPE_*", "*_SECRET*", "*_PASSWORD*", "*_TOKEN*"]
@@ -403,6 +413,21 @@ func setupTestDirWithConfig(t *testing.T, config string) string {
 		t.Fatalf("failed to write config.toml: %v", err)
 	}
 	return dir
+}
+
+func auditDBPath(t *testing.T, dir string) string {
+	t.Helper()
+	t.Setenv("NOCKLOCK_ALLOW_UNTRUSTED_CONFIG", "1")
+	configPath := filepath.Join(dir, config.Dir, config.File)
+	cfg, err := config.Load(configPath)
+	if err != nil {
+		t.Fatalf("load integration config: %v", err)
+	}
+	dbPath, _, err := config.ResolveDBPath(cfg, configPath)
+	if err != nil {
+		t.Fatalf("resolve integration audit database: %v", err)
+	}
+	return dbPath
 }
 
 // runNocklock executes the nocklock binary with the given args in the given directory.
@@ -509,7 +534,7 @@ func TestInitCreatesConfig(t *testing.T) {
 	}
 
 	content := string(data)
-	for _, section := range []string{"[project]", "[filesystem]", "[network]", "[secrets]", "[logging]", "[cloud]"} {
+	for _, section := range []string{"[project]", "[filesystem]", "[network]", "[syscall]", "[secrets]", "[logging]"} {
 		if !strings.Contains(content, section) {
 			t.Errorf("config missing expected section %q", section)
 		}
@@ -651,7 +676,7 @@ func TestNetworkFenceAllowsGithub(t *testing.T) {
 // Test 8: Event logging records secret_blocked events
 // ---------------------------------------------------------------------------
 
-// TestEventLogging verifies that fence events are written to .nock/events.db
+// TestEventLogging verifies that fence events are written to the resolved audit DB
 // and that secret_blocked events include the variable name.
 func TestEventLogging(t *testing.T) {
 	dir := setupTestDir(t)
@@ -662,7 +687,7 @@ func TestEventLogging(t *testing.T) {
 		t.Logf("nocklock exited %d, stderr: %s", code, stderr)
 	}
 
-	dbPath := filepath.Join(dir, ".nock", "events.db")
+	dbPath := auditDBPath(t, dir)
 	if _, err := os.Stat(dbPath); os.IsNotExist(err) {
 		t.Fatalf("events.db was not created at %s", dbPath)
 	}
@@ -1218,7 +1243,7 @@ func TestWrapExportsSessionIDMatchingAuditDB(t *testing.T) {
 		t.Fatalf("wrap exited %d, stderr: %s", code, stderr)
 	}
 
-	db, err := sql.Open("sqlite", filepath.Join(dir, ".nock", "events.db"))
+	db, err := sql.Open("sqlite", auditDBPath(t, dir))
 	if err != nil {
 		t.Fatalf("failed to open events.db: %v", err)
 	}

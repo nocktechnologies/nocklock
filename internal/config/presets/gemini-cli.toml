@@ -66,8 +66,3 @@ socket_families = [
 # used verbatim. See the "Event log" section of the README for why.
 db = "events.db"
 level = "info"
-
-[cloud]
-enabled = false
-api_key = ""
-endpoint = "https://cc.nocktechnologies.io/api/fence/events/"

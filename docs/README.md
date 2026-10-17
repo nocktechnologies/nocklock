@@ -14,6 +14,7 @@ The root [README](../README.md) is the user-facing guide; [AGENTS.md](../AGENTS.
 | Where it is going | [Roadmap](ROADMAP.md) |
 | Specs and designs | [Designs](design/), [dated build specs](superpowers/specs/), [build plans](superpowers/plans/), [earlier design notes](../.claude/design/), [Mermaid diagrams](../.claude/diagrams/) |
 | Platform probe records | [Probes](probes/) |
+| What the last run changed and left open | [Handoff](HANDOFF.md) |
 
 ## Rules for these pages
 

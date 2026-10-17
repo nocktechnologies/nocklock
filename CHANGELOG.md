@@ -4,6 +4,28 @@ All notable changes to NockLock will be documented in this file.
 
 ## [Unreleased]
 
+## [0.13.0] - 2026-10-17
+
+v0.13.0 adds repo git-config execution warnings to `doctor` and a Linux netns proof for GitSpawn. It also simplifies audit appends, retires unused internal v1 HTTP routes, and removes inert cloud settings from newly generated configs. Existing config files and audit formats remain compatible. GitSpawn warnings leave doctor verdicts and exit codes unchanged; the new enforcement proof covers Linux netns mode only.
+
+### Fixed
+
+- Integration fixtures now explicitly disable syscall enforcement when the shared fixture disables filesystem fencing, check the generated syscall section, and resolve the audit DB through the current config API. The runner keeps audit state in its temporary directory. Product enforcement and existing fence proofs are unchanged.
+
+### Added
+
+- `doctor` warns about repo git config that runs code ("GitSpawn"). Run inside a git repository, it lists each local config key whose value is a program git runs, such as `core.fsmonitor`, `core.hooksPath`, `core.sshCommand`, `core.pager`, diff `textconv`, filter and merge drivers, credential helpers and `!` aliases. It reads `.git/config`, `config.worktree` and the files they include (not your system or global config) for the repository doctor runs in, and names the key, its value and the file it came from. A repository config doctor cannot read (an include that stalls the read past the timeout, such as a FIFO, or git older than 2.26) is reported as an incomplete warning, not skipped; a config git cannot parse or open gets no doctor warning, because every git command then fails with git's own error and runs nothing. The warning leaves the verdict and exit code unchanged, and doctor runs no hook and removes nothing.
+- A Linux CI proof for GitSpawn (`gitspawn-proof`). A planted `core.fsmonitor` program fires on `git status` and, unwrapped, reaches a host outside the allowlist, reads a file under `~/.ssh/` and writes outside the project. Under `wrap --profile claude-code --net-fence=netns` it still fires, all three are blocked, each block is a signed audit row, and `verify --audit` reports `AUTHENTIC`. Proxy-mode networking and macOS are not covered. See `docs/how-it-works/doctor-and-verify.md`.
+
+### Changed
+
+- `LogImmediate` uses the same immediate SQLite transaction as ordinary event writes, preserving write-lock waiting, committed-event callbacks, and signed run-close accounting without an unused predecessor lookup.
+- Removed the unused internal HTTP client for ordinary v1 anchor pushes and fetches. Remote v2 enrollment, migration, and conditional updates, plus local v1 anchor-file verification, are unchanged.
+- Newly generated configs, runtime presets, and examples omit the inert `[cloud]` section. Existing cloud settings still decode and validate as before; optional delivery uses `[audit.forward]`.
+- Release runbook: one whole-repo cleanup pass before the release notes.
+- CI skips the test suites on a pull request that changes only `*.md` files or `docs/` (`scripts/ci-code-changed.sh`). The required checks still run and report green; the public content, `AGENTS.md` path and gitleaks checks still run. Pushes to `main` and `next` always run everything. `AGENTS.md` now asks contributors to run the tests for the packages they touched, plus lint; the full suite runs once, in CI.
+- `AGENTS.md` is the full agent index, with build, checks, rules, gotchas and locations; `CLAUDE.md` only imports it and adds Claude Code notes. New `docs/HANDOFF.md` carries pod notes between runs. CI now fails when `AGENTS.md` names a path git does not track, or one outside the repo (`scripts/check-agents-paths.py`).
+
 ## [0.12.0] - 2026-10-17
 
 v0.12.0 refuses a `.nock/config.toml` that another user could rewrite, and `nocklock doctor` now lists deputies: more-privileged helpers the wrapped agent can reach and ask to act for it. `wrap` now fails the run when it cannot record one of its own blocks, including a blocked network request, and can push the committed audit head off-box during a run instead of only at teardown. CI now builds signed Linux install candidates; no release assets ship with this release. Read the upgrade notes under Breaking before you upgrade: a config in a directory other users can write is refused, and some `doctor` verdicts move from `PROTECTED` to `PARTIAL`.

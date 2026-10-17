@@ -6,11 +6,13 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"errors"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"strings"
 	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/nocktechnologies/nocklock/internal/logging"
 )
@@ -213,14 +215,62 @@ func TestV2NeverReplaysBearerOnRedirect(t *testing.T) {
 
 func TestV2ConflictRedactsEchoedToken(t *testing.T) {
 	a, pub := v2Fixture(t)
+	const token = "private-token"
+	for _, body := range []string{
+		"echo " + token,
+		strings.Repeat("x", maxErrorBodyBytes-len(token)+1) + token + strings.Repeat("x", 2000),
+	} {
+		s := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			w.WriteHeader(409)
+			_, _ = w.Write([]byte(body))
+		}))
+		_, err := PushV2(context.Background(), s.URL, token, a, pub, strings.Repeat("c", 64))
+		s.Close()
+		if err == nil || strings.Contains(err.Error(), token[:len(token)-1]) || !errors.Is(err, ErrAnchorConflict) {
+			t.Fatalf("conflict result: %v", err)
+		}
+		if len(err.Error()) > 700 {
+			t.Fatalf("server body not truncated to 512 bytes (error is %d bytes)", len(err.Error()))
+		}
+	}
+}
+
+func TestV2FetchHonorsContextTimeout(t *testing.T) {
+	a, pub := v2Fixture(t)
+	release := make(chan struct{})
 	s := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.WriteHeader(409)
-		_, _ = w.Write([]byte("echo private-token"))
+		select {
+		case <-r.Context().Done():
+		case <-release:
+		case <-time.After(5 * time.Second):
+		}
 	}))
 	defer s.Close()
-	_, err := PushV2(context.Background(), s.URL, "private-token", a, pub, strings.Repeat("c", 64))
-	if err == nil || strings.Contains(err.Error(), "private-token") || !errors.Is(err, ErrAnchorConflict) {
-		t.Fatalf("conflict result: %v", err)
+	defer close(release)
+	ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
+	defer cancel()
+	start := time.Now()
+	_, err := FetchLatestV2(ctx, s.URL, "private-token", a.AgentID, a.ChainID, pub)
+	if err == nil || !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("want deadline exceeded, got %v", err)
+	}
+	if time.Since(start) > 2*time.Second {
+		t.Error("fetch did not honor the context deadline")
+	}
+	if strings.Contains(err.Error(), "private-token") {
+		t.Fatalf("timeout error leaks the bearer token: %v", err)
+	}
+}
+
+func TestV2FetchCapsOversizedBody(t *testing.T) {
+	a, pub := v2Fixture(t)
+	s := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = io.WriteString(w, `{"version":2,"agent_id":"`+strings.Repeat("a", 200<<10)+`"}`)
+	}))
+	defer s.Close()
+	_, err := FetchLatestV2(context.Background(), s.URL, "private-token", a.AgentID, a.ChainID, pub)
+	if err == nil || !strings.Contains(err.Error(), "exceeds") {
+		t.Fatalf("oversized body must be refused, got %v", err)
 	}
 }
 

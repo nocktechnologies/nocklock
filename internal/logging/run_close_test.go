@@ -631,12 +631,9 @@ func TestRunClose_ConcurrentProducersReadClosed(t *testing.T) {
 
 // ---------- control: LogImmediate folds look-back rows into the run ----------
 
-// TestRunClose_LogImmediateRowIsFoldedAndClosed proves the fourth append path,
-// LogImmediate (the one the network proxy's look-back writes use), takes the
-// logger mutex and folds its row into the run accumulator like Log/LogBatch/
-// LogAfterLatest, so a row written through it inside a run still reads closed and
-// never a false close_mismatch. LogImmediate delegates to LogAfterLatest, which
-// holds l.mu across BEGIN IMMEDIATE, COMMIT and the fold.
+// TestRunClose_LogImmediateRowIsFoldedAndClosed proves that LogImmediate (used by
+// the network proxy's look-back writes) preserves Log's run accumulator fold,
+// so the signed close covers its row and never reports a false close_mismatch.
 func TestRunClose_LogImmediateRowIsFoldedAndClosed(t *testing.T) {
 	l, _, _ := newSigningLogger(t)
 	defer l.Close()

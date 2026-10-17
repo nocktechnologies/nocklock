@@ -17,6 +17,20 @@ permissions:
   contents: read
 
 jobs:
+  # Docs-only pull requests skip the suites (scripts/ci-code-changed.sh).
+  changes:
+    name: change detect (docs-only PRs skip the suites)
+    runs-on: ubuntu-latest
+    outputs:
+      code: ${{ steps.changes.outputs.code }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+          fetch-depth: 2
+      - id: changes
+        run: bash scripts/ci-code-changed.sh
+
   test:
     name: build · vet · fmt · test
     runs-on: ubuntu-latest
@@ -24,13 +38,22 @@ jobs:
       - uses: actions/checkout@v4
         with:
           persist-credentials: false
+          fetch-depth: 2
+
+      # Required check: it always reports. On a docs-only PR the steps below skip
+      # and the job still goes green (scripts/ci-code-changed.sh).
+      - name: change detect (docs-only PRs skip the suite)
+        id: changes
+        run: bash scripts/ci-code-changed.sh
 
       - uses: actions/setup-go@v5
+        if: steps.changes.outputs.code == 'true'
         with:
           go-version-file: go.mod
           cache: true
 
       - name: build
+        if: steps.changes.outputs.code == 'true'
         run: go build ./...
 
       # Cheap cross-check that the CLI still compiles for darwin. The macOS
@@ -41,12 +64,15 @@ jobs:
       # type-checks _test.go files, so a darwin-only test-file break is caught
       # here too rather than only in the PR-gated macOS job.
       - name: cross-vet (darwin)
+        if: steps.changes.outputs.code == 'true'
         run: GOOS=darwin GOARCH=arm64 go vet ./...
 
       - name: vet
+        if: steps.changes.outputs.code == 'true'
         run: go vet ./...
 
       - name: gofmt
+        if: steps.changes.outputs.code == 'true'
         run: |
           unformatted="$(gofmt -l .)"
           if [ -n "$unformatted" ]; then
@@ -55,16 +81,25 @@ jobs:
             exit 1
           fi
 
+      # Runs on docs-only PRs too: these gates police the docs themselves.
       - name: public content check
         run: |
           git fetch origin next --depth=1
           python3 scripts/check-public-content.py
+          python3 scripts/check-agents-paths.py
+
+      - name: script tests
+        if: steps.changes.outputs.code == 'true'
+        run: |
           python3 -m unittest discover -s scripts -p test_public_checks.py -v
+          python3 -m unittest discover -s scripts -p test_ci_code_changed.py -v
 
       - name: test
+        if: steps.changes.outputs.code == 'true'
         run: go test ./... -count=1
 
       - name: Landlock probe thread-affinity regression
+        if: steps.changes.outputs.code == 'true'
         run: |
           for procs in 2 8 32; do
             GOMAXPROCS="$procs" go test ./internal/fence/fs/landlock \
@@ -73,17 +108,21 @@ jobs:
           done
 
       - name: deterministic cross-thread Landlock control
+        if: steps.changes.outputs.code == 'true'
         run: |
           PYTHONDONTWRITEBYTECODE=1 python3 scripts/test_landlock_probe_thread_affinity.py
           python3 scripts/test-landlock-probe-thread-affinity.py
 
       - name: concurrent proxy stop race regression
+        if: steps.changes.outputs.code == 'true'
         run: go test -race -run '^TestProxyStopConcurrent$' -count=20 ./internal/fence/network
 
       - name: netns proxy shutdown race regression
+        if: steps.changes.outputs.code == 'true'
         run: go test -race -count=20 ./internal/fence/network/netns/...
 
       - name: fresh Linux init and wrapped shell
+        if: steps.changes.outputs.code == 'true'
         run: |
           make build-all
           bash scripts/test-init-default-linux.sh
@@ -106,6 +145,8 @@ jobs:
 
   claude-code-preset:
     name: claude-code preset · Landlock enforcement (non-root)
+    needs: changes
+    if: needs.changes.outputs.code == 'true'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -140,6 +181,8 @@ jobs:
 
   fuzz-smoke:
     name: fuzz smoke (fence decision surface)
+    needs: changes
+    if: needs.changes.outputs.code == 'true'
     runs-on: ubuntu-latest
     # Wall-clock ceiling for the exec-count budgets below.
     timeout-minutes: 15
@@ -178,13 +221,15 @@ jobs:
     # The SBPL fence's runtime ENFORCEMENT can only be exercised on real macOS
     # via sandbox-exec, so this is the ONLY job where the deny→blocked /
     # allow→success proof actually runs. Runs beside (never before) the ubuntu
-    # `test` job — no `needs:`, so it can neither delay nor skip it.
+    # `test` job — no `needs: test`, so it can neither delay nor skip it.
     #
     # Runs on a GitHub-hosted macos-latest runner (ephemeral + isolated), so PR
     # test code — even from forks — executes on an ephemeral runner.
-    # sandbox-exec ships on the hosted image. Runs beside the
-    # ubuntu `test` job (no `needs:`), so it can neither delay nor skip it.
-    if: github.event_name == 'pull_request' && github.event.pull_request.draft == false
+    # sandbox-exec ships on the hosted image.
+    needs: changes
+    if: >-
+      github.event_name == 'pull_request' && github.event.pull_request.draft == false &&
+      needs.changes.outputs.code == 'true'
     runs-on: macos-latest
     timeout-minutes: 15
     steps:
