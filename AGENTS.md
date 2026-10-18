@@ -6,6 +6,8 @@ This is the canonical agent and contributor file; `CLAUDE.md` imports it. If thi
 
 Follows Engineering Standards v4.
 
+This is a public repository. Keep `AGENTS.md` and `docs/HANDOFF.md` product-only: exclude agent and person names, card numbers, internal coordination systems and hosts, and review or merge-gate procedures.
+
 ## Start here
 
 1. Read `docs/HANDOFF.md`: what changed lately, what bit the last run, what is still open.
@@ -89,5 +91,5 @@ Things you cannot guess from the code layout:
 - Changelog: `CHANGELOG.md` (add to `[Unreleased]` in every PR).
 - Roadmap: `docs/ROADMAP.md` (the path to 1.0).
 - Architecture: `ARCHITECTURE.md` (deep package tree); `docs/REPO-MAP.md` (every package and where its tests are).
-- Pod notes: `docs/HANDOFF.md`.
+- Contributor notes: `docs/HANDOFF.md`.
 - Docs index: `docs/README.md`. Designs and specs: `docs/design/`, `docs/superpowers/specs/`. Lessons: `.claude/lessons/`.

@@ -1,11 +1,12 @@
-# Handoff: NockLock pod notes
+# Handoff: NockLock contributor notes
 
-Every run reads this first and adds to it at the end. Keep it short and true: what changed, what bit us, what is still open. The pod lead prunes it. Lasting lessons move into the gotchas in `AGENTS.md`; when an entry is only history, move it to a dated file in docs/archive (create the directory with the first one) and drop it from here.
+Every run reads this first and adds to it at the end. Keep it short and true: what changed, what bit us, what is still open. Maintainers prune it. Lasting lessons move into the gotchas in `AGENTS.md`; when an entry is only history, move it to a dated file in docs/archive (create the directory with the first one) and drop it from here.
 
 No internal host names, personal names or absolute home paths: `scripts/check-public-content.py` scans this file like any other.
 
 ## What changed
 
+- 2026-10-18: contributor guidance now states that this public repository's agent index and handoff stay product-only. Existing coordination wording in those files was replaced with neutral terms.
 - 2026-10-17: release notes and roadmap prepared for v0.13.0 from next 7ee2a6e: GitSpawn doctor warnings and Linux netns proof, audit/config cleanup, and contributor/CI updates. Cleanup PR #252 already removed the batch's unused compatibility paths; the later GitSpawn and CI changes need no further cleanup.
 - 2026-10-17: integration fixtures corrected for release validation: explicit syscall-off in the shared unfenced config, supported generated config sections, current audit DB resolution and temporary audit state. The existing integration package passes on macOS with live networking (10 top-level passes, seven Linux-only skips); actual filesystem/Landlock proof configs are unchanged.
 - 2026-10-17: `AGENTS.md` became the full agent index, this file was added, and CI checks that every path `AGENTS.md` names is tracked by git (`scripts/check-agents-paths.py`). `docs/REPO-MAP.md` was re-verified at next 13fa7a6. Release-level changes are in `CHANGELOG.md`.
@@ -18,4 +19,4 @@ No internal host names, personal names or absolute home paths: `scripts/check-pu
 
 ## Still open
 
-- v0.13.0 preparation still needs review and merge to next, then an exact-head next-to-main promotion with applicable platform CI. Tagging, main-to-next back-sync, Homebrew update and installation smoke follow the release runbook. `docs/REPO-MAP.md` states the commit its paths were verified at; restamp it whenever you touch it.
+- No open items are recorded. `docs/REPO-MAP.md` states the commit its paths were verified at; restamp it whenever you touch it.
