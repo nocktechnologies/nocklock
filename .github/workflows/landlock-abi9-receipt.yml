@@ -1,0 +1,117 @@
+name: Landlock ABI 9 receipt
+
+# Runs the Unix-socket and io_uring kernel cases on a kernel that exposes
+# Landlock ABI 9+, inside a throwaway KVM guest on a GitHub-hosted runner, and
+# keeps a signed receipt. Not a required check and not a release: it changes
+# no doctor or wrap claim. Never move this job to a self-hosted runner.
+on:
+  # Same plain filter as linux-candidate.yml: docs-only PRs skip it.
+  pull_request:
+    paths-ignore: ['**.md', 'docs/**']
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  # Ubuntu 26.10 release cloud image, kernel 7.3. Pinned by digest; changing
+  # the guest is a reviewed edit. The job still asserts the ABI it boots.
+  GUEST_IMAGE_URL: https://cloud-images.ubuntu.com/releases/stonking/release-20261011/ubuntu-26.10-server-cloudimg-amd64.img
+  GUEST_IMAGE_SHA256: 0a369348e6c4280a277d5c8ab7c092c9e7bf35b8db8770006eb09bbd56d06d5b
+
+jobs:
+  receipt:
+    # Receipt signing is confined to this repository's reviewed PR/workflow refs,
+    # like the Linux candidate: no fork PRs, no tags, no release identity.
+    if: >-
+      !startsWith(github.ref, 'refs/tags/') &&
+      (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 40
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
+        with:
+          go-version-file: go.mod
+          cache: false
+      - uses: sigstore/cosign-installer@6f9f17788090df1f26f669e9d70d6ae9567deba6 # v4.1.2
+        with:
+          cosign-release: v3.1.3
+      - name: Require a disposable GitHub-hosted host with KVM
+        run: |
+          test "$GITHUB_ACTIONS" = true
+          test "$RUNNER_ENVIRONMENT" = github-hosted
+          test -e /dev/kvm || { echo 'FAIL: /dev/kvm is missing; refusing slow emulation' >&2; exit 1; }
+          echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' \
+            | sudo tee /etc/udev/rules.d/99-kvm-runner.rules
+          sudo udevadm control --reload-rules
+          sudo udevadm trigger --name-match=kvm
+          sudo apt-get update
+          sudo apt-get install -y qemu-system-x86 qemu-utils cloud-image-utils
+      - name: Fetch and verify the pinned guest image
+        run: |
+          curl -fsSL --retry 3 -o "$RUNNER_TEMP/guest.img" "$GUEST_IMAGE_URL"
+          echo "$GUEST_IMAGE_SHA256  $RUNNER_TEMP/guest.img" | sha256sum --check --strict
+      - name: Boot the disposable guest
+        run: bash packaging/linux/boot-guest.sh "$RUNNER_TEMP/guest.img" "$RUNNER_TEMP/vm"
+      - name: Copy this checkout and the Go toolchain into the guest
+        run: |
+          tar -C "$(go env GOROOT)/.." -cf - "$(basename "$(go env GOROOT)")" \
+            | ssh -F "$RUNNER_TEMP/vm/ssh_config" guest 'mkdir go-root && tar -C go-root --strip-components=1 -xf -'
+          tar -cf - . | ssh -F "$RUNNER_TEMP/vm/ssh_config" guest 'mkdir nocklock && tar -C nocklock -xf -'
+      # The first thing run in the guest. Below ABI 9 the job fails with the
+      # number; there is no skip and no green on an older kernel.
+      - name: Assert guest Landlock ABI >= 9
+        run: ssh -F "$RUNNER_TEMP/vm/ssh_config" guest 'uname -a && python3 nocklock/bench/redteam/kernel_cases.py --require-abi 9'
+      - name: Unix-socket and io_uring cases under CONFINED (expected vs actual)
+        run: |
+          ssh -F "$RUNNER_TEMP/vm/ssh_config" guest 'umask 022 && cd nocklock &&
+            PATH="$HOME/go-root/bin:$PATH" GOTOOLCHAIN=local \
+            python3 bench/redteam/kernel_cases.py --require-abi 9 --out "$HOME/receipt"'
+      - name: Collect the receipt
+        if: always()
+        env:
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          mkdir -p "$RUNNER_TEMP/receipt"
+          ssh -F "$RUNNER_TEMP/vm/ssh_config" guest 'test -d receipt && tar -C receipt -cf - .' \
+            | tar -C "$RUNNER_TEMP/receipt" -xf - || true
+          {
+            echo "Workflow run: $RUN_URL"
+            echo "Workflow ref: $GITHUB_WORKFLOW_REF"
+            echo "Checked-out commit: $GITHUB_SHA"
+            echo "Runner image: $ImageVersion"
+            echo "Guest image: $GUEST_IMAGE_URL"
+            echo "Guest image sha256: $GUEST_IMAGE_SHA256"
+            ssh -F "$RUNNER_TEMP/vm/ssh_config" guest \
+              'echo "Guest kernel: $(uname -a)"; echo "Guest io_uring_disabled: $(sysctl -n kernel.io_uring_disabled 2>&1)"' || true
+          } > "$RUNNER_TEMP/receipt/provenance.txt"
+          cat "$RUNNER_TEMP/receipt/provenance.txt"
+          if test -f "$RUNNER_TEMP/receipt/REPORT.md"; then
+            cat "$RUNNER_TEMP/receipt/REPORT.md" "$RUNNER_TEMP/receipt/provenance.txt" >> "$GITHUB_STEP_SUMMARY"
+          fi
+      # Only a passing receipt is signed; a failed run uploads its evidence unsigned.
+      - name: Sign and authenticate the receipt manifest
+        env:
+          RECEIPT_IDENTITY: https://github.com/${{ github.workflow_ref }}
+        run: |
+          (cd "$RUNNER_TEMP/receipt" &&
+            find . -type f ! -name SHA256SUMS -printf '%P\n' | LC_ALL=C sort | xargs -d '\n' sha256sum > SHA256SUMS)
+          bash packaging/linux/sign-manifest.sh "$RUNNER_TEMP/receipt" "$RECEIPT_IDENTITY"
+          echo "Signer identity: $RECEIPT_IDENTITY" >> "$GITHUB_STEP_SUMMARY"
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        if: always()
+        with:
+          name: landlock-abi9-receipt
+          path: ${{ runner.temp }}/receipt/
+          if-no-files-found: error
+          retention-days: 90
+      - name: Stop the guest
+        if: always()
+        run: |
+          if test -f "$RUNNER_TEMP/vm/qemu.pid"; then kill "$(cat "$RUNNER_TEMP/vm/qemu.pid")" || true; fi

@@ -6,10 +6,13 @@ scoring. Known reachable sockets and unavailable proof remain visible gaps.
 """
 
 import argparse
+import ctypes
+import errno
 import json
 import os
 from pathlib import Path
 import platform
+import re
 import signal
 import subprocess
 import sys
@@ -19,6 +22,18 @@ CASES = (
     ("abi9", "./internal/fence/fs/landlock", "TestLandlockABI9UnixSocketIsolation"),
     ("io-uring", "./internal/fence/syscallfence", "TestEnforce_IORingSocketConnectDenied"),
 )
+# With --require-abi, the full CONFINED wrap probe on ABI 9+ must show these
+# values (logged by its "Landlock ABI 9 enforcement with filesystem rules"
+# subtest) and the io_uring case, which requires io_uring_setup EPERM, must pass.
+WRAP_CLAIMS = (
+    ("a-pathname-socket-outside-root", "path", "DENIED"),
+    ("b-abstract-socket", "abstract", "DENIED"),
+    ("c-allowed-proxy-socket", "proxy", "CONNECTED"),
+    ("c-allowed-event-socket", "event", "CONNECTED"),
+)
+WRAP_PROBE = re.compile(r"ABI9_WRAP_PROBE ((?:\w+=\w+ ?)+)")
+SYS_LANDLOCK_CREATE_RULESET = 444
+LANDLOCK_CREATE_RULESET_VERSION = 1
 CASE_TIMEOUT_SECONDS = 300
 CLEANUP_TIMEOUT_SECONDS = 5
 SIGTERM_GRACE_SECONDS = 2
@@ -65,6 +80,38 @@ def classify(case, actions, output):
     if case == "abi9":
         return dict(case=case, verdict="PASS", reason="Real ABI9+ Landlock: exact socket pathname allowed; unrelated pathname and abstract connects return EACCES/EPERM; all sockets reachable unfenced.")
     return dict(case=case, verdict="PASS", reason="Raw seccomp boundary: unfenced io_uring SOCKET+CONNECT reaches live TCP listener; fenced io_uring_setup returns EPERM. This is not a full-wrap probe.")
+
+
+def landlock_abi():
+    """Return the running kernel's Landlock ABI, or 0 when Landlock is absent."""
+    if platform.system() != "Linux":
+        return 0
+    libc = ctypes.CDLL(None, use_errno=True)
+    libc.syscall.restype = ctypes.c_long
+    abi = libc.syscall(ctypes.c_long(SYS_LANDLOCK_CREATE_RULESET), None, ctypes.c_size_t(0),
+                       ctypes.c_uint32(LANDLOCK_CREATE_RULESET_VERSION))
+    if abi >= 0:
+        return abi
+    code = ctypes.get_errno()
+    if code in (errno.ENOSYS, errno.EOPNOTSUPP):
+        return 0
+    raise OSError(code, "landlock_create_ruleset version query failed: " + os.strerror(code))
+
+
+def enforcement_claims(rows, out):
+    """Expected vs actual for each required ABI 9+ enforcement claim.
+
+    Reads the raw wrap test output, so a failed run still records what the
+    probe observed.
+    """
+    raw = out / "unix-wrap.jsonl"
+    match = WRAP_PROBE.search(raw.read_text()) if raw.exists() else None
+    probe = dict(item.split("=", 1) for item in match.group(1).split()) if match else {}
+    claims = [dict(claim=name, expected=expected, actual=probe.get(key, "MISSING"))
+              for name, key, expected in WRAP_CLAIMS]
+    claims.append(dict(claim="d-io-uring-setup-denied", expected="PASS",
+                       actual=next((row["verdict"] for row in rows if row["case"] == "io-uring"), "MISSING")))
+    return claims
 
 
 def _partial(value):
@@ -203,8 +250,21 @@ def _on_sigterm(signum, frame):
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--out", type=Path, required=True)
+    parser.add_argument("--out", type=Path)
+    parser.add_argument("--require-abi", type=int, metavar="N",
+                        help="fail before any case unless the kernel's Landlock ABI is at least N; "
+                             "with --out, every case and enforcement claim must then pass")
     args = parser.parse_args()
+    if args.out is None and args.require_abi is None:
+        parser.error("--out is required")
+    abi = landlock_abi()
+    print(f"Landlock ABI: {abi}", flush=True)
+    if args.require_abi is not None and abi < args.require_abi:
+        print(f"FAIL: Landlock ABI {abi} is below the required {args.require_abi}; "
+              "this kernel cannot prove the enforcement claims", file=sys.stderr)
+        return 1
+    if args.out is None:
+        return 0
     signal.signal(signal.SIGTERM, _on_sigterm)
     repo = Path(__file__).resolve().parents[2]
     args.out.mkdir(parents=True, exist_ok=True)
@@ -219,15 +279,28 @@ def main():
             rows.append(dict(case=case, verdict="FAIL", reason=str(exc)))
     failed = any(row["verdict"] == "FAIL" for row in rows)
     gaps = any(row["verdict"] in ("SKIP", "KNOWN-LIMIT") for row in rows)
+    claims = []
+    if args.require_abi is not None:
+        # A gap is missing proof, so it fails a run that requires the proof.
+        claims = enforcement_claims(rows, args.out)
+        for row in rows:
+            row["expected"] = "PASS"
+        failed = gaps or failed or any(claim["actual"] != claim["expected"] for claim in claims)
     verdict = "FAIL" if failed else "PASS_WITH_COVERAGE_GAPS" if gaps else "PASS"
     report = dict(verdict=verdict, kernel=platform.release(), architecture=platform.machine(),
-                  commit=head_commit(repo), cases=rows)
+                  landlock_abi=abi, commit=head_commit(repo), cases=rows)
+    if claims:
+        report["claims"] = claims
     (args.out / "report.json").write_text(json.dumps(report, indent=2) + "\n")
     lines = ["# Kernel red-team companion", "", "Verdict: **" + verdict + "**", "",
              "This report is separate from the main bench score. SKIP is missing proof; KNOWN-LIMIT is observed reachable behavior.", ""]
     for row in rows:
         lines += [f"- {row['case']}: **{row['verdict']}** — " + row["reason"].replace("\n", " ")]
+    if claims:
+        lines += ["", f"Required Landlock ABI {args.require_abi}+ claims (kernel ABI {abi}):", ""]
+        lines += [f"- {c['claim']}: expected {c['expected']}, actual **{c['actual']}**" for c in claims]
     (args.out / "REPORT.md").write_text("\n".join(lines) + "\n")
+    print("\n".join(lines[2:]))
     print(verdict + "; evidence: " + str(args.out))
     return int(failed)
 

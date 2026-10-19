@@ -34,6 +34,15 @@ report. It does not change `attacks.toml`, the main pass bar or breach scoring.
   with `EPERM`. An unavailable ambient operation is **SKIP** with its reason;
   it is not attributed to NockLock. This probes seccomp directly, not full wrap.
 
+`--require-abi 9` turns the gaps into failures for a capable kernel. It first
+prints the kernel's Landlock ABI and exits 1 below 9, before any case runs.
+With `--out`, every case must then be **PASS**, and `report.json` gains
+`claims` with expected and actual values: the full-wrap probe's unrelated
+pathname socket outside `filesystem.root` and abstract socket `DENIED`, the
+policy-allowed proxy and event sockets `CONNECTED`, and `io_uring_setup`
+`DENIED`. `.github/workflows/landlock-abi9-receipt.yml` runs it in a KVM guest
+and signs the result.
+
 A missing test, unexpected skip, failed control or harness fault fails the
 required step and the `redteam-bench` job; the main bench then does not run.
 Summary/artifact steps still preserve the failure receipts. Every harness
