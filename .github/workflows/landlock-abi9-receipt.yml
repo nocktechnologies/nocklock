@@ -89,14 +89,20 @@ jobs:
             sudo sysctl -w kernel.io_uring_disabled=0 && umask 022 && cd nocklock &&
             PATH="$HOME/go-root/bin:$PATH" GOTOOLCHAIN=local \
             python3 bench/redteam/kernel_cases.py --require-abi 9 --out "$HOME/receipt"'
+      # A failed or partial transfer fails this step; the provenance is still
+      # written so the unsigned upload below keeps what did arrive.
       - name: Collect the receipt
+        id: collect
         if: always()
         env:
           RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
         run: |
+          set -o pipefail
           mkdir -p "$RUNNER_TEMP/receipt"
+          transfer=0
           ssh -F "$RUNNER_TEMP/vm/ssh_config" guest 'test -d receipt && tar -C receipt -cf - .' \
-            | tar -C "$RUNNER_TEMP/receipt" -xf - || true
+            | tar -C "$RUNNER_TEMP/receipt" -xf - || transfer=$?
+          echo "transfer=$transfer" >> "$GITHUB_OUTPUT"
           {
             echo "Workflow run: $RUN_URL"
             echo "Workflow ref: $GITHUB_WORKFLOW_REF"
@@ -111,11 +117,27 @@ jobs:
           if test -f "$RUNNER_TEMP/receipt/REPORT.md"; then
             cat "$RUNNER_TEMP/receipt/REPORT.md" "$RUNNER_TEMP/receipt/provenance.txt" >> "$GITHUB_STEP_SUMMARY"
           fi
-      # Only a passing receipt is signed; a failed run uploads its evidence unsigned.
+          if test "$transfer" != 0; then
+            echo "FAIL: guest-to-runner receipt transfer exited $transfer; the receipt is partial and is not signed" >&2
+            exit 1
+          fi
+      # Only a complete, passing receipt is signed; a failed run uploads its
+      # evidence unsigned. Every file kernel_cases.py writes is listed here: the
+      # report and each case's go test -json output must be non-empty, and each
+      # case's stderr capture must exist (it is empty when go test is quiet).
       - name: Sign and authenticate the receipt manifest
+        if: success() && steps.collect.outputs.transfer == '0'
         env:
           RECEIPT_IDENTITY: https://github.com/${{ github.workflow_ref }}
         run: |
+          cd "$RUNNER_TEMP/receipt"
+          for f in report.json REPORT.md provenance.txt unix-wrap.jsonl abi9.jsonl io-uring.jsonl; do
+            test -s "$f" || { echo "FAIL: evidence file $f is missing or empty; refusing to sign" >&2; exit 1; }
+          done
+          for f in unix-wrap.stderr.txt abi9.stderr.txt io-uring.stderr.txt; do
+            test -f "$f" || { echo "FAIL: evidence file $f is missing; refusing to sign" >&2; exit 1; }
+          done
+          cd "$GITHUB_WORKSPACE"
           jq -e '.verdict == "PASS" and .landlock_abi >= 9 and (.claims | length) > 0' \
             "$RUNNER_TEMP/receipt/report.json"
           (cd "$RUNNER_TEMP/receipt" &&
@@ -123,11 +145,18 @@ jobs:
           bash packaging/linux/sign-manifest.sh "$RUNNER_TEMP/receipt" "$RECEIPT_IDENTITY"
           echo "Signer identity: $RECEIPT_IDENTITY" >> "$GITHUB_STEP_SUMMARY"
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
-        if: always()
         with:
           name: landlock-abi9-receipt
           path: ${{ runner.temp }}/receipt/
           if-no-files-found: error
+          retention-days: 90
+      # Best-effort debugging copy of whatever evidence arrived. Never signed.
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        if: failure() || cancelled()
+        with:
+          name: landlock-abi9-evidence-UNSIGNED
+          path: ${{ runner.temp }}/receipt/
+          if-no-files-found: warn
           retention-days: 90
       - name: Stop the guest
         if: always()
