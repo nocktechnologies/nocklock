@@ -118,13 +118,14 @@ jobs:
             cat "$RUNNER_TEMP/receipt/REPORT.md" "$RUNNER_TEMP/receipt/provenance.txt" >> "$GITHUB_STEP_SUMMARY"
           fi
           if test "$transfer" != 0; then
-            echo "FAIL: guest-to-runner receipt transfer exited $transfer; the receipt is partial and is not signed" >&2
+            echo "FAIL: guest-to-runner receipt transfer exited $transfer; the receipt is missing or partial and is not signed" >&2
             exit 1
           fi
       # Only a complete, passing receipt is signed; a failed run uploads its
-      # evidence unsigned. Every file kernel_cases.py writes is listed here: the
-      # report and each case's go test -json output must be non-empty, and each
-      # case's stderr capture must exist (it is empty when go test is quiet).
+      # evidence unsigned. Every file kernel_cases.py writes, plus provenance.txt,
+      # is listed here as a regular file (no symlinks, which the manifest would
+      # skip): the reports and each case's go test -json output must be
+      # non-empty; each case's stderr capture may be empty.
       - name: Sign and authenticate the receipt manifest
         if: success() && steps.collect.outputs.transfer == '0'
         env:
@@ -132,10 +133,10 @@ jobs:
         run: |
           cd "$RUNNER_TEMP/receipt"
           for f in report.json REPORT.md provenance.txt unix-wrap.jsonl abi9.jsonl io-uring.jsonl; do
-            test -s "$f" || { echo "FAIL: evidence file $f is missing or empty; refusing to sign" >&2; exit 1; }
+            test -s "$f" && ! test -L "$f" || { echo "FAIL: evidence file $f is missing, empty or a symlink; refusing to sign" >&2; exit 1; }
           done
           for f in unix-wrap.stderr.txt abi9.stderr.txt io-uring.stderr.txt; do
-            test -f "$f" || { echo "FAIL: evidence file $f is missing; refusing to sign" >&2; exit 1; }
+            test -f "$f" && ! test -L "$f" || { echo "FAIL: evidence file $f is missing or a symlink; refusing to sign" >&2; exit 1; }
           done
           cd "$GITHUB_WORKSPACE"
           jq -e '.verdict == "PASS" and .landlock_abi >= 9 and (.claims | length) > 0' \
@@ -150,12 +151,15 @@ jobs:
           path: ${{ runner.temp }}/receipt/
           if-no-files-found: error
           retention-days: 90
-      # Best-effort debugging copy of whatever evidence arrived. Never signed.
+      # Best-effort debugging copy of whatever evidence arrived. Never signed:
+      # a manifest or bundle from a step that failed after signing is left out.
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         if: failure() || cancelled()
         with:
           name: landlock-abi9-evidence-UNSIGNED
-          path: ${{ runner.temp }}/receipt/
+          path: |
+            ${{ runner.temp }}/receipt/
+            !${{ runner.temp }}/receipt/SHA256SUMS*
           if-no-files-found: warn
           retention-days: 90
       - name: Stop the guest
