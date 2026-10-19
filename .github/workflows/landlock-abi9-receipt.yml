@@ -103,7 +103,6 @@ jobs:
           ssh -F "$RUNNER_TEMP/vm/ssh_config" guest 'test -d receipt && tar -C receipt -cf - .' \
             | tar -C "$RUNNER_TEMP/receipt" -xf - || transfer=$?
           echo "transfer=$transfer" >> "$GITHUB_OUTPUT"
-          rm -f "$RUNNER_TEMP/receipt/abi9.jsonl" # DELIBERATE NEGATIVE: simulate a truncated transfer
           {
             echo "Workflow run: $RUN_URL"
             echo "Workflow ref: $GITHUB_WORKFLOW_REF"
