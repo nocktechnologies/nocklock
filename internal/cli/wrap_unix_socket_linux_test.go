@@ -93,7 +93,7 @@ func proxyGet(proxySocket, targetURL string) int {
 }
 
 func main() {
-	pathConnected := dialAndSend(os.Args[1], "probe-path")
+	pathConnected := dialAndSend(os.Getenv("NOCKLOCK_PROXY_UNIX_SOCKET"), "probe-path") // DELIBERATE NEGATIVE: revert
 	abstractConnected := dialAndSend("@"+os.Args[2], "probe-abstract")
 	eventAcked := reportBlockedFile()
 	proxyStatus := proxyGet(os.Getenv("NOCKLOCK_PROXY_UNIX_SOCKET"), os.Args[3])
