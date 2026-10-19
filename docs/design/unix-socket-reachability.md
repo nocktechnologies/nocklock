@@ -1,6 +1,6 @@
 # Linux CONFINED Unix-socket reachability
 
-Status: reachability confirmed; mitigation design only. Nock #11650.
+Status: reachability confirmed. The ABI 9 mitigation is implemented and runs on an ABI 9+ kernel in CI (`.github/workflows/landlock-abi9-receipt.yml`); no release carries that receipt yet. Nock #11650.
 
 ## Finding
 

@@ -13,6 +13,8 @@ No internal host names, personal names or absolute home paths: `scripts/check-pu
 - 2026-10-17: the path check also reads angle-bracketed and titled link targets, and no longer treats version strings as paths.
 - 2026-10-17: docs-only PRs (only `*.md` or `docs/`) skip the test suites in CI. The required jobs run the detector as a step and skip their own steps, so they still report; a new step in a required job needs `if: steps.changes.outputs.code == 'true'`. A new optional test job needs `needs: changes` and the matching job `if:`.
 
+- 2026-10-19: `.github/workflows/landlock-abi9-receipt.yml` runs `bench/redteam/kernel_cases.py --require-abi 9` in a throwaway Ubuntu 26.10 KVM guest (kernel 7.3) on a GitHub-hosted runner and signs the receipt (ROADMAP bar 1: receipt produced in CI, not yet released). Landlock ABI 9 first shipped in Linux 7.1 (7.0 reports 8), so the hosted runner kernel cannot prove it itself. `packaging/linux/sign-manifest.sh` is now shared with the candidate workflow. The guest image is pinned by URL and digest; when Ubuntu prunes that release directory, bump both together.
+
 ## What bit us
 
 - 2026-10-17, on a dev host: `go test ./...` failed in `internal/logging` under umask 002. The failure in `TestWrapComposedDefaultEgressAudit` was suspected to involve a week-old installed binary used by the egress helper; that host cause was not reverified. Both conditions are now `AGENTS.md` gotchas.

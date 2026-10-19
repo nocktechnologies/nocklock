@@ -33,7 +33,7 @@ Before you push:
 4. The PR follows `CONTRIBUTING.md` and targets `next`.
 5. `CHANGELOG.md` has an `[Unreleased]` entry; this file and `docs/REPO-MAP.md` are updated if structure changed.
 
-CI: `.github/workflows/test.yml` runs build, darwin cross-vet, vet, gofmt, the content gates, the unit suite, race regressions, fuzz smoke tests, Landlock and macOS Seatbelt enforcement proofs. `.github/workflows/network-egress.yml` runs the root netns, egress and red-team jobs. `.github/workflows/gitleaks.yml` scans for secrets against `.gitleaks-baseline.json`. `.github/workflows/linux-candidate.yml` builds the Linux install candidate.
+CI: `.github/workflows/test.yml` runs build, darwin cross-vet, vet, gofmt, the content gates, the unit suite, race regressions, fuzz smoke tests, Landlock and macOS Seatbelt enforcement proofs. `.github/workflows/network-egress.yml` runs the root netns, egress and red-team jobs. `.github/workflows/gitleaks.yml` scans for secrets against `.gitleaks-baseline.json`. `.github/workflows/linux-candidate.yml` builds the Linux install candidate. `.github/workflows/landlock-abi9-receipt.yml` runs the Unix-socket and io_uring kernel cases in a KVM guest with Landlock ABI 9+ and signs the receipt.
 
 ## Rules that bite
 

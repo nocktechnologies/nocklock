@@ -4,6 +4,16 @@ All notable changes to NockLock will be documented in this file.
 
 ## [Unreleased]
 
+### Added
+
+- CI job `landlock-abi9-receipt` (`.github/workflows/landlock-abi9-receipt.yml`). On a GitHub-hosted runner it boots a throwaway KVM guest from a digest-pinned Ubuntu 26.10 cloud image, fails unless the guest kernel reports Landlock ABI 9 or later, and runs the kernel cases. The receipt records the kernel, ABI, commit and, for each case, expected and actual results. Under a full `CONFINED` wrap, an unrelated pathname socket outside `filesystem.root` and an abstract socket are denied and the policy-allowed proxy and event sockets connect. The io_uring case probes the seccomp filter directly, not a full wrap: `io_uring_setup` is denied after an unfenced control reaches a live listener. A passing receipt is signed with the workflow's Sigstore identity. `doctor` and `wrap` claims are unchanged until a release carries this receipt.
+- `bench/redteam/kernel_cases.py --require-abi N` fails before any case on a kernel below Landlock ABI N; with `--out`, every case must pass and each enforcement claim must match. Reports now record the Landlock ABI.
+
+### Changed
+
+- The Linux candidate workflow signs its manifest through `packaging/linux/sign-manifest.sh`, shared with the receipt job. The signature, verification and both refusal controls are unchanged.
+- The tamper-evident audit log spec now says it shipped (#89, #90, #93).
+
 ## [0.13.0] - 2026-10-17
 
 v0.13.0 adds repo git-config execution warnings to `doctor` and a Linux netns proof for GitSpawn. It also simplifies audit appends, retires unused internal v1 HTTP routes, and removes inert cloud settings from newly generated configs. Existing config files and audit formats remain compatible. GitSpawn warnings leave doctor verdicts and exit codes unchanged; the new enforcement proof covers Linux netns mode only.

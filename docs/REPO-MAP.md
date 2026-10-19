@@ -1,6 +1,6 @@
 # Repo map
 
-One line per directory or key package: what lives there and where its tests are. Paths verified at `origin/next` 13fa7a6. For the file-level tree see `ARCHITECTURE.md`; if this page and the code disagree, the code wins.
+One line per directory or key package: what lives there and where its tests are. Paths verified at `origin/next` 8b717de. For the file-level tree see `ARCHITECTURE.md`; if this page and the code disagree, the code wins.
 
 Go tests sit beside the code as `*_test.go`. Files ending `_linux_test.go` or `_darwin_test.go` run on that OS only.
 
@@ -13,7 +13,7 @@ Go tests sit beside the code as `*_test.go`. Files ending `_linux_test.go` or `_
 | `pkg/receipt/` | Public, read-only per-session audit-chain verifier (`VerifySession`, `pkg/receipt/receipt.go`), importable by other modules | `pkg/receipt/receipt_test.go`, `external_test.go` (imports it as an outside module would), `testdata/` |
 | `integration/` | End-to-end test of the built binary | `integration/integration_test.go`, run with `go test -tags=integration ./...` (`CONTRIBUTING.md`) |
 | `scripts/` | `install-egress-helper.sh` (root-owned helper plus sudoers grant), `test-init-default-linux.sh` (fresh `init` then wrapped shell), `credential-mutation-overlay.py` (test-only credential mutations), `test-landlock-probe-thread-affinity.py` (deterministic cross-thread control and optional unpinned soak), `check-public-content.py` (tracked-file disclosure guard), `check-gitleaks-baseline.py` (historical scan fingerprint comparison), `check-agents-paths.py` (fails when `AGENTS.md` names a path git does not track) | helper: `internal/fence/network/netns/install_helper_script_linux_test.go`; hosted credential jobs in `network-egress.yml`; thread-affinity classifier/cleanup tests in `test_landlock_probe_thread_affinity.py` and non-root controls in `test.yml`; public-content and AGENTS.md path checks (with built-in controls) in `test.yml`; secret scan comparison in `gitleaks.yml` |
-| `packaging/linux/` | Ubuntu 24.04 amd64 paired CI candidate build, strict archive validator, CI-only fresh-install provisioning and unprivileged acceptance; no public installer or release publication | `test_artifact.py`, `test_acceptance.py`; `.github/workflows/linux-candidate.yml` |
+| `packaging/linux/` | Ubuntu 24.04 amd64 paired CI candidate build, strict archive validator, CI-only fresh-install provisioning and unprivileged acceptance, manifest signing (`sign-manifest.sh`) and the throwaway KVM guest for kernel receipts (`boot-guest.sh`); no public installer or release publication | `test_artifact.py`, `test_acceptance.py`; `.github/workflows/linux-candidate.yml`, `.github/workflows/landlock-abi9-receipt.yml` |
 | `docs/` | This documentation set; index at `docs/README.md`; the full invariant list in `docs/context/invariants.md`; pod notes in `docs/HANDOFF.md` | none |
 | `bench/redteam/` | NockLock + NockGuard scripted attack bench (`attacks.toml`, `run.sh`, `redteam.py`) and signed receipt report; `kernel_cases.py` records Unix-socket/io_uring proof and explicit kernel coverage gaps separately | bench cases in `attacks.toml`, Python driver/receipt tests, CI `redteam-bench` job in `.github/workflows/network-egress.yml` |
 | `.claude/` | Agent config: branch-lock hook, `decisions/` (ADR-001..005), `design/`, `diagrams/`, `lessons/` | none |
