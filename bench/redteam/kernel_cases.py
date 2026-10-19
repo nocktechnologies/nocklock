@@ -83,7 +83,7 @@ def classify(case, actions, output):
 
 
 def landlock_abi():
-    """Return the running kernel's Landlock ABI, or 0 when Landlock is absent."""
+    """Return the running kernel's Landlock ABI, or 0 when it cannot be read."""
     if platform.system() != "Linux":
         return 0
     libc = ctypes.CDLL(None, use_errno=True)
@@ -93,9 +93,9 @@ def landlock_abi():
     if abi >= 0:
         return abi
     code = ctypes.get_errno()
-    if code in (errno.ENOSYS, errno.EOPNOTSUPP):
-        return 0
-    raise OSError(code, "landlock_create_ruleset version query failed: " + os.strerror(code))
+    if code not in (errno.ENOSYS, errno.EOPNOTSUPP):
+        print("kernel_cases: Landlock ABI query failed: " + os.strerror(code), file=sys.stderr)
+    return 0
 
 
 def enforcement_claims(rows, out):

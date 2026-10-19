@@ -39,8 +39,8 @@ prints the kernel's Landlock ABI and exits 1 below 9, before any case runs.
 With `--out`, every case must then be **PASS**, and `report.json` gains
 `claims` with expected and actual values: the full-wrap probe's unrelated
 pathname socket outside `filesystem.root` and abstract socket `DENIED`, the
-policy-allowed proxy and event sockets `CONNECTED`, and `io_uring_setup`
-`DENIED`. `.github/workflows/landlock-abi9-receipt.yml` runs it in a KVM guest
+policy-allowed proxy and event sockets `CONNECTED`, and the io_uring seccomp
+case **PASS**. `.github/workflows/landlock-abi9-receipt.yml` runs it in a KVM guest
 and signs the result.
 
 A missing test, unexpected skip, failed control or harness fault fails the

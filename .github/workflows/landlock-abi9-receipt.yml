@@ -5,13 +5,25 @@ name: Landlock ABI 9 receipt
 # keeps a signed receipt. Not a required check and not a release: it changes
 # no doctor or wrap claim. Never move this job to a self-hosted runner.
 on:
-  # Same plain filter as linux-candidate.yml: docs-only PRs skip it.
+  # No required check lives here, so a plain filter is safe. Only code the
+  # kernel cases build or run starts the guest.
   pull_request:
-    paths-ignore: ['**.md', 'docs/**']
+    paths:
+      - 'cmd/**'
+      - 'internal/**'
+      - 'bench/redteam/**'
+      - 'packaging/linux/**'
+      - 'go.mod'
+      - 'go.sum'
+      - '.github/workflows/landlock-abi9-receipt.yml'
   workflow_dispatch:
 
 permissions:
   contents: read
+
+concurrency:
+  group: landlock-abi9-receipt-${{ github.ref }}
+  cancel-in-progress: true
 
 env:
   # Ubuntu 26.10 release cloud image, kernel 7.3. Pinned by digest; changing
@@ -21,11 +33,12 @@ env:
 
 jobs:
   receipt:
-    # Receipt signing is confined to this repository's reviewed PR/workflow refs,
-    # like the Linux candidate: no fork PRs, no tags, no release identity.
+    # Receipt signing is confined to this repository's PR refs and to manual
+    # runs on next or main: no fork PRs, no tags, no other branches. A receipt
+    # that backs a release must come from a next or main identity.
     if: >-
-      !startsWith(github.ref, 'refs/tags/') &&
-      (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository)
+      (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository) ||
+      (github.event_name == 'workflow_dispatch' && (github.ref == 'refs/heads/next' || github.ref == 'refs/heads/main'))
     runs-on: ubuntu-24.04
     timeout-minutes: 40
     permissions:
@@ -64,13 +77,16 @@ jobs:
           tar -C "$(go env GOROOT)/.." -cf - "$(basename "$(go env GOROOT)")" \
             | ssh -F "$RUNNER_TEMP/vm/ssh_config" guest 'mkdir go-root && tar -C go-root --strip-components=1 -xf -'
           tar -cf - . | ssh -F "$RUNNER_TEMP/vm/ssh_config" guest 'mkdir nocklock && tar -C nocklock -xf -'
-      # The first thing run in the guest. Below ABI 9 the job fails with the
-      # number; there is no skip and no green on an older kernel.
+      # The first check run in the guest once it is up. Below ABI 9 the job fails
+      # with the number; there is no skip and no green on an older kernel.
       - name: Assert guest Landlock ABI >= 9
         run: ssh -F "$RUNNER_TEMP/vm/ssh_config" guest 'uname -a && python3 nocklock/bench/redteam/kernel_cases.py --require-abi 9'
-      - name: Unix-socket and io_uring cases under CONFINED (expected vs actual)
+      # The io_uring case needs an ambient io_uring control to attribute its
+      # EPERM to the syscall fence, so the throwaway guest's sysctl is opened.
+      - name: Unix-socket cases under CONFINED and the io_uring seccomp case (expected vs actual)
         run: |
-          ssh -F "$RUNNER_TEMP/vm/ssh_config" guest 'umask 022 && cd nocklock &&
+          ssh -F "$RUNNER_TEMP/vm/ssh_config" guest 'echo "io_uring_disabled was $(sysctl -n kernel.io_uring_disabled)" &&
+            sudo sysctl -w kernel.io_uring_disabled=0 && umask 022 && cd nocklock &&
             PATH="$HOME/go-root/bin:$PATH" GOTOOLCHAIN=local \
             python3 bench/redteam/kernel_cases.py --require-abi 9 --out "$HOME/receipt"'
       - name: Collect the receipt
@@ -100,6 +116,8 @@ jobs:
         env:
           RECEIPT_IDENTITY: https://github.com/${{ github.workflow_ref }}
         run: |
+          jq -e '.verdict == "PASS" and .landlock_abi >= 9 and (.claims | length) > 0' \
+            "$RUNNER_TEMP/receipt/report.json"
           (cd "$RUNNER_TEMP/receipt" &&
             find . -type f ! -name SHA256SUMS -printf '%P\n' | LC_ALL=C sort | xargs -d '\n' sha256sum > SHA256SUMS)
           bash packaging/linux/sign-manifest.sh "$RUNNER_TEMP/receipt" "$RECEIPT_IDENTITY"

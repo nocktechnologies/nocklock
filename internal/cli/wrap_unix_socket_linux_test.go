@@ -231,14 +231,15 @@ func TestWrapUnixSocketReachability(t *testing.T) {
 		}
 		probeRan = true
 		output, err := runWrap(t, "preferred", false)
-		if err != nil {
-			t.Fatalf("CONFINED wrap failed on Landlock ABI v%d: %v\n%s", abi, err, output)
-		}
-		// bench/redteam/kernel_cases.py reads this line into its receipt.
+		// bench/redteam/kernel_cases.py reads this line into its receipt, so
+		// log it before any failure.
 		for _, line := range strings.Split(string(output), "\n") {
 			if strings.HasPrefix(line, "path=") {
 				t.Logf("ABI9_WRAP_PROBE %s", line)
 			}
+		}
+		if err != nil {
+			t.Fatalf("CONFINED wrap failed on Landlock ABI v%d: %v\n%s", abi, err, output)
 		}
 		assertSocketProbeOutput(t, output, "path=DENIED", "abstract=DENIED", "event=CONNECTED", "proxy=CONNECTED", "lookback=403", "inet=DENIED", "Unix-socket isolation active")
 	})
