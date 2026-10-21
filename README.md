@@ -460,7 +460,7 @@ cd nocklock
 make build-all
 ```
 
-Requires Go 1.26 or newer. The binary is built to `./nocklock`; building does not install it on `PATH`. Follow [the complete source installation steps](docs/setup.md#1-install) to install the binary and, on Linux, its required library. On Linux, `build-all` also compiles the filesystem fence interposer library (`libfence_fs.so`). On macOS, the library build is skipped automatically, and the filesystem fence uses the built-in Seatbelt sandbox (`sandbox-exec`).
+Requires Go 1.27.3 or newer. The binary is built to `./nocklock`; building does not install it on `PATH`. Follow [the complete source installation steps](docs/setup.md#1-install) to install the binary and, on Linux, its required library. On Linux, `build-all` also compiles the filesystem fence interposer library (`libfence_fs.so`). On macOS, the library build is skipped automatically, and the filesystem fence uses the built-in Seatbelt sandbox (`sandbox-exec`).
 
 ### Verify the installation
 
