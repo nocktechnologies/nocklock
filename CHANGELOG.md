@@ -10,7 +10,7 @@ v0.13.1 refreshes the Go build toolchain to fix reachable standard-library vulne
 
 ### Security
 
-- Built with Go 1.26.10, fixing reachable standard-library vulnerabilities including GO-2026-6809 in `crypto/x509`, reached through the proxy's `http.Server.Serve`. Upgrade with `brew upgrade nocklock` or rebuild from source.
+- Built with Go 1.26.10, fixing reachable standard-library vulnerabilities including GO-2026-6809 in `crypto/x509`, reached through the proxy's `http.Server.Serve`. On macOS, upgrade with `brew upgrade nocklock`. On Linux, rebuild from source as described in docs/setup.md, including the interposer library.
 
 ### Added
 
