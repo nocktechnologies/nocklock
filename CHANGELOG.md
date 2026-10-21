@@ -4,6 +4,24 @@ All notable changes to NockLock will be documented in this file.
 
 ## [Unreleased]
 
+## [0.13.1] - 2026-10-21
+
+v0.13.1 raises the minimum Go version to 1.27.3 to fix reachable standard-library vulnerabilities.
+
+### Security
+
+- Requires Go 1.27.3 or later to build. GO-2026-6809 in `crypto/x509`, reached through the proxy's `http.Server.Serve`, affects Go before 1.26.10 and Go 1.27.0 to 1.27.2. go.mod now requires Go 1.27.3, so any older toolchain, including the patched 1.26.10, either downloads Go 1.27.3 automatically or refuses to build. On macOS, run `brew update && brew upgrade nocklock`. On Linux, rebuild from source as described in docs/setup.md, including the interposer library.
+
+### Added
+
+- CI job `landlock-abi9-receipt` (`.github/workflows/landlock-abi9-receipt.yml`). On a GitHub-hosted runner it boots a throwaway KVM guest from a digest-pinned Ubuntu 26.10 cloud image, fails unless the guest kernel reports Landlock ABI 9 or later, and runs the kernel cases. The receipt records the kernel, ABI, commit and, for each case, expected and actual results. Under a full `CONFINED` wrap, an unrelated pathname socket outside `filesystem.root` and an abstract socket are denied and the policy-allowed proxy and event sockets connect. The io_uring case probes the seccomp filter directly, not a full wrap: `io_uring_setup` is denied after an unfenced control reaches a live listener. A passing receipt is signed with the workflow's Sigstore identity. `doctor` and `wrap` claims are unchanged until a release carries this receipt.
+- `bench/redteam/kernel_cases.py --require-abi N` fails before any case on a kernel below Landlock ABI N; with `--out`, every case must pass and each enforcement claim must match. Reports now record the Landlock ABI.
+
+### Changed
+
+- The Linux candidate workflow signs its manifest through `packaging/linux/sign-manifest.sh`, shared with the receipt job. The signature, verification and both refusal controls are unchanged. The shared script also checks the manifest with `sha256sum --check --strict` before signing.
+- The tamper-evident audit log spec now says it shipped (#89, #90, #93).
+
 ## [0.13.0] - 2026-10-17
 
 v0.13.0 adds repo git-config execution warnings to `doctor` and a Linux netns proof for GitSpawn. It also simplifies audit appends, retires unused internal v1 HTTP routes, and removes inert cloud settings from newly generated configs. Existing config files and audit formats remain compatible. GitSpawn warnings leave doctor verdicts and exit codes unchanged; the new enforcement proof covers Linux netns mode only.

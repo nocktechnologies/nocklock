@@ -1,6 +1,6 @@
 # Tamper-Evident Audit Log: Spec (v1: hash chain)
 
-**Status:** Scoped, design questions answered. Ready to build.
+**Status:** Shipped. v1 hash chain in #89, Ed25519 signing in #90 and the external chain-head anchor in #93. `docs/how-it-works/audit-log.md` describes current behavior.
 
 ## Why
 

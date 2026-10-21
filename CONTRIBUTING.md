@@ -4,7 +4,7 @@ Thanks for your interest in making AI agents safer. NockLock is open source unde
 
 ## Quick start
 
-Go 1.26 or newer is required. Linux also needs a C compiler for the filesystem interposer.
+Go 1.27.3 or newer is required. Linux also needs a C compiler for the filesystem interposer.
 
 ```bash
 # Fork and clone
@@ -71,7 +71,7 @@ Use the highest applicable tier in the PR body; higher tiers include all require
 
 ## Code standards
 
-Go 1.26 or newer is required. All exported functions need doc comments. Error messages should tell the reader what to do about them: "failed to create proxy listener on port 8080: address already in use" rather than "proxy error". Do not add external dependencies without discussion; the CLI should stay lightweight. Config file changes must be backwards compatible. Fence implementations must fail closed: if a fence cannot initialize, block everything rather than allow everything.
+Go 1.27.3 or newer is required. All exported functions need doc comments. Error messages should tell the reader what to do about them: "failed to create proxy listener on port 8080: address already in use" rather than "proxy error". Do not add external dependencies without discussion; the CLI should stay lightweight. Config file changes must be backwards compatible. Fence implementations must fail closed: if a fence cannot initialize, block everything rather than allow everything.
 
 ## Testing
 

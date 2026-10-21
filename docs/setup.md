@@ -12,7 +12,7 @@ brew install nocktechnologies/tap/nocklock
 
 On Linux the formula installs only the `nocklock` binary, not `libfence_fs.so`, and the default config's `wrap` refuses to start without it. No supported Homebrew step installs the library today; use the source install below. Packaging is the open card N11643.
 
-**From source** (Go 1.26 or newer; `go.mod` pins 1.26.4):
+**From source** (Go 1.27.3 or newer; `go.mod` requires 1.27.3):
 
 ```bash
 git clone https://github.com/nocktechnologies/nocklock.git

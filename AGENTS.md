@@ -6,6 +6,8 @@ This is the canonical agent and contributor file; `CLAUDE.md` imports it. If thi
 
 Follows Engineering Standards v4.
 
+This is a public repository. Keep `AGENTS.md` and `docs/HANDOFF.md` product-only: exclude agent and person names, card numbers, internal coordination systems and hosts, and review or merge-gate procedures.
+
 ## Start here
 
 1. Read `docs/HANDOFF.md`: what changed lately, what bit the last run, what is still open.
@@ -19,7 +21,7 @@ Follows Engineering Standards v4.
 - `go test -tags=integration ./...`: end-to-end tests against the built binary
 - `GOOS=darwin GOARCH=arm64 go vet ./...`: compiles the darwin code and test files from Linux; CI runs it on every push
 - `go fmt ./...` / `go vet ./...`: format and lint; `make lint` runs both. CI fails if `gofmt -l .` prints anything.
-- Stack: Go 1.26+, cobra, BurntSushi/toml, SQLite via modernc.org/sqlite. Python 3 for scripts and the red-team bench.
+- Stack: Go 1.27.3+, cobra, BurntSushi/toml, SQLite via modernc.org/sqlite. Python 3 for scripts and the red-team bench.
 
 ## Required checks
 
@@ -31,7 +33,7 @@ Before you push:
 4. The PR follows `CONTRIBUTING.md` and targets `next`.
 5. `CHANGELOG.md` has an `[Unreleased]` entry; this file and `docs/REPO-MAP.md` are updated if structure changed.
 
-CI: `.github/workflows/test.yml` runs build, darwin cross-vet, vet, gofmt, the content gates, the unit suite, race regressions, fuzz smoke tests, Landlock and macOS Seatbelt enforcement proofs. `.github/workflows/network-egress.yml` runs the root netns, egress and red-team jobs. `.github/workflows/gitleaks.yml` scans for secrets against `.gitleaks-baseline.json`. `.github/workflows/linux-candidate.yml` builds the Linux install candidate.
+CI: `.github/workflows/test.yml` runs build, darwin cross-vet, vet, gofmt, the content gates, the unit suite, race regressions, fuzz smoke tests, Landlock and macOS Seatbelt enforcement proofs. `.github/workflows/network-egress.yml` runs the root netns, egress and red-team jobs. `.github/workflows/gitleaks.yml` scans for secrets against `.gitleaks-baseline.json`. `.github/workflows/linux-candidate.yml` builds the Linux install candidate. `.github/workflows/landlock-abi9-receipt.yml` runs the Unix-socket and io_uring kernel cases in a KVM guest with Landlock ABI 9+ and signs the receipt.
 
 ## Rules that bite
 
@@ -89,5 +91,5 @@ Things you cannot guess from the code layout:
 - Changelog: `CHANGELOG.md` (add to `[Unreleased]` in every PR).
 - Roadmap: `docs/ROADMAP.md` (the path to 1.0).
 - Architecture: `ARCHITECTURE.md` (deep package tree); `docs/REPO-MAP.md` (every package and where its tests are).
-- Pod notes: `docs/HANDOFF.md`.
+- Contributor notes: `docs/HANDOFF.md`.
 - Docs index: `docs/README.md`. Designs and specs: `docs/design/`, `docs/superpowers/specs/`. Lessons: `.claude/lessons/`.

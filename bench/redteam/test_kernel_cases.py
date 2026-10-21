@@ -337,5 +337,90 @@ class KernelReceiptTest(TestCase):
         with self.assertRaises(ValueError): kernel_cases.classify("unix-wrap", actions, "")
 
 
+class RequiredABIReceiptTest(TestCase):
+    PASSING = dict.fromkeys(("unix-wrap", "abi9", "io-uring"), "PASS")
+    PROBE = "ABI9_WRAP_PROBE path={path} abstract=DENIED event=CONNECTED proxy=CONNECTED lookback=403 inet=DENIED"
+
+    def setUp(self):
+        # main() installs its own SIGTERM handler and never restores it.
+        self.addCleanup(signal.signal, signal.SIGTERM, signal.getsignal(signal.SIGTERM))
+        out = tempfile.TemporaryDirectory()
+        self.addCleanup(out.cleanup)
+        self.out = Path(out.name)
+
+    def run_main(self, abi, verdicts, path="DENIED", extra=(), require=True):
+        def run_case(repo, out, case, package, test):
+            if case == "unix-wrap":
+                event = dict(Test=test + "/Landlock_ABI_9_enforcement_with_filesystem_rules", Action="output",
+                             Output="    wrap_test.go:1: " + self.PROBE.format(path=path) + "\n")
+                (out / "unix-wrap.jsonl").write_text(json.dumps(event) + "\n")
+            return dict(case=case, verdict=verdicts[case], reason="stub")
+
+        argv = ["kernel_cases.py", *(("--require-abi", "9") if require else ()), *extra]
+        with mock.patch("kernel_cases.platform.system", return_value="Linux"), \
+             mock.patch("kernel_cases.landlock_abi", return_value=abi), \
+             mock.patch("kernel_cases.run_case", side_effect=run_case) as cases, \
+             mock.patch("sys.argv", argv), contextlib.redirect_stdout(io.StringIO()) as stdout, \
+             contextlib.redirect_stderr(io.StringIO()) as stderr:
+            code = kernel_cases.main()
+        return code, cases, stdout.getvalue() + stderr.getvalue()
+
+    def report(self):
+        return json.loads((self.out / "report.json").read_text())
+
+    def test_old_kernel_fails_before_any_case(self):
+        code, cases, output = self.run_main(8, {}, extra=("--out", str(self.out)))
+        self.assertEqual(code, 1)
+        cases.assert_not_called()
+        self.assertIn("Landlock ABI: 8", output)
+        self.assertIn("below the required 9", output)
+        self.assertFalse((self.out / "report.json").exists())
+
+    def test_abi_only_check_passes_on_capable_kernel(self):
+        code, cases, output = self.run_main(11, {})
+        self.assertEqual(code, 0)
+        cases.assert_not_called()
+        self.assertIn("Landlock ABI: 11", output)
+
+    def test_every_claim_matching_is_a_pass_receipt(self):
+        code, _, output = self.run_main(9, self.PASSING, extra=("--out", str(self.out)))
+        self.assertEqual(code, 0)
+        report = self.report()
+        self.assertEqual((report["verdict"], report["landlock_abi"]), ("PASS", 9))
+        self.assertEqual([row["expected"] for row in report["cases"]], ["PASS"] * 3)
+        self.assertEqual([claim["claim"][0] for claim in report["claims"]], ["a", "b", "c", "c", "d"])
+        for claim in report["claims"]:
+            self.assertEqual(claim["actual"], claim["expected"], claim)
+        self.assertIn("a-pathname-socket-outside-root: expected DENIED, actual **DENIED**", output)
+
+    def test_reachable_socket_is_recorded_and_fails(self):
+        # Negative control: the same passing verdicts cannot hide an observed
+        # connection to a socket the policy must deny.
+        code, _, _ = self.run_main(9, self.PASSING, path="CONNECTED", extra=("--out", str(self.out)))
+        self.assertEqual(code, 1)
+        report = self.report()
+        self.assertEqual(report["verdict"], "FAIL")
+        self.assertEqual(report["claims"][0], dict(claim="a-pathname-socket-outside-root",
+                                                   expected="DENIED", actual="CONNECTED"))
+
+    def test_gap_or_missing_probe_fails_when_proof_is_required(self):
+        for verdicts in (self.PASSING | {"io-uring": "SKIP"}, self.PASSING | {"abi9": "SKIP"}):
+            with self.subTest(verdicts=verdicts):
+                code, _, _ = self.run_main(9, verdicts, extra=("--out", str(self.out)))
+                self.assertEqual(code, 1)
+                self.assertEqual(self.report()["verdict"], "FAIL")
+        (self.out / "unix-wrap.jsonl").unlink()
+        claims = kernel_cases.enforcement_claims([dict(case="io-uring", verdict="PASS")], self.out)
+        self.assertEqual([claim["actual"] for claim in claims], ["MISSING"] * 4 + ["PASS"])
+
+    def test_without_requirement_gaps_still_report_as_before(self):
+        verdicts = self.PASSING | {"abi9": "SKIP"}
+        self.assertEqual(self.run_main(5, verdicts, extra=("--out", str(self.out)), require=False)[0], 0)
+        report = self.report()
+        self.assertEqual((report["verdict"], report["landlock_abi"]), ("PASS_WITH_COVERAGE_GAPS", 5))
+        self.assertNotIn("claims", report)
+        self.assertNotIn("expected", report["cases"][0])
+
+
 if __name__ == "__main__":
     unittest_main()
