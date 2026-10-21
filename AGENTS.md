@@ -21,7 +21,7 @@ This is a public repository. Keep `AGENTS.md` and `docs/HANDOFF.md` product-only
 - `go test -tags=integration ./...`: end-to-end tests against the built binary
 - `GOOS=darwin GOARCH=arm64 go vet ./...`: compiles the darwin code and test files from Linux; CI runs it on every push
 - `go fmt ./...` / `go vet ./...`: format and lint; `make lint` runs both. CI fails if `gofmt -l .` prints anything.
-- Stack: Go 1.26+, cobra, BurntSushi/toml, SQLite via modernc.org/sqlite. Python 3 for scripts and the red-team bench.
+- Stack: Go 1.27.3+, cobra, BurntSushi/toml, SQLite via modernc.org/sqlite. Python 3 for scripts and the red-team bench.
 
 ## Required checks
 
