@@ -10,7 +10,7 @@ v0.13.1 raises the minimum Go version to 1.27.3 to fix reachable standard-librar
 
 ### Security
 
-- Requires Go 1.27.3 or later to build. GO-2026-6809 in `crypto/x509`, reached through the proxy's `http.Server.Serve`, is fixed in Go 1.26.10 and 1.27.3, and Go 1.27.0 to 1.27.2 are affected. go.mod now sets `go 1.27.3`, so an affected toolchain either downloads Go 1.27.3 automatically or refuses to build. On macOS, run `brew update && brew upgrade nocklock`. On Linux, rebuild from source as described in docs/setup.md, including the interposer library.
+- Requires Go 1.27.3 or later to build. GO-2026-6809 in `crypto/x509`, reached through the proxy's `http.Server.Serve`, affects Go before 1.26.10 and Go 1.27.0 to 1.27.2. go.mod now requires Go 1.27.3, so any older toolchain, including the patched 1.26.10, either downloads Go 1.27.3 automatically or refuses to build. On macOS, run `brew update && brew upgrade nocklock`. On Linux, rebuild from source as described in docs/setup.md, including the interposer library.
 
 ### Added
 
