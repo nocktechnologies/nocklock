@@ -19,7 +19,7 @@ v0.13.1 refreshes the Go build toolchain to fix reachable standard-library vulne
 
 ### Changed
 
-- The Linux candidate workflow signs its manifest through `packaging/linux/sign-manifest.sh`, shared with the receipt job. The signature, verification and both refusal controls are unchanged.
+- The Linux candidate workflow signs its manifest through `packaging/linux/sign-manifest.sh`, shared with the receipt job. The signature, verification and both refusal controls are unchanged. The shared script also checks the manifest with `sha256sum --check --strict` before signing.
 - The tamper-evident audit log spec now says it shipped (#89, #90, #93).
 
 ## [0.13.0] - 2026-10-17

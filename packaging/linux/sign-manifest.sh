@@ -10,6 +10,7 @@ dir="$1"
 identity="$2"
 issuer=https://token.actions.githubusercontent.com
 diagnostics="$(mktemp -d)"
+trap 'rm -rf "$diagnostics"' EXIT
 cd "$dir"
 test -s SHA256SUMS
 sha256sum --check --strict SHA256SUMS
@@ -38,4 +39,3 @@ fi
 cat "$diagnostics/changed-manifest.log"
 grep -Eq 'failed to verify signature|could not verify message|invalid signature|artifact digest does not match|artifact does not match digest|does not match artifact' \
   "$diagnostics/changed-manifest.log" || { echo 'FAIL: changed manifest refused for another reason' >&2; exit 1; }
-rm -rf "$diagnostics"

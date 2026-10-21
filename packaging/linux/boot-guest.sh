@@ -12,8 +12,7 @@ test "${RUNNER_ENVIRONMENT:-}" = github-hosted
 image="$1"
 work="$2"
 port=2222
-mkdir -p "$work"
-chmod 700 "$work"
+mkdir -m 700 "$work"
 
 ssh-keygen -q -t ed25519 -N '' -C abi9-client -f "$work/client"
 ssh-keygen -q -t ed25519 -N '' -C abi9-guest -f "$work/hostkey"
