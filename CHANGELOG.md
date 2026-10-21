@@ -4,6 +4,14 @@ All notable changes to NockLock will be documented in this file.
 
 ## [Unreleased]
 
+## [0.13.1] - 2026-10-21
+
+v0.13.1 refreshes the Go build toolchain to fix reachable standard-library vulnerabilities.
+
+### Security
+
+- Built with Go 1.26.10, fixing reachable standard-library vulnerabilities including GO-2026-6809 in `crypto/x509`, reached through the proxy's `http.Server.Serve`. On macOS, upgrade with `brew upgrade nocklock`. On Linux, rebuild from source as described in docs/setup.md, including the interposer library.
+
 ### Added
 
 - CI job `landlock-abi9-receipt` (`.github/workflows/landlock-abi9-receipt.yml`). On a GitHub-hosted runner it boots a throwaway KVM guest from a digest-pinned Ubuntu 26.10 cloud image, fails unless the guest kernel reports Landlock ABI 9 or later, and runs the kernel cases. The receipt records the kernel, ABI, commit and, for each case, expected and actual results. Under a full `CONFINED` wrap, an unrelated pathname socket outside `filesystem.root` and an abstract socket are denied and the policy-allowed proxy and event sockets connect. The io_uring case probes the seccomp filter directly, not a full wrap: `io_uring_setup` is denied after an unfenced control reaches a live listener. A passing receipt is signed with the workflow's Sigstore identity. `doctor` and `wrap` claims are unchanged until a release carries this receipt.
