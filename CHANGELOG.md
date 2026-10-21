@@ -6,11 +6,11 @@ All notable changes to NockLock will be documented in this file.
 
 ## [0.13.1] - 2026-10-21
 
-v0.13.1 refreshes the Go build toolchain to fix reachable standard-library vulnerabilities.
+v0.13.1 raises the minimum Go version to 1.27.3 to fix reachable standard-library vulnerabilities.
 
 ### Security
 
-- Built with Go 1.26.10, fixing reachable standard-library vulnerabilities including GO-2026-6809 in `crypto/x509`, reached through the proxy's `http.Server.Serve`. On macOS, upgrade with `brew upgrade nocklock`. On Linux, rebuild from source as described in docs/setup.md, including the interposer library.
+- Requires Go 1.27.3 or later to build. GO-2026-6809 in `crypto/x509`, reached through the proxy's `http.Server.Serve`, is fixed in Go 1.26.10 and 1.27.3, and Go 1.27.0 to 1.27.2 are affected. go.mod now sets `go 1.27.3`, so an affected toolchain either downloads Go 1.27.3 automatically or refuses to build. On macOS, run `brew update && brew upgrade nocklock`. On Linux, rebuild from source as described in docs/setup.md, including the interposer library.
 
 ### Added
 
