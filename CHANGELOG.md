@@ -4,15 +4,17 @@ All notable changes to NockLock will be documented in this file.
 
 ## [Unreleased]
 
-### Added
+## [0.13.1] - 2026-10-21
 
-- CI job `landlock-abi9-receipt` (`.github/workflows/landlock-abi9-receipt.yml`). On a GitHub-hosted runner it boots a throwaway KVM guest from a digest-pinned Ubuntu 26.10 cloud image, fails unless the guest kernel reports Landlock ABI 9 or later, and runs the kernel cases. The receipt records the kernel, ABI, commit and, for each case, expected and actual results. Under a full `CONFINED` wrap, an unrelated pathname socket outside `filesystem.root` and an abstract socket are denied and the policy-allowed proxy and event sockets connect. The io_uring case probes the seccomp filter directly, not a full wrap: `io_uring_setup` is denied after an unfenced control reaches a live listener. A passing receipt is signed with the workflow's Sigstore identity. `doctor` and `wrap` claims are unchanged until a release carries this receipt.
-- `bench/redteam/kernel_cases.py --require-abi N` fails before any case on a kernel below Landlock ABI N; with `--out`, every case must pass and each enforcement claim must match. Reports now record the Landlock ABI.
+v0.13.1 refreshes the Go build toolchain to fix reachable standard-library vulnerabilities.
+
+### Security
+
+- Built with Go 1.26.10, fixing reachable standard-library vulnerabilities including GO-2026-6809 in `crypto/x509`, reached through the proxy's `http.Server.Serve`. Upgrade with `brew upgrade nocklock` or rebuild from source.
 
 ### Changed
 
-- The Linux candidate workflow signs its manifest through `packaging/linux/sign-manifest.sh`, shared with the receipt job. The signature, verification and both refusal controls are unchanged.
-- The tamper-evident audit log spec now says it shipped (#89, #90, #93).
+- The Landlock ABI 9 CI proof publishes a signed receipt of kernel enforcement results.
 
 ## [0.13.0] - 2026-10-17
 
