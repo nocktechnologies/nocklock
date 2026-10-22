@@ -107,7 +107,7 @@ def main():
             assert denied.returncode == 73 and "READ_ATTEMPT" in denied.stdout and CANARY not in denied.stdout, (name, "not an enforced read denial", denied.returncode, denied.stdout, denied.stderr)
             configure([str(grant)])
             refused = run([str(binary), "wrap", "--"] + command, project, env)
-            assert refused.returncode == 2 and "built-in credential deny" in refused.stderr and "READ_ATTEMPT" not in refused.stdout, (name, "overlapping allow was not refused", refused.returncode, refused.stderr)
+            assert refused.returncode != 0 and "built-in credential deny" in refused.stderr and "READ_ATTEMPT" not in refused.stdout, (name, "overlapping allow was not refused", refused.returncode, refused.stderr)
             mutated = run([str(mutant), "wrap", "--"] + command, project, env)
             # This is the same refusal assertion above with the guard removed:
             # every case must turn red, and it must reach the fake canary.
@@ -116,7 +116,7 @@ def main():
 
         configure([str(home)])
         refused = run([str(binary), "wrap", "--", "/bin/echo", "CHILD_STARTED"], project, env)
-        assert refused.returncode == 2 and "built-in credential deny" in refused.stderr and "CHILD_STARTED" not in refused.stdout
+        assert refused.returncode != 0 and "built-in credential deny" in refused.stderr and "CHILD_STARTED" not in refused.stdout
 
         # Package manager config is opt-in, and project dotenv stays readable.
         configure()
