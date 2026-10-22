@@ -13,8 +13,8 @@ import (
 // all descendants of the sandboxed process — no code injection, unlike the
 // Linux LD_PRELOAD path. This is the interim mechanism; see the design spec.
 
-// DefaultSensitivePaths returns the credential/secret directories the macOS
-// fence denies by default. This is a curated denylist that includes ~/.config
+// DefaultSensitivePaths returns the credential/secret paths both platform
+// fences deny by default. This is a curated denylist that includes ~/.config
 // because agent and cloud credentials frequently live there. User config can
 // extend it.
 // Paths that do not exist on a given machine are fine — GenerateProfile
@@ -25,6 +25,7 @@ func DefaultSensitivePaths() []string {
 		return nil
 	}
 	rel := []string{
+		".nock",
 		".ssh",
 		".aws",
 		".config",

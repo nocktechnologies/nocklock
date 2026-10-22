@@ -9,6 +9,13 @@ Since v0.9.0, `doctor` reports `PARTIAL` (exit 3) for Linux `CONFINED` below Lan
 
 `doctor` also lists deputies: more-privileged helpers the wrapped agent can ask to act for it, such as a reachable `docker.sock`, a writable shell startup file or agent config, or sudo that runs without a password prompt. Each row says whether the fence blocks it. A deputy the fence does not block keeps the verdict at `PARTIAL`; doctor fixes nothing (`internal/cli/doctor_deputies.go`). See [deputies](deputies.md).
 
+`doctor` inspects project `.env*` files beneath `filesystem.root` with the bounded,
+no-symlink secret scanner. Secret-shaped assignments or recognized credential
+formats produce a `project-dotenv` warning and `PARTIAL` (exit 3), as does an
+incomplete inspection when the other boundaries are protected. More severe
+verdicts remain unchanged. Values are never reported, and project files remain
+readable; this heuristic is not a runtime fence.
+
 Limit: `doctor` reports configuration and host capability, not proof that a particular session ran with every fence. Use `verify` for an active self-test and inspect that session's signed fence-state rows for evidence.
 
 ## Repo git config that runs code ("GitSpawn")

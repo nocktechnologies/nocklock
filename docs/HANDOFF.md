@@ -6,6 +6,8 @@ No internal host names, personal names or absolute home paths: `scripts/check-pu
 
 ## What changed
 
+- 2026-10-22: mandatory credential denies now share one policy resolver across Linux and macOS; broad grants refuse. macOS home filename prefixes protect agent and dotenv stores, and presets persist their own login exception. Doctor inspects project dotenv metadata without adding denies. CI-only fake-home canaries and policy-removal mutations cover both backends; pre-made project hardlinks remain a documented limitation.
+
 - 2026-10-18: contributor guidance now states that this public repository's agent index and handoff stay product-only. Existing coordination wording in those files was replaced with neutral terms.
 - 2026-10-17: release notes and roadmap prepared for v0.13.0 from next 7ee2a6e: GitSpawn doctor warnings and Linux netns proof, audit/config cleanup, and contributor/CI updates. Cleanup PR #252 already removed the batch's unused compatibility paths; the later GitSpawn and CI changes need no further cleanup.
 - 2026-10-17: integration fixtures corrected for release validation: explicit syscall-off in the shared unfenced config, supported generated config sections, current audit DB resolution and temporary audit state. The existing integration package passes on macOS with live networking (10 top-level passes, seven Linux-only skips); actual filesystem/Landlock proof configs are unchanged.

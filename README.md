@@ -133,10 +133,32 @@ write boundary. Seatbelt deliberately keeps `(allow default)`, because a
 file-write*)` with narrow write allows for the canonical `filesystem.root`,
 `.nock`, `/private/tmp`, the invoking user's temp and cache paths, and required
 `/dev` pseudo-devices. The built-in and configured sensitive paths remain
-denied for both reads and writes, even when they sit under the configured root. Reads outside the
+denied for both reads and writes. A root or allow grant covering a built-in credential path is refused. Reads outside the
 root are not confined; NockLock does not claim macOS read isolation. Every
 emitted path is canonicalized, and an unresolvable path or a rejected profile
 fails closed before the agent starts.
+
+Built-in credential denies are always added to `filesystem.deny` on Linux and
+macOS: `~/.ssh`, `~/.aws`, `~/.gnupg`, `~/.config`, `~/.kube`, `~/.docker`,
+`~/.nock`, `~/.netrc`, `~/.git-credentials`, and `~/Library/Keychains`.
+A user deny list cannot remove them. Any overlapping `filesystem.root`,
+`allow`, or `allow_rw` grant (including `~/`) refuses startup with a clear error.
+macOS additionally denies home `.env*`, `.claude*`, and `.codex` paths. The
+`claude-code` and `codex` presets permit their own agent login store only;
+`init --runtime` persists that choice as `project.runtime`. Existing generated
+configs can adopt `project.runtime = "claude-code"` or `"codex"` after reviewing
+the corresponding preset diff. `~/.npmrc` and `~/.pypirc` remain optional denies.
+
+Project `.env*` files remain readable. `doctor` reports `PARTIAL` (exit 3) when
+its bounded inspection finds secret-shaped values there, or cannot complete the
+inspection; it reports no values and adds no deny. This is a heuristic check,
+not proof that every credential format is detected.
+
+**Pre-made hard links:** macOS Seatbelt denies path names, not every name for an
+inode. A hard link created before launch from a credential file to an allowed
+project path can remain readable. Linux Landlock likewise allows a pre-existing
+alias reached through a granted project tree. Keep credential hard links and
+copies out of the project; neither fence claims to discover all aliases.
 
 Apple deprecates `sandbox-exec`, but it is still present and working on
 macOS 26.5. NockLock tests it in macOS CI and will track its availability. Its
@@ -318,7 +340,6 @@ root = "."
 mode = "read-write"
 linux_enforcement = "required"
 allow = [
-    "~/.claude/",
     "/tmp/",
     "/usr/",
     "/bin/",
@@ -401,10 +422,10 @@ state directory. Both lists are ignored on macOS, whose Seatbelt backend uses
 the configured root as its write boundary instead.
 
 The default Linux policy includes the system binary, library, and configuration
-paths needed to launch a shell. Missing read-only paths, such as `~/.claude/`
-in a new home, grant nothing for that session and do not prevent a wrap.
+paths needed to launch a shell. Missing optional read-only paths grant nothing
+for that session and do not prevent a wrap. Generic defaults do not grant agent login stores.
 
-Runtime presets exist for `claude-code`, `codex`, `aider`, `gemini-cli`, `opencode`, and `goose`. Each preset keeps the network default-deny, blocks private ranges, keeps Linux filesystem and syscall enforcement required, and passes only the runtime's documented first-party provider key or keys. `claude-code` also passes `CLAUDE_CODE_OAUTH_TOKEN` (see the macOS note under Quick start). `codex` keeps its login in a file under `~/.codex`; the built-in macOS deny list does not include `~/.codex`, so reads are not blocked, but Codex's token-refresh writes outside the project root would be, and this has not been verified on a macOS runner. Use `OPENAI_API_KEY` if a refresh fails. `gemini-cli` targets the API-key path; OAuth and Vertex AI setups need explicit operator review before widening the filesystem or egress. `opencode` targets OpenCode Zen/Go through `opencode.ai`; direct third-party providers should use a reviewed custom config. `goose` is a multi-provider preset covering Anthropic, OpenAI, Gemini, Groq, and OpenRouter; only the provider key the user has set is live, and the rest are unset and harmless. MCP extensions that reach additional hosts need an operator overlay.
+Runtime presets exist for `claude-code`, `codex`, `aider`, `gemini-cli`, `opencode`, and `goose`. Each preset keeps the network default-deny, blocks private ranges, keeps Linux filesystem and syscall enforcement required, and passes only the runtime's documented first-party provider key or keys. `claude-code` also passes `CLAUDE_CODE_OAUTH_TOKEN` (see the macOS note under Quick start). `codex` keeps its login in a file under `~/.codex`; only the Codex preset exempts that store from the built-in macOS deny. Token-refresh writes outside the project root remain blocked, and the actual Codex OAuth flow has not been verified on a macOS runner. Use `OPENAI_API_KEY` if a refresh fails. `gemini-cli` targets the API-key path; OAuth and Vertex AI setups need explicit operator review before widening the filesystem or egress. `opencode` targets OpenCode Zen/Go through `opencode.ai`; direct third-party providers should use a reviewed custom config. `goose` is a multi-provider preset covering Anthropic, OpenAI, Gemini, Groq, and OpenRouter; only the provider key the user has set is live, and the rest are unset and harmless. MCP extensions that reach additional hosts need an operator overlay.
 
 Two candidate runtimes are deliberately left without a preset:
 

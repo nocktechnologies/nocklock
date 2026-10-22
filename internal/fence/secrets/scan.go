@@ -60,11 +60,12 @@ var scanDetectors = []struct {
 }
 
 type scanner struct {
-	ctx     context.Context
-	report  ScanReport
-	entries int
-	stopped bool
-	seen    map[string]bool
+	dotenvOnly bool
+	ctx        context.Context
+	report     ScanReport
+	entries    int
+	stopped    bool
+	seen       map[string]bool
 }
 
 // Scan inspects relative paths beneath root and the supplied environment values.
@@ -218,6 +219,9 @@ func (s *scanner) walk(root *os.Root, path string, depth int, parent *os.File) {
 		s.issue(path, "cannot inspect input; check existence and permissions")
 		return
 	}
+	if s.dotenvOnly && !before.IsDir() && !strings.HasPrefix(filepath.Base(path), ".env") {
+		return
+	}
 	if !before.IsDir() && !before.Mode().IsRegular() {
 		s.issue(path, "symlink or special file is unsupported; select regular files/directories")
 		return
@@ -272,6 +276,9 @@ func (s *scanner) walk(root *os.Root, path string, depth int, parent *os.File) {
 			return
 		}
 		s.inspect(data, "file", path)
+		if s.dotenvOnly {
+			s.inspectDotEnv(data, path)
+		}
 		s.report.FilesScanned++
 	}
 	if !scanInputUnchanged(root, path, f, info, data) {

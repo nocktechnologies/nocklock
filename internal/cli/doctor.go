@@ -228,6 +228,7 @@ func runDoctor(caps doctorCapabilities) doctorReport {
 	checks = append(checks, syscallDoctorCheck(cfg, caps))
 	checks = append(checks, networkDoctorCheck(cfg, caps))
 	checks = append(checks, secretDoctorCheck(cfg))
+	checks = append(checks, projectDotEnvDoctorCheck(cfg))
 	checks = append(checks, egressHelperDoctorCheck(caps))
 	checks = append(checks, sanityDoctorChecks(cfg, configPath, caps)...)
 	projectRoot := filepath.Dir(filepath.Dir(configPath))
@@ -258,7 +259,7 @@ func runDoctor(caps doctorCapabilities) doctorReport {
 	report := finishDoctorReport(checks, doctorBoundaries(cfg, caps.goos, level, checks), activity)
 	// A reachable deputy the fence does not block is a partial posture, never
 	// a gap: it cannot raise the verdict above PARTIAL, nor lower a worse one.
-	if report.Verdict == doctorVerdictProtected && reachableDeputies(checks) > 0 {
+	if report.Verdict == doctorVerdictProtected && (reachableDeputies(checks) > 0 || projectDotEnvWarning(checks)) {
 		report.Verdict = doctorVerdictPartial
 	}
 	report.EgressLevel = level
@@ -280,7 +281,9 @@ func signingKeyDoctorCheck(cfg *config.Config, configPath string, caps doctorCap
 	}
 	fsConfig := cfg.Filesystem
 	fsConfig.Deny = deny
-	resolved, err := fsfence.ProcessConfig(fsConfig)
+	effective := *cfg
+	effective.Filesystem = fsConfig
+	resolved, err := fsfence.ProcessEffectiveConfig(&effective, caps.goos)
 	if err != nil {
 		check := doctorCriticalCheck("Fences", "signing-key", "unresolved", fmt.Sprintf("Cannot resolve managed signing key directory %s: %v", keyDir, err), "fix the signing key path and filesystem config")
 		return check, &doctorSigningKey{Directory: keyDir, Posture: doctorCheckPosture(check)}
@@ -454,6 +457,10 @@ func filesystemDoctorCheck(cfg *config.Config, caps doctorCapabilities) doctorCh
 			Status:   "not-configured",
 			Message:  "Filesystem fence is not configured.",
 		}
+	}
+
+	if _, err := fsfence.ProcessEffectiveConfig(cfg, caps.goos); err != nil {
+		return doctorCriticalCheck("Fences", "filesystem", "will-refuse", err.Error(), "narrow the filesystem grants so built-in credential denies remain protected")
 	}
 
 	switch caps.goos {
@@ -1081,4 +1088,13 @@ func localProxyBackendAvailable() error {
 		return err
 	}
 	return ln.Close()
+}
+
+func projectDotEnvWarning(checks []doctorCheck) bool {
+	for _, check := range checks {
+		if check.Name == "project-dotenv" && check.Severity == doctorWarning {
+			return true
+		}
+	}
+	return false
 }

@@ -282,8 +282,10 @@ type Config struct {
 
 // ProjectConfig identifies the project being fenced.
 type ProjectConfig struct {
-	Name string `toml:"name"`
-	Root string `toml:"root"`
+	// Runtime selects the preset-owned login store; empty denies all agent stores.
+	Runtime string `toml:"runtime"`
+	Name    string `toml:"name"`
+	Root    string `toml:"root"`
 }
 
 // FilesystemConfig defines filesystem access boundaries.

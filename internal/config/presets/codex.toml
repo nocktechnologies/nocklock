@@ -1,4 +1,6 @@
 [project]
+# This preset may read only its own agent login store.
+runtime = "codex"
 name = "codex"
 root = "."
 

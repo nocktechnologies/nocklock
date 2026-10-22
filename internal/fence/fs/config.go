@@ -66,6 +66,8 @@ type FenceConfig struct {
 	AllowPaths   []string
 	AllowRWPaths []string
 	DenyPaths    []string
+	// DenyPrefixes are macOS home filename prefixes (not user-config globs).
+	DenyPrefixes []string
 
 	// ProtectedRootSubdir, when set, is a directory INSIDE Root that must not
 	// become writable — in practice a legacy in-project audit directory. It

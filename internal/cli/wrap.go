@@ -503,7 +503,7 @@ var wrapCmd = &cobra.Command{
 			}
 
 			var err error
-			fsCfg, err = fsfence.ProcessConfig(cfg.Filesystem)
+			fsCfg, err = fsfence.ProcessEffectiveConfig(cfg, runtime.GOOS)
 			if err != nil {
 				if runtime.GOOS == "darwin" {
 					if logErr := recordMacOSFilesystemFenceState("REFUSED-TO-START", "invalid filesystem configuration", true); logErr != nil {
@@ -605,11 +605,6 @@ var wrapCmd = &cobra.Command{
 						return refuse("sandbox-exec unavailable", err)
 					}
 
-					defaultSensitive := fsfence.DefaultSensitivePaths()
-					if len(defaultSensitive) == 0 {
-						return refuse("default sensitive paths unavailable", errors.New("cannot resolve the current user's home directory"))
-					}
-					sensitive := append(defaultSensitive, fsCfg.DenyPaths...)
 					// The audit state is written only by this unfenced parent. It
 					// is already included in sensitive through egressChildDenyPaths,
 					// so never grant its directory to the fenced child.
@@ -629,8 +624,8 @@ var wrapCmd = &cobra.Command{
 						proxyPort = ln.Addr().(*net.TCPAddr).Port
 						seatbeltProxyAddr = ln.Addr().String()
 					}
-					profile, pathCount, err := fsfence.GenerateTaggedWriteConfinementProfile(
-						sensitive, fsCfg.Root, fsCfg.Mode, macOSHardened, fsfence.DenialTag(sessionID), proxyPort,
+					profile, pathCount, err := fsfence.GenerateEffectiveProfile(
+						fsCfg, macOSHardened, fsfence.DenialTag(sessionID), proxyPort,
 					)
 					if err != nil {
 						return refuse("profile generation failed", err)
@@ -1530,7 +1525,7 @@ func validateWrapRuntimeConfig(cfg *config.Config) error {
 		if !fsfence.IsSupported() {
 			return fmt.Errorf("filesystem fence configured but not supported on %s", runtime.GOOS)
 		}
-		fsCfg, err := fsfence.ProcessConfig(cfg.Filesystem)
+		fsCfg, err := fsfence.ProcessEffectiveConfig(cfg, runtime.GOOS)
 		if err != nil {
 			return fmt.Errorf("invalid filesystem fence config: %w", err)
 		}
