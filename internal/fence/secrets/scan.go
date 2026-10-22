@@ -219,7 +219,7 @@ func (s *scanner) walk(root *os.Root, path string, depth int, parent *os.File) {
 		s.issue(path, "cannot inspect input; check existence and permissions")
 		return
 	}
-	if s.dotenvOnly && !before.IsDir() && !strings.HasPrefix(filepath.Base(path), ".env") {
+	if s.dotenvOnly && !before.IsDir() && !strings.HasPrefix(strings.ToLower(filepath.Base(path)), ".env") {
 		return
 	}
 	if !before.IsDir() && !before.Mode().IsRegular() {

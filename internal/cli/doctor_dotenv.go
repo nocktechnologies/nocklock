@@ -5,6 +5,7 @@ import (
 	"time"
 
 	"github.com/nocktechnologies/nocklock/internal/config"
+	fsfence "github.com/nocktechnologies/nocklock/internal/fence/fs"
 	"github.com/nocktechnologies/nocklock/internal/fence/secrets"
 )
 
@@ -15,7 +16,11 @@ func projectDotEnvDoctorCheck(cfg *config.Config) doctorCheck {
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
-	report := secrets.ScanDotEnv(ctx, cfg.Filesystem.Root)
+	root, err := fsfence.ExpandTilde(cfg.Filesystem.Root)
+	report := secrets.ScanReport{Complete: false}
+	if err == nil {
+		report = secrets.ScanDotEnv(ctx, root)
+	}
 	check.Status = "clear"
 	check.Message = "No secret-shaped values found in the bounded project .env inspection; project .env files remain readable."
 	if len(report.Findings) > 0 {

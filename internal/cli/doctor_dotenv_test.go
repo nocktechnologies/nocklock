@@ -2,6 +2,7 @@ package cli
 
 import (
 	"encoding/json"
+	"github.com/nocktechnologies/nocklock/internal/config"
 	"os"
 	"path/filepath"
 	"strings"
@@ -28,5 +29,19 @@ func TestDoctorProjectDotEnvPartial(t *testing.T) {
 	encoded, _ := json.Marshal(got)
 	if strings.Contains(string(encoded), canary) {
 		t.Fatal("doctor exposed secret-shaped value")
+	}
+}
+
+func TestDoctorDotEnvExpandsHomeWithoutReportingValues(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	if err := os.WriteFile(filepath.Join(home, ".ENV.local"), []byte("TOKEN=fake-only"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	cfg := config.DefaultConfig()
+	cfg.Filesystem.Root = "~"
+	check := projectDotEnvDoctorCheck(&cfg)
+	if check.Status != "readable-secret" {
+		t.Fatalf("home dotenv check: %+v", check)
 	}
 }
