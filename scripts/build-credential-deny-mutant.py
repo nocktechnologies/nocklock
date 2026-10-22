@@ -12,7 +12,7 @@ if os.environ.get("GITHUB_ACTIONS") != "true":
 output = Path(sys.argv[1]).resolve()
 with tempfile.TemporaryDirectory(prefix="nocklock-mutant-", dir=os.environ["RUNNER_TEMP"]) as tmp:
     source = Path(tmp) / "source"
-    shutil.copytree(Path.cwd(), source, ignore=shutil.ignore_patterns(".git", "credential-proof-*", "nocklock", "*.so"))
+    shutil.copytree(Path.cwd(), source, ignore=shutil.ignore_patterns(".git", "credential-proof-*", "*.so"))
     path = source / "internal/fence/fs/builtins.go"
     text = path.read_text()
     signature = 'func ProcessEffectiveConfig(cfg *config.Config, goos string) (*FenceConfig, error) {'

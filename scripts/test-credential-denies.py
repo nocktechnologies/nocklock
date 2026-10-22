@@ -69,9 +69,9 @@ def main():
                 command = ["/bin/sh", "-c", 'exec /bin/sh -c \'exec "$@"\' grandchild "$@"', "child"] + command
             return command
 
-        paths = [".ssh/canary", ".aws/credentials", ".gnupg/canary", ".config/canary",
+        paths = [".ssh/canary", ".ssh/id_rsa", ".aws/credentials", ".gnupg/private-keys-v1.d/canary", ".config/canary",
                  ".config/gh/hosts.yml", ".config/gcloud/application_default_credentials.json",
-                 ".kube/canary", ".docker/canary", ".nock/canary",
+                 ".kube/config", ".docker/config.json", ".nock/canary",
                  "Library/Keychains/canary", ".netrc", ".git-credentials"]
         if system == "Darwin":
             paths += [".env", ".env.production", ".claude/canary", ".claude/.credentials.json", ".claude.json", ".codex/canary", ".codex/auth.json"]
