@@ -19,6 +19,8 @@ No internal host names, personal names or absolute home paths: `scripts/check-pu
 
 ## What bit us
 
+- 2026-10-22: mandatory credential denies make a fake home beneath /tmp incompatible with the default /tmp allow, and root=/ is now refused even in network-only fixtures. CLI fixtures keep fake homes beside the package and network proofs grant their temporary project plus runtime paths.
+
 - 2026-10-17, on a dev host: `go test ./...` failed in `internal/logging` under umask 002. The failure in `TestWrapComposedDefaultEgressAudit` was suspected to involve a week-old installed binary used by the egress helper; that host cause was not reverified. Both conditions are now `AGENTS.md` gotchas.
 
 ## Still open

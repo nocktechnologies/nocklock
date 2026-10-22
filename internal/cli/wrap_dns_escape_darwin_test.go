@@ -58,6 +58,7 @@ func TestWrapMacOSDNSEscapeRecordsProxyEnforcement(t *testing.T) {
 	allowedHits, allowedAddr := startDNSEscapeUpstream(t)
 
 	project := t.TempDir()
+	t.Setenv("HOME", isolatedTestHome(t))
 	nockDir := filepath.Join(project, config.Dir)
 	if err := os.MkdirAll(nockDir, 0o755); err != nil {
 		t.Fatalf("create .nock dir: %v", err)
@@ -69,7 +70,7 @@ func TestWrapMacOSDNSEscapeRecordsProxyEnforcement(t *testing.T) {
 name = "n10813-dns-escape-darwin"
 
 [filesystem]
-root = "/"
+root = "."
 mode = "read-write"
 allow = []
 deny = []

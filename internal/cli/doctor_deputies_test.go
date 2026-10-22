@@ -34,11 +34,9 @@ type deputyFixture struct {
 func newDeputyFixture(t *testing.T) *deputyFixture {
 	t.Helper()
 	base := resolvedTempDir(t)
-	f := &deputyFixture{project: filepath.Join(base, "project"), home: filepath.Join(base, "home")}
-	for _, d := range []string{f.project, f.home} {
-		if err := os.Mkdir(d, 0o700); err != nil {
-			t.Fatal(err)
-		}
+	f := &deputyFixture{project: filepath.Join(base, "project"), home: isolatedTestHome(t)}
+	if err := os.Mkdir(f.project, 0o700); err != nil {
+		t.Fatal(err)
 	}
 	sockDir, err := os.MkdirTemp("", "nld")
 	if err != nil {
