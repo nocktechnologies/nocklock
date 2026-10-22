@@ -12,7 +12,6 @@ func DefaultConfig() Config {
 			Mode:             "read-write",
 			LinuxEnforcement: "required",
 			Allow: []string{
-				"~/.claude/",
 				"/tmp/",
 				"/usr/",
 				"/bin/",
@@ -100,7 +99,6 @@ root = "."
 mode = "read-write"
 linux_enforcement = "required"
 allow = [
-    "~/.claude/",
     "/tmp/",
     "/usr/",
     "/bin/",

@@ -243,7 +243,7 @@ func TestDoctorRealInterposerProbe(t *testing.T) {
 	if os.Getenv("NOCKLOCK_INTERPOSER_DOCTOR_CHILD") == "1" {
 		caps := currentDoctorCapabilities
 		caps.goos = "linux" // Exercise the real library probe on either Unix test host.
-		check := filesystemDoctorCheck(&config.Config{Filesystem: config.FilesystemConfig{Root: "/project"}}, caps)
+		check := filesystemDoctorCheck(&config.Config{Filesystem: config.FilesystemConfig{Root: "."}}, caps)
 		if check.Severity != doctorCritical || check.Status != "configured-but-backend-missing" || !strings.Contains(check.Message, "group/world-writable") {
 			t.Fatalf("unsafe interposer was not reported: %+v", check)
 		}

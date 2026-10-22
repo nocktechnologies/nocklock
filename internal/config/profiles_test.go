@@ -25,3 +25,20 @@ func TestClaudeCodePresetIncludesSystemReadPaths(t *testing.T) {
 		}
 	}
 }
+
+func TestGenericDefaultsDoNotGrantAgentLogin(t *testing.T) {
+	for _, p := range DefaultConfig().Filesystem.Allow {
+		if p == "~/.claude/" {
+			t.Fatal("generic defaults grant Claude login")
+		}
+	}
+	for _, name := range []string{"claude-code", "codex"} {
+		cfg, err := LoadProfile(name)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if cfg.Project.Runtime != name {
+			t.Fatalf("preset %s lost persisted runtime identity", name)
+		}
+	}
+}

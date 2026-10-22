@@ -11,6 +11,7 @@ import (
 func restrictOverlay(base, overlay Config) Config {
 	cfg := overlay
 	cfg.ProfileName = base.ProfileName
+	cfg.Project.Runtime = base.Project.Runtime
 
 	cfg.Filesystem.Allow = intersectStrings(base.Filesystem.Allow, overlay.Filesystem.Allow)
 	cfg.Filesystem.AllowRW = intersectStrings(base.Filesystem.AllowRW, overlay.Filesystem.AllowRW)

@@ -13,6 +13,8 @@ import (
 	"github.com/nocktechnologies/nocklock/internal/logging"
 )
 
+var cliTestWorkDir string
+
 // TestMain points the audit state root at a throwaway directory for the whole
 // package. Tests here run real `wrap` invocations, and the event log now
 // resolves into $XDG_STATE_HOME (config.AuditStateDir) -- without this they
@@ -24,6 +26,7 @@ func TestMain(m *testing.M) {
 		fmt.Fprintf(os.Stderr, "locate test working directory: %v\n", err)
 		os.Exit(1)
 	}
+	cliTestWorkDir = workDir
 	// The claude-code preset grants /tmp, so placing the audit-state deny under
 	// os.TempDir makes that deny unenforceable. Keep it beside the test projects
 	// in the package working directory instead.
@@ -48,6 +51,22 @@ func TestMain(m *testing.M) {
 	code := m.Run()
 	os.RemoveAll(stateHome)
 	os.Exit(code)
+}
+
+// isolatedTestHome stays outside the default /tmp grant and any temporary
+// project, even when an earlier helper changed the working directory.
+func isolatedTestHome(t *testing.T) string {
+	t.Helper()
+	home, err := os.MkdirTemp(cliTestWorkDir, "preset-test-home-")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(home) })
+	home, err = filepath.EvalSymlinks(home)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return home
 }
 
 // resolvedTempDir returns a t.TempDir() with symlinks resolved. On macOS it

@@ -63,6 +63,7 @@ func TestWrapMacOSNetworkFloor(t *testing.T) {
 	}
 
 	project := t.TempDir()
+	t.Setenv("HOME", isolatedTestHome(t))
 	if err := os.MkdirAll(filepath.Join(project, config.Dir), 0o755); err != nil {
 		t.Fatalf("create .nock dir: %v", err)
 	}
@@ -70,7 +71,7 @@ func TestWrapMacOSNetworkFloor(t *testing.T) {
 name = "n11599-network-floor-darwin"
 
 [filesystem]
-root = "/"
+root = "."
 mode = "read-write"
 allow = []
 deny = []

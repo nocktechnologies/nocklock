@@ -9,6 +9,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"runtime"
 	"slices"
 	"sort"
 	"strings"
@@ -130,7 +131,7 @@ func canonicalPolicy(cfg *config.Config, configPath, dbPath, networkFenceMode st
 		"hardened":             cfg.Filesystem.Hardened,
 	}
 	if cfg.Filesystem.Root != "" {
-		resolved, err := fsfence.ProcessConfig(cfg.Filesystem)
+		resolved, err := fsfence.ProcessEffectiveConfig(cfg, runtime.GOOS)
 		if err != nil {
 			return nil, fmt.Errorf("resolve filesystem policy: %w", err)
 		}
@@ -139,12 +140,16 @@ func canonicalPolicy(cfg *config.Config, configPath, dbPath, networkFenceMode st
 		filesystem["allow"] = canonicalStrings(resolved.AllowPaths)
 		filesystem["allow_rw"] = canonicalStrings(resolved.AllowRWPaths)
 		filesystem["deny"] = canonicalStrings(resolved.DenyPaths)
+		if len(resolved.DenyPrefixes) > 0 {
+			filesystem["deny_prefixes"] = canonicalStrings(resolved.DenyPrefixes)
+		}
 	}
 	policy := map[string]any{
 		"profile": cfg.ProfileName,
 		"project": map[string]any{
-			"name": cfg.Project.Name,
-			"root": canonicalConfigPath(projectRoot, cfg.Project.Root),
+			"name":    cfg.Project.Name,
+			"runtime": cfg.Project.Runtime,
+			"root":    canonicalConfigPath(projectRoot, cfg.Project.Root),
 		},
 		"filesystem": filesystem,
 		"network": map[string]any{

@@ -2,6 +2,16 @@
 
 Citations name source files at `origin/main` 89c02fa (no line numbers, so they do not go stale). Wording of limits follows `README.md` ("Filesystem platform boundary").
 
+Both platforms merge the mandatory credential deny set with user denies through
+`internal/fence/fs/builtins.go`. Grants overlapping a built-in path refuse startup.
+macOS adds home `.env*` and `.claude*` prefix rules and `.codex`, with only the
+selected agent preset exempting its own login store. Project `.env*` files stay
+readable; see the README for the complete path list and preset migration.
+
+Pre-made hard links into an allowed project tree can remain readable, including
+on macOS: Seatbelt path rules do not find every name for an inode. The CI proof
+asserts this limitation instead of claiming hard-link isolation.
+
 ## Linux: Landlock root allowlist
 - `wrap` re-execs the child through the hidden `__landlock-exec` shim (`internal/cli/wrap.go`), which builds a Landlock ruleset (`internal/fence/fs/landlock/landlock_linux.go`) and `execve`s the child in place. Every descendant inherits it.
 - `filesystem.allow` grants read-only, `filesystem.allow_rw` read-write, `filesystem.root` is the working root, `filesystem.deny` lists excluded paths. Missing optional paths grant nothing and do not block a wrap. Defaults: `README.md` "Configuration".

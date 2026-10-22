@@ -14,17 +14,19 @@ fi
 repo=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
 scratch=
 read_only=
-trap 'rm -rf -- "$scratch" "$read_only"' EXIT
+probe_bin=
+trap 'rm -rf -- "$scratch" "$read_only"; if [[ -n "$probe_bin" ]]; then sudo rm -rf -- "$probe_bin"; fi' EXIT
 scratch=$(mktemp -d "${HOME}/nocklock-init-default.XXXXXX")
 read_only=$(mktemp -d /tmp/nocklock-init-read-only.XXXXXX)
 
 mkdir -p "$scratch/home" "$scratch/project" "$scratch/outside"
-# The interposer must not have /tmp's world-writable ancestor. ~/.claude
-# already has a default read-only grant; retain /tmp for its separate deny test.
-probe_bin="$scratch/home/.claude/nocklock-test"
-mkdir -p "$probe_bin"
-cp "$repo/nocklock" "$probe_bin/nocklock"
-cp "$repo/internal/fence/fs/interposer/libfence_fs.so" "$probe_bin/libfence_fs.so"
+# CI-only: install the executable pair beneath the default /usr grant. Agent
+# login stores are no longer a generic runtime grant.
+[[ "${GITHUB_ACTIONS:-}" == true ]] || { echo "CI only" >&2; exit 1; }
+probe_bin=$(sudo mktemp -d /usr/local/lib/nocklock-init-proof.XXXXXX)
+sudo chmod 0755 "$probe_bin"
+sudo install -m 0755 "$repo/nocklock" "$probe_bin/nocklock"
+sudo install -m 0755 "$repo/internal/fence/fs/interposer/libfence_fs.so" "$probe_bin/libfence_fs.so"
 
 run_fenced() {
     (cd "$scratch/project" && env -i HOME="$scratch/home" PATH=/usr/bin:/bin USER=nocklock-test \

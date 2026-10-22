@@ -173,6 +173,7 @@ func TestConfigDigestCoversRequireEnforcedCLIFlag(t *testing.T) {
 
 var configDigestPolicyFields = map[string]string{
 	"ProfileName":                        "profile",
+	"Project.Runtime":                    "project.runtime",
 	"Project.Name":                       "project.name",
 	"Project.Root":                       "project.root",
 	"Filesystem.Root":                    "filesystem.root",

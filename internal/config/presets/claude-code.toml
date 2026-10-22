@@ -1,4 +1,6 @@
 [project]
+# This preset may read only its own agent login store.
+runtime = "claude-code"
 name = "claude-code"
 root = "."
 
@@ -7,7 +9,7 @@ root = "."
 mode = "read-write"
 linux_enforcement = "required"
 allow = [
-    "~/.claude/",
+    "~/.claude/", # Claude Code's own login and configuration, not a generic grant.
     "~/.cache/",
     "/tmp/",
     # Node runtime introspection: os.cpus() reads these system-wide,

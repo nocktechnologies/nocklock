@@ -105,7 +105,7 @@ Strict: unknown keys are a load error (`internal/config/config.go`). Structs at 
 
 | Table | Keys |
 |---|---|
-| `[project]` | `name`, `root` |
+| `[project]` | `name`, `root`, `runtime` (preset-owned login store; empty denies all agent stores on macOS) |
 | `[filesystem]` | `root`, `mode` (`read-write`, `read-only`), `linux_enforcement` (`required`, `preferred`, `off`), `allow`, `allow_rw`, `deny`, `hardened`; `macos_allow_unfenced` (only `false` loads) |
 | `[network]` | `allow`, `allow_all`, `allow_private_ranges`, `require_enforced`, `require_unix_socket_isolation`, `[[network.lookback]]` (`name`, `on`, `within`, `then`) |
 | `[syscall]` | `enforcement` (`required`, `preferred`, `off`), `allow_namespaces`, `socket_families`, `extra_deny` |

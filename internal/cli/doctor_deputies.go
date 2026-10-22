@@ -274,7 +274,7 @@ func doctorDeputyFence(cfg *config.Config, caps doctorCapabilities, checks []doc
 	case caps.goos == "linux" && linuxEnforcementMode(cfg.Filesystem.LinuxEnforcement) == linuxEnforcementOff:
 		f.fsReason = "Landlock is off by config, so only the userspace fence applies"
 	case caps.goos == "linux" || caps.goos == "darwin":
-		resolved, err := fsfence.ProcessConfig(cfg.Filesystem)
+		resolved, err := fsfence.ProcessEffectiveConfig(cfg, caps.goos)
 		if err != nil || resolved == nil {
 			f.fsReason = "the filesystem fence config does not resolve"
 			break
@@ -288,7 +288,6 @@ func doctorDeputyFence(cfg *config.Config, caps doctorCapabilities, checks []doc
 			f.writeGrants = append(f.writeGrants, resolved.AllowRWPaths...)
 		} else {
 			f.writeGrants = append(f.writeGrants, h.tempWriteDirs...)
-			f.writeDenies = append(f.writeDenies, fsfence.DefaultSensitivePaths()...)
 		}
 	default:
 		f.fsReason = "this platform has no filesystem fence"
