@@ -20,32 +20,48 @@ CANARY = "NOCKLOCK_FAKE_CREDENTIAL_CANARY\n"
 
 
 def run(argv, cwd, env, *, timeout=30):
-    with subprocess.Popen(argv, cwd=cwd, env=env, text=True,
-                          stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-                          start_new_session=True) as process:
+    process = subprocess.Popen(argv, cwd=cwd, env=env, text=True,
+                               stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                               start_new_session=True)
+    try:
+        stdout, stderr = process.communicate(timeout=timeout)
+    except subprocess.TimeoutExpired as expired:
+        # The known launcher group must stop even if process enumeration fails.
+        # Do not use Popen's context manager: its unbounded wait can hang cleanup.
         try:
-            stdout, stderr = process.communicate(timeout=timeout)
-        except subprocess.TimeoutExpired:
-            # wrap gives its child a separate process group. Collect every
-            # group in our isolated session, including reparented descendants;
-            # killing only the launcher's group would miss the wrapped child.
-            groups = {process.pid}
+            os.killpg(process.pid, signal.SIGKILL)
+        except ProcessLookupError:
+            pass
+        groups = set()
+        try:
+            # wrap gives its child a separate group. Reparented descendants
+            # retain this invocation's isolated session ID after the kill above.
             rows = subprocess.check_output(["/bin/ps", "-axo", "pid=,pgid="], text=True, timeout=5)
             for row in rows.splitlines():
                 pid, pgid = map(int, row.split())
                 try:
                     if os.getsid(pid) == process.pid:
                         groups.add(pgid)
-                except ProcessLookupError:
+                except OSError:
                     pass
-            for pgid in sorted(groups - {process.pid}) + [process.pid]:
+        except (OSError, subprocess.SubprocessError, ValueError) as error:
+            expired.add_note(f"Cannot enumerate remaining proof process groups: {error}")
+        finally:
+            for pgid in groups:
                 try:
                     os.killpg(pgid, signal.SIGKILL)
                 except ProcessLookupError:
                     pass
-            process.communicate(timeout=5)
-            raise
-        return subprocess.CompletedProcess(argv, process.returncode, stdout, stderr)
+            try:
+                process.communicate(timeout=5)
+            except subprocess.TimeoutExpired:
+                # A surviving descendant can hold a pipe open after launcher
+                # death. Close those readers and reap only the known launcher.
+                process.stdout.close()
+                process.stderr.close()
+                process.wait(timeout=5)
+        raise
+    return subprocess.CompletedProcess(argv, process.returncode, stdout, stderr)
 
 
 def main():
