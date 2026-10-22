@@ -60,9 +60,12 @@ For another runtime, choose one of these commands instead of the Claude Code ini
 nocklock init --runtime codex
 nocklock init --runtime aider
 nocklock init --runtime gemini-cli
-nocklock init --runtime opencode
-nocklock init --runtime goose
 ```
+
+The existing OpenCode and Goose presets currently refuse startup because their
+home configuration grants overlap mandatory credential denies; see the
+[filesystem platform boundary](#filesystem-platform-boundary) before choosing
+a configuration for either runtime.
 
 ## How it works
 

@@ -129,6 +129,7 @@ jobs:
 
 
       - name: credential deny canaries and policy-removal mutation (CI only)
+        timeout-minutes: 5
         if: steps.changes.outputs.code == 'true'
         run: |
           make build-fence-fs
@@ -281,6 +282,7 @@ jobs:
         run: go test ./internal/fence/fs/ -count=1 -v
 
       - name: credential deny canaries and policy-removal mutation (CI only)
+        timeout-minutes: 5
         run: |
           proof_bin="$HOME/.cache/nocklock-credential-proof"
           mkdir -p "$proof_bin"

@@ -9,6 +9,7 @@ All notable changes to NockLock will be documented in this file.
 - Merge built-in credential denies with user deny lists on Linux and macOS. Refuse root/allow grants overlapping a built-in deny, including a whole-home grant. macOS also denies home `.env*`, `.claude*`, and `.codex`; Claude Code and Codex presets retain access only to their own agent login store via the persisted `project.runtime` setting. Generic defaults no longer grant `~/.claude/`. Package manager config denies stay opt-in.
 - Keep project `.env*` readable and make `doctor` report `PARTIAL` for secret-shaped values or incomplete bounded inspection, without disclosing values. Document pre-made hard links into a granted project as a remaining read exposure on both platforms.
 - Add CI-only credential canaries, allowed controls, and per-case policy-removal mutation checks on Linux and macOS, including symlinks, hardlink names, case aliases, grandchildren, and Linux `/proc/self/root`.
+- Compatibility change: existing OpenCode and Goose presets now refuse startup because they grant paths beneath the mandatory `~/.config` deny. They need separately reviewed runtime configurations that relocate required files outside protected credential directories.
 
 ## [0.13.1] - 2026-10-21
 

@@ -12,15 +12,40 @@ import json
 import os
 from pathlib import Path
 import platform
+import signal
 import subprocess
 import tempfile
 
 CANARY = "NOCKLOCK_FAKE_CREDENTIAL_CANARY\n"
 
 
-def run(argv, cwd, env):
-    return subprocess.run(argv, cwd=cwd, env=env, text=True,
-                          stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=30)
+def run(argv, cwd, env, *, timeout=30):
+    with subprocess.Popen(argv, cwd=cwd, env=env, text=True,
+                          stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                          start_new_session=True) as process:
+        try:
+            stdout, stderr = process.communicate(timeout=timeout)
+        except subprocess.TimeoutExpired:
+            # wrap gives its child a separate process group. Collect every
+            # group in our isolated session, including reparented descendants;
+            # killing only the launcher's group would miss the wrapped child.
+            groups = {process.pid}
+            rows = subprocess.check_output(["/bin/ps", "-axo", "pid=,pgid="], text=True, timeout=5)
+            for row in rows.splitlines():
+                pid, pgid = map(int, row.split())
+                try:
+                    if os.getsid(pid) == process.pid:
+                        groups.add(pgid)
+                except ProcessLookupError:
+                    pass
+            for pgid in sorted(groups - {process.pid}) + [process.pid]:
+                try:
+                    os.killpg(pgid, signal.SIGKILL)
+                except ProcessLookupError:
+                    pass
+            process.communicate(timeout=5)
+            raise
+        return subprocess.CompletedProcess(argv, process.returncode, stdout, stderr)
 
 
 def main():
