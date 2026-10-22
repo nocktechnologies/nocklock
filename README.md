@@ -149,6 +149,11 @@ macOS additionally denies home `.env*`, `.claude*`, and `.codex` paths. The
 configs can adopt `project.runtime = "claude-code"` or `"codex"` after reviewing
 the corresponding preset diff. `~/.npmrc` and `~/.pypirc` remain optional denies.
 
+The existing `opencode` and `goose` presets grant directories beneath
+`~/.config`, so they now refuse startup on both platforms. That mandatory deny
+has no preset exception. Those runtimes need a reviewed configuration that
+keeps their required files outside the protected credential directories.
+
 Project `.env*` files remain readable. `doctor` reports `PARTIAL` (exit 3) when
 its bounded inspection finds secret-shaped values there, or cannot complete the
 inspection; it reports no values and adds no deny. This is a heuristic check,

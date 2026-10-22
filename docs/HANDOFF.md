@@ -25,4 +25,5 @@ No internal host names, personal names or absolute home paths: `scripts/check-pu
 
 ## Still open
 
-- No open items are recorded. `docs/REPO-MAP.md` states the commit its paths were verified at; restamp it whenever you touch it.
+- The existing opencode and goose presets grant paths beneath the mandatory home .config deny and now refuse startup. They need a separately reviewed runtime configuration that relocates required files without broadening credential access.
+- `docs/REPO-MAP.md` states the commit its paths were verified at; restamp it whenever you touch it.
