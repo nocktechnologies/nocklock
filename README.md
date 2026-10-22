@@ -157,10 +157,13 @@ The existing `opencode` and `goose` presets grant directories beneath
 has no preset exception. Those runtimes need a reviewed configuration that
 keeps their required files outside the protected credential directories.
 
-Project `.env*` files remain readable. `doctor` reports `PARTIAL` (exit 3) when
-its bounded inspection finds secret-shaped values there, or cannot complete the
-inspection; it reports no values and adds no deny. This is a heuristic check,
-not proof that every credential format is detected.
+Project `.env` and `.env.*` files remain readable. `doctor` checks those names
+only at `filesystem.root` and one directory level below, skipping dependency
+and build directories. Actual secret-shaped values produce `PARTIAL` (exit 3);
+an incomplete check says `not checked` and does not change the verdict. It
+reports no values and adds no deny. `PROTECTED` does not mean the whole project
+was scanned for secrets: deeper files and unrecognized credential formats are
+outside this heuristic check. See [the exact scope](docs/how-it-works/doctor-and-verify.md).
 
 **Pre-made hard links:** macOS Seatbelt denies path names, not every name for an
 inode. A hard link created before launch from a credential file to an allowed

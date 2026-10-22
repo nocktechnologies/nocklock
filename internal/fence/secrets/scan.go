@@ -219,7 +219,7 @@ func (s *scanner) walk(root *os.Root, path string, depth int, parent *os.File) {
 		s.issue(path, "cannot inspect input; check existence and permissions")
 		return
 	}
-	if s.dotenvOnly && !before.IsDir() && !strings.HasPrefix(strings.ToLower(filepath.Base(path)), ".env") {
+	if s.dotenvOnly && !before.IsDir() && !dotEnvName(filepath.Base(path)) {
 		return
 	}
 	if !before.IsDir() && !before.Mode().IsRegular() {
@@ -247,8 +247,18 @@ func (s *scanner) walk(root *os.Root, path string, depth int, parent *os.File) {
 	var data []byte
 	if info.IsDir() {
 		for !s.stopped {
+			if s.dotenvOnly && s.ctx.Err() != nil {
+				s.next(path)
+				break
+			}
 			entries, err := f.ReadDir(128)
 			for _, entry := range entries {
+				// Doctor's dotenv check is deliberately shallow. Prune before
+				// stat/open and entry accounting so dependency trees and ordinary
+				// files cannot consume its general scanner traversal budget.
+				if s.dotenvOnly && !dotEnvEntry(entry.Name(), entry.IsDir(), depth) {
+					continue
+				}
 				s.walk(root, filepath.Join(path, entry.Name()), depth+1, f)
 				if s.stopped {
 					break

@@ -22,15 +22,15 @@ func projectDotEnvDoctorCheck(cfg *config.Config) doctorCheck {
 		report = secrets.ScanDotEnv(ctx, root)
 	}
 	check.Status = "clear"
-	check.Message = "No secret-shaped values found in the bounded project .env inspection; project .env files remain readable."
+	check.Message = "No secret-shaped values found in .env and .env.* files at filesystem.root and one directory level below, excluding dependency/build directories. Deeper files were not checked; project .env files remain readable."
 	if len(report.Findings) > 0 {
 		check.Severity, check.Status = doctorWarning, "readable-secret"
 		check.Message = "Project .env files contain secret-shaped values and remain readable by the wrapped agent. Values are not reported."
 		check.Fix = "remove credentials from the project root or replace them with scoped development credentials"
 	} else if !report.Complete {
-		check.Severity, check.Status = doctorWarning, "incomplete"
-		check.Message = "Project .env inspection was incomplete; readable project credentials cannot be ruled out."
-		check.Fix = "inspect .env files under filesystem.root and resolve scan size, permissions, symlink, or concurrent-change limits"
+		check.Status = "not-checked"
+		check.Message = "Project .env check: not checked (inspection could not finish within the bounded root-and-one-level scope). Project .env files remain readable; this is not a full-project secret scan."
+		check.Fix = "inspect project .env files separately; resolve scan size, permissions, symlink, or concurrent-change limits to retry the shallow check"
 	}
 	return check
 }

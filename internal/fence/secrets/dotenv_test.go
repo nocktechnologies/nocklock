@@ -50,3 +50,37 @@ func TestScanDotEnvSafeControlAndSymlink(t *testing.T) {
 		t.Fatal("symlink .env must report incomplete without following it")
 	}
 }
+
+func TestScanDotEnvShallowScopeExcludesDependencyAndBuildDirectories(t *testing.T) {
+	root := t.TempDir()
+	for _, path := range []string{
+		".git/.env", "node_modules/.env", "vendor/.env", ".venv/.env",
+		"build/.env", "dist/.env", "target/.env", ".next/.env",
+		"app/deeper/.env", ".environment", "app/.envrc",
+	} {
+		full := filepath.Join(root, path)
+		if err := os.MkdirAll(filepath.Dir(full), 0700); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(full, []byte("TOKEN=fake-outside-scope"), 0600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if report := ScanDotEnv(context.Background(), root); !report.Safe() || report.FilesScanned != 0 {
+		t.Fatalf("out-of-scope files were inspected: %+v", report)
+	}
+	if err := os.WriteFile(filepath.Join(root, "app", ".env.local"), []byte("TOKEN=fake-in-scope"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if report := ScanDotEnv(context.Background(), root); !report.Complete || len(report.Findings) != 1 || report.FilesScanned != 1 {
+		t.Fatalf("immediate child dotenv was not inspected: %+v", report)
+	}
+}
+
+func TestScanDotEnvCancellationReportsIncomplete(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	if report := ScanDotEnv(ctx, t.TempDir()); report.Complete || len(report.Findings) != 0 {
+		t.Fatalf("cancelled inspection must be incomplete without inventing findings: %+v", report)
+	}
+}

@@ -6,6 +6,8 @@ No internal host names, personal names or absolute home paths: `scripts/check-pu
 
 ## What changed
 
+- 2026-10-22: doctor checks dotenv files only at the project root and one directory level below, skipping dependency/build directories. Incomplete inspection is informational; actual matches retain PARTIAL. The CI credential proof now cleans its isolated process session on every exit path, with mocked lifecycle regression tests that do not execute enforcement locally.
+
 - 2026-10-22: mandatory credential denies now share one policy resolver across Linux and macOS; broad grants refuse. macOS home filename prefixes protect agent and dotenv stores, and presets persist their own login exception. Doctor inspects project dotenv metadata without adding denies. CI-only fake-home canaries and policy-removal mutations cover both backends; pre-made project hardlinks remain a documented limitation.
 
 - 2026-10-18: contributor guidance now states that this public repository's agent index and handoff stay product-only. Existing coordination wording in those files was replaced with neutral terms.

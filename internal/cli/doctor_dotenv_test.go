@@ -2,12 +2,15 @@ package cli
 
 import (
 	"encoding/json"
-	"github.com/nocktechnologies/nocklock/internal/config"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/nocktechnologies/nocklock/internal/config"
+	"github.com/nocktechnologies/nocklock/internal/fence/secrets"
 )
 
 func TestDoctorProjectDotEnvPartial(t *testing.T) {
@@ -30,6 +33,60 @@ func TestDoctorProjectDotEnvPartial(t *testing.T) {
 	if strings.Contains(string(encoded), canary) {
 		t.Fatal("doctor exposed secret-shaped value")
 	}
+	if err := os.Symlink(filepath.Join(t.TempDir(), "missing"), filepath.Join(dir, ".env.link")); err != nil {
+		t.Fatal(err)
+	}
+	if incomplete := runDoctor(caps); incomplete.Verdict != doctorVerdictPartial {
+		t.Fatalf("actual match must remain PARTIAL even when inspection is incomplete: %+v", incomplete)
+	}
+}
+
+func TestDoctorLargeProjectWithoutDotEnvStaysProtected(t *testing.T) {
+	dir := t.TempDir()
+	writeTestConfig(t, dir, doctorTestTOML(false))
+	withWorkingDir(t, dir)
+	deps := filepath.Join(dir, "node_modules")
+	if err := os.Mkdir(deps, 0700); err != nil {
+		t.Fatal(err)
+	}
+	for i := 0; i <= secrets.MaxScanEntries; i++ {
+		if err := os.WriteFile(filepath.Join(deps, fmt.Sprintf("module-%d.js", i)), nil, 0600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	caps := doctorCapabilities{goos: "linux", fsBackend: func() error { return nil }, landlockABI: func() (int, error) { return 9, nil }, syscallBackend: func() bool { return true }, networkBackend: func() error { return nil }, sandboxExec: func() error { return nil }, now: time.Now}
+	got := runDoctor(caps)
+	if got.Verdict != doctorVerdictProtected {
+		t.Fatalf("large dependency tree changed verdict: %+v", got)
+	}
+	for _, check := range got.Checks {
+		if check.Name == "project-dotenv" && (check.Status != "clear" || !strings.Contains(check.Message, "Deeper files were not checked")) {
+			t.Fatalf("shallow scope not clear: %+v", check)
+		}
+	}
+}
+
+func TestDoctorIncompleteDotEnvIsInformational(t *testing.T) {
+	dir := t.TempDir()
+	writeTestConfig(t, dir, doctorTestTOML(false))
+	withWorkingDir(t, dir)
+	if err := os.Symlink(filepath.Join(t.TempDir(), "missing"), filepath.Join(dir, ".env.link")); err != nil {
+		t.Fatal(err)
+	}
+	caps := doctorCapabilities{goos: "linux", fsBackend: func() error { return nil }, landlockABI: func() (int, error) { return 9, nil }, syscallBackend: func() bool { return true }, networkBackend: func() error { return nil }, sandboxExec: func() error { return nil }, now: time.Now}
+	got := runDoctor(caps)
+	if got.Verdict != doctorVerdictProtected || doctorExitCode(got.Verdict) != 0 {
+		t.Fatalf("incomplete dotenv check changed verdict: %+v", got)
+	}
+	for _, check := range got.Checks {
+		if check.Name == "project-dotenv" {
+			if check.Status != "not-checked" || check.Severity != doctorInfo || !strings.Contains(check.Message, "not checked") {
+				t.Fatalf("incomplete check should be informational: %+v", check)
+			}
+			return
+		}
+	}
+	t.Fatal("missing project-dotenv check")
 }
 
 func TestDoctorDotEnvExpandsHomeWithoutReportingValues(t *testing.T) {

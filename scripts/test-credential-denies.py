@@ -14,6 +14,7 @@ from pathlib import Path
 import platform
 import signal
 import subprocess
+import sys
 import tempfile
 
 CANARY = "NOCKLOCK_FAKE_CREDENTIAL_CANARY\n"
@@ -25,14 +26,31 @@ def run(argv, cwd, env, *, timeout=30):
                                start_new_session=True)
     try:
         stdout, stderr = process.communicate(timeout=timeout)
-    except subprocess.TimeoutExpired as expired:
+        return subprocess.CompletedProcess(argv, process.returncode, stdout, stderr)
+    finally:
+        # Also clean up on success, cancellation and unexpected exceptions: a
+        # launcher can exit while a descendant in its session is still alive.
+        original_error = sys.exc_info()[1]
+        try:
+            cleanup_session(process)
+        except Exception as error:
+            if original_error is None:
+                raise
+            original_error.add_note(f"Proof process cleanup failed: {error}")
+
+
+def cleanup_session(process):
+    errors = []
+    groups = set()
+    try:
         # The known launcher group must stop even if process enumeration fails.
         # Do not use Popen's context manager: its unbounded wait can hang cleanup.
         try:
             os.killpg(process.pid, signal.SIGKILL)
         except ProcessLookupError:
             pass
-        groups = set()
+        except OSError as error:
+            errors.append(error)
         try:
             # wrap gives its child a separate group. Reparented descendants
             # retain this invocation's isolated session ID after the kill above.
@@ -45,23 +63,30 @@ def run(argv, cwd, env, *, timeout=30):
                 except OSError:
                     pass
         except (OSError, subprocess.SubprocessError, ValueError) as error:
-            expired.add_note(f"Cannot enumerate remaining proof process groups: {error}")
-        finally:
+            errors.append(error)
+    finally:
+        try:
             for pgid in groups:
                 try:
                     os.killpg(pgid, signal.SIGKILL)
                 except ProcessLookupError:
                     pass
+                except OSError as error:
+                    errors.append(error)
+        finally:
             try:
-                process.communicate(timeout=5)
-            except subprocess.TimeoutExpired:
-                # A surviving descendant can hold a pipe open after launcher
-                # death. Close those readers and reap only the known launcher.
-                process.stdout.close()
-                process.stderr.close()
-                process.wait(timeout=5)
-        raise
-    return subprocess.CompletedProcess(argv, process.returncode, stdout, stderr)
+                try:
+                    process.communicate(timeout=5)
+                except subprocess.TimeoutExpired:
+                    # A surviving descendant can hold a pipe open after launcher
+                    # death. Close those readers and reap only the known launcher.
+                    process.stdout.close()
+                    process.stderr.close()
+                    process.wait(timeout=5)
+            except (OSError, subprocess.SubprocessError) as error:
+                errors.append(error)
+    if errors:
+        raise RuntimeError("; ".join(str(error) for error in errors)) from errors[0]
 
 
 def main():
