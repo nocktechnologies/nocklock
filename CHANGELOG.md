@@ -4,12 +4,20 @@ All notable changes to NockLock will be documented in this file.
 
 ## [Unreleased]
 
+## [0.14.0] - 2026-10-23
+
+v0.14.0 makes the credential-file denies mandatory on Linux and macOS (#269). A config can add paths to the deny list but can no longer remove the built-in ones, and a config that grants one of the protected folders now refuses to start. Read the upgrade note under Breaking before you upgrade.
+
+### Breaking
+
+- The credential-file denies are mandatory on Linux and macOS: `~/.ssh`, `~/.aws`, `~/.gnupg`, `~/.config`, `~/.kube`, `~/.docker`, `~/.netrc` and `~/.git-credentials`, plus `~/.nock` and `~/Library/Keychains`. `filesystem.deny` adds to this list but cannot remove from it. A `filesystem.root`, `filesystem.allow` or `filesystem.allow_rw` grant that overlaps one of these paths, including a grant of the whole home directory, now refuses to start. To upgrade: run `nocklock doctor` in each project, or start a `wrap`; the refusal names the grant and the built-in deny it overlaps. If the agent needs a file that lives in one of those folders, move or copy that file to a location outside them and grant that location instead; otherwise drop the grant. Narrowing a grant to a subfolder of a protected folder does not help: any overlap is refused.
+- Existing OpenCode and Goose presets now refuse startup because they grant paths beneath the mandatory `~/.config` deny. They need separately reviewed runtime configurations that relocate required files outside protected credential directories.
+
 ### Security
 
-- Merge built-in credential denies with user deny lists on Linux and macOS. Refuse root/allow grants overlapping a built-in deny, including a whole-home grant. macOS also denies home `.env*`, `.claude*`, and `.codex`; Claude Code and Codex presets retain access only to their own agent login store via the persisted `project.runtime` setting. Generic defaults no longer grant `~/.claude/`. Package manager config denies stay opt-in.
+- The credential-file denies are now mandatory on Linux and macOS (#269); see Breaking for the list and for grants that now refuse to start. macOS also denies home `.env*`, `.claude*`, and `.codex`; Claude Code and Codex presets retain access only to their own agent login store via the persisted `project.runtime` setting. Generic defaults no longer grant `~/.claude/`. Package manager config denies stay opt-in.
 - Keep project `.env` and `.env.*` readable and make `doctor` report `PARTIAL` for actual secret-shaped values, without disclosing values. The check covers the project root plus one level, skips dependency/build directories, and reports incomplete inspection as informational `not checked`. Document pre-made hard links into a granted project as a remaining read exposure on both platforms.
 - Add CI-only credential canaries, allowed controls, and per-case policy-removal mutation checks on Linux and macOS, including symlinks, hardlink names, case aliases, grandchildren, and Linux `/proc/self/root`.
-- Compatibility change: existing OpenCode and Goose presets now refuse startup because they grant paths beneath the mandatory `~/.config` deny. They need separately reviewed runtime configurations that relocate required files outside protected credential directories.
 
 ## [0.13.1] - 2026-10-21
 
