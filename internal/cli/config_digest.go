@@ -28,9 +28,9 @@ type configDigestRecord struct {
 	ConfigPath     string `json:"config_path"`
 	PreviousDigest string `json:"previous_digest,omitempty"`
 	ConfigMTime    string `json:"config_mtime,omitempty"`
-	// Runtime is the login-store runtime (config.LoginStoreRuntime). It is
-	// signed with the row but outside Policy, so digests stay stable. Rows
-	// written before it existed leave it nil.
+	// Runtime is the login-store runtime (config.LoginStoreRuntime), recorded
+	// on macOS only. It is signed with the row but outside Policy, so digests
+	// stay stable. Other platforms and older rows leave it nil.
 	Runtime *string         `json:"runtime,omitempty"`
 	Policy  json.RawMessage `json:"policy"`
 }
@@ -104,6 +104,10 @@ func recordConfigDigest(logger *logging.Logger, cfg *config.Config, configPath, 
 	return nil
 }
 
+// loginStoreGOOS is the platform whose built-in denies carry a login-store
+// exemption; only there is the runtime recorded. Tests override it.
+var loginStoreGOOS = runtime.GOOS
+
 func runtimeLabel(name string) string {
 	if name == "" {
 		return "none"
@@ -124,12 +128,14 @@ func newConfigDigestRecord(cfg *config.Config, configPath, dbPath, networkFenceM
 			path = abs
 		}
 	}
-	loginStore := cfg.LoginStoreRuntime()
 	record := configDigestRecord{
 		Digest:     hex.EncodeToString(sum[:]),
 		ConfigPath: path,
-		Runtime:    &loginStore,
 		Policy:     policy,
+	}
+	if loginStoreGOOS == "darwin" {
+		loginStore := cfg.LoginStoreRuntime()
+		record.Runtime = &loginStore
 	}
 	if info, err := os.Stat(configPath); err == nil {
 		record.ConfigMTime = info.ModTime().UTC().Format(time.RFC3339Nano)

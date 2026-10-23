@@ -300,7 +300,7 @@ func RuntimeForCommand(command string) string {
 // the built-in credential denies, or "" for none. An explicit --profile
 // decides it. Otherwise project.runtime must name the agent the wrapped
 // command runs: the project config is writable by the fenced child, so it can
-// only narrow the exemption, never pick it.
+// exempt at most the store of the agent the operator wrapped, never another.
 func (c *Config) LoginStoreRuntime() string {
 	if c.ProfileName != "" {
 		return c.ProfileName

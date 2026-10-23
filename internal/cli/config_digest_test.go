@@ -1175,6 +1175,8 @@ func TestConfigDigestIncludesStrictUnixSocketSetting(t *testing.T) {
 // A changed login-store runtime warns once and leaves one signed audit row.
 // Control: rerunning with the same runtime warns and records nothing more.
 func TestConfigDigestRuntimeChangeWarnsOnce(t *testing.T) {
+	defer func(goos string) { loginStoreGOOS = goos }(loginStoreGOOS)
+	loginStoreGOOS = "darwin"
 	project, configPath := writeProjectConfig(t, `db = "events.db"`)
 	dbPath := resolvedAuditDB(t, project)
 	logger, err := logging.NewLogger(dbPath, project)
@@ -1212,5 +1214,44 @@ func TestConfigDigestRuntimeChangeWarnsOnce(t *testing.T) {
 	records := digestRecords(t, dbPath, project)
 	if len(records) != 3 || records[1].Runtime == nil || *records[1].Runtime != "codex" {
 		t.Fatalf("digest rows must record the login-store runtime: %+v", records)
+	}
+}
+
+// Only macOS has a login-store exemption, so other platforms record no runtime
+// and a changed runtime warns and logs nothing there.
+func TestConfigDigestRuntimeIgnoredOffMacOS(t *testing.T) {
+	defer func(goos string) { loginStoreGOOS = goos }(loginStoreGOOS)
+	loginStoreGOOS = "linux"
+	project, configPath := writeProjectConfig(t, `db = "events.db"`)
+	dbPath := resolvedAuditDB(t, project)
+	logger, err := logging.NewLogger(dbPath, project)
+	if err != nil {
+		t.Fatalf("NewLogger: %v", err)
+	}
+	defer logger.Close()
+	cfg, err := config.Load(configPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	for i, runtime := range []string{"codex", ""} {
+		cfg.Project.Runtime = "codex"
+		cfg.CommandRuntime = runtime
+		var warning strings.Builder
+		if err := recordConfigDigest(logger, cfg, configPath, dbPath, "run", "proxy", &warning); err != nil {
+			t.Fatalf("record run %d: %v", i, err)
+		}
+		if strings.Contains(warning.String(), "login-store") {
+			t.Fatalf("run %d warned off macOS: %q", i, warning.String())
+		}
+	}
+	eventType := logging.EventRuntimeChanged
+	events, err := logger.Query(logging.QueryOptions{EventType: &eventType, ByID: true, Limit: 10})
+	if err != nil {
+		t.Fatal(err)
+	}
+	records := digestRecords(t, dbPath, project)
+	if len(events) != 0 || len(records) != 2 || records[0].Runtime != nil || records[1].Runtime != nil {
+		t.Fatalf("off macOS: want no runtime rows or fields, got events %+v records %+v", events, records)
 	}
 }

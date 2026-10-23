@@ -61,6 +61,10 @@ var wrapCmd = &cobra.Command{
 		}
 		if len(args) > 0 {
 			cfg.CommandRuntime = config.RuntimeForCommand(args[0])
+		} else {
+			// A dry run without a command launches nothing; like doctor, it
+			// judges wrap -- <the agent project.runtime names>.
+			cfg.CommandRuntime = cfg.Project.Runtime
 		}
 		if err := validateWrapRuntimeConfig(cfg); err != nil {
 			cmd.SilenceUsage = true

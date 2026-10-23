@@ -149,6 +149,9 @@ func TestBuiltinLoginStoreNeedsProfileOrWrappedCommand(t *testing.T) {
 			if tc.exempt != (err == nil) {
 				t.Fatalf("grant of the login store: exempt=%v, err=%v", tc.exempt, err)
 			}
+			if err != nil && !strings.Contains(err.Error(), "--profile") {
+				t.Fatalf("login-store refusal must name --profile: %v", err)
+			}
 		})
 	}
 }

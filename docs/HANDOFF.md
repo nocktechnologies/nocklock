@@ -6,6 +6,8 @@ No internal host names, personal names or absolute home paths: `scripts/check-pu
 
 ## What changed
 
+- 2026-10-23: on macOS the agent login-store exemption comes from `--profile`, or from `project.runtime` only when the wrapped command's basename is that agent (`config.RuntimeForCommand`); a wrapper launch (`npx`, `env`, a renamed binary) keeps every store denied and needs `--profile`. `doctor` and a command-less `wrap --dry-run` judge `wrap -- <project.runtime agent>`. macOS `config.digest` rows carry the exempt runtime outside the hashed policy, and a change writes a signed `config.runtime_changed` row; `verify` does not yet summarize those rows.
+
 - 2026-10-22: doctor checks dotenv files only at the project root and one directory level below, skipping dependency/build directories. Incomplete inspection is informational; actual matches retain PARTIAL. The CI credential proof now cleans its isolated process session on every exit path, with mocked lifecycle regression tests that do not execute enforcement locally.
 
 - 2026-10-22: mandatory credential denies now share one policy resolver across Linux and macOS; broad grants refuse. macOS home filename prefixes protect agent and dotenv stores, and presets persist their own login exception. Doctor inspects project dotenv metadata without adding denies. CI-only fake-home canaries and policy-removal mutations cover both backends; pre-made project hardlinks remain a documented limitation.
