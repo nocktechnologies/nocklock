@@ -28,9 +28,10 @@ type configDigestRecord struct {
 	ConfigPath     string `json:"config_path"`
 	PreviousDigest string `json:"previous_digest,omitempty"`
 	ConfigMTime    string `json:"config_mtime,omitempty"`
-	// Runtime is the login-store runtime (config.LoginStoreRuntime), recorded
-	// on macOS only. It is signed with the row but outside Policy, so digests
-	// stay stable. Other platforms and older rows leave it nil.
+	// Runtime records which agent's login store was exempt
+	// (config.LoginStoreRuntime), on macOS only. The resolved deny rules that
+	// follow from it are in the hashed Policy, so the digest changes when the
+	// exemption changes. Other platforms and older rows leave it nil.
 	Runtime *string         `json:"runtime,omitempty"`
 	Policy  json.RawMessage `json:"policy"`
 }
