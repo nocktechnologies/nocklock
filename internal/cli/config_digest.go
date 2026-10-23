@@ -139,7 +139,10 @@ func canonicalPolicy(cfg *config.Config, configPath, dbPath, networkFenceMode st
 		filesystem["mode"] = resolved.Mode
 		filesystem["allow"] = canonicalStrings(resolved.AllowPaths)
 		filesystem["allow_rw"] = canonicalStrings(resolved.AllowRWPaths)
-		filesystem["deny"] = canonicalStrings(resolved.DenyPaths)
+		// Hash the prefix rules, not the home entries they matched at launch.
+		filesystem["deny"] = canonicalStrings(slices.DeleteFunc(slices.Clone(resolved.DenyPaths), func(p string) bool {
+			return slices.Contains(resolved.PrefixAliasPaths, p)
+		}))
 		if len(resolved.DenyPrefixes) > 0 {
 			filesystem["deny_prefixes"] = canonicalStrings(resolved.DenyPrefixes)
 		}

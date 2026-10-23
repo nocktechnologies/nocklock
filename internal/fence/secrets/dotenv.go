@@ -9,6 +9,10 @@ import (
 
 var dotEnvSecretName = regexp.MustCompile(`(?i)(?:^|_)(?:TOKEN|SECRET|PASSWORD|PASSWD|API_KEY|PRIVATE_KEY|ACCESS_KEY|DATABASE_URL)(?:_|$)`)
 
+// dotEnvDefault captures the literal written inside a ${NAME:-default},
+// ${NAME:=default} or ${NAME:+alternate} reference (colon optional).
+var dotEnvDefault = regexp.MustCompile(`^\$\{[A-Za-z_][A-Za-z0-9_]*:?[-=+](.*)\}$`)
+
 // ScanDotEnv inspects .env and .env.* files in root and its immediate child
 // directories, excluding dependency and build directories. It uses the bounded,
 // no-symlink preflight scanner, returns metadata only and never changes the fence.
@@ -55,10 +59,23 @@ func (s *scanner) inspectDotEnv(data []byte, path string) {
 			continue
 		}
 		name, value, ok := strings.Cut(line, "=")
-		value = strings.Trim(strings.TrimSpace(value), "\"'")
-		// Empty and environment-substituted values do not themselves expose a key.
-		if ok && dotEnvSecretName.MatchString(strings.TrimSpace(name)) && value != "" && !strings.HasPrefix(value, "$") {
+		value = dotEnvLiteral(strings.TrimSpace(value))
+		if ok && dotEnvSecretName.MatchString(strings.TrimSpace(name)) && value != "" {
 			s.report.Findings = append(s.report.Findings, Finding{"dotenv-secret-assignment", "file", scanLocation(path), i + 1})
 		}
 	}
+}
+
+// dotEnvLiteral returns the part of a value written in the file itself: the
+// value, or the inline default of a ${NAME:-default} reference. A plain
+// environment substitution returns "": it does not itself expose a key.
+func dotEnvLiteral(value string) string {
+	value = strings.Trim(value, "\"'")
+	if !strings.HasPrefix(value, "$") {
+		return value
+	}
+	if m := dotEnvDefault.FindStringSubmatch(value); m != nil {
+		return dotEnvLiteral(m[1])
+	}
+	return ""
 }

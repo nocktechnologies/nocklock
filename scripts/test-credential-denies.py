@@ -45,9 +45,12 @@ def cleanup_session(process):
     try:
         # The known launcher group must stop even if process enumeration fails.
         # Do not use Popen's context manager: its unbounded wait can hang cleanup.
+        # A reaped launcher's pid can be reused, so only signal it while unreaped.
         try:
-            os.killpg(process.pid, signal.SIGKILL)
+            if process.returncode is None:
+                os.killpg(process.pid, signal.SIGKILL)
         except ProcessLookupError:
+            # The launcher group already exited; nothing is left to stop.
             pass
         except OSError as error:
             errors.append(error)
@@ -61,6 +64,7 @@ def cleanup_session(process):
                     if os.getsid(pid) == process.pid:
                         groups.add(pgid)
                 except OSError:
+                    # The process exited or cannot be inspected; skip it.
                     pass
         except (OSError, subprocess.SubprocessError, ValueError) as error:
             errors.append(error)
@@ -70,6 +74,7 @@ def cleanup_session(process):
                 try:
                     os.killpg(pgid, signal.SIGKILL)
                 except ProcessLookupError:
+                    # The descendant group exited between enumeration and kill.
                     pass
                 except OSError as error:
                     errors.append(error)

@@ -140,3 +140,40 @@ func TestBuiltinPrefixProfileProtectsFutureAndCaseAliases(t *testing.T) {
 		t.Fatal("prefix-covered allow must fail")
 	}
 }
+
+func TestBuiltinPrefixAliasesStayEnforcedButOutOfPolicy(t *testing.T) {
+	cfg, home := builtinFixture(t)
+	before, err := ProcessEffectiveConfig(cfg, "darwin")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(before.PrefixAliasPaths) != 0 {
+		t.Fatalf("empty home recorded aliases: %v", before.PrefixAliasPaths)
+	}
+	names := []string{".env.production", ".claude-backup"}
+	for _, name := range names {
+		if err := os.WriteFile(filepath.Join(home, name), []byte("fake-canary"), 0600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	after, err := ProcessEffectiveConfig(cfg, "darwin")
+	if err != nil {
+		t.Fatal(err)
+	}
+	h, _ := resolvePath(home)
+	for _, name := range names {
+		alias := filepath.Join(h, name)
+		if !slices.Contains(after.DenyPaths, alias) || !slices.Contains(after.PrefixAliasPaths, alias) {
+			t.Fatalf("%s must be enforced and recorded as a prefix alias", name)
+		}
+	}
+	policy := slices.DeleteFunc(slices.Clone(after.DenyPaths), func(p string) bool {
+		return slices.Contains(after.PrefixAliasPaths, p)
+	})
+	if !slices.Equal(policy, before.DenyPaths) || !slices.Equal(after.DenyPrefixes, before.DenyPrefixes) {
+		t.Fatalf("policy denies changed: %v -> %v", before.DenyPaths, policy)
+	}
+	if slices.Contains(after.PrefixAliasPaths, filepath.Join(h, ".ssh")) {
+		t.Fatal("static deny recorded as a prefix alias")
+	}
+}

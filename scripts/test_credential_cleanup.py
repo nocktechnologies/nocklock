@@ -36,8 +36,9 @@ class ProcessCleanupTests(unittest.TestCase):
                         self.assertEqual((result.returncode, result.stdout, result.stderr),
                                          (outcome, "stdout", "stderr"))
                     self.assertTrue(popen.call_args.kwargs["start_new_session"])
-                    self.assertEqual(kill.call_args_list,
-                                     [call(process.pid, signal.SIGKILL), call(201, signal.SIGKILL)])
+                    # A reaped launcher's pid may be reused: only signal it unreaped.
+                    launcher = [] if isinstance(outcome, int) else [call(process.pid, signal.SIGKILL)]
+                    self.assertEqual(kill.call_args_list, launcher + [call(201, signal.SIGKILL)])
                     self.assertEqual(process.communicate.call_args_list,
                                      [call(timeout=30), call(timeout=5)])
 
@@ -46,7 +47,7 @@ class ProcessCleanupTests(unittest.TestCase):
                       subprocess.TimeoutExpired("ps", 5), ValueError("bad ps row")]:
             with self.subTest(error=repr(error)):
                 original = KeyboardInterrupt()
-                process = Mock(pid=12345)
+                process = Mock(pid=12345, returncode=None)
                 process.communicate.side_effect = [original, ("", "")]
                 order = Mock()
                 with patch.object(harness.subprocess, "Popen", return_value=process), \
@@ -77,14 +78,13 @@ class ProcessCleanupTests(unittest.TestCase):
         with patch.object(harness.subprocess, "Popen", return_value=process), \
              patch.object(harness.subprocess, "check_output", return_value="200 201\n300 301\n"), \
              patch.object(harness.os, "getsid", side_effect=[PermissionError(), process.pid]), \
-             patch.object(harness.os, "killpg", side_effect=[ProcessLookupError(), None]) as kill:
+             patch.object(harness.os, "killpg", side_effect=[ProcessLookupError()]) as kill:
             self.assertEqual(harness.run(["proof"], ".", {}).returncode, 0)
-            self.assertEqual(kill.call_args_list,
-                             [call(process.pid, signal.SIGKILL), call(301, signal.SIGKILL)])
+            self.assertEqual(kill.call_args_list, [call(301, signal.SIGKILL)])
 
     def test_pipe_timeout_closes_readers_and_bounds_launcher_reap(self):
         original = subprocess.TimeoutExpired("proof", 30)
-        process = Mock(pid=12345)
+        process = Mock(pid=12345, returncode=None)
         process.communicate.side_effect = [original, subprocess.TimeoutExpired("proof", 5)]
         with patch.object(harness.subprocess, "Popen", return_value=process), \
              patch.object(harness.subprocess, "check_output", return_value=""), \

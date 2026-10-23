@@ -51,6 +51,36 @@ func TestScanDotEnvSafeControlAndSymlink(t *testing.T) {
 	}
 }
 
+func TestScanDotEnvChecksInlineSubstitutionDefaults(t *testing.T) {
+	canary := "fake-canary-default-12345"
+	for body, want := range map[string]int{
+		"TOKEN=${DEV_TOKEN:-" + canary + "}":         1,
+		"PASSWORD=\"${DB_PASSWORD-" + canary + "}\"": 1,
+		"API_KEY=${KEY:=" + canary + "}":             1,
+		"SECRET=${A:-${B:-" + canary + "}}":          1,
+		"TOKEN=${DEV_TOKEN}":                         0,
+		"TOKEN=${DEV_TOKEN:-}":                       0,
+		"TOKEN=${DEV_TOKEN:-$OTHER}":                 0,
+		"TOKEN=$DEV_TOKEN":                           0,
+		"PORT=${PORT:-3000}":                         0,
+	} {
+		t.Run(body, func(t *testing.T) {
+			root := t.TempDir()
+			if err := os.WriteFile(filepath.Join(root, ".env"), []byte(body+"\n"), 0600); err != nil {
+				t.Fatal(err)
+			}
+			r := ScanDotEnv(context.Background(), root)
+			if !r.Complete || len(r.Findings) != want {
+				t.Fatalf("findings = %d, want %d: %+v", len(r.Findings), want, r)
+			}
+			out, _ := json.Marshal(r)
+			if strings.Contains(string(out), canary) {
+				t.Fatal("value leaked into report")
+			}
+		})
+	}
+}
+
 func TestScanDotEnvShallowScopeExcludesDependencyAndBuildDirectories(t *testing.T) {
 	root := t.TempDir()
 	for _, path := range []string{
