@@ -167,9 +167,7 @@ func TestBuiltinPrefixAliasesStayEnforcedButOutOfPolicy(t *testing.T) {
 			t.Fatalf("%s must be enforced and recorded as a prefix alias", name)
 		}
 	}
-	policy := slices.DeleteFunc(slices.Clone(after.DenyPaths), func(p string) bool {
-		return slices.Contains(after.PrefixAliasPaths, p)
-	})
+	policy := after.PolicyDenyPaths()
 	if !slices.Equal(policy, before.DenyPaths) || !slices.Equal(after.DenyPrefixes, before.DenyPrefixes) {
 		t.Fatalf("policy denies changed: %v -> %v", before.DenyPaths, policy)
 	}

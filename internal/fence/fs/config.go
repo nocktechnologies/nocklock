@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 
 	"github.com/nocktechnologies/nocklock/internal/config"
@@ -103,6 +104,14 @@ type FenceConfig struct {
 	// sends it only after the report is handled, which lets a look-back rule
 	// commit its trigger and close open connections first.
 	WaitForAck bool
+}
+
+// PolicyDenyPaths returns DenyPaths without PrefixAliasPaths: the denies the
+// signed policy digest records, alongside the DenyPrefixes rules themselves.
+func (fc *FenceConfig) PolicyDenyPaths() []string {
+	return slices.DeleteFunc(slices.Clone(fc.DenyPaths), func(p string) bool {
+		return slices.Contains(fc.PrefixAliasPaths, p)
+	})
 }
 
 // SerializedConfig is the parsed representation of a serialized fence
