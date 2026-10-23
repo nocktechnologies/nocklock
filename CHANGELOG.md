@@ -15,15 +15,17 @@ v0.14.0 makes the credential-file denies mandatory on Linux and macOS (#269). A 
 
 ### Security
 
-- The credential-file denies are now mandatory on Linux and macOS (#269); see Breaking for the list and for grants that now refuse to start. macOS also denies home `.env*`, `.claude*`, and `.codex`; Claude Code and Codex presets retain access only to their own agent login store via the persisted `project.runtime` setting. Generic defaults no longer grant `~/.claude/`. Package manager config denies stay opt-in.
+- The credential-file denies are now mandatory on Linux and macOS (#269): a config can no longer remove the built-in ones. See Breaking for the list and for grants that now refuse to start. macOS also denies home `.env*`, `.claude*`, and `.codex`, except the login store of the agent named by `project.runtime` (or the `--profile` preset), so that agent can sign in; the runtime is recorded in the signed config digest. Generic defaults no longer grant `~/.claude/`. Package manager config denies stay opt-in.
 - Keep project `.env` and `.env.*` readable and make `doctor` report `PARTIAL` for actual secret-shaped values, without disclosing values. The check covers the project root plus one level, skips dependency/build directories, and reports incomplete inspection as informational `not checked`. Document pre-made hard links into a granted project as a remaining read exposure on both platforms.
 - Add CI-only credential canaries, allowed controls, and per-case policy-removal mutation checks on Linux and macOS, including symlinks, hardlink names, case aliases, grandchildren, and Linux `/proc/self/root`.
 - On macOS the signed config digest records the home `.env*` and `.claude*` prefix rules, not the home entries they match, so a matching file appearing or going away leaves the digest unchanged. Existing matches, including symlink targets, are still denied.
 - The `doctor` `.env` check inspects the inline default of a `${VAR:-default}`, `${VAR:=default}` or `${VAR:+value}` reference on a secret-named key; a plain `$VAR` or `${VAR}` reference is not reported.
+- The `doctor` `.env` check ignores an unquoted inline comment (whitespace then `#`), so `API_KEY= # your key here` is not reported, and reads a single-quoted value as literal text, so `API_KEY='$abc'` is reported; double-quoted and unquoted values keep reference parsing.
 
 ### Fixed
 
 - On macOS a built-in credential deny refusal (a filesystem grant overlapping a built-in deny, or no resolvable `HOME`) is recorded as one `REFUSED-TO-START` filesystem fence state before the run refuses, instead of exiting as an unrecorded config error. `--dry-run` still reports it.
+- When the filesystem config is refused, such as by a grant over a built-in credential deny, `doctor` reports the `signing-key` row as `will-refuse` with the filesystem refusal as its cause and fix, instead of `unresolved` with a signing key path fix.
 
 ## [0.13.1] - 2026-10-21
 

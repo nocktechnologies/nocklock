@@ -141,6 +141,29 @@ func TestDoctorSigningKeyNoFenceReportsResolvedDirectory(t *testing.T) {
 	}
 }
 
+func TestDoctorSigningKeyReportsBuiltinDenyRefusalAsFilesystemCause(t *testing.T) {
+	home := resolvedTempDir(t)
+	t.Setenv("HOME", home)
+	t.Setenv("XDG_CONFIG_HOME", resolvedTempDir(t))
+	caps := doctorCapabilities{goos: "linux", landlockABI: func() (int, error) { return 9, nil }}
+
+	refused := &config.Config{Filesystem: config.FilesystemConfig{Root: home}}
+	check, key := signingKeyDoctorCheck(refused, "", caps)
+	if check.Severity != doctorCritical || check.Status != "will-refuse" || key == nil ||
+		!strings.Contains(check.Message, "built-in credential deny") || strings.Contains(check.Fix, "signing key path") {
+		t.Fatalf("built-in deny refusal must name the filesystem cause: %+v", check)
+	}
+
+	project := filepath.Join(home, "project")
+	if err := os.Mkdir(project, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	allowed := &config.Config{Filesystem: config.FilesystemConfig{Root: project}}
+	if check, _ := signingKeyDoctorCheck(allowed, "", caps); check.Status == "will-refuse" || strings.Contains(check.Message, "built-in credential deny") {
+		t.Fatalf("config without a refusal must still judge the key: %+v", check)
+	}
+}
+
 func TestDoctorSigningKeyRelocatedXDG(t *testing.T) {
 	for _, tc := range []struct {
 		name, goos, xdg string

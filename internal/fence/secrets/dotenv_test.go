@@ -92,6 +92,47 @@ func TestScanDotEnvChecksInlineSubstitutionDefaults(t *testing.T) {
 	}
 }
 
+func TestScanDotEnvInlineCommentsAndSingleQuotes(t *testing.T) {
+	for body, want := range map[string]int{
+		"API_KEY= # your key here":          0,
+		"TOKEN=  #x":                        0,
+		"TOKEN=\t#x":                        0,
+		"API_KEY=sk_live_x # note":          1,
+		"API_KEY=#not-a-comment":            1,
+		"API_KEY='' # empty":                0,
+		"API_KEY='$abc_literal'":            1,
+		"API_KEY='$abc_literal' # note":     1,
+		"API_KEY='${DEV_TOKEN}'":            1,
+		"API_KEY='$abc # literal'":          1,
+		"API_KEY=\"$abc_literal\"":          0,
+		"API_KEY=\"$abc_literal\" # note":   0,
+		"API_KEY=\"${A:-abc_literal}\" # x": 1,
+		"API_KEY=$abc_literal":              0,
+		"API_KEY=$abc_literal # note":       0,
+		"API_KEY=\"sk_live_x # inside\"":    1,
+		"API_KEY=''sk_live_x":               1,
+		"API_KEY=\"$abc_literal\"sk_live_x": 1,
+		"API_KEY='' '' # note":              0,
+		"API_KEY=\"\"":                      0,
+		"API_KEY='unterminated":             1,
+	} {
+		t.Run(body, func(t *testing.T) {
+			root := t.TempDir()
+			if err := os.WriteFile(filepath.Join(root, ".env"), []byte(body+"\n"), 0600); err != nil {
+				t.Fatal(err)
+			}
+			r := ScanDotEnv(context.Background(), root)
+			if !r.Complete || len(r.Findings) != want {
+				t.Fatalf("findings = %d, want %d: %+v", len(r.Findings), want, r)
+			}
+			out, _ := json.Marshal(r)
+			if strings.Contains(string(out), "abc_literal") || strings.Contains(string(out), "sk_live_x") {
+				t.Fatal("value leaked into report")
+			}
+		})
+	}
+}
+
 func TestScanDotEnvDeeplyNestedDefaultStaysLinear(t *testing.T) {
 	const depth = 200000
 	value := strings.Repeat("${A:-", depth) + "fake-nested-canary" + strings.Repeat("}", depth)
