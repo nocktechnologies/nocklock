@@ -88,7 +88,7 @@ func recordConfigDigest(logger *logging.Logger, cfg *config.Config, configPath, 
 		fmt.Fprintf(stderr, "NockLock: warning: effective config changed since the previous wrap (digest %s -> %s; fields: %s; config mtime: %s)\n",
 			previous.Digest, record.Digest, strings.Join(fields, ", "), mtime)
 	}
-	if previous != nil && previous.Runtime != nil && *previous.Runtime != *record.Runtime {
+	if previous != nil && previous.Runtime != nil && record.Runtime != nil && *previous.Runtime != *record.Runtime {
 		change := fmt.Sprintf("login-store runtime changed since the previous wrap (%s -> %s)", runtimeLabel(*previous.Runtime), runtimeLabel(*record.Runtime))
 		fmt.Fprintf(stderr, "NockLock: warning: %s\n", change)
 		if err := logger.Log(logging.Event{
