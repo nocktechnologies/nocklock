@@ -55,11 +55,33 @@ func (s *scanner) inspectDotEnv(data []byte, path string) {
 			continue
 		}
 		name, value, ok := strings.Cut(line, "=")
-		value = dotEnvLiteral(strings.TrimSpace(value))
+		value = dotEnvValue(value)
 		if ok && dotEnvSecretName.MatchString(strings.TrimSpace(name)) && value != "" {
 			s.report.Findings = append(s.report.Findings, Finding{"dotenv-secret-assignment", "file", scanLocation(path), i + 1})
 		}
 	}
+}
+
+// dotEnvValue returns the literal text of a raw .env value. A single-quoted
+// value is literal, with no substitution. A double-quoted or unquoted value is
+// parsed for references by dotEnvLiteral, and an unquoted value ends at an
+// inline comment: whitespace then #.
+func dotEnvValue(raw string) string {
+	value := strings.TrimSpace(raw)
+	if value != "" && (value[0] == '\'' || value[0] == '"') {
+		body, _, _ := strings.Cut(value[1:], value[:1])
+		if value[0] == '\'' {
+			return body
+		}
+		return dotEnvLiteral(body)
+	}
+	for i := 1; i < len(raw); i++ {
+		if raw[i] == '#' && (raw[i-1] == ' ' || raw[i-1] == '\t') {
+			raw = raw[:i]
+			break
+		}
+	}
+	return dotEnvLiteral(strings.TrimSpace(raw))
 }
 
 // dotEnvLiteral returns literal text written in the value itself: text outside
