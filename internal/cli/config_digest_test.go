@@ -213,6 +213,9 @@ var configDigestPolicyFields = map[string]string{
 // future config field that does not belong in the digest.
 var configDigestNotSecurityRelevantFields = map[string]struct{}{
 	"Cloud.APIKey": {}, // A credential, never policy data; including it would leak a secret into the audit log.
+	// Its only effect is the login-store exemption, hashed as filesystem deny
+	// rules and signed beside the policy as the record's runtime field.
+	"CommandRuntime": {},
 }
 
 func TestConfigDigestCoversTopLevelConfigFields(t *testing.T) {
@@ -1166,5 +1169,48 @@ func TestConfigDigestIncludesStrictUnixSocketSetting(t *testing.T) {
 	}
 	if bytes.Equal(without, with) {
 		t.Fatal("strict Unix-socket setting did not change the canonical policy")
+	}
+}
+
+// A changed login-store runtime warns once and leaves one signed audit row.
+// Control: rerunning with the same runtime warns and records nothing more.
+func TestConfigDigestRuntimeChangeWarnsOnce(t *testing.T) {
+	project, configPath := writeProjectConfig(t, `db = "events.db"`)
+	dbPath := resolvedAuditDB(t, project)
+	logger, err := logging.NewLogger(dbPath, project)
+	if err != nil {
+		t.Fatalf("NewLogger: %v", err)
+	}
+	defer logger.Close()
+	cfg, err := config.Load(configPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	warnings := make([]string, 3)
+	for i, runtime := range []string{"", "codex", "codex"} {
+		cfg.Project.Runtime, cfg.CommandRuntime = runtime, runtime
+		var warning strings.Builder
+		if err := recordConfigDigest(logger, cfg, configPath, dbPath, "run", "proxy", &warning); err != nil {
+			t.Fatalf("record run %d: %v", i, err)
+		}
+		warnings[i] = warning.String()
+	}
+	const want = "login-store runtime changed since the previous wrap (none -> codex)"
+	if strings.Contains(warnings[0], "login-store") || !strings.Contains(warnings[1], want) || strings.Contains(warnings[2], "login-store") {
+		t.Fatalf("runtime warning must fire on the change only: %q", warnings)
+	}
+
+	eventType := logging.EventRuntimeChanged
+	events, err := logger.Query(logging.QueryOptions{EventType: &eventType, ByID: true, Limit: 10})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(events) != 1 || events[0].Detail != want {
+		t.Fatalf("want one %s row %q, got %+v", eventType, want, events)
+	}
+	records := digestRecords(t, dbPath, project)
+	if len(records) != 3 || records[1].Runtime == nil || *records[1].Runtime != "codex" {
+		t.Fatalf("digest rows must record the login-store runtime: %+v", records)
 	}
 }

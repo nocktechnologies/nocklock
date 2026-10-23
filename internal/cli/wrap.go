@@ -59,6 +59,9 @@ var wrapCmd = &cobra.Command{
 			cmd.SilenceUsage = true
 			return err
 		}
+		if len(args) > 0 {
+			cfg.CommandRuntime = config.RuntimeForCommand(args[0])
+		}
 		if err := validateWrapRuntimeConfig(cfg); err != nil {
 			cmd.SilenceUsage = true
 			return fmt.Errorf("invalid config at %s: %w", configPath, err)

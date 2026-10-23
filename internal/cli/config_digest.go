@@ -24,11 +24,15 @@ import (
 // deliberately excludes cloud.api_key: a policy audit record must not copy a
 // credential into the event database.
 type configDigestRecord struct {
-	Digest         string          `json:"digest"`
-	ConfigPath     string          `json:"config_path"`
-	PreviousDigest string          `json:"previous_digest,omitempty"`
-	ConfigMTime    string          `json:"config_mtime,omitempty"`
-	Policy         json.RawMessage `json:"policy"`
+	Digest         string `json:"digest"`
+	ConfigPath     string `json:"config_path"`
+	PreviousDigest string `json:"previous_digest,omitempty"`
+	ConfigMTime    string `json:"config_mtime,omitempty"`
+	// Runtime is the login-store runtime (config.LoginStoreRuntime). It is
+	// signed with the row but outside Policy, so digests stay stable. Rows
+	// written before it existed leave it nil.
+	Runtime *string         `json:"runtime,omitempty"`
+	Policy  json.RawMessage `json:"policy"`
 }
 
 // recordConfigDigest appends the current effective policy to the audit chain
@@ -84,7 +88,27 @@ func recordConfigDigest(logger *logging.Logger, cfg *config.Config, configPath, 
 		fmt.Fprintf(stderr, "NockLock: warning: effective config changed since the previous wrap (digest %s -> %s; fields: %s; config mtime: %s)\n",
 			previous.Digest, record.Digest, strings.Join(fields, ", "), mtime)
 	}
+	if previous != nil && previous.Runtime != nil && *previous.Runtime != *record.Runtime {
+		change := fmt.Sprintf("login-store runtime changed since the previous wrap (%s -> %s)", runtimeLabel(*previous.Runtime), runtimeLabel(*record.Runtime))
+		fmt.Fprintf(stderr, "NockLock: warning: %s\n", change)
+		if err := logger.Log(logging.Event{
+			Timestamp: time.Now(),
+			EventType: logging.EventRuntimeChanged,
+			Category:  "config",
+			Detail:    change,
+			SessionID: sessionID,
+		}); err != nil {
+			return fmt.Errorf("append %s audit row: %w", logging.EventRuntimeChanged, err)
+		}
+	}
 	return nil
+}
+
+func runtimeLabel(name string) string {
+	if name == "" {
+		return "none"
+	}
+	return name
 }
 
 func newConfigDigestRecord(cfg *config.Config, configPath, dbPath, networkFenceMode string) (configDigestRecord, error) {
@@ -100,9 +124,11 @@ func newConfigDigestRecord(cfg *config.Config, configPath, dbPath, networkFenceM
 			path = abs
 		}
 	}
+	loginStore := cfg.LoginStoreRuntime()
 	record := configDigestRecord{
 		Digest:     hex.EncodeToString(sum[:]),
 		ConfigPath: path,
+		Runtime:    &loginStore,
 		Policy:     policy,
 	}
 	if info, err := os.Stat(configPath); err == nil {

@@ -27,10 +27,7 @@ func ProcessEffectiveConfig(cfg *config.Config, goos string) (*FenceConfig, erro
 	if goos == "darwin" {
 		home, _ := os.UserHomeDir()
 		fc.DenyPrefixes = []string{filepath.Join(home, ".env")}
-		agent := cfg.ProfileName
-		if agent == "" {
-			agent = cfg.Project.Runtime
-		}
+		agent := cfg.LoginStoreRuntime()
 		if agent != "claude-code" {
 			fc.DenyPrefixes = append(fc.DenyPrefixes, filepath.Join(home, ".claude"))
 		}

@@ -269,20 +269,52 @@ func ResolveDBPath(cfg *Config, configPath string) (dbPath string, projectRoot s
 
 // Config is the top-level NockLock configuration.
 type Config struct {
-	ProfileName string           `toml:"-"`
-	Project     ProjectConfig    `toml:"project"`
-	Filesystem  FilesystemConfig `toml:"filesystem"`
-	Network     NetworkConfig    `toml:"network"`
-	Secrets     SecretsConfig    `toml:"secrets"`
-	Syscall     SyscallConfig    `toml:"syscall"`
-	Logging     LoggingConfig    `toml:"logging"`
-	Audit       AuditConfig      `toml:"audit"`
-	Cloud       CloudConfig      `toml:"cloud"`
+	ProfileName string `toml:"-"`
+	// CommandRuntime is the runtime preset whose agent the wrapped command
+	// runs (see RuntimeForCommand). wrap sets it from argv; no file can.
+	CommandRuntime string           `toml:"-"`
+	Project        ProjectConfig    `toml:"project"`
+	Filesystem     FilesystemConfig `toml:"filesystem"`
+	Network        NetworkConfig    `toml:"network"`
+	Secrets        SecretsConfig    `toml:"secrets"`
+	Syscall        SyscallConfig    `toml:"syscall"`
+	Logging        LoggingConfig    `toml:"logging"`
+	Audit          AuditConfig      `toml:"audit"`
+	Cloud          CloudConfig      `toml:"cloud"`
+}
+
+// commandRuntimes maps a wrapped command's basename to the runtime preset
+// whose agent it is. It is the only such mapping; keep it here.
+var commandRuntimes = map[string]string{
+	"claude": "claude-code",
+	"codex":  "codex",
+}
+
+// RuntimeForCommand returns the runtime preset whose agent command runs, or ""
+// when command is not a known agent.
+func RuntimeForCommand(command string) string {
+	return commandRuntimes[filepath.Base(command)]
+}
+
+// LoginStoreRuntime returns the runtime whose own login store is exempt from
+// the built-in credential denies, or "" for none. An explicit --profile
+// decides it. Otherwise project.runtime must name the agent the wrapped
+// command runs: the project config is writable by the fenced child, so it can
+// only narrow the exemption, never pick it.
+func (c *Config) LoginStoreRuntime() string {
+	if c.ProfileName != "" {
+		return c.ProfileName
+	}
+	if c.Project.Runtime != "" && c.Project.Runtime == c.CommandRuntime {
+		return c.Project.Runtime
+	}
+	return ""
 }
 
 // ProjectConfig identifies the project being fenced.
 type ProjectConfig struct {
-	// Runtime selects the preset-owned login store; empty denies all agent stores.
+	// Runtime names the agent this project expects. It cannot unlock a login
+	// store alone; see LoginStoreRuntime.
 	Runtime string `toml:"runtime"`
 	Name    string `toml:"name"`
 	Root    string `toml:"root"`
