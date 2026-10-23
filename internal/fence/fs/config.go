@@ -70,9 +70,10 @@ type FenceConfig struct {
 	// DenyPrefixes are macOS home filename prefixes (not user-config globs).
 	DenyPrefixes []string
 	// PrefixAliasPaths are the DenyPaths entries added only because an existing
-	// home entry matched a DenyPrefixes rule. They are enforced like any other
-	// deny but kept out of the signed policy digest, which hashes the prefix
-	// rules instead, so the digest does not change when such an entry appears.
+	// home entry matched a DenyPrefixes rule (resolved, so a symlink alias names
+	// its target). They are enforced like any other deny but kept out of the
+	// signed policy digest, which records the prefix rules instead, so the
+	// digest does not change when such a home entry appears or goes away.
 	PrefixAliasPaths []string
 
 	// ProtectedRootSubdir, when set, is a directory INSIDE Root that must not

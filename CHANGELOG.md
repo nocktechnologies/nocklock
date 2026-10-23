@@ -18,8 +18,8 @@ v0.14.0 makes the credential-file denies mandatory on Linux and macOS (#269). A 
 - The credential-file denies are now mandatory on Linux and macOS (#269); see Breaking for the list and for grants that now refuse to start. macOS also denies home `.env*`, `.claude*`, and `.codex`; Claude Code and Codex presets retain access only to their own agent login store via the persisted `project.runtime` setting. Generic defaults no longer grant `~/.claude/`. Package manager config denies stay opt-in.
 - Keep project `.env` and `.env.*` readable and make `doctor` report `PARTIAL` for actual secret-shaped values, without disclosing values. The check covers the project root plus one level, skips dependency/build directories, and reports incomplete inspection as informational `not checked`. Document pre-made hard links into a granted project as a remaining read exposure on both platforms.
 - Add CI-only credential canaries, allowed controls, and per-case policy-removal mutation checks on Linux and macOS, including symlinks, hardlink names, case aliases, grandchildren, and Linux `/proc/self/root`.
-- On macOS the signed config digest hashes the home `.env*` and `.claude*` prefix rules instead of the home entries they match, so a matching file appearing or going away no longer changes the digest. Existing matches are still denied.
-- The `doctor` `.env` check now inspects the inline default of a `${VAR:-default}`, `${VAR:=default}` or `${VAR:+value}` reference on a secret-named key; previously any value starting with `$` was skipped.
+- On macOS the signed config digest records the home `.env*` and `.claude*` prefix rules, not the home entries they match, so a matching file appearing or going away leaves the digest unchanged. Existing matches, including symlink targets, are still denied.
+- The `doctor` `.env` check inspects the inline default of a `${VAR:-default}`, `${VAR:=default}` or `${VAR:+value}` reference on a secret-named key; a plain `$VAR` or `${VAR}` reference is not reported.
 
 ## [0.13.1] - 2026-10-21
 

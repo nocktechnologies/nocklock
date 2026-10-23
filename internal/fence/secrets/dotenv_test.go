@@ -63,6 +63,8 @@ func TestScanDotEnvChecksInlineSubstitutionDefaults(t *testing.T) {
 		"TOKEN=${DEV_TOKEN:-$OTHER}":                 0,
 		"TOKEN=$DEV_TOKEN":                           0,
 		"PORT=${PORT:-3000}":                         0,
+		"TOKEN=${DEV_TOKEN:?unset}":                  0,
+		"TOKEN=${:-" + canary + "}":                  0,
 	} {
 		t.Run(body, func(t *testing.T) {
 			root := t.TempDir()
@@ -78,6 +80,17 @@ func TestScanDotEnvChecksInlineSubstitutionDefaults(t *testing.T) {
 				t.Fatal("value leaked into report")
 			}
 		})
+	}
+}
+
+func TestScanDotEnvDeeplyNestedDefaultStaysLinear(t *testing.T) {
+	const depth = 200000
+	value := strings.Repeat("${A:-", depth) + "fake-nested-canary" + strings.Repeat("}", depth)
+	if got := dotEnvLiteral(value); got != "fake-nested-canary" {
+		t.Fatalf("nested default = %q", got)
+	}
+	if got := dotEnvLiteral(strings.Repeat("${A:-", depth) + strings.Repeat("}", depth)); got != "" {
+		t.Fatalf("empty nested default = %q", got)
 	}
 }
 

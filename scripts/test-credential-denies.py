@@ -43,9 +43,10 @@ def cleanup_session(process):
     errors = []
     groups = set()
     try:
-        # The known launcher group must stop even if process enumeration fails.
+        # An unreaped launcher group must stop even if process enumeration fails.
+        # A reaped launcher's pid can be reused, so it is not signalled; the
+        # session scan below still reaches surviving members of its group.
         # Do not use Popen's context manager: its unbounded wait can hang cleanup.
-        # A reaped launcher's pid can be reused, so only signal it while unreaped.
         try:
             if process.returncode is None:
                 os.killpg(process.pid, signal.SIGKILL)
