@@ -107,17 +107,23 @@ func exportOCSF(t *testing.T) (lines []string, stderr string) {
 	return strings.Split(strings.TrimSuffix(string(data), "\n"), "\n"), errOut.String()
 }
 
+// trailerFields decodes the trailer line, returning the event and its
+// unmapped.nocklock_export object.
+func trailerFields(t *testing.T, line string) (ev, trailer map[string]any) {
+	t.Helper()
+	if err := json.Unmarshal([]byte(line), &ev); err != nil {
+		t.Fatal(err)
+	}
+	return ev, ev["unmapped"].(map[string]any)["nocklock_export"].(map[string]any)
+}
+
 // normalizeTrailer blanks the trailer fields that differ on every run: its
 // time and the head signature, whose signed bytes include the moment signing
 // was adopted. TestOCSFExportVerifiesFromExportAlone checks them.
 func normalizeTrailer(t *testing.T, line string) string {
 	t.Helper()
-	var ev map[string]any
-	if err := json.Unmarshal([]byte(line), &ev); err != nil {
-		t.Fatal(err)
-	}
+	ev, tr := trailerFields(t, line)
 	ev["time"] = 0
-	tr := ev["unmapped"].(map[string]any)["nocklock_export"].(map[string]any)
 	tr["head_sig"], tr["head_signed_bytes"] = "<varies>", "<varies>"
 	var buf bytes.Buffer
 	enc := json.NewEncoder(&buf)
@@ -180,26 +186,11 @@ func TestOCSFExportGolden(t *testing.T) {
 	}
 }
 
-// exportedRow is unmapped.nocklock as a downstream reader sees it.
-type exportedRow struct {
-	ID           int64  `json:"id"`
-	Timestamp    string `json:"timestamp"`
-	EventType    string `json:"event_type"`
-	Category     string `json:"category"`
-	Detail       string `json:"detail"`
-	DetailBase64 string `json:"detail_base64"`
-	Blocked      int64  `json:"blocked"`
-	SessionID    string `json:"session_id"`
-	PrevHash     string `json:"prev_hash"`
-	EntryHash    string `json:"entry_hash"`
-	EntrySig     string `json:"entry_sig"`
-}
-
 // rowCanonical re-implements the documented canonical row encoding from the
 // exported fields alone, without the logging package, as an outside verifier
 // would: 0x01 || u64be(id) || lp(timestamp) || lp(event_type) || lp(category)
 // || lp(detail) || blocked byte || lp(session_id), lp = u32be length + bytes.
-func rowCanonical(t *testing.T, r exportedRow) []byte {
+func rowCanonical(t *testing.T, r ocsf.Row) []byte {
 	t.Helper()
 	detail := []byte(r.Detail)
 	if r.DetailBase64 != "" {
@@ -232,7 +223,6 @@ func rowCanonical(t *testing.T, r exportedRow) []byte {
 // commit to that chain_head and row count.
 func verifyExport(t *testing.T, lines []string) error {
 	t.Helper()
-	var trailer ocsf.Trailer
 	var tev struct {
 		Unmapped struct {
 			Export *ocsf.Trailer `json:"nocklock_export"`
@@ -241,7 +231,7 @@ func verifyExport(t *testing.T, lines []string) error {
 	if err := json.Unmarshal([]byte(lines[len(lines)-1]), &tev); err != nil || tev.Unmapped.Export == nil {
 		return errors.New("last line is not the export trailer")
 	}
-	trailer = *tev.Unmapped.Export
+	trailer := *tev.Unmapped.Export
 	pubBytes, err := base64.StdEncoding.DecodeString(trailer.PublicKey)
 	if err != nil || len(pubBytes) != ed25519.PublicKeySize {
 		return errors.New("trailer public key is not an Ed25519 key")
@@ -253,7 +243,7 @@ func verifyExport(t *testing.T, lines []string) error {
 	for _, l := range rows {
 		var ev struct {
 			Unmapped struct {
-				NockLock exportedRow `json:"nocklock"`
+				NockLock ocsf.Row `json:"nocklock"`
 			} `json:"unmapped"`
 		}
 		if err := json.Unmarshal([]byte(l), &ev); err != nil {
@@ -316,11 +306,8 @@ func TestOCSFExportVerifiesFromExportAlone(t *testing.T) {
 	if err := verifyExport(t, append(append([]string{}, lines[:3]...), lines[4:]...)); err == nil {
 		t.Fatal("an export missing a row still verified")
 	}
-	var tr map[string]any
-	if err := json.Unmarshal([]byte(lines[len(lines)-1]), &tr); err != nil {
-		t.Fatal(err)
-	}
-	headSig := tr["unmapped"].(map[string]any)["nocklock_export"].(map[string]any)["head_sig"].(string)
+	_, tr := trailerFields(t, lines[len(lines)-1])
+	headSig := tr["head_sig"].(string)
 	forged := base64.StdEncoding.EncodeToString(make([]byte, ed25519.SignatureSize))
 	if err := verifyExport(t, edit(len(lines)-1, headSig, forged)); err == nil {
 		t.Fatal("a forged head signature still verified")

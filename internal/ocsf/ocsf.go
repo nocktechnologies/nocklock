@@ -139,17 +139,8 @@ type Unmapped struct {
 // is set only when the stored detail is not valid UTF-8, which JSON cannot
 // carry byte for byte; the hash then covers the decoded bytes, not Detail.
 type Row struct {
-	ID           int64  `json:"id"`
-	Timestamp    string `json:"timestamp"`
-	EventType    string `json:"event_type"`
-	Category     string `json:"category"`
-	Detail       string `json:"detail"`
+	logging.ChainRow
 	DetailBase64 string `json:"detail_base64,omitempty"`
-	Blocked      int64  `json:"blocked"`
-	SessionID    string `json:"session_id"`
-	PrevHash     string `json:"prev_hash"`
-	EntryHash    string `json:"entry_hash"`
-	EntrySig     string `json:"entry_sig"`
 }
 
 // Trailer is the chain evidence the export ends with: the signed chain head
@@ -198,25 +189,12 @@ func FromRow(r logging.ChainRow, productVersion string) (Event, error) {
 		return Event{}, err
 	}
 	blocked := r.Blocked != 0
-	detail, _ := logging.DecodeEventDetail(r.EventType, r.Detail)
-	product := Product{Name: productName, VendorName: vendorName, Version: productVersion}
-
-	e := Event{
-		SeverityID: severityInfo,
-		Time:       ts.UnixMilli(),
-		Message:    detail,
-		Metadata: Metadata{
-			Version:      Version,
-			Product:      product,
-			UID:          r.EntryHash,
-			LogName:      logName,
-			Sequence:     r.ID,
-			OriginalTime: r.Timestamp,
-		},
-		Device:   unrecordedDevice,
-		Actor:    Actor{Process: Process{Name: "nocklock", UID: r.SessionID}},
-		Unmapped: Unmapped{NockLock: &row},
-	}
+	detail := logging.DecodeEventDetail(r.EventType, r.Detail)
+	e := baseEvent(productVersion, r.EntryHash, r.SessionID, ts)
+	e.Message = detail
+	e.Metadata.Sequence = r.ID
+	e.Metadata.OriginalTime = r.Timestamp
+	e.Unmapped.NockLock = &row
 	if blocked {
 		e.SeverityID = severityMed
 	}
@@ -258,7 +236,8 @@ func FromRow(r logging.ChainRow, productVersion string) (Event, error) {
 		// Fence state, config_loaded, proxy start/stop, *_passed rows and
 		// every other type: the state goes in status_detail.
 		e.setClass(ClassApplicationLifecycle, activityOther, "Other")
-		e.App = &product
+		app := e.Metadata.Product
+		e.App = &app
 		e.StatusDetail = r.EventType
 		if logging.EventType(r.EventType) == logging.EventFilesystemFenceState {
 			if state := fenceState(detail); state != "" {
@@ -273,26 +252,33 @@ func FromRow(r logging.ChainRow, productVersion string) (Event, error) {
 // TrailerEvent wraps the chain evidence in an Application Lifecycle event, so
 // every line of the export is an OCSF event an ingesting tool accepts.
 func TrailerEvent(t Trailer, productVersion string, now time.Time) Event {
-	product := Product{Name: productName, VendorName: vendorName, Version: productVersion}
-	e := Event{
-		SeverityID:   severityInfo,
-		Time:         now.UnixMilli(),
-		Message:      fmt.Sprintf("NockLock audit export: %d rows, chain head %s, %s", t.RowCount, t.ChainHead, t.Verdict),
-		StatusDetail: "audit_export_trailer",
-		Metadata: Metadata{
-			Version: Version,
-			Product: product,
-			UID:     "nocklock-export:" + t.ChainHead,
-			LogName: logName,
-		},
-		Device:   unrecordedDevice,
-		Actor:    Actor{Process: Process{Name: "nocklock", UID: "nocklock-export"}},
-		App:      &product,
-		Unmapped: Unmapped{Export: &t},
-	}
+	e := baseEvent(productVersion, "nocklock-export:"+t.ChainHead, "nocklock-export", now)
+	e.Message = fmt.Sprintf("NockLock audit export: %d rows, chain head %s, %s", t.RowCount, t.ChainHead, t.Verdict)
+	e.StatusDetail = "audit_export_trailer"
+	app := e.Metadata.Product
+	e.App = &app
+	e.Unmapped.Export = &t
 	e.setClass(ClassApplicationLifecycle, activityOther, "Other")
 	e.setStatus(true)
 	return e
+}
+
+// baseEvent returns the fields every exported event shares: informational
+// severity, the pinned metadata, the unrecorded device, and the nocklock run
+// as actor.
+func baseEvent(productVersion, uid, actorUID string, t time.Time) Event {
+	return Event{
+		SeverityID: severityInfo,
+		Time:       t.UnixMilli(),
+		Metadata: Metadata{
+			Version: Version,
+			Product: Product{Name: productName, VendorName: vendorName, Version: productVersion},
+			UID:     uid,
+			LogName: logName,
+		},
+		Device: unrecordedDevice,
+		Actor:  Actor{Process: Process{Name: "nocklock", UID: actorUID}},
+	}
 }
 
 func (e *Event) setClass(class, activity int, name string) {
@@ -323,21 +309,16 @@ func (e *Event) setDecision(blocked bool) {
 }
 
 func verbatimRow(r logging.ChainRow) (Row, error) {
-	for name, v := range map[string]string{
-		"timestamp": r.Timestamp, "event_type": r.EventType, "category": r.Category,
-		"session_id": r.SessionID, "prev_hash": r.PrevHash, "entry_hash": r.EntryHash, "entry_sig": r.EntrySig,
+	for _, f := range [...]struct{ name, v string }{
+		{"event_type", r.EventType}, {"category", r.Category}, {"session_id", r.SessionID}, {"entry_sig", r.EntrySig},
 	} {
-		if !utf8.ValidString(v) {
-			return Row{}, fmt.Errorf("entry %d: %s is not valid UTF-8 and cannot be exported verbatim", r.ID, name)
+		if !utf8.ValidString(f.v) {
+			return Row{}, fmt.Errorf("entry %d: %s is not valid UTF-8 and cannot be exported verbatim", r.ID, f.name)
 		}
 	}
-	row := Row{
-		ID: r.ID, Timestamp: r.Timestamp, EventType: r.EventType, Category: r.Category,
-		Detail: r.Detail, Blocked: r.Blocked, SessionID: r.SessionID,
-		PrevHash: r.PrevHash, EntryHash: r.EntryHash, EntrySig: r.EntrySig,
-	}
+	row := Row{ChainRow: r}
 	if !utf8.ValidString(r.Detail) {
-		row.Detail = strings.ToValidUTF8(r.Detail, "�")
+		row.Detail = strings.ToValidUTF8(r.Detail, "\uFFFD")
 		row.DetailBase64 = base64.StdEncoding.EncodeToString([]byte(r.Detail))
 	}
 	return row, nil

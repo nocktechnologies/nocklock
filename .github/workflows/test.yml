@@ -109,6 +109,7 @@ jobs:
         with:
           path: ~/.cache/nocklock-ocsf-schema
           key: ocsf-schema-${{ hashFiles('scripts/check-ocsf-schema.py') }}
+          restore-keys: ocsf-schema-
 
       - name: OCSF export schema check
         if: steps.changes.outputs.code == 'true'

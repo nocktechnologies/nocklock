@@ -113,60 +113,74 @@ func (h ChainHead) VerifySig(pub ed25519.PublicKey) bool {
 	return verifyHeadSig(pub, h.Hash, h.RowCount, h.meta, h.Sig)
 }
 
-// DecodeEventDetail returns the human detail and egress level of a stored
-// detail column. Only session_start rows carry the versioned JSON envelope;
-// every other row, and a session_start without one, returns stored unchanged.
-func DecodeEventDetail(eventType, stored string) (detail, egressLevel string) {
-	return decodeEventDetail(EventType(eventType), stored)
+// DecodeEventDetail returns the human detail of a stored detail column. Only
+// session_start rows carry the versioned JSON envelope; every other row, and a
+// session_start without one, returns stored unchanged.
+func DecodeEventDetail(eventType, stored string) string {
+	detail, _ := decodeEventDetail(EventType(eventType), stored)
+	return detail
 }
 
 // ChainRow is one events row exactly as stored: every column the entry_hash,
 // the hash link, and the entry_sig cover, with no decoding applied.
 type ChainRow struct {
-	ID        int64
-	Timestamp string // the stored canonical timestamp string
-	EventType string
-	Category  string
-	Detail    string // the stored detail column, including any envelope
-	Blocked   int64  // the stored integer; nonzero means blocked
-	SessionID string
-	PrevHash  string
-	EntryHash string
-	EntrySig  string // base64 Ed25519 signature, empty when unsigned
+	ID        int64  `json:"id"`
+	Timestamp string `json:"timestamp"` // the stored canonical timestamp string
+	EventType string `json:"event_type"`
+	Category  string `json:"category"`
+	Detail    string `json:"detail"`  // the stored detail column, including any envelope
+	Blocked   int64  `json:"blocked"` // the stored integer; nonzero means blocked
+	SessionID string `json:"session_id"`
+	PrevHash  string `json:"prev_hash"`
+	EntryHash string `json:"entry_hash"`
+	EntrySig  string `json:"entry_sig"` // base64 Ed25519 signature, empty when unsigned
 }
 
-// ReadChain reads the chain head and then every events row in id order, both
-// inside one read transaction, so the rows passed to fn are the snapshot the
-// head describes even while a writer appends. found reports whether a head was
-// read (see ReadChainHead). An error from fn stops the walk and is returned.
-func (l *Logger) ReadChain(ctx context.Context, fn func(ChainRow) error) (head ChainHead, found bool, err error) {
+// ReadVerifiedChain verifies the chain exactly as VerifyChainSignedContext does
+// and, only when the verdict passes (intact, and neither forged nor suspect),
+// passes every events row in id order to fn, reading the rows and the
+// returned chain head in the same read transaction as the verdict. The rows fn sees are therefore the rows the
+// returned verdict covers, even while a writer appends. A failing verdict is
+// returned with a zero head and fn never called. An error from fn stops the
+// read and is returned.
+func (l *Logger) ReadVerifiedChain(ctx context.Context, pub ed25519.PublicKey, requireSigned bool, fn func(ChainRow) error) (*ChainVerifyResult, ChainHead, error) {
 	tx, err := l.db.BeginTx(ctx, nil)
 	if err != nil {
-		return ChainHead{}, false, fmt.Errorf("begin read transaction: %w", err)
+		return nil, ChainHead{}, fmt.Errorf("begin read transaction: %w", err)
 	}
 	defer tx.Rollback()
 
-	head, found, err = ReadChainHead(tx)
+	result, _, _, err := verifyChainInTransaction(ctx, tx, pub, requireSigned)
 	if err != nil {
-		return ChainHead{}, false, err
+		return nil, ChainHead{}, err
+	}
+	if !result.Intact || result.SigState == "forged" || result.SigState == "suspect" {
+		return result, ChainHead{}, nil
+	}
+	head, found, err := ReadChainHead(tx)
+	if err != nil {
+		return nil, ChainHead{}, err
+	}
+	if !found {
+		head = ChainHead{Hash: result.HeadHash}
 	}
 	rows, err := tx.QueryContext(ctx,
 		"SELECT id, timestamp, event_type, category, detail, blocked, session_id, prev_hash, entry_hash, entry_sig FROM events ORDER BY id ASC")
 	if err != nil {
-		return ChainHead{}, false, fmt.Errorf("read events: %w", err)
+		return nil, ChainHead{}, fmt.Errorf("read events: %w", err)
 	}
 	defer rows.Close()
 	for rows.Next() {
 		var r ChainRow
 		if err := rows.Scan(&r.ID, &r.Timestamp, &r.EventType, &r.Category, &r.Detail, &r.Blocked, &r.SessionID, &r.PrevHash, &r.EntryHash, &r.EntrySig); err != nil {
-			return ChainHead{}, false, fmt.Errorf("scan events row: %w", err)
+			return nil, ChainHead{}, fmt.Errorf("scan events row: %w", err)
 		}
 		if err := fn(r); err != nil {
-			return ChainHead{}, false, err
+			return nil, ChainHead{}, err
 		}
 	}
 	if err := rows.Err(); err != nil {
-		return ChainHead{}, false, fmt.Errorf("iterate events: %w", err)
+		return nil, ChainHead{}, verifyInterrupted(ctx, fmt.Errorf("iterate events: %w", err))
 	}
-	return head, found, nil
+	return result, head, nil
 }

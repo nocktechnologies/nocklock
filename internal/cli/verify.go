@@ -357,15 +357,18 @@ func resolveAuditDBPath() (dbPath, projectRoot string, err error) {
 }
 
 func runAuditVerify(ctx context.Context, w io.Writer, pubFlag string, requireClosed bool) error {
-	_, _, err := verifyAuditLog(ctx, w, pubFlag, requireClosed)
+	logger, _, err := verifyAuditLog(ctx, w, pubFlag, requireClosed)
+	if logger != nil {
+		logger.Close()
+	}
 	return err
 }
 
 // verifyAuditLog runs the verify --audit checks and prints their report to w.
-// On a passing verdict it also returns the chain result and the public key the
-// signatures were checked against (nil for a hash-only check), so a caller
-// such as verify --export can bind its output to exactly what was verified.
-func verifyAuditLog(ctx context.Context, w io.Writer, pubFlag string, requireClosed bool) (*logging.ChainVerifyResult, ed25519.PublicKey, error) {
+// On a passing verdict it returns the still-open event log, which the caller
+// must close, and the public key the signatures were checked against (nil for
+// a hash-only check), so verify --export reads the log it just verified.
+func verifyAuditLog(ctx context.Context, w io.Writer, pubFlag string, requireClosed bool) (*logging.Logger, ed25519.PublicKey, error) {
 	// unclosedRuns is populated once the run-lifecycle pass runs, so the deferred
 	// coverage notice (which may also fire on an early tamper return) can name any
 	// run missing its close. The closure reads it at return time, not defer time.
@@ -389,7 +392,12 @@ func verifyAuditLog(ctx context.Context, w io.Writer, pubFlag string, requireClo
 	if err != nil {
 		return nil, nil, fmt.Errorf("failed to open event log: %w", err)
 	}
-	defer logger.Close()
+	passed := false
+	defer func() {
+		if !passed {
+			logger.Close()
+		}
+	}()
 
 	// Verify the chain (signature-aware when a key is available), bounding only the
 	// walk by the operator's --walk-timeout (unbounded by default) so the flag
@@ -443,7 +451,8 @@ func verifyAuditLog(ctx context.Context, w io.Writer, pubFlag string, requireClo
 		fmt.Fprintf(w, "AUDIT: UNCLOSED — %d run(s) have no signed session_close and --require-closed was set\n", len(unclosed))
 		return nil, nil, &exitCodeError{code: 1}
 	}
-	return result, pub, nil
+	passed = true
+	return logger, pub, nil
 }
 
 // writeRunLifecycleResult prints the per-run lifecycle verdicts and a summary

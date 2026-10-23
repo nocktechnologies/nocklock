@@ -14,7 +14,8 @@ below before use; a changed schema fails the check instead of being trusted.
 When the exporter's OCSF version changes, bump OCSF_VERSION and every digest
 together.
 
-A negative control runs first: an event missing a required attribute must fail,
+A negative control runs first: an event missing a required attribute must fail
+schema validation,
 so a validator that accepts everything cannot pass this check.
 
 Usage: check-ocsf-schema.py --schema-dir DIR EXPORT.jsonl [...]
@@ -94,12 +95,11 @@ def main():
     parser.add_argument("--schema-dir", required=True, help="where the class schemas are cached")
     parser.add_argument("paths", nargs="+", metavar="EXPORT.jsonl")
     args = parser.parse_args()
-    paths = args.paths
     os.makedirs(args.schema_dir, exist_ok=True)
     validators = {uid: load_validator(args.schema_dir, name, digest) for uid, (name, digest) in CLASSES.items()}
 
     events = []
-    for path in paths:
+    for path in args.paths:
         with open(path, encoding="utf-8") as f:
             for n, line in enumerate(f, 1):
                 if line.strip():
@@ -108,9 +108,9 @@ def main():
         raise SystemExit("no events to validate")
 
     control = copy.deepcopy(events[0][1])
-    del control["metadata"]
-    if not errors_for(validators, control):
-        raise SystemExit("negative control: an event without metadata validated; the check proves nothing")
+    del control["severity_id"]
+    if not list(validators[control["class_uid"]].iter_errors(control)):
+        raise SystemExit("negative control: an event without severity_id validated; the check proves nothing")
 
     failed = 0
     seen = set()
