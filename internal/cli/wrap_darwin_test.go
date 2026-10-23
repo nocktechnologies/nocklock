@@ -316,7 +316,42 @@ func TestWrapMacOSBuiltinDenyRefusalIsRecorded(t *testing.T) {
 			if len(states) != 1 || !strings.Contains(states[0], "REFUSED-TO-START") {
 				t.Fatalf("expected exactly one refusal state, got %q", states)
 			}
+			var verifyOut strings.Builder
+			if err := runAuditVerify(context.Background(), &verifyOut, "", false); err != nil {
+				t.Fatalf("verify --audit after a recorded refusal: %v\n%s", err, verifyOut.String())
+			}
 		})
+	}
+}
+
+// TestWrapMacOSDegradedRootSkipsBuiltinDenyResolution proves the explicit
+// filesystem.root = "" opt-out resolves no built-in denies, so an unresolvable
+// HOME still records exactly one DEGRADED state and launches the child.
+func TestWrapMacOSDegradedRootSkipsBuiltinDenyResolution(t *testing.T) {
+	project := t.TempDir()
+	t.Setenv("HOME", "")
+	policy := strings.Replace(doctorTestTOML(true), "[filesystem]\nroot = \".\"", "[filesystem]\nroot = \"\"", 1)
+	// enforcement = "required" refuses without a Seatbelt profile to carry it.
+	policy = strings.Replace(policy, "\nenforcement = \"required\"", "\nenforcement = \"off\"", 1)
+	if !strings.Contains(policy, "[filesystem]\nroot = \"\"") || !strings.Contains(policy, "\nenforcement = \"off\"") {
+		t.Fatalf("test policy did not disable the filesystem and syscall fences:\n%s", policy)
+	}
+	marker := filepath.Join(project, "child-ran")
+	if err := runDarwinWrap(t, project, policy, "/usr/bin/touch", marker); err != nil {
+		t.Fatalf("degraded wrap with no HOME should launch the child: %v", err)
+	}
+	if _, err := os.Stat(marker); err != nil {
+		t.Fatalf("degraded wrap did not run the child: %v", err)
+	}
+
+	db, err := sql.Open("sqlite", resolvedAuditDB(t, project))
+	if err != nil {
+		t.Fatalf("open audit log: %v", err)
+	}
+	defer db.Close()
+	states := macOSFilesystemFenceStates(t, db)
+	if len(states) != 1 || !strings.Contains(states[0], "DEGRADED") {
+		t.Fatalf("expected exactly one DEGRADED state and no refusal, got %q", states)
 	}
 }
 

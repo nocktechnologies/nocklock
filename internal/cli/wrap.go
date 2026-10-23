@@ -165,8 +165,8 @@ var wrapCmd = &cobra.Command{
 			// A dry run opens no event log, so report the built-in deny
 			// refusal that a real macOS run records as REFUSED-TO-START.
 			// validateWrapRuntimeConfig already resolved it on Linux.
-			if runtime.GOOS == "darwin" {
-				if _, err := fsfence.ProcessEffectiveConfig(cfg, runtime.GOOS); err != nil {
+			if runtime.GOOS == "darwin" && effectiveCfg.Filesystem.Root != "" {
+				if _, err := fsfence.ProcessEffectiveConfig(&effectiveCfg, runtime.GOOS); err != nil {
 					cmd.SilenceUsage = true
 					return fmt.Errorf("invalid config at %s: invalid filesystem fence config: %w", configPath, err)
 				}
@@ -229,9 +229,10 @@ var wrapCmd = &cobra.Command{
 
 		// The digest below resolves the built-in credential denies, so a macOS
 		// refusal of them (an overlapping grant, no resolvable HOME) is
-		// recorded here first.
-		if runtime.GOOS == "darwin" {
-			if _, err := fsfence.ProcessEffectiveConfig(cfg, runtime.GOOS); err != nil {
+		// recorded here first. Like the digest, skip it for filesystem.root = "",
+		// which resolves no built-in denies and records DEGRADED later.
+		if runtime.GOOS == "darwin" && effectiveCfg.Filesystem.Root != "" {
+			if _, err := fsfence.ProcessEffectiveConfig(&effectiveCfg, runtime.GOOS); err != nil {
 				cmd.SilenceUsage = true
 				if logErr := recordMacOSFilesystemFenceState("REFUSED-TO-START", "invalid filesystem configuration: "+err.Error(), true); logErr != nil {
 					return fmt.Errorf("cannot record macOS filesystem fence refusal; refusing to start: %w", logErr)
