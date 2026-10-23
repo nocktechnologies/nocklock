@@ -21,6 +21,10 @@ v0.14.0 makes the credential-file denies mandatory on Linux and macOS (#269). A 
 - On macOS the signed config digest records the home `.env*` and `.claude*` prefix rules, not the home entries they match, so a matching file appearing or going away leaves the digest unchanged. Existing matches, including symlink targets, are still denied.
 - The `doctor` `.env` check inspects the inline default of a `${VAR:-default}`, `${VAR:=default}` or `${VAR:+value}` reference on a secret-named key; a plain `$VAR` or `${VAR}` reference is not reported.
 
+### Fixed
+
+- On macOS a built-in credential deny refusal (a filesystem grant overlapping a built-in deny, or no resolvable `HOME`) is recorded as one `REFUSED-TO-START` filesystem fence state before the run refuses, instead of exiting as an unrecorded config error. `--dry-run` still reports it.
+
 ## [0.13.1] - 2026-10-21
 
 v0.13.1 raises the minimum Go version to 1.27.3 to fix reachable standard-library vulnerabilities.
