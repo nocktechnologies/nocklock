@@ -15,7 +15,7 @@ v0.14.0 makes the credential-file denies mandatory on Linux and macOS (#269). A 
 
 ### Security
 
-- The credential-file denies are now mandatory on Linux and macOS (#269): built-in credential denies merge with user deny lists; a user deny list cannot remove them. Refuse root/allow grants overlapping a built-in deny, including a whole-home grant. macOS also denies home `.env*`, `.claude*`, and `.codex`; Claude Code and Codex presets retain access only to their own agent login store via the persisted `project.runtime` setting. Generic defaults no longer grant `~/.claude/`. Package manager config denies stay opt-in.
+- The credential-file denies are now mandatory on Linux and macOS (#269); see Breaking for the list and for grants that now refuse to start. macOS also denies home `.env*`, `.claude*`, and `.codex`; Claude Code and Codex presets retain access only to their own agent login store via the persisted `project.runtime` setting. Generic defaults no longer grant `~/.claude/`. Package manager config denies stay opt-in.
 - Keep project `.env` and `.env.*` readable and make `doctor` report `PARTIAL` for actual secret-shaped values, without disclosing values. The check covers the project root plus one level, skips dependency/build directories, and reports incomplete inspection as informational `not checked`. Document pre-made hard links into a granted project as a remaining read exposure on both platforms.
 - Add CI-only credential canaries, allowed controls, and per-case policy-removal mutation checks on Linux and macOS, including symlinks, hardlink names, case aliases, grandchildren, and Linux `/proc/self/root`.
 
