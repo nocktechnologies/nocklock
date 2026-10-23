@@ -286,6 +286,11 @@ func signingKeyDoctorCheck(cfg *config.Config, configPath string, caps doctorCap
 	resolved, err := fsfence.ProcessEffectiveConfig(&effective, caps.goos)
 	if err != nil {
 		check := doctorCriticalCheck("Fences", "signing-key", "unresolved", fmt.Sprintf("Cannot resolve managed signing key directory %s: %v", keyDir, err), "fix the signing key path and filesystem config")
+		// A refusal the config earns without the key deny (such as a grant over
+		// a built-in credential deny) is the filesystem row's cause, not the key's.
+		if _, fsErr := fsfence.ProcessEffectiveConfig(cfg, caps.goos); fsErr != nil {
+			check = doctorCriticalCheck("Fences", "signing-key", "will-refuse", fmt.Sprintf("Managed signing key directory %s is not judged: wrap refuses the filesystem config: %v", keyDir, fsErr), "fix the filesystem fence refusal; the signing key needs no separate change")
+		}
 		return check, &doctorSigningKey{Directory: keyDir, Posture: doctorCheckPosture(check)}
 	}
 	if dbPath, _, err := config.ResolveDBPath(cfg, configPath); err == nil {
