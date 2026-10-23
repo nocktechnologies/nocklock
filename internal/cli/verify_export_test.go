@@ -41,7 +41,7 @@ var ocsfFixtureRows = []struct {
 }{
 	{logging.EventSessionStart, "session", `command="/usr/bin/node" lifecycle=1`, false, "proxy"},
 	{logging.EventConfigLoaded, "session", "claude-code", false, ""},
-	{logging.EventSecretBlocked, "secret", "AWS_SECRET_ACCESS_KEY", true, ""},
+	{logging.EventSecretBlocked, "secret", "DEPLOY_API_TOKEN", true, ""},
 	{logging.EventSecretPassed, "secret", "HOME, LANG, TERM, PATH", false, ""},
 	{logging.EventFilePassed, "filesystem", "landlock abi=5 paths=4", false, ""},
 	{logging.EventFilePassed, "filesystem", "root=<home>/project mode=read-write", false, ""},
@@ -300,7 +300,7 @@ func TestOCSFExportVerifiesFromExportAlone(t *testing.T) {
 		c[i] = strings.Replace(c[i], from, to, 1)
 		return c
 	}
-	if err := verifyExport(t, edit(2, `"detail":"AWS_SECRET_ACCESS_KEY"`, `"detail":"AWS_SECRET_ACCESS_KEX"`)); err == nil {
+	if err := verifyExport(t, edit(2, `"detail":"DEPLOY_API_TOKEN"`, `"detail":"DEPLOY_API_TOKEX"`)); err == nil {
 		t.Fatal("an edited detail still verified")
 	}
 	if err := verifyExport(t, append(append([]string{}, lines[:3]...), lines[4:]...)); err == nil {
