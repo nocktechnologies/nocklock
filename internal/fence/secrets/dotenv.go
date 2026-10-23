@@ -64,23 +64,30 @@ func (s *scanner) inspectDotEnv(data []byte, path string) {
 // dotEnvValue returns the literal text of a raw .env value. A single-quoted
 // value is literal, with no substitution. A double-quoted or unquoted value is
 // parsed for references by dotEnvLiteral, and an unquoted value ends at an
-// inline comment: whitespace then #.
+// inline comment: whitespace then #. Text after a closing quote is read the
+// same way, so a quoted part does not hide the text concatenated after it.
 func dotEnvValue(raw string) string {
-	switch value := strings.TrimSpace(raw); {
-	case strings.HasPrefix(value, "'"):
-		body, _, _ := strings.Cut(value[1:], "'")
-		return body
-	case strings.HasPrefix(value, `"`):
-		body, _, _ := strings.Cut(value[1:], `"`)
-		return dotEnvLiteral(body)
-	}
-	for i := 1; i < len(raw); i++ {
-		if raw[i] == '#' && (raw[i-1] == ' ' || raw[i-1] == '\t') {
-			raw = raw[:i]
-			break
+	for {
+		var literal string
+		switch value := strings.TrimSpace(raw); {
+		case strings.HasPrefix(value, "'"):
+			literal, raw, _ = strings.Cut(value[1:], "'")
+		case strings.HasPrefix(value, `"`):
+			literal, raw, _ = strings.Cut(value[1:], `"`)
+			literal = dotEnvLiteral(literal)
+		default:
+			for i := 1; i < len(raw); i++ {
+				if raw[i] == '#' && (raw[i-1] == ' ' || raw[i-1] == '\t') {
+					raw = raw[:i]
+					break
+				}
+			}
+			return dotEnvLiteral(strings.TrimSpace(raw))
+		}
+		if literal != "" {
+			return literal
 		}
 	}
-	return dotEnvLiteral(strings.TrimSpace(raw))
 }
 
 // dotEnvLiteral returns literal text written in the value itself: text outside
@@ -90,7 +97,6 @@ func dotEnvValue(raw string) string {
 // unbalanced reference. Each ${...} is matched by brace depth in one pass, so
 // back-to-back references stay separate and deep nesting stays linear.
 func dotEnvLiteral(value string) string {
-	value = strings.Trim(value, "\"'")
 	isName := func(c byte) bool {
 		return c == '_' || (c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z') || (c >= '0' && c <= '9')
 	}

@@ -110,6 +110,11 @@ func TestScanDotEnvInlineCommentsAndSingleQuotes(t *testing.T) {
 		"API_KEY=$abc_literal":              0,
 		"API_KEY=$abc_literal # note":       0,
 		"API_KEY=\"sk_live_x # inside\"":    1,
+		"API_KEY=''sk_live_x":               1,
+		"API_KEY=\"$abc_literal\"sk_live_x": 1,
+		"API_KEY='' '' # note":              0,
+		"API_KEY=\"\"":                      0,
+		"API_KEY='unterminated":             1,
 	} {
 		t.Run(body, func(t *testing.T) {
 			root := t.TempDir()

@@ -25,6 +25,7 @@ v0.14.0 makes the credential-file denies mandatory on Linux and macOS (#269). A 
 ### Fixed
 
 - On macOS a built-in credential deny refusal (a filesystem grant overlapping a built-in deny, or no resolvable `HOME`) is recorded as one `REFUSED-TO-START` filesystem fence state before the run refuses, instead of exiting as an unrecorded config error. `--dry-run` still reports it.
+- When the filesystem config is refused, such as by a grant over a built-in credential deny, `doctor` reports the `signing-key` row as `will-refuse` with the filesystem refusal as its cause and fix, instead of `unresolved` with a signing key path fix.
 
 ## [0.13.1] - 2026-10-21
 
