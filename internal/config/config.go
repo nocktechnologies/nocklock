@@ -305,7 +305,7 @@ func (c *Config) LoginStoreRuntime() string {
 	if c.ProfileName != "" {
 		return c.ProfileName
 	}
-	if c.Project.Runtime != "" && c.Project.Runtime == c.CommandRuntime {
+	if c.Project.Runtime == c.CommandRuntime {
 		return c.Project.Runtime
 	}
 	return ""
