@@ -243,6 +243,8 @@ Every `wrap` also signs a `config.digest` row for its resolved policy; a changed
 
 Supplying `--ed25519-pub` states the external expectation that the log is signed. Without it, a genuinely unsigned or pre-adoption log reads CONSISTENT. With it, a completely erased signing record reads SUSPECT. Telling a never-signed log apart from a fully stripped one cryptographically requires anchoring the signed head off-box, which is what the v1.2 external chain-head anchor below does. Signing is adopted going forward, so rows written before adoption verify as consistent-but-unsigned, not forged. Run `nocklock verify --export-pubkey` to publish the public key for out-of-band checking.
 
+`nocklock verify --export ocsf --out audit.ocsf.jsonl` writes the log as OCSF 1.9.0 events, one JSON line per row, for security tools that ingest OCSF. Each event keeps its source row verbatim, and a closing trailer carries the chain head, its signature and the public key, so the hash chain and signatures can be checked from the export alone. It verifies first and writes nothing when the chain fails. The mapping and its limits are in [the audit log page](docs/how-it-works/audit-log.md#ocsf-export).
+
 Because the head is signed, deleting the newest rows and rewriting `chain_head` in lockstep, the attack the unkeyed chain cannot resist, is now caught as FORGED: the attacker cannot re-sign the shortened head. The remaining gap is rollback. An attacker who restores an earlier, legitimately signed snapshot of the whole database presents a shorter log that still verifies, because its head was validly signed at the time. Detecting that requires anchoring the signed head off-box, which is exactly what the external chain-head anchor adds.
 
 ## External chain-head anchors

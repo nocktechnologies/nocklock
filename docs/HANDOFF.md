@@ -6,6 +6,8 @@ No internal host names, personal names or absolute home paths: `scripts/check-pu
 
 ## What changed
 
+- 2026-10-23: `verify --export ocsf [--out FILE]` (`internal/cli/verify_export.go`, mapping in `internal/ocsf/`) writes one OCSF 1.9.0 event per audit row plus a chain-evidence trailer, after the `verify --audit` checks pass; it refuses and writes nothing otherwise. The golden export is `internal/cli/testdata/ocsf/export.golden.jsonl`: regenerate it with `go test ./internal/cli -run OCSFExportGolden -update-ocsf-golden` and review the diff. CI validates the golden with `scripts/check-ocsf-schema.py`, which downloads the class schemas (the schema server can take over a minute per class) into a cached directory and pins them by SHA-256; bump the version and digests together.
+
 - 2026-10-23: on macOS the agent login-store exemption comes from `--profile`, or from `project.runtime` only when the wrapped command's basename is that agent (`config.RuntimeForCommand`); a wrapper launch (`npx`, `env`, a renamed binary) keeps every store denied and needs `--profile`. `doctor` and a command-less `wrap --dry-run` judge `wrap -- <project.runtime agent>`. macOS `config.digest` rows carry the exempt runtime outside the hashed policy, and a change writes a signed `config.runtime_changed` row; `verify` does not yet summarize those rows.
 
 - 2026-10-22: doctor checks dotenv files only at the project root and one directory level below, skipping dependency/build directories. Incomplete inspection is informational; actual matches retain PARTIAL. The CI credential proof now cleans its isolated process session on every exit path, with mocked lifecycle regression tests that do not execute enforcement locally.

@@ -276,6 +276,35 @@ The scratch directory is only a verification workspace: never run `wrap`, `log -
 - The new log is a fresh chain. Nothing binds it to the archived one, so deleting the archive is undetectable from the new log.
 - If you push anchors with `NOCKLOCK_ANCHOR_URL`, the receiving server was given the old public key with each anchor. How a server treats the new key was not tested.
 
+## OCSF export
+
+`nocklock verify --export ocsf [--out <file>]` writes the audit log for security tools that ingest the Open Cybersecurity Schema Framework (`internal/cli/verify_export.go`, `internal/ocsf/ocsf.go`). It verifies first and refuses, writing nothing, when the chain does not pass (`docs/reference/cli.md`).
+
+Every row becomes one OCSF 1.9.0 event (the version is one constant, `ocsf.Version`):
+
+| Row type | OCSF class | Activity |
+|---|---|---|
+| `session_start`, `session_end` | Process Activity (1007) | Launch (1), Terminate (2) |
+| `network_blocked`, `network_passed` | Network Activity (4001) | Refuse (5), Open (1); action Denied/Allowed, disposition Blocked/Allowed |
+| `file_blocked` | File Activity (1001) | Other (99); action Denied, disposition Blocked |
+| `secret_blocked` | Detection Finding (2004) | Create (1) |
+| everything else: fence state, `config_loaded`, proxy start and stop, `*_passed`, `session_close`, `config.*`, `network_error`, and any type added later | Application Lifecycle (6002) | Other (99); the row type, or the fence state for `filesystem_fence_state`, in `status_detail` |
+
+The mapped fields are read from the row and nothing is guessed: `dst_endpoint.hostname` comes from a `host=` token, `file.path` from `path=` or the JSON report, `exit_code` from `exit_code=`; a row without one leaves the field out (a `file_blocked` row naming no path gets file name `unknown`). The log does not record the host, so every event's `device` is `{"type_id": 0, "name": "unrecorded"}`. `time` is milliseconds; the stored nanosecond timestamp is in `metadata.original_time`. `metadata.uid` is the row's `entry_hash`.
+
+Each event carries its source row verbatim in `unmapped.nocklock` under the stored column names: `id`, `timestamp`, `event_type`, `category`, `detail` (the stored column, including the `session_start` envelope), `blocked` (0 or 1), `session_id`, `prev_hash`, `entry_hash`, `entry_sig`. A detail that is not valid UTF-8 cannot travel in JSON byte for byte, so its bytes are also given as `detail_base64`, and the hash covers those bytes.
+
+The last line is a trailer, itself an Application Lifecycle event with `status_detail` `audit_export_trailer`, whose `unmapped.nocklock_export` holds `verdict` (`AUTHENTIC` or `CONSISTENT`, as `verify --audit` reported), `row_count`, `genesis_hash`, `chain_head`, and, for an `AUTHENTIC` chain, `head_sig`, `head_signed_bytes` (base64 of the bytes the head signature covers), `public_key` and `public_key_fingerprint`. From the export alone a reader can:
+
+1. Rebuild each row's canonical bytes, `0x01 || u64be(id) || lp(timestamp) || lp(event_type) || lp(category) || lp(detail) || blocked byte || lp(session_id)` with `lp` a big-endian u32 length followed by the bytes, and check `entry_hash = SHA-256(canonical || prev_hash bytes)`.
+2. Check each `prev_hash` is the previous row's `entry_hash`, starting from `genesis_hash` and ending at `chain_head` after `row_count` rows.
+3. Check each `entry_sig` (base64 Ed25519 over the canonical bytes) under `public_key`.
+4. Check `head_sig` over `head_signed_bytes`, whose bytes 1 to 32 are `chain_head` and bytes 33 to 40 the big-endian `row_count`.
+
+`internal/cli/verify_export_test.go` does exactly this, without the logging package, and fails it on an edited field, a dropped row and a forged head signature.
+
+Limits: a `CONSISTENT` export carries no key, so its rows prove internal consistency only. The trailer proves the export matches the local signed head; like `verify --audit` it cannot see a rollback of the whole database to an earlier signed state (see Layers). The public key in the trailer is the one the log was checked against; a reader should compare its fingerprint with a key obtained out of band (`verify --export-pubkey`) rather than trust the file that carries it. CI validates the golden export against the OCSF 1.9.0 class schemas with the cloud and osint profile attributes not required (`scripts/check-ocsf-schema.py`).
+
 ## Forwarding to Command (opt-in)
 `[audit.forward]` sends committed decisions to Command's ops log from a bounded, non-durable queue (`internal/forward/forward.go`). Failures never change a decision or remove a local row. Both the URL and the key come from the operator environment.
 
@@ -288,4 +317,4 @@ The scratch directory is only a verification workspace: never run `wrap`, `log -
   `verify` prints a `NOTE`. V2 local pending/enrolled state or a retained original registration request refuses prune, including state none after an interrupted write.
 
 ## Tests
-`internal/logging/*_test.go`, `internal/cli/exec_fingerprint_test.go`, `internal/cli/verify_test.go`, `verify_signing_test.go`, `audit_state_*_test.go`, `anchor_*_test.go`, `internal/anchorclient/client*_test.go`, `pkg/receipt/*_test.go`.
+`internal/logging/*_test.go`, `internal/cli/exec_fingerprint_test.go`, `internal/cli/verify_test.go`, `verify_signing_test.go`, `verify_export_test.go`, `audit_state_*_test.go`, `anchor_*_test.go`, `internal/anchorclient/client*_test.go`, `pkg/receipt/*_test.go`.

@@ -80,6 +80,7 @@ Things you cannot guess from the code layout:
 | The network fence | `internal/fence/network/` (proxy, allowlist, look-back rules), `internal/fence/network/netns/` (Linux netns mode), `docs/how-it-works/network-fence.md` |
 | The syscall fence | `internal/fence/syscallfence/`, `docs/how-it-works/syscall-fence.md` |
 | The audit log, signing, anchors, verification | `internal/logging/`, `internal/anchorclient/`, `pkg/receipt/` (public verifier), `docs/how-it-works/audit-log.md` |
+| The OCSF audit export | `internal/ocsf/` (mapping), `internal/cli/verify_export.go`, `scripts/check-ocsf-schema.py` (CI schema check) |
 | `doctor` and `verify` verdicts | `internal/cli/doctor.go`, `internal/cli/verify.go`, `docs/how-it-works/doctor-and-verify.md` |
 | End-to-end tests | `integration/` |
 | The red-team bench | `bench/redteam/` |

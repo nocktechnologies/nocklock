@@ -1,6 +1,7 @@
 package logging
 
 import (
+	"context"
 	"crypto/ed25519"
 	"database/sql"
 	"errors"
@@ -110,4 +111,62 @@ func (h ChainHead) CanonicalBytes() ([]byte, error) {
 // same check nocklock verify applies. An empty or malformed signature is false.
 func (h ChainHead) VerifySig(pub ed25519.PublicKey) bool {
 	return verifyHeadSig(pub, h.Hash, h.RowCount, h.meta, h.Sig)
+}
+
+// DecodeEventDetail returns the human detail and egress level of a stored
+// detail column. Only session_start rows carry the versioned JSON envelope;
+// every other row, and a session_start without one, returns stored unchanged.
+func DecodeEventDetail(eventType, stored string) (detail, egressLevel string) {
+	return decodeEventDetail(EventType(eventType), stored)
+}
+
+// ChainRow is one events row exactly as stored: every column the entry_hash,
+// the hash link, and the entry_sig cover, with no decoding applied.
+type ChainRow struct {
+	ID        int64
+	Timestamp string // the stored canonical timestamp string
+	EventType string
+	Category  string
+	Detail    string // the stored detail column, including any envelope
+	Blocked   int64  // the stored integer; nonzero means blocked
+	SessionID string
+	PrevHash  string
+	EntryHash string
+	EntrySig  string // base64 Ed25519 signature, empty when unsigned
+}
+
+// ReadChain reads the chain head and then every events row in id order, both
+// inside one read transaction, so the rows passed to fn are the snapshot the
+// head describes even while a writer appends. found reports whether a head was
+// read (see ReadChainHead). An error from fn stops the walk and is returned.
+func (l *Logger) ReadChain(ctx context.Context, fn func(ChainRow) error) (head ChainHead, found bool, err error) {
+	tx, err := l.db.BeginTx(ctx, nil)
+	if err != nil {
+		return ChainHead{}, false, fmt.Errorf("begin read transaction: %w", err)
+	}
+	defer tx.Rollback()
+
+	head, found, err = ReadChainHead(tx)
+	if err != nil {
+		return ChainHead{}, false, err
+	}
+	rows, err := tx.QueryContext(ctx,
+		"SELECT id, timestamp, event_type, category, detail, blocked, session_id, prev_hash, entry_hash, entry_sig FROM events ORDER BY id ASC")
+	if err != nil {
+		return ChainHead{}, false, fmt.Errorf("read events: %w", err)
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var r ChainRow
+		if err := rows.Scan(&r.ID, &r.Timestamp, &r.EventType, &r.Category, &r.Detail, &r.Blocked, &r.SessionID, &r.PrevHash, &r.EntryHash, &r.EntrySig); err != nil {
+			return ChainHead{}, false, fmt.Errorf("scan events row: %w", err)
+		}
+		if err := fn(r); err != nil {
+			return ChainHead{}, false, err
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return ChainHead{}, false, fmt.Errorf("iterate events: %w", err)
+	}
+	return head, found, nil
 }

@@ -74,8 +74,21 @@ var verifyCmd = &cobra.Command{
 		pubFlag, _ := cmd.Flags().GetString("ed25519-pub")
 		anchorFile, _ := cmd.Flags().GetString("against-anchor")
 		remoteAnchor, _ := cmd.Flags().GetBool("against-remote-anchor")
+		exportFormat, _ := cmd.Flags().GetString("export")
+		outPath, _ := cmd.Flags().GetString("out")
 		if exportPub {
 			return runExportPubkey(cmd.OutOrStdout())
+		}
+		if outPath != "" && exportFormat == "" {
+			return fmt.Errorf("--out requires --export")
+		}
+		if exportFormat != "" {
+			if anchorFile != "" || remoteAnchor {
+				return fmt.Errorf("--export cannot be combined with --against-anchor or --against-remote-anchor")
+			}
+			cmd.SilenceUsage = true
+			requireClosed, _ := cmd.Flags().GetBool("require-closed")
+			return runAuditExport(cmd.Context(), cmd.OutOrStdout(), cmd.ErrOrStderr(), exportFormat, outPath, pubFlag, requireClosed)
 		}
 		if anchorFile != "" && remoteAnchor {
 			return fmt.Errorf("--against-anchor and --against-remote-anchor are mutually exclusive")
@@ -122,7 +135,9 @@ func init() {
 	verifyCmd.Flags().String("ed25519-pub", "", "trusted Ed25519 public key (base64 or hex); requires the audit log to be signed")
 	verifyCmd.Flags().String("against-anchor", "", "verify the local audit chain against an external anchor file (detects tail truncation and rollback)")
 	verifyCmd.Flags().Bool("against-remote-anchor", false, "verify the local audit chain against the latest anchor in the off-box store at $NOCKLOCK_ANCHOR_URL (absence fails)")
-	verifyCmd.Flags().Bool("require-closed", false, "with --audit, fail verification when a run has no signed session_close (a neutral unclosed run; close_mismatch and rows_after_close fail regardless)")
+	verifyCmd.Flags().String("export", "", "verify the audit chain, then write it as one OCSF JSON event per row (JSONL) plus a chain-evidence trailer; the only format is ocsf. Refuses, writing nothing, when verification fails")
+	verifyCmd.Flags().String("out", "", "with --export, write the export to this file (published by rename only when complete) instead of stdout")
+	verifyCmd.Flags().Bool("require-closed", false, "with --audit or --export, fail verification when a run has no signed session_close (a neutral unclosed run; close_mismatch and rows_after_close fail regardless)")
 	verifyCmd.Flags().Duration("walk-timeout", 0, walkTimeoutFlagUsage)
 	rootCmd.AddCommand(verifyCmd)
 }
@@ -342,6 +357,15 @@ func resolveAuditDBPath() (dbPath, projectRoot string, err error) {
 }
 
 func runAuditVerify(ctx context.Context, w io.Writer, pubFlag string, requireClosed bool) error {
+	_, _, err := verifyAuditLog(ctx, w, pubFlag, requireClosed)
+	return err
+}
+
+// verifyAuditLog runs the verify --audit checks and prints their report to w.
+// On a passing verdict it also returns the chain result and the public key the
+// signatures were checked against (nil for a hash-only check), so a caller
+// such as verify --export can bind its output to exactly what was verified.
+func verifyAuditLog(ctx context.Context, w io.Writer, pubFlag string, requireClosed bool) (*logging.ChainVerifyResult, ed25519.PublicKey, error) {
 	// unclosedRuns is populated once the run-lifecycle pass runs, so the deferred
 	// coverage notice (which may also fire on an early tamper return) can name any
 	// run missing its close. The closure reads it at return time, not defer time.
@@ -349,7 +373,7 @@ func runAuditVerify(ctx context.Context, w io.Writer, pubFlag string, requireClo
 	defer func() { writeVerificationCoverage(w, unclosedRuns) }()
 	dbPath, projectRoot, err := resolveAuditDBPath()
 	if err != nil {
-		return err
+		return nil, nil, err
 	}
 
 	// Resolve a public key for authenticity checking. An explicit --ed25519-pub
@@ -358,12 +382,12 @@ func runAuditVerify(ctx context.Context, w io.Writer, pubFlag string, requireClo
 	// at all means a hash-only (CONSISTENCY) verification.
 	pub, err := resolveVerifyPublicKey(pubFlag)
 	if err != nil {
-		return err
+		return nil, nil, err
 	}
 
 	logger, err := logging.NewLogger(dbPath, projectRoot)
 	if err != nil {
-		return fmt.Errorf("failed to open event log: %w", err)
+		return nil, nil, fmt.Errorf("failed to open event log: %w", err)
 	}
 	defer logger.Close()
 
@@ -377,19 +401,19 @@ func runAuditVerify(ctx context.Context, w io.Writer, pubFlag string, requireClo
 	defer cancelWalk()
 	result, err := logger.VerifyChainSignedContext(walkCtx, pub, pubFlag != "")
 	if err != nil {
-		return fmt.Errorf("verification failed: %w", err)
+		return nil, nil, fmt.Errorf("verification failed: %w", err)
 	}
 	history, err := inspectConfigDigestHistory(logger, result)
 	if err != nil {
-		return fmt.Errorf("config digest verification failed: %w", err)
+		return nil, nil, fmt.Errorf("config digest verification failed: %w", err)
 	}
 
 	// Format and print output
 	if err := writeAuditVerifyResult(w, result); err != nil {
-		return err
+		return nil, nil, err
 	}
 	if err := writeConfigDigestVerifyResult(w, history); err != nil {
-		return err
+		return nil, nil, err
 	}
 
 	// Run-lifecycle verification: report each run's observed lifecycle (closed,
@@ -401,9 +425,9 @@ func runAuditVerify(ctx context.Context, w io.Writer, pubFlag string, requireClo
 		// Surface an interrupted walk raw, matching the anchor paths and the
 		// N11800 neutral-interrupt convention (no "failed" wording, no verdict).
 		if errors.Is(err, logging.ErrVerifyInterrupted) {
-			return err
+			return nil, nil, err
 		}
-		return fmt.Errorf("run lifecycle verification failed: %w", err)
+		return nil, nil, fmt.Errorf("run lifecycle verification failed: %w", err)
 	}
 	lifecycleFailed, unclosed := writeRunLifecycleResult(w, runs)
 	unclosedRuns = unclosed
@@ -413,13 +437,13 @@ func runAuditVerify(ctx context.Context, w io.Writer, pubFlag string, requireClo
 		// AUDIT verdict line so a script reading the first AUDIT: line cannot
 		// mistake the earlier AUTHENTIC/CONSISTENT verdict for the overall result.
 		fmt.Fprintln(w, "AUDIT: RUN INTEGRITY FAILURE")
-		return &exitCodeError{code: 1}
+		return nil, nil, &exitCodeError{code: 1}
 	}
 	if requireClosed && len(unclosed) > 0 {
 		fmt.Fprintf(w, "AUDIT: UNCLOSED — %d run(s) have no signed session_close and --require-closed was set\n", len(unclosed))
-		return &exitCodeError{code: 1}
+		return nil, nil, &exitCodeError{code: 1}
 	}
-	return nil
+	return result, pub, nil
 }
 
 // writeRunLifecycleResult prints the per-run lifecycle verdicts and a summary
