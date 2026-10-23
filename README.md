@@ -148,7 +148,13 @@ A user deny list cannot remove them. Any overlapping `filesystem.root`,
 `allow`, or `allow_rw` grant (including `~/`) refuses startup with a clear error.
 macOS additionally denies home `.env*`, `.claude*`, and `.codex` paths. The
 `claude-code` and `codex` presets permit their own agent login store only;
-`init --runtime` persists that choice as `project.runtime`. Existing generated
+`init --runtime` persists that choice as `project.runtime`. Because the fenced
+agent can write the project config, `project.runtime` exempts the store only
+when the wrapped command runs that agent (`claude` or `codex`); `--profile`
+exempts it for any command, so use it when a wrapper such as `npx` or `env`
+launches the agent. Each signed `config.digest` row records the exempt
+runtime, and a change from the previous wrap prints a warning and writes a
+signed `config.runtime_changed` row. Existing generated
 configs can adopt `project.runtime = "claude-code"` or `"codex"` after reviewing
 the corresponding preset diff. `~/.npmrc` and `~/.pypirc` remain optional denies.
 

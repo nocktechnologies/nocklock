@@ -27,10 +27,7 @@ func ProcessEffectiveConfig(cfg *config.Config, goos string) (*FenceConfig, erro
 	if goos == "darwin" {
 		home, _ := os.UserHomeDir()
 		fc.DenyPrefixes = []string{filepath.Join(home, ".env")}
-		agent := cfg.ProfileName
-		if agent == "" {
-			agent = cfg.Project.Runtime
-		}
+		agent := cfg.LoginStoreRuntime()
 		if agent != "claude-code" {
 			fc.DenyPrefixes = append(fc.DenyPrefixes, filepath.Join(home, ".claude"))
 		}
@@ -91,7 +88,11 @@ func ProcessEffectiveConfig(cfg *config.Config, goos string) (*FenceConfig, erro
 }
 
 func builtinGrantError(grant, deny string) error {
-	return fmt.Errorf("filesystem grant %q overlaps built-in credential deny %q; refusing to start: narrow filesystem.root, allow, or allow_rw", grant, deny)
+	err := fmt.Errorf("filesystem grant %q overlaps built-in credential deny %q; refusing to start: narrow filesystem.root, allow, or allow_rw", grant, deny)
+	if name := filepath.Base(deny); strings.HasPrefix(name, ".claude") || name == ".codex" {
+		return fmt.Errorf("%w; an agent login store is exempt only with --profile <preset> or when wrap runs the agent command directly (claude or codex)", err)
+	}
+	return err
 }
 
 func pathsIntersect(a, b string, fold bool) bool {

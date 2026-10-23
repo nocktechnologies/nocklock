@@ -213,6 +213,9 @@ var configDigestPolicyFields = map[string]string{
 // future config field that does not belong in the digest.
 var configDigestNotSecurityRelevantFields = map[string]struct{}{
 	"Cloud.APIKey": {}, // A credential, never policy data; including it would leak a secret into the audit log.
+	// Its only effect is the login-store exemption, hashed as filesystem deny
+	// rules and signed beside the policy as the record's runtime field.
+	"CommandRuntime": {},
 }
 
 func TestConfigDigestCoversTopLevelConfigFields(t *testing.T) {
@@ -1166,5 +1169,133 @@ func TestConfigDigestIncludesStrictUnixSocketSetting(t *testing.T) {
 	}
 	if bytes.Equal(without, with) {
 		t.Fatal("strict Unix-socket setting did not change the canonical policy")
+	}
+}
+
+// A changed login-store runtime warns once and leaves one signed audit row.
+// Control: rerunning with the same runtime warns and records nothing more.
+func TestConfigDigestRuntimeChangeWarnsOnce(t *testing.T) {
+	defer func(goos string) { loginStoreGOOS = goos }(loginStoreGOOS)
+	loginStoreGOOS = "darwin"
+	project, configPath := writeProjectConfig(t, `db = "events.db"`)
+	dbPath := resolvedAuditDB(t, project)
+	logger, err := logging.NewLogger(dbPath, project)
+	if err != nil {
+		t.Fatalf("NewLogger: %v", err)
+	}
+	defer logger.Close()
+	cfg, err := config.Load(configPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	warnings := make([]string, 3)
+	for i, runtime := range []string{"", "codex", "codex"} {
+		cfg.Project.Runtime, cfg.CommandRuntime = runtime, runtime
+		var warning strings.Builder
+		if err := recordConfigDigest(logger, cfg, configPath, dbPath, "run", "proxy", &warning); err != nil {
+			t.Fatalf("record run %d: %v", i, err)
+		}
+		warnings[i] = warning.String()
+	}
+	const want = "login-store runtime changed since the previous wrap (none -> codex)"
+	if strings.Contains(warnings[0], "login-store") || !strings.Contains(warnings[1], want) || strings.Contains(warnings[2], "login-store") {
+		t.Fatalf("runtime warning must fire on the change only: %q", warnings)
+	}
+
+	eventType := logging.EventRuntimeChanged
+	events, err := logger.Query(logging.QueryOptions{EventType: &eventType, ByID: true, Limit: 10})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(events) != 1 || events[0].Detail != want {
+		t.Fatalf("want one %s row %q, got %+v", eventType, want, events)
+	}
+	records := digestRecords(t, dbPath, project)
+	if len(records) != 3 || records[1].Runtime == nil || *records[1].Runtime != "codex" {
+		t.Fatalf("digest rows must record the login-store runtime: %+v", records)
+	}
+}
+
+// Only macOS has a login-store exemption, so other platforms record no runtime
+// and a changed runtime warns and logs nothing there.
+func TestConfigDigestRuntimeIgnoredOffMacOS(t *testing.T) {
+	defer func(goos string) { loginStoreGOOS = goos }(loginStoreGOOS)
+	loginStoreGOOS = "linux"
+	project, configPath := writeProjectConfig(t, `db = "events.db"`)
+	dbPath := resolvedAuditDB(t, project)
+	logger, err := logging.NewLogger(dbPath, project)
+	if err != nil {
+		t.Fatalf("NewLogger: %v", err)
+	}
+	defer logger.Close()
+	cfg, err := config.Load(configPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	for i, runtime := range []string{"codex", ""} {
+		cfg.Project.Runtime = "codex"
+		cfg.CommandRuntime = runtime
+		var warning strings.Builder
+		if err := recordConfigDigest(logger, cfg, configPath, dbPath, "run", "proxy", &warning); err != nil {
+			t.Fatalf("record run %d: %v", i, err)
+		}
+		if strings.Contains(warning.String(), "login-store") {
+			t.Fatalf("run %d warned off macOS: %q", i, warning.String())
+		}
+	}
+	eventType := logging.EventRuntimeChanged
+	events, err := logger.Query(logging.QueryOptions{EventType: &eventType, ByID: true, Limit: 10})
+	if err != nil {
+		t.Fatal(err)
+	}
+	records := digestRecords(t, dbPath, project)
+	if len(events) != 0 || len(records) != 2 || records[0].Runtime != nil || records[1].Runtime != nil {
+		t.Fatalf("off macOS: want no runtime rows or fields, got events %+v records %+v", events, records)
+	}
+}
+
+// A runtime is compared only when both rows carry one, so a chain that moves
+// between platforms neither panics nor logs a change. Run 2 (off macOS, nil
+// runtime) follows a recorded runtime; run 3 (macOS, a different runtime)
+// follows the nil one. Control: the digest rows still record each runtime.
+func TestConfigDigestRuntimeSkippedWhenEitherSideNil(t *testing.T) {
+	defer func(goos string) { loginStoreGOOS = goos }(loginStoreGOOS)
+	project, configPath := writeProjectConfig(t, `db = "events.db"`)
+	dbPath := resolvedAuditDB(t, project)
+	logger, err := logging.NewLogger(dbPath, project)
+	if err != nil {
+		t.Fatalf("NewLogger: %v", err)
+	}
+	defer logger.Close()
+	cfg, err := config.Load(configPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	runs := []struct{ goos, runtime string }{{"darwin", "codex"}, {"linux", ""}, {"darwin", ""}}
+	for i, run := range runs {
+		loginStoreGOOS = run.goos
+		cfg.Project.Runtime, cfg.CommandRuntime = run.runtime, run.runtime
+		var warning strings.Builder
+		if err := recordConfigDigest(logger, cfg, configPath, dbPath, "run", "proxy", &warning); err != nil {
+			t.Fatalf("record run %d: %v", i, err)
+		}
+		if strings.Contains(warning.String(), "login-store") {
+			t.Fatalf("run %d warned with a nil runtime on one side: %q", i, warning.String())
+		}
+	}
+	eventType := logging.EventRuntimeChanged
+	events, err := logger.Query(logging.QueryOptions{EventType: &eventType, ByID: true, Limit: 10})
+	if err != nil {
+		t.Fatal(err)
+	}
+	records := digestRecords(t, dbPath, project)
+	if len(events) != 0 || len(records) != 3 ||
+		records[0].Runtime == nil || *records[0].Runtime != "codex" ||
+		records[1].Runtime != nil ||
+		records[2].Runtime == nil || *records[2].Runtime != "" {
+		t.Fatalf("want no %s rows and runtimes [codex nil \"\"], got events %+v records %+v", eventType, events, records)
 	}
 }

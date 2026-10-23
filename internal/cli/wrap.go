@@ -59,6 +59,13 @@ var wrapCmd = &cobra.Command{
 			cmd.SilenceUsage = true
 			return err
 		}
+		if len(args) > 0 {
+			cfg.CommandRuntime = config.RuntimeForCommand(args[0])
+		} else {
+			// A dry run without a command launches nothing; like doctor, it
+			// judges wrap -- <the agent project.runtime names>.
+			cfg.CommandRuntime = cfg.Project.Runtime
+		}
 		if err := validateWrapRuntimeConfig(cfg); err != nil {
 			cmd.SilenceUsage = true
 			return fmt.Errorf("invalid config at %s: %w", configPath, err)
@@ -1495,7 +1502,7 @@ const claudeHintStrippedFormat = "NockLock: %s is set but the secret fence strip
 // the config fix; otherwise it says to run claude setup-token. It never includes
 // a value. It returns "" otherwise. The hint is advisory; wrap still launches.
 func claudeKeychainHint(goos string, args, parentEnv, childEnv []string) string {
-	if goos != "darwin" || len(args) == 0 || filepath.Base(args[0]) != "claude" {
+	if goos != "darwin" || len(args) == 0 || config.RuntimeForCommand(args[0]) != "claude-code" {
 		return ""
 	}
 	if claudeAuthEnvName(childEnv) != "" {

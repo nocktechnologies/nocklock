@@ -43,6 +43,9 @@ const (
 	EventSessionClose         EventType = "session_close"
 	EventConfigLoaded         EventType = "config_loaded"
 	EventConfigDigest         EventType = "config.digest"
+	// EventRuntimeChanged records that the login-store runtime differs from the
+	// previous wrap of the same project.
+	EventRuntimeChanged EventType = "config.runtime_changed"
 )
 
 // formatTimestampForChain formats a time.Time as UTC RFC3339 with exactly 9 fractional second digits and trailing Z.

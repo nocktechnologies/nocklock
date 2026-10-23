@@ -6,6 +6,8 @@ No internal host names, personal names or absolute home paths: `scripts/check-pu
 
 ## What changed
 
+- 2026-10-23: on macOS the agent login-store exemption comes from `--profile`, or from `project.runtime` only when the wrapped command's basename is that agent (`config.RuntimeForCommand`); a wrapper launch (`npx`, `env`, a renamed binary) keeps every store denied and needs `--profile`. `doctor` and a command-less `wrap --dry-run` judge `wrap -- <project.runtime agent>`. macOS `config.digest` rows carry the exempt runtime outside the hashed policy, and a change writes a signed `config.runtime_changed` row; `verify` does not yet summarize those rows.
+
 - 2026-10-22: doctor checks dotenv files only at the project root and one directory level below, skipping dependency/build directories. Incomplete inspection is informational; actual matches retain PARTIAL. The CI credential proof now cleans its isolated process session on every exit path, with mocked lifecycle regression tests that do not execute enforcement locally.
 
 - 2026-10-22: mandatory credential denies now share one policy resolver across Linux and macOS; broad grants refuse. macOS home filename prefixes protect agent and dotenv stores, and presets persist their own login exception. Doctor inspects project dotenv metadata without adding denies. CI-only fake-home canaries and policy-removal mutations cover both backends; pre-made project hardlinks remain a documented limitation.
@@ -20,6 +22,8 @@ No internal host names, personal names or absolute home paths: `scripts/check-pu
 - 2026-10-19: `.github/workflows/landlock-abi9-receipt.yml` runs `bench/redteam/kernel_cases.py --require-abi 9` in a throwaway Ubuntu 26.10 KVM guest (kernel 7.3) on a GitHub-hosted runner and signs the receipt (ROADMAP bar 1: receipt produced in CI, not yet released). Landlock ABI 9 first shipped in Linux 7.1 (7.0 reports 8), so the hosted runner kernel cannot prove it itself. `packaging/linux/sign-manifest.sh` is now shared with the candidate workflow. The guest image is pinned by URL and digest; when Ubuntu prunes that release directory, bump both together.
 
 ## What bit us
+
+- 2026-10-23: the macOS credential proof (`scripts/test-credential-denies.py`) still set only `project.runtime` and wrapped `/bin/sh`, so it failed once that key stopped unlocking a login store. It now wraps with `--profile <agent>` for the own-store read and asserts `project.runtime` alone keeps the store denied.
 
 - 2026-10-22: mandatory credential denies make a fake home beneath /tmp incompatible with the default /tmp allow, and root=/ is now refused even in network-only fixtures. CLI fixtures keep fake homes beside the package and network proofs grant their temporary project plus runtime paths.
 

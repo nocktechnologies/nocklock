@@ -10,6 +10,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -299,7 +300,7 @@ func TestWrapMacOSBuiltinDenyRefusalIsRecorded(t *testing.T) {
 			project := t.TempDir()
 			policy := tc.setup(t)
 			marker := filepath.Join(project, "child-ran")
-			err := runDarwinWrap(t, project, policy, "/usr/bin/touch", marker)
+			err := runDarwinWrap(t, project, policy, nil, "/usr/bin/touch", marker)
 			if err == nil {
 				t.Fatal("wrap started the child despite a built-in deny refusal")
 			}
@@ -337,7 +338,7 @@ func TestWrapMacOSDegradedRootSkipsBuiltinDenyResolution(t *testing.T) {
 		t.Fatalf("test policy did not disable the filesystem and syscall fences:\n%s", policy)
 	}
 	marker := filepath.Join(project, "child-ran")
-	if err := runDarwinWrap(t, project, policy, "/usr/bin/touch", marker); err != nil {
+	if err := runDarwinWrap(t, project, policy, nil, "/usr/bin/touch", marker); err != nil {
 		t.Fatalf("degraded wrap with no HOME should launch the child: %v", err)
 	}
 	if _, err := os.Stat(marker); err != nil {
@@ -590,14 +591,16 @@ func macOSSyscallHardeningEvents(t *testing.T, project string) int {
 	return n
 }
 
-func runDarwinWrap(t *testing.T, project, toml string, args ...string) error {
+// runDarwinWrap writes toml as the project config and runs wrap with the
+// given NockLock flags (before "--") and child command args.
+func runDarwinWrap(t *testing.T, project, toml string, flags []string, args ...string) error {
 	t.Helper()
 	writeTestConfig(t, project, toml)
 	withWorkingDir(t, project)
 	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
 	cmd := &cobra.Command{}
 	cmd.SetContext(context.Background())
-	return wrapCmd.RunE(cmd, append([]string{"--"}, args...))
+	return wrapCmd.RunE(cmd, slices.Concat(flags, []string{"--"}, args))
 }
 
 // TestWrapMacOSSyscallEnforcementMatchesDoctor pins wrap's macOS syscall
@@ -610,7 +613,7 @@ func TestWrapMacOSSyscallEnforcementMatchesDoctor(t *testing.T) {
 
 	t.Run("default config applies hardened rules", func(t *testing.T) {
 		project := t.TempDir()
-		if err := runDarwinWrap(t, project, doctorTestTOML(true), "/usr/bin/true"); err != nil {
+		if err := runDarwinWrap(t, project, doctorTestTOML(true), nil, "/usr/bin/true"); err != nil {
 			t.Fatalf("default config must wrap under hardened SBPL: %v", err)
 		}
 		if n := macOSSyscallHardeningEvents(t, project); n != 1 {
@@ -620,7 +623,7 @@ func TestWrapMacOSSyscallEnforcementMatchesDoctor(t *testing.T) {
 	t.Run("required without filesystem.root refuses", func(t *testing.T) {
 		project := t.TempDir()
 		toml := strings.Replace(dryRunTestTOML(), "allow_all = false", "allow_all = true", 1)
-		err := runDarwinWrap(t, project, toml, "/usr/bin/true")
+		err := runDarwinWrap(t, project, toml, nil, "/usr/bin/true")
 		if err == nil || !strings.Contains(err.Error(), "syscall fence cannot be enforced (fail-closed)") {
 			t.Fatalf("wrap err = %v, want the syscall fail-closed refusal", err)
 		}
@@ -631,7 +634,7 @@ func TestWrapMacOSSyscallEnforcementMatchesDoctor(t *testing.T) {
 		if !strings.Contains(toml, "\nenforcement = \"off\"") {
 			t.Fatal("test premise: [syscall] enforcement was not switched off")
 		}
-		if err := runDarwinWrap(t, project, toml, "/usr/bin/true"); err != nil {
+		if err := runDarwinWrap(t, project, toml, nil, "/usr/bin/true"); err != nil {
 			t.Fatalf("syscall off must wrap: %v", err)
 		}
 		if n := macOSSyscallHardeningEvents(t, project); n != 0 {
@@ -643,6 +646,8 @@ func TestWrapMacOSSyscallEnforcementMatchesDoctor(t *testing.T) {
 // TestWrapMacOSClaudeCodePresetRunsUnderHardenedRules proves the hardened SBPL
 // rules that "required" now applies do not break ordinary tools under the
 // claude-code preset: shell, /dev/null and pty-style writes, directory reads.
+// The child is /bin/sh, not claude, so the preset's login-store grant needs
+// --profile claude-code; project.runtime alone is refused for this command.
 func TestWrapMacOSClaudeCodePresetRunsUnderHardenedRules(t *testing.T) {
 	requireSandboxExecForWrap(t)
 	body, err := config.ProfileTOML("claude-code")
@@ -650,7 +655,7 @@ func TestWrapMacOSClaudeCodePresetRunsUnderHardenedRules(t *testing.T) {
 		t.Fatalf("claude-code preset: %v", err)
 	}
 	project := t.TempDir()
-	err = runDarwinWrap(t, project, body,
+	err = runDarwinWrap(t, project, body, []string{"--profile", "claude-code"},
 		"/bin/sh", "-c", `echo ok >/dev/null && /bin/ls /usr/bin >/dev/null && /usr/bin/true`)
 	if err != nil {
 		t.Fatalf("claude-code preset must run ordinary tools under hardened SBPL: %v", err)

@@ -214,12 +214,20 @@ def main():
             assert control.returncode == 0 and CANARY in control.stdout, (rel, "opt-in control", control.stderr)
         if system == "Darwin":
             for agent, own, other in (("claude-code", ".claude/canary", ".codex/canary"), ("codex", ".codex/canary", ".claude/canary")):
+                # --profile exempts its own store; project.runtime does only
+                # when the wrapped command is that agent, and /bin/sh is not.
+                configure()
+                profiled = [str(binary), "wrap", "--profile", agent, "--"]
+                permitted = run(profiled + read_command(home / own), project, env)
+                denied = run(profiled + read_command(home / other), project, env)
+                assert permitted.returncode == 0 and CANARY in permitted.stdout, (agent, "own login", permitted.returncode, permitted.stdout, permitted.stderr)
+                assert denied.returncode == 73 and "READ_ATTEMPT" in denied.stdout and CANARY not in denied.stdout, (agent, "foreign login", denied.returncode, denied.stdout, denied.stderr)
+                # project.runtime is writable by the fenced child, so alone it
+                # must not unlock the store.
                 configure(runtime=agent)
-                permitted = run([str(binary), "wrap", "--"] + read_command(home / own), project, env)
-                denied = run([str(binary), "wrap", "--"] + read_command(home / other), project, env)
-                assert permitted.returncode == 0 and CANARY in permitted.stdout, (agent, "own login", permitted.stderr)
-                assert denied.returncode == 73 and CANARY not in denied.stdout, (agent, "foreign login", denied.stderr)
-            print("PASS runtime presets permit only their own agent login store", flush=True)
+                unbound = run([str(binary), "wrap", "--"] + read_command(home / own), project, env)
+                assert unbound.returncode == 73 and "READ_ATTEMPT" in unbound.stdout and CANARY not in unbound.stdout, (agent, "project.runtime alone exempted own login", unbound.returncode, unbound.stdout, unbound.stderr)
+            print("PASS --profile presets permit only their own agent login store; project.runtime alone permits none", flush=True)
 
 
 if __name__ == "__main__":

@@ -24,11 +24,16 @@ import (
 // deliberately excludes cloud.api_key: a policy audit record must not copy a
 // credential into the event database.
 type configDigestRecord struct {
-	Digest         string          `json:"digest"`
-	ConfigPath     string          `json:"config_path"`
-	PreviousDigest string          `json:"previous_digest,omitempty"`
-	ConfigMTime    string          `json:"config_mtime,omitempty"`
-	Policy         json.RawMessage `json:"policy"`
+	Digest         string `json:"digest"`
+	ConfigPath     string `json:"config_path"`
+	PreviousDigest string `json:"previous_digest,omitempty"`
+	ConfigMTime    string `json:"config_mtime,omitempty"`
+	// Runtime records which agent's login store was exempt
+	// (config.LoginStoreRuntime), on macOS only. The resolved deny rules that
+	// follow from it are in the hashed Policy, so the digest changes when the
+	// exemption changes. Other platforms and older rows leave it nil.
+	Runtime *string         `json:"runtime,omitempty"`
+	Policy  json.RawMessage `json:"policy"`
 }
 
 // recordConfigDigest appends the current effective policy to the audit chain
@@ -84,7 +89,31 @@ func recordConfigDigest(logger *logging.Logger, cfg *config.Config, configPath, 
 		fmt.Fprintf(stderr, "NockLock: warning: effective config changed since the previous wrap (digest %s -> %s; fields: %s; config mtime: %s)\n",
 			previous.Digest, record.Digest, strings.Join(fields, ", "), mtime)
 	}
+	if previous != nil && previous.Runtime != nil && record.Runtime != nil && *previous.Runtime != *record.Runtime {
+		change := fmt.Sprintf("login-store runtime changed since the previous wrap (%s -> %s)", runtimeLabel(*previous.Runtime), runtimeLabel(*record.Runtime))
+		fmt.Fprintf(stderr, "NockLock: warning: %s\n", change)
+		if err := logger.Log(logging.Event{
+			Timestamp: time.Now(),
+			EventType: logging.EventRuntimeChanged,
+			Category:  "config",
+			Detail:    change,
+			SessionID: sessionID,
+		}); err != nil {
+			return fmt.Errorf("append %s audit row: %w", logging.EventRuntimeChanged, err)
+		}
+	}
 	return nil
+}
+
+// loginStoreGOOS is the platform whose built-in denies carry a login-store
+// exemption; only there is the runtime recorded. Tests override it.
+var loginStoreGOOS = runtime.GOOS
+
+func runtimeLabel(name string) string {
+	if name == "" {
+		return "none"
+	}
+	return name
 }
 
 func newConfigDigestRecord(cfg *config.Config, configPath, dbPath, networkFenceMode string) (configDigestRecord, error) {
@@ -104,6 +133,10 @@ func newConfigDigestRecord(cfg *config.Config, configPath, dbPath, networkFenceM
 		Digest:     hex.EncodeToString(sum[:]),
 		ConfigPath: path,
 		Policy:     policy,
+	}
+	if loginStoreGOOS == "darwin" {
+		loginStore := cfg.LoginStoreRuntime()
+		record.Runtime = &loginStore
 	}
 	if info, err := os.Stat(configPath); err == nil {
 		record.ConfigMTime = info.ModTime().UTC().Format(time.RFC3339Nano)

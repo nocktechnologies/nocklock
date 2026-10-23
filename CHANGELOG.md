@@ -4,6 +4,10 @@ All notable changes to NockLock will be documented in this file.
 
 ## [Unreleased]
 
+### Security
+
+- macOS: `project.runtime` alone no longer exempts an agent login store from the built-in `.claude*` and `.codex` denies. The project config is writable by the fenced child, so the exemption now comes from `--profile`, or from `project.runtime` only when the wrapped command runs that agent (`claude` for `claude-code`, `codex` for `codex`). Any other command keeps every agent login store denied, and a config that grants the store then refuses to start. This corrects the v0.14.0 note that the runtime is recorded in the signed config digest: the declared `project.runtime` and the resolved deny rules are in the hashed policy, so the digest changes when the exempt agent changes (for example `wrap -- claude` then `wrap -- make`), and the `runtime` field of each signed `config.digest` row names the agent. When it differs from the previous wrap of the same project, `wrap` prints a warning and writes a signed `config.runtime_changed` row. Other platforms have no login-store exemption and record no runtime. `doctor` and `wrap --dry-run` without a command have no wrapped command and judge the run `wrap -- <agent>` for the agent `project.runtime` names. A refused login-store grant now names `--profile` and the agent command as the fix, for example when a wrapper such as `npx` launches the agent.
+
 ## [0.14.0] - 2026-10-23
 
 v0.14.0 makes the credential-file denies mandatory on Linux and macOS (#269). A config can add paths to the deny list but can no longer remove the built-in ones, and a config that grants one of the protected folders now refuses to start. Read the upgrade note under Breaking before you upgrade.
