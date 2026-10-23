@@ -55,8 +55,7 @@ func (s *scanner) inspectDotEnv(data []byte, path string) {
 			continue
 		}
 		name, value, ok := strings.Cut(line, "=")
-		value = dotEnvValue(value)
-		if ok && dotEnvSecretName.MatchString(strings.TrimSpace(name)) && value != "" {
+		if ok && dotEnvSecretName.MatchString(strings.TrimSpace(name)) && dotEnvValue(value) != "" {
 			s.report.Findings = append(s.report.Findings, Finding{"dotenv-secret-assignment", "file", scanLocation(path), i + 1})
 		}
 	}
@@ -67,12 +66,12 @@ func (s *scanner) inspectDotEnv(data []byte, path string) {
 // parsed for references by dotEnvLiteral, and an unquoted value ends at an
 // inline comment: whitespace then #.
 func dotEnvValue(raw string) string {
-	value := strings.TrimSpace(raw)
-	if value != "" && (value[0] == '\'' || value[0] == '"') {
-		body, _, _ := strings.Cut(value[1:], value[:1])
-		if value[0] == '\'' {
-			return body
-		}
+	switch value := strings.TrimSpace(raw); {
+	case strings.HasPrefix(value, "'"):
+		body, _, _ := strings.Cut(value[1:], "'")
+		return body
+	case strings.HasPrefix(value, `"`):
+		body, _, _ := strings.Cut(value[1:], `"`)
 		return dotEnvLiteral(body)
 	}
 	for i := 1; i < len(raw); i++ {
