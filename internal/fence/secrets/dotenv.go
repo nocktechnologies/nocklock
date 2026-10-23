@@ -55,10 +55,65 @@ func (s *scanner) inspectDotEnv(data []byte, path string) {
 			continue
 		}
 		name, value, ok := strings.Cut(line, "=")
-		value = strings.Trim(strings.TrimSpace(value), "\"'")
-		// Empty and environment-substituted values do not themselves expose a key.
-		if ok && dotEnvSecretName.MatchString(strings.TrimSpace(name)) && value != "" && !strings.HasPrefix(value, "$") {
+		value = dotEnvLiteral(strings.TrimSpace(value))
+		if ok && dotEnvSecretName.MatchString(strings.TrimSpace(name)) && value != "" {
 			s.report.Findings = append(s.report.Findings, Finding{"dotenv-secret-assignment", "file", scanLocation(path), i + 1})
 		}
 	}
+}
+
+// dotEnvLiteral returns literal text written in the value itself: text outside
+// any reference, or the inline default of a ${NAME:-default}, ${NAME:=default}
+// or ${NAME:+alternate} reference (colon optional, nesting allowed). It returns
+// "" for pure substitutions such as $A, ${A}${B} or ${A:-$B}${C}, and for an
+// unbalanced reference. Each ${...} is matched by brace depth in one pass, so
+// back-to-back references stay separate and deep nesting stays linear.
+func dotEnvLiteral(value string) string {
+	value = strings.Trim(value, "\"'")
+	isName := func(c byte) bool {
+		return c == '_' || (c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z') || (c >= '0' && c <= '9')
+	}
+	literal := ""
+	// One entry per open ${: true when its body is a literal default or
+	// alternate in a literal context, false for a plain name or another
+	// operator's argument such as a ${NAME?message}.
+	var open []bool
+	for i := 0; i < len(value); {
+		switch {
+		case value[i] == '}' && len(open) > 0:
+			open = open[:len(open)-1]
+			i++
+		case strings.HasPrefix(value[i:], "${"):
+			j := i + 2
+			for j < len(value) && isName(value[j]) {
+				j++
+			}
+			named := j > i+2
+			if named && j < len(value) && value[j] == ':' {
+				j++
+			}
+			defaulted := named && j < len(value) && strings.IndexByte("-=+", value[j]) >= 0
+			if defaulted {
+				j++
+			}
+			open = append(open, defaulted && (len(open) == 0 || open[len(open)-1]))
+			i = j
+		case value[i] == '$' && i+1 < len(value) && isName(value[i+1]):
+			for i++; i < len(value) && isName(value[i]); i++ {
+			}
+		default:
+			if literal == "" && (len(open) == 0 || open[len(open)-1]) {
+				end := strings.IndexAny(value[i:], "${}")
+				if end < 0 {
+					end = len(value) - i
+				}
+				literal = value[i : i+end]
+			}
+			i++
+		}
+	}
+	if len(open) > 0 {
+		return ""
+	}
+	return literal
 }

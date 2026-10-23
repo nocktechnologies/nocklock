@@ -8,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"runtime"
 	"slices"
 	"strings"
 	"sync"
@@ -314,6 +315,50 @@ func TestConfigDigestResolvesFilesystemPolicyPaths(t *testing.T) {
 	}
 	if got, want := policy.Filesystem.AllowRW, []string{filepath.Join(wantRoot, "scratch")}; len(got) != 1 || got[0] != want[0] {
 		t.Fatalf("canonical filesystem allow_rw = %q, want %q", got, want)
+	}
+}
+
+func TestConfigDigestIgnoresNewPrefixMatchingHomeEntries(t *testing.T) {
+	if runtime.GOOS != "darwin" {
+		t.Skip("home prefix aliases are expanded only on macOS")
+	}
+	base := t.TempDir()
+	home, project := filepath.Join(base, "home"), filepath.Join(base, "project")
+	for _, dir := range []string{home, project} {
+		if err := os.Mkdir(dir, 0o700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	t.Setenv("HOME", home)
+	cfg := config.DefaultConfig()
+	cfg.Filesystem.Root, cfg.Filesystem.Allow = project, nil
+	configPath, dbPath := filepath.Join(project, config.Dir, config.File), filepath.Join(project, "events.db")
+	before, err := newConfigDigestRecord(&cfg, configPath, dbPath, "proxy")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !jsonPathPresent(before.Policy, "filesystem.deny_prefixes") {
+		t.Fatalf("policy omitted the prefix rules: %s", before.Policy)
+	}
+	for _, name := range []string{".env.production", ".claude-backup"} {
+		if err := os.WriteFile(filepath.Join(home, name), []byte("fake-canary"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	after, err := newConfigDigestRecord(&cfg, configPath, dbPath, "proxy")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if after.Digest != before.Digest {
+		t.Fatalf("new prefix-matching home entry changed the digest:\n%s\n%s", before.Policy, after.Policy)
+	}
+	cfg.Filesystem.Deny = []string{filepath.Join(base, "user-private")}
+	denied, err := newConfigDigestRecord(&cfg, configPath, dbPath, "proxy")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if denied.Digest == after.Digest {
+		t.Fatal("a user deny change did not change the digest")
 	}
 }
 

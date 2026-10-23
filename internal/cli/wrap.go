@@ -162,6 +162,15 @@ var wrapCmd = &cobra.Command{
 			return refusal
 		}
 		if wrapFlags.DryRun {
+			// A dry run opens no event log, so report the built-in deny
+			// refusal that a real macOS run records as REFUSED-TO-START.
+			// validateWrapRuntimeConfig already resolved it on Linux.
+			if runtime.GOOS == "darwin" && effectiveCfg.Filesystem.Root != "" {
+				if _, err := fsfence.ProcessEffectiveConfig(&effectiveCfg, runtime.GOOS); err != nil {
+					cmd.SilenceUsage = true
+					return fmt.Errorf("invalid config at %s: invalid filesystem fence config: %w", configPath, err)
+				}
+			}
 			fmt.Fprintln(os.Stdout, effectiveCfg.EffectivePolicy())
 			if useNetns {
 				fmt.Fprintln(os.Stderr, "NockLock: --net-fence=netns selected — kernel tproxy enforcement uses network.allow for HTTP(S)+DNS; all other egress remains default-drop and passwordless sudo is required at run time")
@@ -203,6 +212,34 @@ var wrapCmd = &cobra.Command{
 		// so this push is the final flush and never races a checkpoint upload.
 		var checkpoints *anchorCheckpointer
 		defer func() { finishAnchorSessionWithCheckpoints(os.Stderr, logger, dbPath, checkpoints) }()
+
+		// macOS filesystem-fence state is an enforcement prerequisite, unlike
+		// ordinary best-effort access telemetry: the child must not run unless
+		// ENGAGED or the explicit filesystem.root = "" DEGRADED state is durably recorded.
+		recordMacOSFilesystemFenceState := func(state, detail string, blocked bool) error {
+			return logger.Log(logging.Event{
+				Timestamp: time.Now(),
+				EventType: logging.EventFilesystemFenceState,
+				Category:  "filesystem",
+				Detail:    "macOS filesystem-fence " + state + ": " + detail,
+				Blocked:   blocked,
+				SessionID: sessionID,
+			})
+		}
+
+		// The digest below resolves the built-in credential denies, so a macOS
+		// refusal of them (an overlapping grant, no resolvable HOME) is
+		// recorded here first. Like the digest, skip it for filesystem.root = "",
+		// which resolves no built-in denies and records DEGRADED later.
+		if runtime.GOOS == "darwin" && effectiveCfg.Filesystem.Root != "" {
+			if _, err := fsfence.ProcessEffectiveConfig(&effectiveCfg, runtime.GOOS); err != nil {
+				cmd.SilenceUsage = true
+				if logErr := recordMacOSFilesystemFenceState("REFUSED-TO-START", "invalid filesystem configuration: "+err.Error(), true); logErr != nil {
+					return fmt.Errorf("cannot record macOS filesystem fence refusal; refusing to start: %w", logErr)
+				}
+				return fmt.Errorf("invalid config at %s: invalid filesystem fence config: %w", configPath, err)
+			}
+		}
 
 		// Record the resolved policy before any child setup or launch. The config
 		// file lives inside the project root by default, so the fenced child can
@@ -336,20 +373,6 @@ var wrapCmd = &cobra.Command{
 				fmt.Fprintf(cmd.ErrOrStderr(), "NockLock: warning: failed to write signed session close for run %s (%d rows covered): %v — the run will read unclosed\n", sessionID, covered, err)
 			}
 		}()
-		// macOS filesystem-fence state is an enforcement prerequisite, unlike
-		// ordinary best-effort access telemetry: the child must not run unless
-		// ENGAGED or the explicit filesystem.root = "" DEGRADED state is durably recorded.
-		recordMacOSFilesystemFenceState := func(state, detail string, blocked bool) error {
-			return logger.Log(logging.Event{
-				Timestamp: time.Now(),
-				EventType: logging.EventFilesystemFenceState,
-				Category:  "filesystem",
-				Detail:    "macOS filesystem-fence " + state + ": " + detail,
-				Blocked:   blocked,
-				SessionID: sessionID,
-			})
-		}
-
 		// Log config loaded with project name.
 		logEvent(logging.EventConfigLoaded, "session", cfg.Project.Name, false)
 
@@ -1525,6 +1548,14 @@ func validateWrapRuntimeConfig(cfg *config.Config) error {
 		if !fsfence.IsSupported() {
 			return fmt.Errorf("filesystem fence configured but not supported on %s", runtime.GOOS)
 		}
+		// Only Linux resolves the built-in denies here: on macOS their
+		// refusal must wait for the event logger so it is recorded.
+		if runtime.GOOS != "linux" {
+			if _, err := fsfence.ProcessConfig(cfg.Filesystem); err != nil {
+				return fmt.Errorf("invalid filesystem fence config: %w", err)
+			}
+			return nil
+		}
 		fsCfg, err := fsfence.ProcessEffectiveConfig(cfg, runtime.GOOS)
 		if err != nil {
 			return fmt.Errorf("invalid filesystem fence config: %w", err)
@@ -1533,10 +1564,8 @@ func validateWrapRuntimeConfig(cfg *config.Config) error {
 		// interposer's absolute budget regardless of shim engagement.
 		// The exact check (with the real reserve) runs later in wrap,
 		// after the ABI probe and syscall-fence decision are final.
-		if runtime.GOOS == "linux" {
-			if err := fsfence.CheckInterposerBudget(fsCfg, 0); err != nil {
-				return fmt.Errorf("invalid filesystem fence config: %w", err)
-			}
+		if err := fsfence.CheckInterposerBudget(fsCfg, 0); err != nil {
+			return fmt.Errorf("invalid filesystem fence config: %w", err)
 		}
 	}
 

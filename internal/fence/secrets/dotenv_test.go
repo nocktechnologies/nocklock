@@ -51,6 +51,58 @@ func TestScanDotEnvSafeControlAndSymlink(t *testing.T) {
 	}
 }
 
+func TestScanDotEnvChecksInlineSubstitutionDefaults(t *testing.T) {
+	canary := "fake-canary-default-12345"
+	for body, want := range map[string]int{
+		"TOKEN=${DEV_TOKEN:-" + canary + "}":         1,
+		"PASSWORD=\"${DB_PASSWORD-" + canary + "}\"": 1,
+		"API_KEY=${KEY:=" + canary + "}":             1,
+		"SECRET=${A:-${B:-" + canary + "}}":          1,
+		"TOKEN=${DEV_TOKEN}":                         0,
+		"TOKEN=${DEV_TOKEN:-}":                       0,
+		"TOKEN=${DEV_TOKEN:-$OTHER}":                 0,
+		"TOKEN=$DEV_TOKEN":                           0,
+		"PORT=${PORT:-3000}":                         0,
+		"TOKEN=${DEV_TOKEN:?unset}":                  0,
+		"TOKEN=${:-" + canary + "}":                  0,
+		"TOKEN=${A}${B}":                             0,
+		"TOKEN=${A:-$B}${C}":                         0,
+		"TOKEN=${A:-}${B}":                           0,
+		"TOKEN=${A}${B:-" + canary + "}":             1,
+		"TOKEN=${A?${B:-" + canary + "}}":            0,
+		"TOKEN=${A:-" + canary + "}${B}":             1,
+		"TOKEN=" + canary + "${A}":                   1,
+		"TOKEN=${A}" + canary:                        1,
+		"TOKEN=${A:-" + canary:                       0,
+	} {
+		t.Run(body, func(t *testing.T) {
+			root := t.TempDir()
+			if err := os.WriteFile(filepath.Join(root, ".env"), []byte(body+"\n"), 0600); err != nil {
+				t.Fatal(err)
+			}
+			r := ScanDotEnv(context.Background(), root)
+			if !r.Complete || len(r.Findings) != want {
+				t.Fatalf("findings = %d, want %d: %+v", len(r.Findings), want, r)
+			}
+			out, _ := json.Marshal(r)
+			if strings.Contains(string(out), canary) {
+				t.Fatal("value leaked into report")
+			}
+		})
+	}
+}
+
+func TestScanDotEnvDeeplyNestedDefaultStaysLinear(t *testing.T) {
+	const depth = 200000
+	value := strings.Repeat("${A:-", depth) + "fake-nested-canary" + strings.Repeat("}", depth)
+	if got := dotEnvLiteral(value); got != "fake-nested-canary" {
+		t.Fatalf("nested default = %q", got)
+	}
+	if got := dotEnvLiteral(strings.Repeat("${A:-", depth) + strings.Repeat("}", depth)); got != "" {
+		t.Fatalf("empty nested default = %q", got)
+	}
+}
+
 func TestScanDotEnvShallowScopeExcludesDependencyAndBuildDirectories(t *testing.T) {
 	root := t.TempDir()
 	for _, path := range []string{

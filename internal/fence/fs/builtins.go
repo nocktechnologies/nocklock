@@ -22,6 +22,8 @@ func ProcessEffectiveConfig(cfg *config.Config, goos string) (*FenceConfig, erro
 	if len(builtins) == 0 {
 		return nil, fmt.Errorf("cannot resolve built-in credential denies: set HOME to a usable directory")
 	}
+	// aliases are existing home entries matched by a prefix rule; see PrefixAliasPaths.
+	var aliases []string
 	if goos == "darwin" {
 		home, _ := os.UserHomeDir()
 		fc.DenyPrefixes = []string{filepath.Join(home, ".env")}
@@ -44,7 +46,7 @@ func ProcessEffectiveConfig(cfg *config.Config, goos string) (*FenceConfig, erro
 		for _, entry := range entries {
 			for _, prefix := range fc.DenyPrefixes {
 				if strings.HasPrefix(strings.ToLower(entry.Name()), strings.ToLower(filepath.Base(prefix))) {
-					builtins = append(builtins, filepath.Join(home, entry.Name()))
+					aliases = append(aliases, filepath.Join(home, entry.Name()))
 				}
 			}
 		}
@@ -60,7 +62,7 @@ func ProcessEffectiveConfig(cfg *config.Config, goos string) (*FenceConfig, erro
 	}
 	grants := append([]string{fc.Root}, fc.AllowPaths...)
 	grants = append(grants, fc.AllowRWPaths...)
-	for _, builtin := range builtins {
+	for i, builtin := range append(builtins, aliases...) {
 		denied, err := resolvePath(builtin)
 		if err != nil {
 			return nil, fmt.Errorf("cannot resolve built-in credential deny: %w", err)
@@ -72,6 +74,9 @@ func ProcessEffectiveConfig(cfg *config.Config, goos string) (*FenceConfig, erro
 		}
 		if !slices.Contains(fc.DenyPaths, denied) {
 			fc.DenyPaths = append(fc.DenyPaths, denied)
+			if i >= len(builtins) {
+				fc.PrefixAliasPaths = append(fc.PrefixAliasPaths, denied)
+			}
 		}
 	}
 	for _, prefix := range fc.DenyPrefixes {

@@ -43,11 +43,16 @@ def cleanup_session(process):
     errors = []
     groups = set()
     try:
-        # The known launcher group must stop even if process enumeration fails.
+        # An unreaped launcher group must stop even if process enumeration fails.
+        # A reaped launcher's pid can be reused, so it is never signalled; after
+        # the reap only the session scan below can reach survivors, and if it
+        # fails they are reported, not signalled.
         # Do not use Popen's context manager: its unbounded wait can hang cleanup.
         try:
-            os.killpg(process.pid, signal.SIGKILL)
+            if process.returncode is None:
+                os.killpg(process.pid, signal.SIGKILL)
         except ProcessLookupError:
+            # The launcher group already exited; nothing is left to stop.
             pass
         except OSError as error:
             errors.append(error)
@@ -61,15 +66,22 @@ def cleanup_session(process):
                     if os.getsid(pid) == process.pid:
                         groups.add(pgid)
                 except OSError:
+                    # The process exited or cannot be inspected; skip it.
                     pass
         except (OSError, subprocess.SubprocessError, ValueError) as error:
-            errors.append(error)
+            # Without the scan no survivor is verified, so nothing more is
+            # signalled; the raised cleanup error is the report.
+            failure = RuntimeError("process enumeration failed; descendants "
+                                   f"of this proof may still be running: {error}")
+            failure.__cause__ = error
+            errors.append(failure)
     finally:
         try:
             for pgid in groups:
                 try:
                     os.killpg(pgid, signal.SIGKILL)
                 except ProcessLookupError:
+                    # The descendant group exited between enumeration and kill.
                     pass
                 except OSError as error:
                     errors.append(error)
