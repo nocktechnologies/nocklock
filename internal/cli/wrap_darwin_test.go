@@ -273,6 +273,88 @@ func TestWrapMacOSFilesystemFenceRefusesBeforeLaunchingChild(t *testing.T) {
 	}
 }
 
+// TestWrapMacOSBuiltinDenyRefusalIsRecorded proves a built-in credential deny
+// refusal (a grant overlapping it, or no resolvable HOME) reaches the event log
+// as exactly one REFUSED-TO-START state, rather than exiting as an unrecorded
+// config error, and that the child never runs.
+func TestWrapMacOSBuiltinDenyRefusalIsRecorded(t *testing.T) {
+	cases := []struct {
+		name  string
+		setup func(t *testing.T) string
+	}{
+		{"overlapping grant", func(t *testing.T) string {
+			home := t.TempDir()
+			t.Setenv("HOME", home)
+			return strings.Replace(config.DefaultTOML(), `"/tmp/",`, `"/tmp/", "`+home+`/",`, 1)
+		}},
+		{"unresolvable HOME", func(t *testing.T) string {
+			t.Setenv("HOME", "")
+			deny := config.DefaultTOML()[strings.Index(config.DefaultTOML(), "deny = ["):]
+			deny = deny[:strings.Index(deny, "]")+1]
+			return strings.Replace(config.DefaultTOML(), deny, "deny = []", 1)
+		}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			project := t.TempDir()
+			policy := tc.setup(t)
+			marker := filepath.Join(project, "child-ran")
+			err := runDarwinWrap(t, project, policy, "/usr/bin/touch", marker)
+			if err == nil {
+				t.Fatal("wrap started the child despite a built-in deny refusal")
+			}
+			if _, statErr := os.Stat(marker); !errors.Is(statErr, os.ErrNotExist) {
+				t.Fatalf("refused wrap ran the child: stat marker = %v", statErr)
+			}
+
+			db, err := sql.Open("sqlite", resolvedAuditDB(t, project))
+			if err != nil {
+				t.Fatalf("open audit log: %v", err)
+			}
+			defer db.Close()
+			states := macOSFilesystemFenceStates(t, db)
+			if len(states) != 1 || !strings.Contains(states[0], "REFUSED-TO-START") {
+				t.Fatalf("expected exactly one refusal state, got %q", states)
+			}
+			var verifyOut strings.Builder
+			if err := runAuditVerify(context.Background(), &verifyOut, "", false); err != nil {
+				t.Fatalf("verify --audit after a recorded refusal: %v\n%s", err, verifyOut.String())
+			}
+		})
+	}
+}
+
+// TestWrapMacOSDegradedRootSkipsBuiltinDenyResolution proves the explicit
+// filesystem.root = "" opt-out resolves no built-in denies, so an unresolvable
+// HOME still records exactly one DEGRADED state and launches the child.
+func TestWrapMacOSDegradedRootSkipsBuiltinDenyResolution(t *testing.T) {
+	project := t.TempDir()
+	t.Setenv("HOME", "")
+	policy := strings.Replace(doctorTestTOML(true), "[filesystem]\nroot = \".\"", "[filesystem]\nroot = \"\"", 1)
+	// enforcement = "required" refuses without a Seatbelt profile to carry it.
+	policy = strings.Replace(policy, "\nenforcement = \"required\"", "\nenforcement = \"off\"", 1)
+	if !strings.Contains(policy, "[filesystem]\nroot = \"\"") || !strings.Contains(policy, "\nenforcement = \"off\"") {
+		t.Fatalf("test policy did not disable the filesystem and syscall fences:\n%s", policy)
+	}
+	marker := filepath.Join(project, "child-ran")
+	if err := runDarwinWrap(t, project, policy, "/usr/bin/touch", marker); err != nil {
+		t.Fatalf("degraded wrap with no HOME should launch the child: %v", err)
+	}
+	if _, err := os.Stat(marker); err != nil {
+		t.Fatalf("degraded wrap did not run the child: %v", err)
+	}
+
+	db, err := sql.Open("sqlite", resolvedAuditDB(t, project))
+	if err != nil {
+		t.Fatalf("open audit log: %v", err)
+	}
+	defer db.Close()
+	states := macOSFilesystemFenceStates(t, db)
+	if len(states) != 1 || !strings.Contains(states[0], "DEGRADED") {
+		t.Fatalf("expected exactly one DEGRADED state and no refusal, got %q", states)
+	}
+}
+
 func macOSFilesystemFenceStates(t *testing.T, db *sql.DB) []string {
 	t.Helper()
 

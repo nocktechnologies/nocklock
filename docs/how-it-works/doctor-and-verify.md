@@ -9,6 +9,23 @@ Since v0.9.0, `doctor` reports `PARTIAL` (exit 3) for Linux `CONFINED` below Lan
 
 `doctor` also lists deputies: more-privileged helpers the wrapped agent can ask to act for it, such as a reachable `docker.sock`, a writable shell startup file or agent config, or sudo that runs without a password prompt. Each row says whether the fence blocks it. A deputy the fence does not block keeps the verdict at `PARTIAL`; doctor fixes nothing (`internal/cli/doctor_deputies.go`). See [deputies](deputies.md).
 
+`doctor` inspects `.env` and `.env.*` files (case-insensitive names) at
+`filesystem.root` and in its immediate child directories, using the bounded,
+no-symlink secret scanner. It skips `.git`, `node_modules`, `bower_components`,
+`vendor`, `.venv`, `venv`, `build`, `dist`, `target`, `coverage`, `__pycache__`,
+`.cache`, `.next`, `.nuxt`, `.output`, `.yarn`, and `.pnpm-store` directories.
+Deeper files are outside the check's scope. The check retains the scanner's
+entry/content bounds and a two-second deadline.
+
+Secret-shaped assignments or recognized credential formats in that scope
+produce a `project-dotenv` warning and `PARTIAL` (exit 3) when the other boundaries
+are protected. More severe verdicts remain unchanged. An incomplete inspection
+(for example, a symlink, unreadable file, or time/size limit) says `not checked`
+with informational severity and does not lower the verdict. Values are never
+reported, and project files remain readable. `PROTECTED` describes the configured
+fences; it does not claim a full-project secret scan or absence of secrets. This
+shallow heuristic is not a runtime fence.
+
 Limit: `doctor` reports configuration and host capability, not proof that a particular session ran with every fence. Use `verify` for an active self-test and inspect that session's signed fence-state rows for evidence.
 
 ## Repo git config that runs code ("GitSpawn")

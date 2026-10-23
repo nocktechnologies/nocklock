@@ -2,6 +2,16 @@
 
 Citations name source files at `origin/main` 89c02fa (no line numbers, so they do not go stale). Wording of limits follows `README.md` ("Filesystem platform boundary").
 
+Both platforms merge the mandatory credential deny set with user denies through
+`internal/fence/fs/builtins.go`. Grants overlapping a built-in path refuse startup.
+macOS adds home `.env*` and `.claude*` prefix rules and `.codex`, with only the
+selected agent preset exempting its own login store. Project `.env*` files stay
+readable; see the README for the complete path list and preset migration.
+
+Pre-made hard links into an allowed project tree can remain readable, including
+on macOS: Seatbelt path rules do not find every name for an inode. The CI proof
+asserts this limitation instead of claiming hard-link isolation.
+
 ## Linux: Landlock root allowlist
 - `wrap` re-execs the child through the hidden `__landlock-exec` shim (`internal/cli/wrap.go`), which builds a Landlock ruleset (`internal/fence/fs/landlock/landlock_linux.go`) and `execve`s the child in place. Every descendant inherits it.
 - `filesystem.allow` grants read-only, `filesystem.allow_rw` read-write, `filesystem.root` is the working root, `filesystem.deny` lists excluded paths. Missing optional paths grant nothing and do not block a wrap. Defaults: `README.md` "Configuration".
@@ -22,7 +32,7 @@ The resolver returns the canonical path and rechecks inode, device, owner, mode 
 ## macOS: Seatbelt write boundary
 - The SBPL profile (`internal/fence/fs/sbpl.go`) keeps `(allow default)`, applies `(deny file-write*)`, then allows writes to the canonical `filesystem.root`, `.nock`, `/private/tmp`, the user's temp and cache paths and required `/dev` pseudo-devices. `filesystem.mode = "read-only"` drops the root write allow (`sbpl.go`).
 - Built-in sensitive paths (`internal/fence/fs/seatbelt.go`: `~/.ssh`, `~/.aws`, `~/.config`, `~/.gnupg`, `~/Library/Keychains`) and `filesystem.deny` are denied for reads and writes.
-- The profile is validated before launch (`seatbelt.go`) and the child is wrapped with `sandbox-exec` (`seatbelt.go`). A rejected profile or an unresolvable path means `REFUSED-TO-START`; every macOS wrap records exactly one fence state: `ENGAGED`, `REFUSED-TO-START` or `DEGRADED` (`internal/cli/wrap.go`).
+- The profile is validated before launch (`seatbelt.go`) and the child is wrapped with `sandbox-exec` (`seatbelt.go`). A rejected profile, an unresolvable path or `HOME`, or a `filesystem.root`, `allow` or `allow_rw` grant overlapping a built-in credential deny means `REFUSED-TO-START`; every macOS wrap records exactly one fence state: `ENGAGED`, `REFUSED-TO-START` or `DEGRADED` (`internal/cli/wrap.go`).
 - Per-file deny events are best-effort: a background `log stream` tailer (`internal/fence/fs/denylog.go`) records kernel denials as `file_blocked`, at most 500 per session.
 
 **Limits**: reads outside `filesystem.root` are not confined. `filesystem.allow` and `allow_rw` are not enforced on macOS. Apple deprecates `sandbox-exec`. The unified log can drop lines, so a missing row is not proof that no denial happened. The `macos_allow_unfenced` escape hatch was removed in v0.6.0 (`docs/decisions/009-remove-macos-unfenced-escape.md`).

@@ -33,10 +33,7 @@ func runDoctorJSON(t *testing.T, toml, goos string) (doctorReport, int) {
 func runDoctorJSONWithABI(t *testing.T, toml, goos string, abi int) (doctorReport, int) {
 	t.Helper()
 	dir := t.TempDir()
-	home := filepath.Join(dir, "home")
-	if err := os.Mkdir(home, 0o700); err != nil {
-		t.Fatal(err)
-	}
+	home := isolatedTestHome(t)
 	t.Setenv("HOME", home)
 	// Keep the managed key outside the temporary project and the default /tmp
 	// grant, without creating or reading a real signing key.

@@ -28,6 +28,11 @@ func (e ValidationError) Error() string {
 // whether the config should be rejected.
 func Validate(cfg *Config) []ValidationError {
 	var errs []ValidationError
+	if cfg.Project.Runtime != "" {
+		if _, ok := profileSummaries[cfg.Project.Runtime]; !ok {
+			errs = append(errs, ValidationError{Field: "project.runtime", Message: "must name a supported runtime preset", Severity: "error"})
+		}
+	}
 	for _, p := range cfg.Secrets.ScanPaths {
 		if !fs.ValidPath(filepath.ToSlash(p)) || filepath.IsAbs(p) {
 			errs = append(errs, ValidationError{Field: "secrets.scan_paths", Message: "use project-relative paths without '..' or empty components", Severity: "error"})

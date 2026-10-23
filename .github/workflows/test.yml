@@ -93,6 +93,7 @@ jobs:
         run: |
           python3 -m unittest discover -s scripts -p test_public_checks.py -v
           python3 -m unittest discover -s scripts -p test_ci_code_changed.py -v
+          python3 -m unittest discover -s scripts -p test_credential_cleanup.py -v
 
       - name: test
         if: steps.changes.outputs.code == 'true'
@@ -126,6 +127,19 @@ jobs:
         run: |
           make build-all
           bash scripts/test-init-default-linux.sh
+
+
+      - name: credential deny canaries and policy-removal mutation (CI only)
+        timeout-minutes: 5
+        if: steps.changes.outputs.code == 'true'
+        run: |
+          make build-fence-fs
+          proof_bin="$HOME/.cache/nocklock-credential-proof"
+          mkdir -p "$proof_bin"
+          go build -o "$proof_bin/nocklock" ./cmd/nocklock
+          install -m 0755 internal/fence/fs/interposer/libfence_fs.so "$proof_bin/libfence_fs.so"
+          python3 scripts/build-credential-deny-mutant.py "$proof_bin/nocklock-mutant"
+          python3 scripts/test-credential-denies.py --binary "$proof_bin/nocklock" --mutant "$proof_bin/nocklock-mutant"
 
   unpinned-landlock-soak:
     name: optional unpinned Landlock reproduction
@@ -267,6 +281,15 @@ jobs:
         env:
           NOCKLOCK_SANDBOX_REQUIRE: "1"
         run: go test ./internal/fence/fs/ -count=1 -v
+
+      - name: credential deny canaries and policy-removal mutation (CI only)
+        timeout-minutes: 5
+        run: |
+          proof_bin="$HOME/.cache/nocklock-credential-proof"
+          mkdir -p "$proof_bin"
+          go build -o "$proof_bin/nocklock" ./cmd/nocklock
+          python3 scripts/build-credential-deny-mutant.py "$proof_bin/nocklock-mutant"
+          python3 scripts/test-credential-denies.py --binary "$proof_bin/nocklock" --mutant "$proof_bin/nocklock-mutant"
 
       # A fresh `nocklock init` config must pass its own `doctor` and wrap
       # under the syscall rule both apply on macOS (N11047).

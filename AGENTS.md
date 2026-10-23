@@ -52,6 +52,8 @@ The full list is `docs/context/invariants.md`. The ones that break builds or rev
 
 ## Gotchas
 
+Credential canary and mutation scripts in `scripts/` are CI-only. Their fake home, project, and audit state are separate siblings outside default grants; moving the fake home under the project or a granted temp directory correctly makes startup refuse. `internal/fence/fs/builtins.go` is the shared mandatory policy resolver.
+
 Things you cannot guess from the code layout:
 
 - **A skipped proof is not a pass.** Platform tests skip, not fail, when Landlock, seccomp, gcc, `sandbox-exec` or root is missing. A green local run on the wrong host may have proved nothing. Read the `-v` output for `SKIP` before you claim a fence works.

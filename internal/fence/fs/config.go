@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 
 	"github.com/nocktechnologies/nocklock/internal/config"
@@ -66,6 +67,14 @@ type FenceConfig struct {
 	AllowPaths   []string
 	AllowRWPaths []string
 	DenyPaths    []string
+	// DenyPrefixes are macOS home filename prefixes (not user-config globs).
+	DenyPrefixes []string
+	// PrefixAliasPaths are the DenyPaths entries added only because an existing
+	// home entry matched a DenyPrefixes rule (resolved, so a symlink alias names
+	// its target). They are enforced like any other deny but kept out of the
+	// signed policy digest, which records the prefix rules instead, so the
+	// digest does not change when such a home entry appears or goes away.
+	PrefixAliasPaths []string
 
 	// ProtectedRootSubdir, when set, is a directory INSIDE Root that must not
 	// become writable — in practice a legacy in-project audit directory. It
@@ -96,6 +105,14 @@ type FenceConfig struct {
 	// sends it only after the report is handled, which lets a look-back rule
 	// commit its trigger and close open connections first.
 	WaitForAck bool
+}
+
+// PolicyDenyPaths returns DenyPaths without PrefixAliasPaths: the denies the
+// signed policy digest records, alongside the DenyPrefixes rules themselves.
+func (fc *FenceConfig) PolicyDenyPaths() []string {
+	return slices.DeleteFunc(slices.Clone(fc.DenyPaths), func(p string) bool {
+		return slices.Contains(fc.PrefixAliasPaths, p)
+	})
 }
 
 // SerializedConfig is the parsed representation of a serialized fence
