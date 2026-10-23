@@ -58,31 +58,36 @@ class ProcessCleanupTests(unittest.TestCase):
                     with self.assertRaises(KeyboardInterrupt) as raised:
                         harness.run(["proof"], ".", {})
                     self.assertIs(raised.exception, original)
-                    self.assertTrue(original.__notes__)
+                    self.assertIn("process enumeration failed", original.__notes__[0])
                     self.assertEqual(order.mock_calls[0], call.kill(process.pid, signal.SIGKILL))
                     self.assertEqual(process.communicate.call_count, 2)
 
-    def test_enumeration_failure_after_reap_kills_surviving_group(self):
+    def test_enumeration_failure_after_reap_signals_nothing(self):
         process = Mock(pid=12345, returncode=0)
         process.communicate.return_value = ("", "")
         with patch.object(harness.subprocess, "Popen", return_value=process), \
              patch.object(harness.subprocess, "check_output", side_effect=OSError("ps unavailable")), \
              patch.object(harness.os, "killpg") as kill:
-            with self.assertRaisesRegex(RuntimeError, "ps unavailable"):
+            with self.assertRaisesRegex(
+                    RuntimeError, "process enumeration failed; descendants of this proof "
+                                  "may still be running: ps unavailable"):
                 harness.run(["proof"], ".", {})
-            # The reaped launcher is not signalled up front, but its group is
-            # killed once the scan cannot find the survivors.
-            self.assertEqual(kill.call_args_list, [call(process.pid, signal.SIGKILL)])
+            # The reaped launcher's pid may be reused: no survivor is verified,
+            # so nothing is signalled and the error is the report.
+            kill.assert_not_called()
 
-    def test_enumeration_failure_tolerates_exited_group(self):
-        process = Mock(pid=12345, returncode=0)
-        process.communicate.return_value = ("", "")
+    def test_enumeration_failure_tolerates_exited_launcher_group(self):
+        original = subprocess.TimeoutExpired("proof", 30)
+        process = Mock(pid=12345, returncode=None)
+        process.communicate.side_effect = [original, ("", "")]
         with patch.object(harness.subprocess, "Popen", return_value=process), \
              patch.object(harness.subprocess, "check_output", side_effect=ValueError("bad ps row")), \
              patch.object(harness.os, "killpg", side_effect=ProcessLookupError()) as kill:
-            with self.assertRaisesRegex(RuntimeError, "bad ps row") as raised:
+            with self.assertRaises(subprocess.TimeoutExpired):
                 harness.run(["proof"], ".", {})
-            self.assertNotIn("No such process", str(raised.exception))
+            note, = original.__notes__
+            self.assertRegex(note, "process enumeration failed.*bad ps row")
+            self.assertNotIn("No such process", note)
             self.assertEqual(kill.call_args_list, [call(process.pid, signal.SIGKILL)])
 
     def test_cleanup_error_does_not_turn_success_into_pass(self):

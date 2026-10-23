@@ -62,29 +62,58 @@ func (s *scanner) inspectDotEnv(data []byte, path string) {
 	}
 }
 
-// dotEnvLiteral returns the part of a value written in the file itself: the
-// value, or the inline default of a ${NAME:-default}, ${NAME:=default} or
-// ${NAME:+alternate} reference (colon optional, nesting allowed). A plain
-// environment substitution returns "": it does not itself expose a key.
-// It slices rather than matching per level, so nesting stays linear.
+// dotEnvLiteral returns literal text written in the value itself: text outside
+// any reference, or the inline default of a ${NAME:-default}, ${NAME:=default}
+// or ${NAME:+alternate} reference (colon optional, nesting allowed). It returns
+// "" for pure substitutions such as $A, ${A}${B} or ${A:-$B}${C}, and for an
+// unbalanced reference. Each ${...} is matched by brace depth in one pass, so
+// back-to-back references stay separate and deep nesting stays linear.
 func dotEnvLiteral(value string) string {
 	value = strings.Trim(value, "\"'")
-	for strings.HasPrefix(value, "$") {
-		if !strings.HasPrefix(value, "${") || !strings.HasSuffix(value, "}") {
-			return ""
-		}
-		ref := value[2 : len(value)-1]
-		name := strings.IndexFunc(ref, func(r rune) bool {
-			return r != '_' && (r < 'A' || r > 'Z') && (r < 'a' || r > 'z') && (r < '0' || r > '9')
-		})
-		if name <= 0 {
-			return ""
-		}
-		op := strings.TrimPrefix(ref[name:], ":")
-		if op == "" || !strings.ContainsRune("-=+", rune(op[0])) {
-			return ""
-		}
-		value = op[1:]
+	isName := func(c byte) bool {
+		return c == '_' || (c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z') || (c >= '0' && c <= '9')
 	}
-	return value
+	literal := ""
+	// One entry per open ${: true when its body is a literal default or
+	// alternate in a literal context, false for a plain name or another
+	// operator's argument such as a ${NAME?message}.
+	var open []bool
+	for i := 0; i < len(value); {
+		switch {
+		case value[i] == '}' && len(open) > 0:
+			open = open[:len(open)-1]
+			i++
+		case strings.HasPrefix(value[i:], "${"):
+			j := i + 2
+			for j < len(value) && isName(value[j]) {
+				j++
+			}
+			named := j > i+2
+			if named && j < len(value) && value[j] == ':' {
+				j++
+			}
+			defaulted := named && j < len(value) && strings.IndexByte("-=+", value[j]) >= 0
+			if defaulted {
+				j++
+			}
+			open = append(open, defaulted && (len(open) == 0 || open[len(open)-1]))
+			i = j
+		case value[i] == '$' && i+1 < len(value) && isName(value[i+1]):
+			for i++; i < len(value) && isName(value[i]); i++ {
+			}
+		default:
+			if literal == "" && (len(open) == 0 || open[len(open)-1]) {
+				end := strings.IndexAny(value[i:], "${}")
+				if end < 0 {
+					end = len(value) - i
+				}
+				literal = value[i : i+end]
+			}
+			i++
+		}
+	}
+	if len(open) > 0 {
+		return ""
+	}
+	return literal
 }

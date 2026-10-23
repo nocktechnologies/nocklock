@@ -44,8 +44,9 @@ def cleanup_session(process):
     groups = set()
     try:
         # An unreaped launcher group must stop even if process enumeration fails.
-        # A reaped launcher's pid can be reused, so it is not signalled; the
-        # session scan below, or its fallback, still reaches its survivors.
+        # A reaped launcher's pid can be reused, so it is never signalled; after
+        # the reap only the session scan below can reach survivors, and if it
+        # fails they are reported, not signalled.
         # Do not use Popen's context manager: its unbounded wait can hang cleanup.
         try:
             if process.returncode is None:
@@ -68,11 +69,12 @@ def cleanup_session(process):
                     # The process exited or cannot be inspected; skip it.
                     pass
         except (OSError, subprocess.SubprocessError, ValueError) as error:
-            errors.append(error)
-            # Without the scan, kill the launcher's own group by its ID. Linux
-            # and macOS do not reuse a pid while a group or session with that
-            # ID has members, so surviving members are the ones reached.
-            groups.add(process.pid)
+            # Without the scan no survivor is verified, so nothing more is
+            # signalled; the raised cleanup error is the report.
+            failure = RuntimeError("process enumeration failed; descendants "
+                                   f"of this proof may still be running: {error}")
+            failure.__cause__ = error
+            errors.append(failure)
     finally:
         try:
             for pgid in groups:

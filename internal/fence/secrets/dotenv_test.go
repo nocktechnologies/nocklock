@@ -65,6 +65,15 @@ func TestScanDotEnvChecksInlineSubstitutionDefaults(t *testing.T) {
 		"PORT=${PORT:-3000}":                         0,
 		"TOKEN=${DEV_TOKEN:?unset}":                  0,
 		"TOKEN=${:-" + canary + "}":                  0,
+		"TOKEN=${A}${B}":                             0,
+		"TOKEN=${A:-$B}${C}":                         0,
+		"TOKEN=${A:-}${B}":                           0,
+		"TOKEN=${A}${B:-" + canary + "}":             1,
+		"TOKEN=${A?${B:-" + canary + "}}":            0,
+		"TOKEN=${A:-" + canary + "}${B}":             1,
+		"TOKEN=" + canary + "${A}":                   1,
+		"TOKEN=${A}" + canary:                        1,
+		"TOKEN=${A:-" + canary:                       0,
 	} {
 		t.Run(body, func(t *testing.T) {
 			root := t.TempDir()
