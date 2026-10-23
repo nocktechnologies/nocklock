@@ -122,7 +122,9 @@ func DecodeEventDetail(eventType, stored string) string {
 }
 
 // ChainRow is one events row exactly as stored: every column the entry_hash,
-// the hash link, and the entry_sig cover, with no decoding applied.
+// the hash link, and the entry_sig cover, with no decoding applied. Its JSON
+// tags are the unmapped.nocklock format of verify --export ocsf, which
+// downstream readers recompute hashes from: do not rename them.
 type ChainRow struct {
 	ID        int64  `json:"id"`
 	Timestamp string `json:"timestamp"` // the stored canonical timestamp string
@@ -139,10 +141,11 @@ type ChainRow struct {
 // ReadVerifiedChain verifies the chain exactly as VerifyChainSignedContext does
 // and, only when the verdict passes (intact, and neither forged nor suspect),
 // passes every events row in id order to fn, reading the rows and the
-// returned chain head in the same read transaction as the verdict. The rows fn sees are therefore the rows the
-// returned verdict covers, even while a writer appends. A failing verdict is
-// returned with a zero head and fn never called. An error from fn stops the
-// read and is returned.
+// returned chain head in the same read transaction as the verdict. The rows fn
+// sees are therefore the rows the returned verdict covers, even while a writer
+// appends. A failing verdict is an error naming the break, with fn never
+// called. The head is zero when the log has no chain_head record. An error
+// from fn stops the read and is returned.
 func (l *Logger) ReadVerifiedChain(ctx context.Context, pub ed25519.PublicKey, requireSigned bool, fn func(ChainRow) error) (*ChainVerifyResult, ChainHead, error) {
 	tx, err := l.db.BeginTx(ctx, nil)
 	if err != nil {
@@ -155,14 +158,11 @@ func (l *Logger) ReadVerifiedChain(ctx context.Context, pub ed25519.PublicKey, r
 		return nil, ChainHead{}, err
 	}
 	if !result.Intact || result.SigState == "forged" || result.SigState == "suspect" {
-		return result, ChainHead{}, nil
+		return nil, ChainHead{}, fmt.Errorf("the audit log does not verify (%s%s)", result.BrokenReason, result.SigBrokenReason)
 	}
-	head, found, err := ReadChainHead(tx)
+	head, _, err := ReadChainHead(tx)
 	if err != nil {
 		return nil, ChainHead{}, err
-	}
-	if !found {
-		head = ChainHead{Hash: result.HeadHash}
 	}
 	rows, err := tx.QueryContext(ctx,
 		"SELECT id, timestamp, event_type, category, detail, blocked, session_id, prev_hash, entry_hash, entry_sig FROM events ORDER BY id ASC")

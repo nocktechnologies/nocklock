@@ -27,9 +27,6 @@ func runAuditExport(ctx context.Context, stdout, stderr io.Writer, format, outPa
 	if format != "ocsf" {
 		return fmt.Errorf("unsupported --export format %q: the supported format is ocsf", format)
 	}
-	if ctx == nil {
-		ctx = context.Background()
-	}
 	refuse := func(err error) error {
 		fmt.Fprintln(stderr, "EXPORT: REFUSED — nothing was written")
 		return err
@@ -56,10 +53,7 @@ func runAuditExport(ctx context.Context, stdout, stderr io.Writer, format, outPa
 		return refuse(err)
 	}
 	if err != nil {
-		return refuse(fmt.Errorf("export: %w", err))
-	}
-	if !result.Intact || result.SigState == "forged" || result.SigState == "suspect" {
-		return refuse(fmt.Errorf("export: the audit log no longer verifies after the report above (%s%s); re-run verify --audit", result.BrokenReason, result.SigBrokenReason))
+		return refuse(fmt.Errorf("export: %w; re-run verify --audit", err))
 	}
 
 	trailer := ocsf.Trailer{
