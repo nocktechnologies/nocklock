@@ -75,3 +75,36 @@ func TestFromRowRejectsBadRows(t *testing.T) {
 		t.Fatal("a non-UTF-8 session_id mapped; it cannot be exported verbatim")
 	}
 }
+
+func TestFromRowNetworkAndOutcome(t *testing.T) {
+	e := mustMap(t, row(logging.EventNetworkPassed, "method=tcp host=api.example.com:443 rule=allowlist", false))
+	if e.ClassUID != ClassNetworkActivity || e.DstEndpoint == nil || *e.DstEndpoint != (Endpoint{Hostname: "api.example.com", Port: 443}) {
+		t.Fatalf("host:port must split into hostname and port, got class %d %+v", e.ClassUID, e.DstEndpoint)
+	}
+	if e := mustMap(t, row(logging.EventNetworkPassed, "method=tcp host=[::1]:8443", false)); *e.DstEndpoint != (Endpoint{Hostname: "::1", Port: 8443}) {
+		t.Fatalf("bracketed IPv6 host:port: got %+v", e.DstEndpoint)
+	}
+	if e := mustMap(t, row(logging.EventNetworkPassed, "method=CONNECT host=example.com", false)); *e.DstEndpoint != (Endpoint{Hostname: "example.com"}) {
+		t.Fatalf("a bare host keeps no port, got %+v", e.DstEndpoint)
+	}
+	if e := mustMap(t, row(logging.EventNetworkPassed, "egress level=OFF allow_all=true", false)); e.ClassUID != ClassApplicationLifecycle || e.DstEndpoint != nil || e.ActionID != 0 {
+		t.Fatalf("a network_passed row naming no host is fence setup, not a connection: got class %d action %d", e.ClassUID, e.ActionID)
+	}
+	if e := mustMap(t, row(logging.EventNetworkBlocked, "rule=lookback:x trigger=y", true)); e.ClassUID != ClassNetworkActivity || e.Action != "Denied" {
+		t.Fatalf("every network_blocked row is a denied network event, got class %d %q", e.ClassUID, e.Action)
+	}
+
+	if e := mustMap(t, row(logging.EventSessionEnd, "exit_code=1 secret_preflight=refused", true)); e.Status != "Failure" {
+		t.Fatalf("a blocked session_end must report Failure, got %q", e.Status)
+	}
+	if e := mustMap(t, row(logging.EventSessionEnd, "exit_code=0", false)); e.Status != "Success" {
+		t.Fatalf("an unblocked session_end must report Success, got %q", e.Status)
+	}
+
+	if e := mustMap(t, row(logging.EventSecretBlocked, `preflight {"findings":[]}`, true)); e.Resources != nil || e.FindingInfo.Title != "Secret preflight scan refused the run" {
+		t.Fatalf("a preflight report is not an environment variable: got %+v %+v", e.Resources, e.FindingInfo)
+	}
+	if e := mustMap(t, row(logging.EventSecretBlocked, "DEPLOY_API_TOKEN", true)); len(e.Resources) != 1 || e.Resources[0] != (Resource{Name: "DEPLOY_API_TOKEN", Type: "Environment variable"}) {
+		t.Fatalf("a withheld variable names its resource, got %+v", e.Resources)
+	}
+}

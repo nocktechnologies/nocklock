@@ -6,7 +6,7 @@ All notable changes to NockLock will be documented in this file.
 
 ### Added
 
-- `nocklock verify --export ocsf [--out <file>]` writes the signed audit log as OCSF 1.9.0 events, one JSON line per row, for security tools that ingest OCSF. Each event carries its source row verbatim, and a closing trailer carries the chain head, the head signature and the public key, so every entry hash, row signature and the head signature can be checked from the export alone. The export verifies the chain first and refuses, exiting `1` and writing nothing, when verification fails. CI validates the golden export against the pinned OCSF class schemas. See `docs/how-it-works/audit-log.md`.
+- `nocklock verify --export ocsf [--out <file>]` writes the signed audit log as OCSF 1.9.0 events, one JSON line per row, for security tools that ingest OCSF. Each event carries its source row verbatim, and a closing trailer carries the chain head, the head signature and the public key, so every entry hash, row signature and the head signature can be checked from the export alone. The export verifies the chain first and refuses, exiting `1` and writing nothing, when verification fails or the log gains rows between those checks and the read. CI validates the golden export against the pinned OCSF class schemas. See `docs/how-it-works/audit-log.md`.
 
 ### Security
 

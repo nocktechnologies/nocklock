@@ -3,6 +3,7 @@ package cli
 import (
 	"bytes"
 	"context"
+	"crypto/ed25519"
 	"encoding/base64"
 	"encoding/json"
 	"errors"
@@ -17,69 +18,84 @@ import (
 	"github.com/nocktechnologies/nocklock/internal/version"
 )
 
+// exportAfterChecks, when set by a test, runs between the verify --audit checks
+// and the export read, where a concurrent writer can append.
+var exportAfterChecks func()
+
 // runAuditExport implements verify --export ocsf. It runs the verify --audit
 // checks first, printing their report to stderr, and refuses to write anything
 // unless they pass. The rows are then read in the same read transaction as a
-// second chain verification (logging.ReadVerifiedChain), so the export is
-// exactly the chain that verdict covers. The export is built in memory and
-// published only once complete: with --out by rename, otherwise to stdout.
+// second chain verification (logging.ReadVerifiedChain), and the export is
+// refused unless that chain ends at the same head as the one the checks
+// covered, so the export is exactly the log those checks passed. The export is
+// built in memory and published only once complete: with --out by rename,
+// otherwise to stdout.
 func runAuditExport(ctx context.Context, stdout, stderr io.Writer, format, outPath, pubFlag string, requireClosed bool) error {
 	if format != "ocsf" {
 		return fmt.Errorf("unsupported --export format %q: the supported format is ocsf", format)
 	}
+	var buf bytes.Buffer
+	var trailer ocsf.Trailer
+	err := verifyAuditLog(ctx, stderr, pubFlag, requireClosed, func(logger *logging.Logger, pub ed25519.PublicKey, checked *logging.ChainVerifyResult) error {
+		if exportAfterChecks != nil {
+			exportAfterChecks()
+		}
+		enc := json.NewEncoder(&buf)
+		enc.SetEscapeHTML(false)
+		walkCtx, cancelWalk := anchorCLIWalkContext(ctx)
+		defer cancelWalk()
+		result, head, err := logger.ReadVerifiedChain(walkCtx, pub, pubFlag != "", func(r logging.ChainRow) error {
+			ev, err := ocsf.FromRow(r, version.Version)
+			if err != nil {
+				return err
+			}
+			return enc.Encode(ev)
+		})
+		if errors.Is(err, logging.ErrVerifyInterrupted) {
+			return err
+		}
+		if err != nil {
+			return fmt.Errorf("export: %w; re-run verify --audit", err)
+		}
+		if result.HeadHash != checked.HeadHash {
+			return fmt.Errorf("export: the audit log changed after the checks above (chain head %s, now %s); re-run the export", checked.HeadHash, result.HeadHash)
+		}
+
+		trailer = ocsf.Trailer{
+			Verdict:     "CONSISTENT",
+			RowCount:    result.EntriesVerified,
+			GenesisHash: logging.ChainGenesisHashHex,
+			ChainHead:   result.HeadHash,
+		}
+		if result.SigState == "authentic" {
+			signedBytes, err := head.CanonicalBytes()
+			if err != nil {
+				return fmt.Errorf("export: chain head: %w", err)
+			}
+			trailer.Verdict = "AUTHENTIC"
+			trailer.UnsignedThroughID = result.UnsignedThroughID
+			trailer.HeadSig = head.Sig
+			trailer.HeadSignedBytes = base64.StdEncoding.EncodeToString(signedBytes)
+			trailer.PublicKey = logging.EncodePublicKey(pub)
+			trailer.KeyFingerprint = logging.PublicKeyFingerprint(pub)
+		}
+		if err := enc.Encode(ocsf.TrailerEvent(trailer, version.Version, time.Now())); err != nil {
+			return fmt.Errorf("export: %w", err)
+		}
+		return nil
+	})
 	refuse := func(err error) error {
 		fmt.Fprintln(stderr, "EXPORT: REFUSED — nothing was written")
 		return err
 	}
-	logger, pub, err := verifyAuditLog(ctx, stderr, pubFlag, requireClosed)
 	if err != nil {
 		return refuse(err)
-	}
-	defer logger.Close()
-
-	var buf bytes.Buffer
-	enc := json.NewEncoder(&buf)
-	enc.SetEscapeHTML(false)
-	walkCtx, cancelWalk := anchorCLIWalkContext(ctx)
-	defer cancelWalk()
-	result, head, err := logger.ReadVerifiedChain(walkCtx, pub, pubFlag != "", func(r logging.ChainRow) error {
-		ev, err := ocsf.FromRow(r, version.Version)
-		if err != nil {
-			return err
-		}
-		return enc.Encode(ev)
-	})
-	if errors.Is(err, logging.ErrVerifyInterrupted) {
-		return refuse(err)
-	}
-	if err != nil {
-		return refuse(fmt.Errorf("export: %w; re-run verify --audit", err))
-	}
-
-	trailer := ocsf.Trailer{
-		Verdict:     "CONSISTENT",
-		RowCount:    result.EntriesVerified,
-		GenesisHash: logging.ChainGenesisHashHex,
-		ChainHead:   result.HeadHash,
-	}
-	if result.SigState == "authentic" {
-		signedBytes, err := head.CanonicalBytes()
-		if err != nil {
-			return refuse(fmt.Errorf("export: chain head: %w", err))
-		}
-		trailer.Verdict = "AUTHENTIC"
-		trailer.HeadSig = head.Sig
-		trailer.HeadSignedBytes = base64.StdEncoding.EncodeToString(signedBytes)
-		trailer.PublicKey = logging.EncodePublicKey(pub)
-		trailer.KeyFingerprint = logging.PublicKeyFingerprint(pub)
-	}
-	if err := enc.Encode(ocsf.TrailerEvent(trailer, version.Version, time.Now())); err != nil {
-		return refuse(fmt.Errorf("export: %w", err))
 	}
 
 	dest := "stdout"
 	if outPath == "" {
 		if _, err := stdout.Write(buf.Bytes()); err != nil {
+			fmt.Fprintln(stderr, "EXPORT: INCOMPLETE — stdout may hold a partial export with no trailer; discard it")
 			return fmt.Errorf("export: write stdout: %w", err)
 		}
 	} else {
@@ -88,7 +104,7 @@ func runAuditExport(ctx context.Context, stdout, stderr io.Writer, format, outPa
 		}
 		dest = outPath
 	}
-	fmt.Fprintf(stderr, "EXPORT: OCSF %s, %d row event(s) and 1 trailer written to %s (%s)\n", ocsf.Version, result.EntriesVerified, dest, trailer.Verdict)
+	fmt.Fprintf(stderr, "EXPORT: OCSF %s, %d row event(s) and 1 trailer written to %s (%s)\n", ocsf.Version, trailer.RowCount, dest, trailer.Verdict)
 	return nil
 }
 

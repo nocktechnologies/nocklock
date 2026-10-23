@@ -357,18 +357,15 @@ func resolveAuditDBPath() (dbPath, projectRoot string, err error) {
 }
 
 func runAuditVerify(ctx context.Context, w io.Writer, pubFlag string, requireClosed bool) error {
-	logger, _, err := verifyAuditLog(ctx, w, pubFlag, requireClosed)
-	if logger != nil {
-		logger.Close()
-	}
-	return err
+	return verifyAuditLog(ctx, w, pubFlag, requireClosed, nil)
 }
 
 // verifyAuditLog runs the verify --audit checks and prints their report to w.
-// On a passing verdict it returns the still-open event log, which the caller
-// must close, and the public key the signatures were checked against (nil for
-// a hash-only check), so verify --export reads the log it just verified.
-func verifyAuditLog(ctx context.Context, w io.Writer, pubFlag string, requireClosed bool) (*logging.Logger, ed25519.PublicKey, error) {
+// On a passing verdict it calls onPass, when set, with the still-open event
+// log, the public key the signatures were checked against (nil for a hash-only
+// check) and the chain verdict, so verify --export reads the log it just
+// verified; an error from onPass is returned.
+func verifyAuditLog(ctx context.Context, w io.Writer, pubFlag string, requireClosed bool, onPass func(*logging.Logger, ed25519.PublicKey, *logging.ChainVerifyResult) error) error {
 	// unclosedRuns is populated once the run-lifecycle pass runs, so the deferred
 	// coverage notice (which may also fire on an early tamper return) can name any
 	// run missing its close. The closure reads it at return time, not defer time.
@@ -376,7 +373,7 @@ func verifyAuditLog(ctx context.Context, w io.Writer, pubFlag string, requireClo
 	defer func() { writeVerificationCoverage(w, unclosedRuns) }()
 	dbPath, projectRoot, err := resolveAuditDBPath()
 	if err != nil {
-		return nil, nil, err
+		return err
 	}
 
 	// Resolve a public key for authenticity checking. An explicit --ed25519-pub
@@ -385,19 +382,14 @@ func verifyAuditLog(ctx context.Context, w io.Writer, pubFlag string, requireClo
 	// at all means a hash-only (CONSISTENCY) verification.
 	pub, err := resolveVerifyPublicKey(pubFlag)
 	if err != nil {
-		return nil, nil, err
+		return err
 	}
 
 	logger, err := logging.NewLogger(dbPath, projectRoot)
 	if err != nil {
-		return nil, nil, fmt.Errorf("failed to open event log: %w", err)
+		return fmt.Errorf("failed to open event log: %w", err)
 	}
-	passed := false
-	defer func() {
-		if !passed {
-			logger.Close()
-		}
-	}()
+	defer logger.Close()
 
 	// Verify the chain (signature-aware when a key is available), bounding only the
 	// walk by the operator's --walk-timeout (unbounded by default) so the flag
@@ -409,19 +401,19 @@ func verifyAuditLog(ctx context.Context, w io.Writer, pubFlag string, requireClo
 	defer cancelWalk()
 	result, err := logger.VerifyChainSignedContext(walkCtx, pub, pubFlag != "")
 	if err != nil {
-		return nil, nil, fmt.Errorf("verification failed: %w", err)
+		return fmt.Errorf("verification failed: %w", err)
 	}
 	history, err := inspectConfigDigestHistory(logger, result)
 	if err != nil {
-		return nil, nil, fmt.Errorf("config digest verification failed: %w", err)
+		return fmt.Errorf("config digest verification failed: %w", err)
 	}
 
 	// Format and print output
 	if err := writeAuditVerifyResult(w, result); err != nil {
-		return nil, nil, err
+		return err
 	}
 	if err := writeConfigDigestVerifyResult(w, history); err != nil {
-		return nil, nil, err
+		return err
 	}
 
 	// Run-lifecycle verification: report each run's observed lifecycle (closed,
@@ -433,9 +425,9 @@ func verifyAuditLog(ctx context.Context, w io.Writer, pubFlag string, requireClo
 		// Surface an interrupted walk raw, matching the anchor paths and the
 		// N11800 neutral-interrupt convention (no "failed" wording, no verdict).
 		if errors.Is(err, logging.ErrVerifyInterrupted) {
-			return nil, nil, err
+			return err
 		}
-		return nil, nil, fmt.Errorf("run lifecycle verification failed: %w", err)
+		return fmt.Errorf("run lifecycle verification failed: %w", err)
 	}
 	lifecycleFailed, unclosed := writeRunLifecycleResult(w, runs)
 	unclosedRuns = unclosed
@@ -445,14 +437,16 @@ func verifyAuditLog(ctx context.Context, w io.Writer, pubFlag string, requireClo
 		// AUDIT verdict line so a script reading the first AUDIT: line cannot
 		// mistake the earlier AUTHENTIC/CONSISTENT verdict for the overall result.
 		fmt.Fprintln(w, "AUDIT: RUN INTEGRITY FAILURE")
-		return nil, nil, &exitCodeError{code: 1}
+		return &exitCodeError{code: 1}
 	}
 	if requireClosed && len(unclosed) > 0 {
 		fmt.Fprintf(w, "AUDIT: UNCLOSED — %d run(s) have no signed session_close and --require-closed was set\n", len(unclosed))
-		return nil, nil, &exitCodeError{code: 1}
+		return &exitCodeError{code: 1}
 	}
-	passed = true
-	return logger, pub, nil
+	if onPass != nil {
+		return onPass(logger, pub, result)
+	}
+	return nil
 }
 
 // writeRunLifecycleResult prints the per-run lifecycle verdicts and a summary

@@ -18,6 +18,7 @@ import (
 	"strings"
 	"testing"
 	"time"
+	"unicode/utf8"
 
 	"github.com/nocktechnologies/nocklock/internal/logging"
 	"github.com/nocktechnologies/nocklock/internal/ocsf"
@@ -43,11 +44,14 @@ var ocsfFixtureRows = []struct {
 	{logging.EventConfigLoaded, "session", "claude-code", false, ""},
 	{logging.EventSecretBlocked, "secret", "DEPLOY_API_TOKEN", true, ""},
 	{logging.EventSecretPassed, "secret", "HOME, LANG, TERM, PATH", false, ""},
+	{logging.EventSecretBlocked, "secret", `preflight {"findings":[{"path":"<project>/deploy.cfg","rule":"private-key"}]}`, true, ""},
 	{logging.EventFilePassed, "filesystem", "landlock abi=5 paths=4", false, ""},
 	{logging.EventFilePassed, "filesystem", "root=<home>/project mode=read-write", false, ""},
 	{logging.EventFilesystemFenceState, "filesystem", "macOS filesystem-fence ENGAGED: seatbelt profile applied", false, ""},
 	{logging.EventProxyStart, "network", "addr=127.0.0.1:43451 unix_socket=<tmp>/proxy.sock", false, ""},
+	{logging.EventNetworkPassed, "network", "egress level=proxy proxy=127.0.0.1:43451 domains=3", false, ""},
 	{logging.EventNetworkPassed, "network", "method=CONNECT host=api.example.com", false, ""},
+	{logging.EventNetworkPassed, "network", "method=tcp host=api.example.com:443 rule=allowlist", false, ""},
 	{logging.EventNetworkBlocked, "network", "method=CONNECT host=example.com", true, ""},
 	{logging.EventFileBlocked, "filesystem", "op=open path=/proc/sys/crypto/fips_enabled reason=path resolution failed", true, ""},
 	{logging.EventFileBlocked, "filesystem", `{"version":1,"report":{"operation":"connect","path":"<tmp>/agent.sock","reason":"unix socket outside grant"},"connection_peer":{"credentials_status":"unavailable","executable":{"status":"unavailable"}}}`, true, ""},
@@ -190,13 +194,18 @@ func TestOCSFExportGolden(t *testing.T) {
 // exported fields alone, without the logging package, as an outside verifier
 // would: 0x01 || u64be(id) || lp(timestamp) || lp(event_type) || lp(category)
 // || lp(detail) || blocked byte || lp(session_id), lp = u32be length + bytes.
-func rowCanonical(t *testing.T, r ocsf.Row) []byte {
-	t.Helper()
+func rowCanonical(r ocsf.Row) ([]byte, error) {
 	detail := []byte(r.Detail)
 	if r.DetailBase64 != "" {
 		var err error
 		if detail, err = base64.StdEncoding.DecodeString(r.DetailBase64); err != nil {
-			t.Fatal(err)
+			return nil, err
+		}
+		// detail_base64 stands in for detail only when the bytes cannot travel
+		// as JSON, and detail must then be their lossy rendering; otherwise
+		// detail could be rewritten under an unchanged hash.
+		if utf8.Valid(detail) || r.Detail != strings.ToValidUTF8(string(detail), "\uFFFD") {
+			return nil, errors.New("detail_base64 does not match detail")
 		}
 	}
 	lp := func(b []byte, s []byte) []byte {
@@ -213,14 +222,62 @@ func rowCanonical(t *testing.T, r ocsf.Row) []byte {
 	} else {
 		b = append(b, 0)
 	}
-	return lp(b, []byte(r.SessionID))
+	return lp(b, []byte(r.SessionID)), nil
+}
+
+// headUnsignedThroughID reads unsigned_through_id out of the head signed bytes
+// and checks they end with the fingerprint of pub. After the version byte,
+// chain_head and row_count come pruned_at, pruned_count, signed_genesis_at and
+// unsigned_through_id, each a presence byte then (when 1) a u32be-length string
+// or a u64be, and last the 32-byte SHA-256 of the public key.
+func headUnsignedThroughID(signed []byte, pub ed25519.PublicKey) (int64, error) {
+	rest := signed[41:]
+	take := func(n int) ([]byte, error) {
+		if len(rest) < n {
+			return nil, errors.New("head signed bytes truncated")
+		}
+		b := rest[:n]
+		rest = rest[n:]
+		return b, nil
+	}
+	var unsigned int64
+	for i, isString := range []bool{true, false, true, false} {
+		flag, err := take(1)
+		if err != nil {
+			return 0, err
+		}
+		if flag[0] == 0 {
+			continue
+		}
+		n := 8
+		if isString {
+			l, err := take(4)
+			if err != nil {
+				return 0, err
+			}
+			n = int(binary.BigEndian.Uint32(l))
+		}
+		v, err := take(n)
+		if err != nil {
+			return 0, err
+		}
+		if i == 3 {
+			unsigned = int64(binary.BigEndian.Uint64(v))
+		}
+	}
+	fp := sha256.Sum256(pub)
+	if !bytes.Equal(rest, fp[:]) {
+		return 0, errors.New("head signed bytes do not end with the public key fingerprint")
+	}
+	return unsigned, nil
 }
 
 // verifyExport checks an export the way a downstream reader can, from its
 // lines alone: every entry_hash recomputes from unmapped.nocklock, the links
 // run from the genesis hash to the trailer's chain_head, every entry_sig and
 // the head signature verify under the trailer's key, and the signed head bytes
-// commit to that chain_head and row count.
+// commit to that chain_head, row count, unsigned_through_id and key. Rows up to
+// unsigned_through_id predate signing and must carry no signature.
 func verifyExport(t *testing.T, lines []string) error {
 	t.Helper()
 	var tev struct {
@@ -250,7 +307,10 @@ func verifyExport(t *testing.T, lines []string) error {
 			return err
 		}
 		r := ev.Unmapped.NockLock
-		cb := rowCanonical(t, r)
+		cb, err := rowCanonical(r)
+		if err != nil {
+			return err
+		}
 		prevBytes, err := hex.DecodeString(r.PrevHash)
 		if err != nil {
 			return err
@@ -259,8 +319,11 @@ func verifyExport(t *testing.T, lines []string) error {
 		if r.PrevHash != prev || hex.EncodeToString(sum[:]) != r.EntryHash {
 			return errors.New("entry " + r.EntryHash + " does not recompute from unmapped")
 		}
-		sig, err := base64.StdEncoding.DecodeString(r.EntrySig)
-		if err != nil || !ed25519.Verify(pub, cb, sig) {
+		if r.ID <= trailer.UnsignedThroughID {
+			if r.EntrySig != "" {
+				return errors.New("a row before signing adoption carries a signature")
+			}
+		} else if sig, err := base64.StdEncoding.DecodeString(r.EntrySig); err != nil || !ed25519.Verify(pub, cb, sig) {
 			return errors.New("entry signature does not verify")
 		}
 		prev = r.EntryHash
@@ -274,6 +337,13 @@ func verifyExport(t *testing.T, lines []string) error {
 	}
 	if hex.EncodeToString(signed[1:33]) != trailer.ChainHead || binary.BigEndian.Uint64(signed[33:41]) != uint64(trailer.RowCount) {
 		return errors.New("head signed bytes do not commit to chain_head and row_count")
+	}
+	unsigned, err := headUnsignedThroughID(signed, pub)
+	if err != nil {
+		return err
+	}
+	if unsigned != trailer.UnsignedThroughID {
+		return errors.New("trailer unsigned_through_id differs from the signed head")
 	}
 	headSig, err := base64.StdEncoding.DecodeString(trailer.HeadSig)
 	if err != nil || !ed25519.Verify(pub, signed, headSig) {
@@ -290,8 +360,10 @@ func TestOCSFExportVerifiesFromExportAlone(t *testing.T) {
 		t.Fatalf("intact export: %v", err)
 	}
 
-	// Negative controls: one changed field of a row, a dropped row, and a
-	// forged head signature must each fail the same check.
+	// Negative controls: a changed field of a row, a detail rewritten behind
+	// a detail_base64 of the original, a dropped row, a stripped row
+	// signature excused by a claimed unsigned prefix, and a forged head
+	// signature must each fail the same check.
 	edit := func(i int, from, to string) []string {
 		c := append([]string{}, lines...)
 		if !strings.Contains(c[i], from) {
@@ -302,6 +374,27 @@ func TestOCSFExportVerifiesFromExportAlone(t *testing.T) {
 	}
 	if err := verifyExport(t, edit(2, `"detail":"DEPLOY_API_TOKEN"`, `"detail":"DEPLOY_API_TOKEX"`)); err == nil {
 		t.Fatal("an edited detail still verified")
+	}
+	original := base64.StdEncoding.EncodeToString([]byte("DEPLOY_API_TOKEN"))
+	if err := verifyExport(t, edit(2, `"detail":"DEPLOY_API_TOKEN"`, `"detail":"harmless","detail_base64":"`+original+`"`)); err == nil {
+		t.Fatal("a detail rewritten behind detail_base64 still verified")
+	}
+	var row struct {
+		Unmapped struct {
+			NockLock ocsf.Row `json:"nocklock"`
+		} `json:"unmapped"`
+	}
+	if err := json.Unmarshal([]byte(lines[2]), &row); err != nil {
+		t.Fatal(err)
+	}
+	stripped := edit(2, `"entry_sig":"`+row.Unmapped.NockLock.EntrySig+`"`, `"entry_sig":""`)
+	if err := verifyExport(t, stripped); err == nil {
+		t.Fatal("a stripped row signature still verified")
+	}
+	last := len(lines) - 1
+	stripped[last] = strings.Replace(stripped[last], `"chain_head":`, `"unsigned_through_id":3,"chain_head":`, 1)
+	if err := verifyExport(t, stripped); err == nil {
+		t.Fatal("a stripped row signature excused by a claimed unsigned prefix still verified")
 	}
 	if err := verifyExport(t, append(append([]string{}, lines[:3]...), lines[4:]...)); err == nil {
 		t.Fatal("an export missing a row still verified")
@@ -385,5 +478,34 @@ func TestOCSFExportRejectsUnknownFormat(t *testing.T) {
 	err := runAuditExport(context.Background(), &stdout, &stderr, "csv", "", "", false)
 	if err == nil || !strings.Contains(err.Error(), "supported format is ocsf") {
 		t.Fatalf("want an unsupported-format error, got %v", err)
+	}
+}
+
+func TestOCSFExportRefusesLogChangedAfterChecks(t *testing.T) {
+	db, key := setupAnchorProject(t)
+	seedOCSFFixture(t, db, key)
+	exportAfterChecks = func() {
+		l, err := logging.NewLogger(db, "", logging.WithSigning(key))
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer l.Close()
+		if err := l.Log(logging.Event{Timestamp: time.Now(), EventType: logging.EventSessionStart, Category: "session", Detail: "late run", SessionID: "late"}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	t.Cleanup(func() { exportAfterChecks = nil })
+
+	out := filepath.Join(t.TempDir(), "audit.ocsf.jsonl")
+	var stdout, stderr bytes.Buffer
+	err := runAuditExport(context.Background(), &stdout, &stderr, "ocsf", out, "", false)
+	if err == nil || !strings.Contains(err.Error(), "changed after the checks") {
+		t.Fatalf("want a refusal for rows the checks did not cover, got %v\n%s", err, stderr.String())
+	}
+	if !strings.Contains(stderr.String(), "EXPORT: REFUSED") {
+		t.Fatalf("refusal not reported:\n%s", stderr.String())
+	}
+	if _, err := os.Stat(out); !os.IsNotExist(err) {
+		t.Fatalf("refused export left %s behind: %v", out, err)
 	}
 }

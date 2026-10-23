@@ -13,6 +13,7 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
+	"net"
 	"path"
 	"strconv"
 	"strings"
@@ -114,6 +115,7 @@ type File struct {
 // Endpoint is the OCSF network endpoint object.
 type Endpoint struct {
 	Hostname string `json:"hostname"`
+	Port     int    `json:"port,omitempty"`
 }
 
 // FindingInfo is the OCSF finding_info object.
@@ -148,14 +150,18 @@ type Row struct {
 // entry_sig, and check the head signature over HeadSignedBytes, all from the
 // export alone.
 type Trailer struct {
-	Verdict         string `json:"verdict"` // AUTHENTIC or CONSISTENT, as nocklock verify --audit reported
-	RowCount        int    `json:"row_count"`
-	GenesisHash     string `json:"genesis_hash"`
-	ChainHead       string `json:"chain_head"`
-	HeadSig         string `json:"head_sig,omitempty"`
-	HeadSignedBytes string `json:"head_signed_bytes,omitempty"` // base64 of the bytes HeadSig covers
-	PublicKey       string `json:"public_key,omitempty"`        // base64 Ed25519
-	KeyFingerprint  string `json:"public_key_fingerprint,omitempty"`
+	Verdict     string `json:"verdict"` // AUTHENTIC or CONSISTENT, as nocklock verify --audit reported
+	RowCount    int    `json:"row_count"`
+	GenesisHash string `json:"genesis_hash"`
+	ChainHead   string `json:"chain_head"`
+	// UnsignedThroughID is the highest row id that predates signing adoption:
+	// those rows carry no entry_sig and are covered by the hash chain and the
+	// signed head only. The head signature commits to it (see audit-log.md).
+	UnsignedThroughID int64  `json:"unsigned_through_id,omitempty"`
+	HeadSig           string `json:"head_sig,omitempty"`
+	HeadSignedBytes   string `json:"head_signed_bytes,omitempty"` // base64 of the bytes HeadSig covers
+	PublicKey         string `json:"public_key,omitempty"`        // base64 Ed25519
+	KeyFingerprint    string `json:"public_key_fingerprint,omitempty"`
 }
 
 const (
@@ -212,41 +218,56 @@ func FromRow(r logging.ChainRow, productVersion string) (Event, error) {
 		if code, err := strconv.Atoi(token(detail, "exit_code")); err == nil {
 			e.ExitCode = &code
 		}
-		e.setStatus(true)
-	case logging.EventNetworkBlocked, logging.EventNetworkPassed:
-		if blocked {
-			e.setClass(ClassNetworkActivity, 5, "Refuse")
-		} else {
+		e.setStatus(!blocked)
+	case logging.EventNetworkBlocked:
+		e.setClass(ClassNetworkActivity, 5, "Refuse")
+		e.DstEndpoint = endpoint(detail)
+		e.setDecision(true)
+	case logging.EventNetworkPassed:
+		// A network_passed row naming no host= records fence setup (the egress
+		// level, staged socket rules), not a connection: it falls through to
+		// Application Lifecycle like the other state rows.
+		if e.DstEndpoint = endpoint(detail); e.DstEndpoint != nil {
 			e.setClass(ClassNetworkActivity, 1, "Open")
+			e.setDecision(false)
+			break
 		}
-		if host := token(detail, "host"); host != "" {
-			e.DstEndpoint = &Endpoint{Hostname: host}
-		}
-		e.setDecision(blocked)
+		e.lifecycle(r.EventType, blocked)
 	case logging.EventFileBlocked:
 		e.setClass(ClassFileActivity, activityOther, "Other")
 		e.File = blockedFile(detail)
 		e.setDecision(true)
 	case logging.EventSecretBlocked:
 		e.setClass(ClassDetectionFinding, 1, "Create")
-		e.FindingInfo = &FindingInfo{UID: r.EntryHash, Title: "Secret withheld from the wrapped agent"}
-		e.Resources = []Resource{{Name: detail, Type: "Environment variable"}}
+		if strings.HasPrefix(detail, "preflight ") {
+			// The secret preflight scan's JSON report; message carries it.
+			e.FindingInfo = &FindingInfo{UID: r.EntryHash, Title: "Secret preflight scan refused the run"}
+		} else {
+			e.FindingInfo = &FindingInfo{UID: r.EntryHash, Title: "Secret withheld from the wrapped agent"}
+			e.Resources = []Resource{{Name: detail, Type: "Environment variable"}}
+		}
 		e.setDecision(true)
 	default:
 		// Fence state, config_loaded, proxy start/stop, *_passed rows and
-		// every other type: the state goes in status_detail.
-		e.setClass(ClassApplicationLifecycle, activityOther, "Other")
-		app := e.Metadata.Product
-		e.App = &app
-		e.StatusDetail = r.EventType
+		// every other type.
+		e.lifecycle(r.EventType, blocked)
 		if logging.EventType(r.EventType) == logging.EventFilesystemFenceState {
 			if state := fenceState(detail); state != "" {
 				e.StatusDetail = state
 			}
 		}
-		e.setStatus(!blocked)
 	}
 	return e, nil
+}
+
+// lifecycle makes e an Application Lifecycle event with the row type in
+// status_detail.
+func (e *Event) lifecycle(eventType string, blocked bool) {
+	e.setClass(ClassApplicationLifecycle, activityOther, "Other")
+	app := e.Metadata.Product
+	e.App = &app
+	e.StatusDetail = eventType
+	e.setStatus(!blocked)
 }
 
 // TrailerEvent wraps the chain evidence in an Application Lifecycle event, so
@@ -254,12 +275,8 @@ func FromRow(r logging.ChainRow, productVersion string) (Event, error) {
 func TrailerEvent(t Trailer, productVersion string, now time.Time) Event {
 	e := baseEvent(productVersion, "nocklock-export:"+t.ChainHead, "nocklock-export", now)
 	e.Message = fmt.Sprintf("NockLock audit export: %d rows, chain head %s, %s", t.RowCount, t.ChainHead, t.Verdict)
-	e.StatusDetail = "audit_export_trailer"
-	app := e.Metadata.Product
-	e.App = &app
+	e.lifecycle("audit_export_trailer", false)
 	e.Unmapped.Export = &t
-	e.setClass(ClassApplicationLifecycle, activityOther, "Other")
-	e.setStatus(true)
 	return e
 }
 
@@ -333,6 +350,21 @@ func token(detail, key string) string {
 		}
 	}
 	return ""
+}
+
+// endpoint returns the destination a network row's host= token names, split
+// into hostname and port when it is host:port, or nil when the row names none.
+func endpoint(detail string) *Endpoint {
+	host := token(detail, "host")
+	if host == "" {
+		return nil
+	}
+	if h, p, err := net.SplitHostPort(host); err == nil {
+		if port, err := strconv.Atoi(p); err == nil && h != "" {
+			return &Endpoint{Hostname: h, Port: port}
+		}
+	}
+	return &Endpoint{Hostname: host}
 }
 
 // sessionCommand returns the wrapped command of a session_start detail:
