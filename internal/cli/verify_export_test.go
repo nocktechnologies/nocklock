@@ -20,6 +20,7 @@ import (
 	"time"
 	"unicode/utf8"
 
+	"github.com/nocktechnologies/nocklock/internal/config"
 	"github.com/nocktechnologies/nocklock/internal/logging"
 	"github.com/nocktechnologies/nocklock/internal/ocsf"
 )
@@ -272,6 +273,11 @@ func headUnsignedThroughID(signed []byte, pub ed25519.PublicKey) (int64, error) 
 	return unsigned, nil
 }
 
+// ocsfHeadSigVersion is the first byte of head_signed_bytes, restated here
+// because verifyExport reads the export the way a reader without the logging
+// package would.
+const ocsfHeadSigVersion = 0x03
+
 // verifyExport checks an export the way a downstream reader can, from its
 // lines alone: every entry_hash recomputes from unmapped.nocklock, the links
 // run from the genesis hash to the trailer's chain_head, every entry_sig and
@@ -334,6 +340,9 @@ func verifyExport(t *testing.T, lines []string) error {
 	signed, err := base64.StdEncoding.DecodeString(trailer.HeadSignedBytes)
 	if err != nil || len(signed) < 41 {
 		return errors.New("head signed bytes malformed")
+	}
+	if signed[0] != ocsfHeadSigVersion {
+		return errors.New("head signed bytes version is not 0x03")
 	}
 	if hex.EncodeToString(signed[1:33]) != trailer.ChainHead || binary.BigEndian.Uint64(signed[33:41]) != uint64(trailer.RowCount) {
 		return errors.New("head signed bytes do not commit to chain_head and row_count")
@@ -404,6 +413,15 @@ func TestOCSFExportVerifiesFromExportAlone(t *testing.T) {
 	forged := base64.StdEncoding.EncodeToString(make([]byte, ed25519.SignatureSize))
 	if err := verifyExport(t, edit(len(lines)-1, headSig, forged)); err == nil {
 		t.Fatal("a forged head signature still verified")
+	}
+	signedB64 := tr["head_signed_bytes"].(string)
+	signed, err := base64.StdEncoding.DecodeString(signedB64)
+	if err != nil || len(signed) == 0 || signed[0] != ocsfHeadSigVersion {
+		t.Fatalf("head signed bytes do not lead with 0x03: %v", err)
+	}
+	signed[0] = 0x01
+	if err := verifyExport(t, edit(len(lines)-1, signedB64, base64.StdEncoding.EncodeToString(signed))); err == nil || !strings.Contains(err.Error(), "version") {
+		t.Fatalf("head signed bytes with another version byte: want a version error, got %v", err)
 	}
 }
 
@@ -522,14 +540,33 @@ func TestOCSFExportRefusesProtectedOut(t *testing.T) {
 		return p
 	}
 	dbDirLink := link("state-dir", filepath.Dir(db))
+	_, projectRoot, err := resolveAuditDBPath()
+	if err != nil {
+		t.Fatal(err)
+	}
+	stateDir, err := config.AuditStateDir(projectRoot)
+	if err != nil {
+		t.Fatal(err)
+	}
+	anchor := logging.DefaultAnchorPath(db)
+	if err := os.WriteFile(anchor, []byte("{}"), 0o600); err != nil {
+		t.Fatal(err)
+	}
 
 	for name, out := range map[string]string{
 		"db":                  db,
 		"symlink to db":       link("db.jsonl", db),
+		"hard link to db":     hardLink(t, db, filepath.Join(filepath.Dir(db), "db.hard")),
+		"db in other case":    filepath.Join(filepath.Dir(db), strings.ToUpper(filepath.Base(db))),
 		"wal":                 db + "-wal",
 		"shm via dir symlink": filepath.Join(dbDirLink, filepath.Base(db)+"-shm"),
 		"key":                 key,
 		"symlink to key":      link("key.jsonl", key),
+		"chain anchor":        anchor,
+		"symlink to anchor":   link("anchor.jsonl", anchor),
+		"chain identity":      filepath.Join(stateDir, logging.ChainIdentityFileName),
+		"chain identity lock": filepath.Join(stateDir, logging.ChainIdentityLockName),
+		"anchor registration": filepath.Join(stateDir, logging.AnchorRegistrationFileName),
 	} {
 		t.Run(name, func(t *testing.T) {
 			before, beforeErr := os.ReadFile(out)
@@ -547,7 +584,7 @@ func TestOCSFExportRefusesProtectedOut(t *testing.T) {
 			}
 		})
 	}
-	for _, dir := range []string{filepath.Dir(db), filepath.Dir(key), links} {
+	for _, dir := range []string{filepath.Dir(db), filepath.Dir(key), stateDir, links} {
 		entries, err := os.ReadDir(dir)
 		if err != nil {
 			t.Fatal(err)
@@ -570,5 +607,104 @@ func TestOCSFExportRefusesProtectedOut(t *testing.T) {
 	}
 	if _, err := os.Stat(db); err != nil {
 		t.Fatal(err)
+	}
+}
+
+// hardLink links target at p, a path in the same directory.
+func hardLink(t *testing.T, target, p string) string {
+	t.Helper()
+	if err := os.Link(target, p); err != nil {
+		t.Fatalf("hard link: %v", err)
+	}
+	return p
+}
+
+// TestOCSFExportPublishesIntoCheckedDirectory retargets a directory symlink in
+// the --out path after the checks, from a scratch directory to the one that
+// holds the audit database, with --out naming the database's file name. The
+// export must still land in the directory that was checked and leave the
+// database's bytes unchanged.
+func TestOCSFExportPublishesIntoCheckedDirectory(t *testing.T) {
+	db, key := setupAnchorProject(t)
+	seedOCSFFixture(t, db, key)
+	before, err := os.ReadFile(db)
+	if err != nil {
+		t.Fatal(err)
+	}
+	scratch := t.TempDir()
+	dirLink := filepath.Join(t.TempDir(), "out-dir")
+	if err := os.Symlink(scratch, dirLink); err != nil {
+		t.Fatal(err)
+	}
+	exportAfterChecks = func() {
+		if err := os.Remove(dirLink); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Symlink(filepath.Dir(db), dirLink); err != nil {
+			t.Fatal(err)
+		}
+	}
+	t.Cleanup(func() { exportAfterChecks = nil })
+
+	out := filepath.Join(dirLink, filepath.Base(db))
+	var stdout, stderr bytes.Buffer
+	if err := runAuditExport(context.Background(), &stdout, &stderr, "ocsf", out, "", false); err != nil {
+		t.Fatalf("export: %v\n%s", err, stderr.String())
+	}
+	if target, err := os.Readlink(dirLink); err != nil || target != filepath.Dir(db) {
+		t.Fatalf("the symlink was not retargeted during the export: %q %v", target, err)
+	}
+	after, err := os.ReadFile(db)
+	if err != nil || !bytes.Equal(before, after) {
+		t.Fatalf("the export replaced the audit database through the retargeted symlink: %v", err)
+	}
+	exported, err := os.ReadFile(filepath.Join(scratch, filepath.Base(db)))
+	if err != nil || bytes.Count(exported, []byte("\n")) != len(ocsfFixtureRows)+1 {
+		t.Fatalf("the export did not land in the checked directory: %v", err)
+	}
+}
+
+func TestOCSFExportRefusesJSONOrAudit(t *testing.T) {
+	for _, flagName := range []string{"json", "audit"} {
+		t.Run(flagName, func(t *testing.T) {
+			t.Cleanup(func() {
+				_ = verifyCmd.Flags().Set("export", "")
+				_ = verifyCmd.Flags().Set(flagName, "false")
+			})
+			if err := verifyCmd.Flags().Set("export", "ocsf"); err != nil {
+				t.Fatal(err)
+			}
+			if err := verifyCmd.Flags().Set(flagName, "true"); err != nil {
+				t.Fatal(err)
+			}
+			err := verifyCmd.RunE(verifyCmd, nil)
+			if err == nil || !strings.Contains(err.Error(), "--export cannot be combined with --json or --audit") {
+				t.Fatalf("want a refusal for --export with --%s, got %v", flagName, err)
+			}
+		})
+	}
+
+	// The allowed case: --export alone runs the export.
+	db, key := setupAnchorProject(t)
+	seedOCSFFixture(t, db, key)
+	out := filepath.Join(t.TempDir(), "audit.ocsf.jsonl")
+	t.Cleanup(func() {
+		_ = verifyCmd.Flags().Set("export", "")
+		_ = verifyCmd.Flags().Set("out", "")
+		verifyCmd.SetErr(nil)
+	})
+	var stderr bytes.Buffer
+	verifyCmd.SetErr(&stderr)
+	if err := verifyCmd.Flags().Set("export", "ocsf"); err != nil {
+		t.Fatal(err)
+	}
+	if err := verifyCmd.Flags().Set("out", out); err != nil {
+		t.Fatal(err)
+	}
+	if err := verifyCmd.RunE(verifyCmd, nil); err != nil {
+		t.Fatalf("--export alone: %v\n%s", err, stderr.String())
+	}
+	if _, err := os.Stat(out); err != nil {
+		t.Fatalf("--export alone wrote no file: %v", err)
 	}
 }

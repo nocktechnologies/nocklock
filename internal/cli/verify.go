@@ -86,6 +86,9 @@ var verifyCmd = &cobra.Command{
 			if anchorFile != "" || remoteAnchor {
 				return fmt.Errorf("--export cannot be combined with --against-anchor or --against-remote-anchor")
 			}
+			if asJSON || asAudit {
+				return fmt.Errorf("--export cannot be combined with --json or --audit: it runs the audit checks itself, reports them on stderr, and writes JSON lines")
+			}
 			cmd.SilenceUsage = true
 			requireClosed, _ := cmd.Flags().GetBool("require-closed")
 			return runAuditExport(cmd.Context(), cmd.OutOrStdout(), cmd.ErrOrStderr(), exportFormat, outPath, pubFlag, requireClosed)
@@ -362,10 +365,10 @@ func runAuditVerify(ctx context.Context, w io.Writer, pubFlag string, requireClo
 
 // verifyAuditLog runs the verify --audit checks and prints their report to w.
 // On a passing verdict it calls onPass, when set, with the still-open event
-// log, the public key the signatures were checked against (nil for a hash-only
+// log, the database path and project root it was opened from, the public key the signatures were checked against (nil for a hash-only
 // check) and the chain verdict, so verify --export reads the log it just
 // verified; an error from onPass is returned.
-func verifyAuditLog(ctx context.Context, w io.Writer, pubFlag string, requireClosed bool, onPass func(*logging.Logger, ed25519.PublicKey, *logging.ChainVerifyResult) error) error {
+func verifyAuditLog(ctx context.Context, w io.Writer, pubFlag string, requireClosed bool, onPass func(logger *logging.Logger, dbPath, projectRoot string, pub ed25519.PublicKey, checked *logging.ChainVerifyResult) error) error {
 	// unclosedRuns is populated once the run-lifecycle pass runs, so the deferred
 	// coverage notice (which may also fire on an early tamper return) can name any
 	// run missing its close. The closure reads it at return time, not defer time.
@@ -444,7 +447,7 @@ func verifyAuditLog(ctx context.Context, w io.Writer, pubFlag string, requireClo
 		return &exitCodeError{code: 1}
 	}
 	if onPass != nil {
-		return onPass(logger, pub, result)
+		return onPass(logger, dbPath, projectRoot, pub, result)
 	}
 	return nil
 }

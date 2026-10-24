@@ -4,15 +4,19 @@ import (
 	"bytes"
 	"context"
 	"crypto/ed25519"
+	"crypto/rand"
 	"encoding/base64"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 
+	"github.com/nocktechnologies/nocklock/internal/config"
 	"github.com/nocktechnologies/nocklock/internal/logging"
 	"github.com/nocktechnologies/nocklock/internal/ocsf"
 	"github.com/nocktechnologies/nocklock/internal/version"
@@ -28,8 +32,8 @@ var exportAfterChecks func()
 // second chain verification (logging.ReadVerifiedChain), and the export is
 // refused unless that chain ends at the same head as the one the checks
 // covered, so the export is exactly the log those checks passed. The export is
-// built in memory and published only once complete: with --out by rename,
-// otherwise to stdout.
+// built in memory and published only once complete: with --out by rename
+// inside the --out directory opened before the checks, otherwise to stdout.
 func runAuditExport(ctx context.Context, stdout, stderr io.Writer, format, outPath, pubFlag string, requireClosed bool) error {
 	if format != "ocsf" {
 		return fmt.Errorf("unsupported --export format %q: the supported format is ocsf", format)
@@ -38,12 +42,21 @@ func runAuditExport(ctx context.Context, stdout, stderr io.Writer, format, outPa
 		fmt.Fprintln(stderr, "EXPORT: REFUSED — nothing was written")
 		return err
 	}
-	if err := refuseProtectedOut(outPath); err != nil {
+	root, name, err := openOutDir(outPath)
+	if err != nil {
 		return refuse(err)
+	}
+	if root != nil {
+		defer root.Close()
 	}
 	var buf bytes.Buffer
 	var trailer ocsf.Trailer
-	err := verifyAuditLog(ctx, stderr, pubFlag, requireClosed, func(logger *logging.Logger, pub ed25519.PublicKey, checked *logging.ChainVerifyResult) error {
+	err = verifyAuditLog(ctx, stderr, pubFlag, requireClosed, func(logger *logging.Logger, dbPath, projectRoot string, pub ed25519.PublicKey, checked *logging.ChainVerifyResult) error {
+		if root != nil {
+			if err := refuseProtectedOut(root, name, outPath, dbPath, projectRoot); err != nil {
+				return err
+			}
+		}
 		if exportAfterChecks != nil {
 			exportAfterChecks()
 		}
@@ -102,7 +115,7 @@ func runAuditExport(ctx context.Context, stdout, stderr io.Writer, format, outPa
 			return fmt.Errorf("export: write stdout: %w", err)
 		}
 	} else {
-		if err := publishExport(outPath, buf.Bytes()); err != nil {
+		if err := publishExport(root, name, outPath, buf.Bytes()); err != nil {
 			return refuse(err)
 		}
 		dest = outPath
@@ -111,55 +124,73 @@ func runAuditExport(ctx context.Context, stdout, stderr io.Writer, format, outPa
 	return nil
 }
 
-// refuseProtectedOut errors when outPath, after symlinks, names the audit
-// database, one of its SQLite sidecars, or the managed signing key: publishing
-// the export by rename would replace the log or key it was read from. An empty
-// outPath (stdout) passes.
-func refuseProtectedOut(outPath string) error {
+// openOutDir opens the directory that will hold --out, before the checks. The
+// protected-file check (refuseProtectedOut) and the publish both go through
+// the returned root, so swapping a symlink in the --out path during the export
+// cannot redirect the rename. An empty outPath (stdout) returns a nil root.
+func openOutDir(outPath string) (*os.Root, string, error) {
 	if outPath == "" {
-		return nil
+		return nil, "", nil
 	}
-	dbPath, _, err := resolveAuditDBPath()
+	abs, err := filepath.Abs(outPath)
 	if err != nil {
-		return err
+		return nil, "", fmt.Errorf("export: --out %s: %w", outPath, err)
 	}
-	protected := []string{dbPath, dbPath + "-wal", dbPath + "-shm", dbPath + "-journal"}
+	dir, err := filepath.EvalSymlinks(filepath.Dir(abs))
+	if err != nil {
+		return nil, "", fmt.Errorf("export: --out %s: its directory must exist: %w", outPath, err)
+	}
+	root, err := os.OpenRoot(dir)
+	if err != nil {
+		return nil, "", fmt.Errorf("export: --out %s: %w", outPath, err)
+	}
+	return root, filepath.Base(abs), nil
+}
+
+// refuseProtectedOut errors when name in root is, by directory and name or by
+// file identity, a file the export must not replace: the audit database it
+// read (dbPath, as opened, not resolved again), its SQLite sidecars, its chain
+// anchor, the managed signing key or a trusted chain identity file. Names
+// compare case-insensitively, failing closed on case-insensitive filesystems.
+func refuseProtectedOut(root *os.Root, name, outPath, dbPath, projectRoot string) error {
+	protected := []string{dbPath, dbPath + "-wal", dbPath + "-shm", dbPath + "-journal", logging.DefaultAnchorPath(dbPath)}
 	if keyPath, err := logging.DefaultSigningKeyPath(); err == nil {
 		protected = append(protected, keyPath)
 	}
-	out := absResolved(outPath)
+	if stateDir, err := config.AuditStateDir(projectRoot); err == nil {
+		for _, n := range []string{logging.ChainIdentityFileName, logging.ChainIdentityLockName, logging.AnchorRegistrationFileName} {
+			protected = append(protected, filepath.Join(stateDir, n))
+		}
+	}
+	dirInfo, err := root.Stat(".")
+	if err != nil {
+		return fmt.Errorf("export: --out %s: %w", outPath, err)
+	}
+	// The rename replaces name itself, never a symlink's target, so following
+	// a symlink here only refuses a path that reads as the protected file.
+	target, targetErr := os.Stat(filepath.Join(root.Name(), name))
 	for _, p := range protected {
-		if rp := absResolved(p); rp == out || sameExistingFile(rp, out) {
+		pDir, err := os.Stat(filepath.Dir(p))
+		sameName := err == nil && os.SameFile(pDir, dirInfo) && strings.EqualFold(filepath.Base(p), name)
+		pInfo, err := os.Stat(p)
+		sameFile := err == nil && targetErr == nil && os.SameFile(pInfo, target)
+		if sameName || sameFile {
 			return fmt.Errorf("export: --out %s is %s, which the export must not replace; choose another path", outPath, p)
 		}
 	}
 	return nil
 }
 
-// absResolved returns p made absolute with the symlinks in its existing
-// prefix resolved.
-func absResolved(p string) string {
-	if abs, err := filepath.Abs(p); err == nil {
-		p = abs
+// publishExport writes data to a temporary file in root, syncs it, and renames
+// it onto name, so a reader never sees a partial export. The file is created
+// 0600: it holds the audit log.
+func publishExport(root *os.Root, name, outPath string, data []byte) error {
+	var suffix [8]byte
+	if _, err := rand.Read(suffix[:]); err != nil {
+		return fmt.Errorf("export: %w", err)
 	}
-	return resolveExistingPrefix(p)
-}
-
-// sameExistingFile reports whether a and b both exist and are the same file.
-func sameExistingFile(a, b string) bool {
-	ai, err := os.Stat(a)
-	if err != nil {
-		return false
-	}
-	bi, err := os.Stat(b)
-	return err == nil && os.SameFile(ai, bi)
-}
-
-// publishExport writes data to a temporary file beside outPath, syncs it, and
-// renames it onto outPath, so a reader never sees a partial export. The file
-// is created 0600: it holds the audit log.
-func publishExport(outPath string, data []byte) error {
-	tmp, err := os.CreateTemp(filepath.Dir(outPath), "."+filepath.Base(outPath)+".tmp-*")
+	tmpName := "." + name + ".tmp-" + hex.EncodeToString(suffix[:])
+	tmp, err := root.OpenFile(tmpName, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
 	if err != nil {
 		return fmt.Errorf("export: create a temporary file next to %s: %w", outPath, err)
 	}
@@ -171,10 +202,10 @@ func publishExport(outPath string, data []byte) error {
 		err = cerr
 	}
 	if err == nil {
-		err = os.Rename(tmp.Name(), outPath)
+		err = root.Rename(tmpName, name)
 	}
 	if err != nil {
-		os.Remove(tmp.Name())
+		root.Remove(tmpName)
 		return fmt.Errorf("export: write %s: %w", outPath, err)
 	}
 	return nil

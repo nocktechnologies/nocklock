@@ -107,7 +107,9 @@ def main():
     if not events:
         raise SystemExit("no events to validate")
 
-    control = copy.deepcopy(events[0][1])
+    where, control = events[0][0], copy.deepcopy(events[0][1])
+    if "severity_id" not in control or control.get("class_uid") not in validators:
+        raise SystemExit(f"negative control: {where} needs severity_id and an exported class_uid to build the control from")
     del control["severity_id"]
     if not list(validators[control["class_uid"]].iter_errors(control)):
         raise SystemExit("negative control: an event without severity_id validated; the check proves nothing")
