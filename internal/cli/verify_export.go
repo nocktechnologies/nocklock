@@ -34,6 +34,13 @@ func runAuditExport(ctx context.Context, stdout, stderr io.Writer, format, outPa
 	if format != "ocsf" {
 		return fmt.Errorf("unsupported --export format %q: the supported format is ocsf", format)
 	}
+	refuse := func(err error) error {
+		fmt.Fprintln(stderr, "EXPORT: REFUSED — nothing was written")
+		return err
+	}
+	if err := refuseProtectedOut(outPath); err != nil {
+		return refuse(err)
+	}
 	var buf bytes.Buffer
 	var trailer ocsf.Trailer
 	err := verifyAuditLog(ctx, stderr, pubFlag, requireClosed, func(logger *logging.Logger, pub ed25519.PublicKey, checked *logging.ChainVerifyResult) error {
@@ -84,10 +91,6 @@ func runAuditExport(ctx context.Context, stdout, stderr io.Writer, format, outPa
 		}
 		return nil
 	})
-	refuse := func(err error) error {
-		fmt.Fprintln(stderr, "EXPORT: REFUSED — nothing was written")
-		return err
-	}
 	if err != nil {
 		return refuse(err)
 	}
@@ -106,6 +109,50 @@ func runAuditExport(ctx context.Context, stdout, stderr io.Writer, format, outPa
 	}
 	fmt.Fprintf(stderr, "EXPORT: OCSF %s, %d row event(s) and 1 trailer written to %s (%s)\n", ocsf.Version, trailer.RowCount, dest, trailer.Verdict)
 	return nil
+}
+
+// refuseProtectedOut errors when outPath, after symlinks, names the audit
+// database, one of its SQLite sidecars, or the managed signing key: publishing
+// the export by rename would replace the log or key it was read from. An empty
+// outPath (stdout) passes.
+func refuseProtectedOut(outPath string) error {
+	if outPath == "" {
+		return nil
+	}
+	dbPath, _, err := resolveAuditDBPath()
+	if err != nil {
+		return err
+	}
+	protected := []string{dbPath, dbPath + "-wal", dbPath + "-shm", dbPath + "-journal"}
+	if keyPath, err := logging.DefaultSigningKeyPath(); err == nil {
+		protected = append(protected, keyPath)
+	}
+	out := absResolved(outPath)
+	for _, p := range protected {
+		if rp := absResolved(p); rp == out || sameExistingFile(rp, out) {
+			return fmt.Errorf("export: --out %s is %s, which the export must not replace; choose another path", outPath, p)
+		}
+	}
+	return nil
+}
+
+// absResolved returns p made absolute with the symlinks in its existing
+// prefix resolved.
+func absResolved(p string) string {
+	if abs, err := filepath.Abs(p); err == nil {
+		p = abs
+	}
+	return resolveExistingPrefix(p)
+}
+
+// sameExistingFile reports whether a and b both exist and are the same file.
+func sameExistingFile(a, b string) bool {
+	ai, err := os.Stat(a)
+	if err != nil {
+		return false
+	}
+	bi, err := os.Stat(b)
+	return err == nil && os.SameFile(ai, bi)
 }
 
 // publishExport writes data to a temporary file beside outPath, syncs it, and

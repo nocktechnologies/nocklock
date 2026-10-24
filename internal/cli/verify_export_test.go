@@ -509,3 +509,66 @@ func TestOCSFExportRefusesLogChangedAfterChecks(t *testing.T) {
 		t.Fatalf("refused export left %s behind: %v", out, err)
 	}
 }
+
+func TestOCSFExportRefusesProtectedOut(t *testing.T) {
+	db, key := setupAnchorProject(t)
+	seedOCSFFixture(t, db, key)
+	links := t.TempDir()
+	link := func(name, target string) string {
+		p := filepath.Join(links, name)
+		if err := os.Symlink(target, p); err != nil {
+			t.Fatal(err)
+		}
+		return p
+	}
+	dbDirLink := link("state-dir", filepath.Dir(db))
+
+	for name, out := range map[string]string{
+		"db":                  db,
+		"symlink to db":       link("db.jsonl", db),
+		"wal":                 db + "-wal",
+		"shm via dir symlink": filepath.Join(dbDirLink, filepath.Base(db)+"-shm"),
+		"key":                 key,
+		"symlink to key":      link("key.jsonl", key),
+	} {
+		t.Run(name, func(t *testing.T) {
+			before, beforeErr := os.ReadFile(out)
+			var stdout, stderr bytes.Buffer
+			err := runAuditExport(context.Background(), &stdout, &stderr, "ocsf", out, "", false)
+			if err == nil || !strings.Contains(err.Error(), "must not replace") {
+				t.Fatalf("want a refusal for --out %s, got %v\n%s", out, err, stderr.String())
+			}
+			if !strings.Contains(stderr.String(), "EXPORT: REFUSED") || stdout.Len() != 0 {
+				t.Fatalf("refusal not reported, or export written to stdout:\n%s", stderr.String())
+			}
+			after, afterErr := os.ReadFile(out)
+			if !bytes.Equal(before, after) || (beforeErr == nil) != (afterErr == nil) {
+				t.Fatalf("refused export changed %s", out)
+			}
+		})
+	}
+	for _, dir := range []string{filepath.Dir(db), filepath.Dir(key), links} {
+		entries, err := os.ReadDir(dir)
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, e := range entries {
+			if strings.Contains(e.Name(), ".tmp-") {
+				t.Fatalf("refused export left %s in %s", e.Name(), dir)
+			}
+		}
+	}
+
+	// The allowed case: a sibling of the database in the same directory exports.
+	out := filepath.Join(filepath.Dir(db), "audit.ocsf.jsonl")
+	var stdout, stderr bytes.Buffer
+	if err := runAuditExport(context.Background(), &stdout, &stderr, "ocsf", out, "", false); err != nil {
+		t.Fatalf("export beside the database: %v\n%s", err, stderr.String())
+	}
+	if lines, err := os.ReadFile(out); err != nil || bytes.Count(lines, []byte("\n")) != len(ocsfFixtureRows)+1 {
+		t.Fatalf("export beside the database: %v", err)
+	}
+	if _, err := os.Stat(db); err != nil {
+		t.Fatal(err)
+	}
+}

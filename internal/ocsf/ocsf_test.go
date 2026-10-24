@@ -1,6 +1,7 @@
 package ocsf
 
 import (
+	"encoding/base64"
 	"testing"
 
 	"github.com/nocktechnologies/nocklock/internal/logging"
@@ -39,8 +40,21 @@ func TestFromRowFallbacks(t *testing.T) {
 	if p := mustMap(t, row(logging.EventSessionStart, `command="/usr/bin/node" lifecycle=1`, false)).Process; p.CmdLine != "/usr/bin/node" || p.Name != "node" {
 		t.Fatalf("command= form: got %+v", p)
 	}
-	if p := mustMap(t, row(logging.EventSessionStart, "/usr/bin/make test", false)).Process; p.CmdLine != "/usr/bin/make test" {
+	if p := mustMap(t, row(logging.EventSessionStart, "/usr/bin/make test", false)).Process; p.CmdLine != "/usr/bin/make test" || p.Name != "make" {
 		t.Fatalf("bare session_start form must keep the whole detail as cmd_line, got %+v", p)
+	}
+	// A slash in an argument must not rename the process to the argument's
+	// base name; the name is always the executable's.
+	if p := mustMap(t, row(logging.EventSessionStart, "/usr/bin/node scripts/run.js --out=/tmp/x", false)).Process; p.Name != "node" || p.CmdLine != "/usr/bin/node scripts/run.js --out=/tmp/x" {
+		t.Fatalf("process.name must be the executable's base name, got %+v", p)
+	}
+	if p := mustMap(t, row(logging.EventSessionStart, "claude --add-dir ../shared/lib", false)).Process; p.Name != "claude" {
+		t.Fatalf("a bare executable name with path arguments: got %+v", p)
+	}
+	// The quoted command= value is the executable alone, so a space in its
+	// path is part of the name, not a word break.
+	if p := mustMap(t, row(logging.EventSessionStart, `command="/opt/My Tools/claude" lifecycle=1`, false)).Process; p.Name != "claude" || p.CmdLine != "/opt/My Tools/claude" {
+		t.Fatalf("a quoted executable path with a space: got %+v", p)
 	}
 
 	state := logging.EventFilesystemFenceState
@@ -73,6 +87,34 @@ func TestFromRowRejectsBadRows(t *testing.T) {
 	r.SessionID = "s\xff"
 	if _, err := FromRow(r, "test"); err == nil {
 		t.Fatal("a non-UTF-8 session_id mapped; it cannot be exported verbatim")
+	}
+}
+
+// The reader rule in audit-log.md: detail is the stored bytes with each
+// maximal run of invalid bytes replaced by one U+FFFD, and detail_base64 is
+// set only then.
+func TestFromRowInvalidDetail(t *testing.T) {
+	for _, tc := range []struct{ stored, detail string }{
+		{"a\xffb", "a\uFFFDb"},
+		{"a\xff\xfeb", "a\uFFFDb"},
+		{"a\xff\xfe\xfdb\xc0\xafc", "a\uFFFDb\uFFFDc"},
+		{"\xe2\x82\xff", "\uFFFD"}, // a truncated sequence and a stray byte are one run
+		{"caf\u00e9 \xff\xff", "caf\u00e9 \uFFFD"},
+	} {
+		e := mustMap(t, row(logging.EventFileBlocked, tc.stored, true))
+		if e.Message != tc.detail {
+			t.Errorf("stored %q: message = %q, want %q (the same rendering as detail)", tc.stored, e.Message, tc.detail)
+		}
+		r := e.Unmapped.NockLock
+		if r.Detail != tc.detail {
+			t.Errorf("stored %q: detail = %q, want %q", tc.stored, r.Detail, tc.detail)
+		}
+		if raw, err := base64.StdEncoding.DecodeString(r.DetailBase64); err != nil || string(raw) != tc.stored {
+			t.Errorf("stored %q: detail_base64 does not decode to the stored bytes: %q %v", tc.stored, raw, err)
+		}
+	}
+	if r := mustMap(t, row(logging.EventFileBlocked, "caf\u00e9", true)).Unmapped.NockLock; r.DetailBase64 != "" || r.Detail != "caf\u00e9" {
+		t.Fatalf("a valid UTF-8 detail travels as is, without detail_base64: got %+v", r)
 	}
 }
 

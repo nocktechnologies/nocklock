@@ -195,7 +195,9 @@ func FromRow(r logging.ChainRow, productVersion string) (Event, error) {
 		return Event{}, err
 	}
 	blocked := r.Blocked != 0
-	detail := logging.DecodeEventDetail(r.EventType, r.Detail)
+	// The mapped fields follow the same one-U+FFFD-per-run rendering as
+	// unmapped.nocklock.detail, not encoding/json's one per invalid byte.
+	detail := strings.ToValidUTF8(logging.DecodeEventDetail(r.EventType, r.Detail), "\uFFFD")
 	e := baseEvent(productVersion, r.EntryHash, r.SessionID, ts)
 	e.Message = detail
 	e.Metadata.Sequence = r.ID
@@ -209,8 +211,8 @@ func FromRow(r logging.ChainRow, productVersion string) (Event, error) {
 	switch logging.EventType(r.EventType) {
 	case logging.EventSessionStart:
 		e.setClass(ClassProcessActivity, 1, "Launch")
-		cmd := sessionCommand(detail)
-		e.Process = &Process{Name: path.Base(cmd), CmdLine: cmd, UID: child}
+		cmd, name := sessionCommand(detail)
+		e.Process = &Process{Name: name, CmdLine: cmd, UID: child}
 		e.setStatus(true)
 	case logging.EventSessionEnd:
 		e.setClass(ClassProcessActivity, 2, "Terminate")
@@ -335,6 +337,8 @@ func verbatimRow(r logging.ChainRow) (Row, error) {
 	}
 	row := Row{ChainRow: r}
 	if !utf8.ValidString(r.Detail) {
+		// Each maximal run of invalid bytes becomes one U+FFFD; the reader
+		// rule in audit-log.md checks detail against exactly this rendering.
 		row.Detail = strings.ToValidUTF8(r.Detail, "\uFFFD")
 		row.DetailBase64 = base64.StdEncoding.EncodeToString([]byte(r.Detail))
 	}
@@ -367,17 +371,30 @@ func endpoint(detail string) *Endpoint {
 	return &Endpoint{Hostname: host}
 }
 
-// sessionCommand returns the wrapped command of a session_start detail:
-// the quoted command= value, or the whole detail in the older bare form.
-func sessionCommand(detail string) string {
+// sessionCommand returns the wrapped command of a session_start detail and
+// the base name of its executable ("" when there is none). The quoted
+// command= value is the executable alone (wrap records argv[0], which may
+// contain spaces), so it is both. The older bare form is the whole command
+// line, whose first word is the executable, so a slash in an argument cannot
+// rename the process.
+func sessionCommand(detail string) (cmd, name string) {
 	if rest, ok := strings.CutPrefix(detail, "command="); ok {
 		if q, err := strconv.QuotedPrefix(rest); err == nil {
-			if cmd, err := strconv.Unquote(q); err == nil {
-				return cmd
+			if c, err := strconv.Unquote(q); err == nil {
+				return c, baseName(c)
 			}
 		}
 	}
-	return detail
+	exe, _, _ := strings.Cut(strings.TrimSpace(detail), " ")
+	return detail, baseName(exe)
+}
+
+// baseName is path.Base, except that an empty path has no name.
+func baseName(p string) string {
+	if p == "" {
+		return ""
+	}
+	return path.Base(p)
 }
 
 // blockedFile returns the file a file_blocked row names: the path= value of
