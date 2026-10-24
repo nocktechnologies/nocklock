@@ -388,22 +388,34 @@ func TestOCSFExportVerifiesFromExportAlone(t *testing.T) {
 	if err := verifyExport(t, edit(2, `"detail":"DEPLOY_API_TOKEN"`, `"detail":"harmless","detail_base64":"`+original+`"`)); err == nil {
 		t.Fatal("a detail rewritten behind detail_base64 still verified")
 	}
-	var row struct {
-		Unmapped struct {
-			NockLock ocsf.Row `json:"nocklock"`
-		} `json:"unmapped"`
+	stripSig := func(c []string, i int) {
+		var row struct {
+			Unmapped struct {
+				NockLock ocsf.Row `json:"nocklock"`
+			} `json:"unmapped"`
+		}
+		if err := json.Unmarshal([]byte(c[i]), &row); err != nil {
+			t.Fatal(err)
+		}
+		if row.Unmapped.NockLock.ID != int64(i+1) || row.Unmapped.NockLock.EntrySig == "" {
+			t.Fatalf("line %d is not signed row %d", i, i+1)
+		}
+		c[i] = strings.Replace(c[i], `"entry_sig":"`+row.Unmapped.NockLock.EntrySig+`"`, `"entry_sig":""`, 1)
 	}
-	if err := json.Unmarshal([]byte(lines[2]), &row); err != nil {
-		t.Fatal(err)
-	}
-	stripped := edit(2, `"entry_sig":"`+row.Unmapped.NockLock.EntrySig+`"`, `"entry_sig":""`)
+	stripped := append([]string{}, lines...)
+	stripSig(stripped, 2)
 	if err := verifyExport(t, stripped); err == nil {
 		t.Fatal("a stripped row signature still verified")
 	}
+	// Strip rows 1 to 3 so every row passes the per-row checks under the
+	// claimed prefix; only the binding of unsigned_through_id to the signed
+	// head can then catch it.
+	stripSig(stripped, 0)
+	stripSig(stripped, 1)
 	last := len(lines) - 1
 	stripped[last] = strings.Replace(stripped[last], `"chain_head":`, `"unsigned_through_id":3,"chain_head":`, 1)
-	if err := verifyExport(t, stripped); err == nil {
-		t.Fatal("a stripped row signature excused by a claimed unsigned prefix still verified")
+	if err := verifyExport(t, stripped); err == nil || !strings.Contains(err.Error(), "differs from the signed head") {
+		t.Fatalf("stripped row signatures excused by a claimed unsigned prefix: want the head-binding error, got %v", err)
 	}
 	if err := verifyExport(t, append(append([]string{}, lines[:3]...), lines[4:]...)); err == nil {
 		t.Fatal("an export missing a row still verified")

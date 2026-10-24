@@ -10,7 +10,8 @@ else is relaxed.
 The schema server renders each class on request and can take minutes, so the
 schemas are downloaded into --schema-dir only when missing there (CI caches that
 directory). Every file, cached or fresh, is checked against the SHA-256 digests
-below before use; a changed schema fails the check instead of being trusted.
+below before use. A cached file that mismatches is deleted and downloaded once
+more; a fresh download that mismatches fails the check instead of being trusted.
 When the exporter's OCSF version changes, bump OCSF_VERSION and every digest
 together.
 
@@ -56,23 +57,45 @@ def fetch(url, retries=3):
             print(f"{url}: attempt {attempt} failed ({err}); retrying")
 
 
-def load_validator(schema_dir, name, digest):
-    path = os.path.join(schema_dir, f"{OCSF_VERSION}-{name}.json")
-    url = SCHEMA_URL.format(version=OCSF_VERSION, name=name)
-    if not os.path.exists(path):
-        body = fetch(url)
-        tmp = path + ".tmp"
-        with open(tmp, "wb") as f:
-            f.write(body)
-        os.replace(tmp, path)
-    with open(path, "rb") as f:
-        body = f.read()
-    got = hashlib.sha256(body).hexdigest()
+def download(url, path):
+    body = fetch(url)
+    tmp = path + ".tmp"
+    with open(tmp, "wb") as f:
+        f.write(body)
+    os.replace(tmp, path)
+
+
+def verified_schema(path, url, digest):
+    """Return the schema bytes at path, downloading them when missing.
+
+    A cached file whose digest mismatches (a stale or damaged cache) is
+    replaced by one fresh download; a fresh download that mismatches fails.
+    """
+    def read():
+        with open(path, "rb") as f:
+            body = f.read()
+        return body, hashlib.sha256(body).hexdigest()
+
+    cached = os.path.exists(path)
+    if not cached:
+        download(url, path)
+    body, got = read()
+    if got != digest and cached:
+        print(f"{path}: cached SHA-256 {got} does not match the pinned {digest}; downloading again")
+        os.remove(path)
+        download(url, path)
+        body, got = read()
     if got != digest:
         os.remove(path)
         raise SystemExit(f"{url}: SHA-256 {got} does not match the pinned {digest}; "
                          "review the schema change and bump the digest deliberately")
-    schema = json.loads(body)
+    return body
+
+
+def load_validator(schema_dir, name, digest):
+    path = os.path.join(schema_dir, f"{OCSF_VERSION}-{name}.json")
+    url = SCHEMA_URL.format(version=OCSF_VERSION, name=name)
+    schema = json.loads(verified_schema(path, url, digest))
     schema["required"] = [r for r in schema.get("required", []) if r not in RELAXED]
     cls = jsonschema.validators.validator_for(schema)
     cls.check_schema(schema)
