@@ -99,6 +99,29 @@ jobs:
         if: steps.changes.outputs.code == 'true'
         run: go test ./... -count=1
 
+      # The suite above proves `verify --export ocsf` reproduces this golden
+      # export byte for byte; this step validates the golden against the pinned
+      # OCSF class schemas. The schema server renders slowly, so the schemas are
+      # cached; the script checks their SHA-256 digests on every run.
+      - name: cache OCSF schemas
+        if: steps.changes.outputs.code == 'true'
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/nocklock-ocsf-schema
+          key: ocsf-schema-${{ hashFiles('scripts/check-ocsf-schema.py') }}
+          restore-keys: ocsf-schema-
+
+      - name: OCSF export schema check
+        if: steps.changes.outputs.code == 'true'
+        timeout-minutes: 20
+        run: |
+          python3 -m venv "$RUNNER_TEMP/ocsf-venv"
+          "$RUNNER_TEMP/ocsf-venv/bin/pip" install --quiet 'jsonschema==4.23.0'
+          PYTHONDONTWRITEBYTECODE=1 "$RUNNER_TEMP/ocsf-venv/bin/python" -m unittest discover -s scripts -p test_ocsf_schema_cache.py -v
+          "$RUNNER_TEMP/ocsf-venv/bin/python" scripts/check-ocsf-schema.py \
+            --schema-dir "$HOME/.cache/nocklock-ocsf-schema" \
+            internal/cli/testdata/ocsf/export.golden.jsonl
+
       - name: Landlock probe thread-affinity regression
         if: steps.changes.outputs.code == 'true'
         run: |

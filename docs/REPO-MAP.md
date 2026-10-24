@@ -1,6 +1,6 @@
 # Repo map
 
-One line per directory or key package: what lives there and where its tests are. Paths verified against `origin/next` bc13d3b plus this change (2026-10-22). For the file-level tree see `ARCHITECTURE.md`; if this page and the code disagree, the code wins.
+One line per directory or key package: what lives there and where its tests are. Paths verified against `origin/next` 6f27bc2 plus this change (2026-10-23). For the file-level tree see `ARCHITECTURE.md`; if this page and the code disagree, the code wins.
 
 Go tests sit beside the code as `*_test.go`. Files ending `_linux_test.go` or `_darwin_test.go` run on that OS only.
 
@@ -40,6 +40,7 @@ Go tests sit beside the code as `*_test.go`. Files ending `_linux_test.go` or `_
 | `internal/fence/network/netns/` | Linux `--net-fence=netns`: network namespace, nftables floor, transparent proxy, egress helper, subnet reservation | `*_linux_test.go` here (`netns_bypass`, `protocol_matrix`, `dns_escape`, `subnet_reservation`) |
 | `internal/logging/` | SQLite event log: hash chain, Ed25519 signing (`signing.go`), default v1 anchors (`anchor.go`), opt-in v2 record format (`anchor_v2.go`), offline rotation endorsements (`rotation_endorsement.go`), trusted identity/enrollment and prune lock (`chain_identity.go`, `chain_identity_lock_*.go`), verified v2 lifecycle and durable registration replay (`anchor_chain.go`), signed verification receipt / prefix rescan (`verify_receipt.go`), durable signed run close and lifecycle verifier (`run_close.go`), chain export | `logger_test.go`, `signing_test.go`, `anchor_test.go`, `anchor_v2_test.go`, `chain_identity*_test.go`, `anchor_chain_test.go`, `anchor_remediation_test.go` (retained-request, strict-open and WAL controls), `anchor_verify_profile_test.go` (env-gated profiling recipe), `anchor_head_only_test.go` (head-only shortcut negative control), `verify_receipt_test.go` (receipt negative controls 1-19, differential and mutation), `run_close_test.go` (run lifecycle acceptance controls), `testdata/anchor-v2/` (public interoperability vectors), `rotation_endorsement_test.go` and `testdata/rotation-endorsement/` (offline transition vectors), `logger_symlink_test.go` |
 | `internal/anchorclient/` | Shared HTTP transport (`client.go`) and authenticated v2 registration/migration/CAS (`client_v2.go`) | `client_test.go`, `client_v2_test.go` |
+| `internal/ocsf/` | OCSF event mapping for `verify --export ocsf`: the pinned OCSF version and class UIDs, one event per audit row, and the chain-evidence trailer (`ocsf.go`) | `internal/ocsf/ocsf_test.go` (mapper fallbacks, rejected rows); `internal/cli/verify_export_test.go` (golden export `internal/cli/testdata/ocsf/`, hash recompute, refuse on a bad chain); CI schema check `scripts/check-ocsf-schema.py` (cache controls `scripts/test_ocsf_schema_cache.py`) |
 | `internal/forward/` | Opt-in `[audit.forward]` queue that sends decisions to Command's ops log (`forward.go`) | `forward_test.go` |
 | `internal/version/` | Version string, set by ldflags | `version_test.go` |
 

@@ -260,7 +260,7 @@ func TestChainIdentityRejectsPartialCorruptAndMismatchedState(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			lock := filepath.Join(filepath.Dir(f.record), chainIdentityLockName)
+			lock := filepath.Join(filepath.Dir(f.record), ChainIdentityLockName)
 			switch corruption {
 			case "missing_record":
 				err = os.Remove(f.record)

@@ -20,7 +20,9 @@ import (
 // audit state directory. It is never selected by logging.db or stored in the DB.
 const ChainIdentityFileName = "chain-identity.json"
 
-const chainIdentityLockName = "chain-identity.lock"
+// ChainIdentityLockName is the lock file beside ChainIdentityFileName that
+// serializes identity reads and writes; it is never unlinked or replaced.
+const ChainIdentityLockName = "chain-identity.lock"
 
 const pruneIdentityLockTimeout = 5 * time.Second
 
@@ -477,7 +479,7 @@ func (l *Logger) lockChainIdentityStoreContext(ctx context.Context) (*chainIdent
 		syncRootFile = (*os.File).Sync
 	}
 	store := &chainIdentityStore{root: root, lock: lock, syncRoot: syncRoot, syncFile: syncFile, syncRootFile: syncRootFile}
-	if err := store.checkFile(chainIdentityLockName, lock); err != nil {
+	if err := store.checkFile(ChainIdentityLockName, lock); err != nil {
 		store.close()
 		return nil, err
 	}
@@ -486,7 +488,7 @@ func (l *Logger) lockChainIdentityStoreContext(ctx context.Context) (*chainIdent
 		return nil, fmt.Errorf("cannot lock trusted chain identity: %w", err)
 	}
 	// Catch a replacement while we were waiting on another process's lock.
-	if err := store.checkFile(chainIdentityLockName, lock); err != nil {
+	if err := store.checkFile(ChainIdentityLockName, lock); err != nil {
 		store.close()
 		return nil, err
 	}
@@ -499,9 +501,9 @@ func openChainIdentityLock(root *os.Root) (*os.File, error) {
 	// O_EXCL makes creation atomic; only EEXIST permits opening the existing
 	// file, still relative to the same anchored root and without symlink follow.
 	flags := os.O_RDWR | oNoFollow | identityNonBlock
-	f, err := root.OpenFile(chainIdentityLockName, flags|os.O_CREATE|os.O_EXCL, 0o600)
+	f, err := root.OpenFile(ChainIdentityLockName, flags|os.O_CREATE|os.O_EXCL, 0o600)
 	if errors.Is(err, os.ErrExist) {
-		return root.OpenFile(chainIdentityLockName, flags, 0)
+		return root.OpenFile(ChainIdentityLockName, flags, 0)
 	}
 	return f, err
 }
