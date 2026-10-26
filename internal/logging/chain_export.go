@@ -1,6 +1,7 @@
 package logging
 
 import (
+	"context"
 	"crypto/ed25519"
 	"database/sql"
 	"errors"
@@ -110,4 +111,76 @@ func (h ChainHead) CanonicalBytes() ([]byte, error) {
 // same check nocklock verify applies. An empty or malformed signature is false.
 func (h ChainHead) VerifySig(pub ed25519.PublicKey) bool {
 	return verifyHeadSig(pub, h.Hash, h.RowCount, h.meta, h.Sig)
+}
+
+// DecodeEventDetail returns the human detail of a stored detail column. Only
+// session_start rows carry the versioned JSON envelope; every other row, and a
+// session_start without one, returns stored unchanged.
+func DecodeEventDetail(eventType, stored string) string {
+	detail, _ := decodeEventDetail(EventType(eventType), stored)
+	return detail
+}
+
+// ChainRow is one events row exactly as stored: every column the entry_hash,
+// the hash link, and the entry_sig cover, with no decoding applied. Its JSON
+// tags are the unmapped.nocklock format of verify --export ocsf, which
+// downstream readers recompute hashes from: do not rename them.
+type ChainRow struct {
+	ID        int64  `json:"id"`
+	Timestamp string `json:"timestamp"` // the stored canonical timestamp string
+	EventType string `json:"event_type"`
+	Category  string `json:"category"`
+	Detail    string `json:"detail"`  // the stored detail column, including any envelope
+	Blocked   int64  `json:"blocked"` // the stored integer; nonzero means blocked
+	SessionID string `json:"session_id"`
+	PrevHash  string `json:"prev_hash"`
+	EntryHash string `json:"entry_hash"`
+	EntrySig  string `json:"entry_sig"` // base64 Ed25519 signature, empty when unsigned
+}
+
+// ReadVerifiedChain verifies the chain exactly as VerifyChainSignedContext does
+// and, only when the verdict passes (intact, and neither forged nor suspect),
+// passes every events row in id order to fn, reading the rows and the
+// returned chain head in the same read transaction as the verdict. The rows fn
+// sees are therefore the rows the returned verdict covers, even while a writer
+// appends. A failing verdict is an error naming the break, with fn never
+// called. The head is zero when the log has no chain_head record. An error
+// from fn stops the read and is returned.
+func (l *Logger) ReadVerifiedChain(ctx context.Context, pub ed25519.PublicKey, requireSigned bool, fn func(ChainRow) error) (*ChainVerifyResult, ChainHead, error) {
+	tx, err := l.db.BeginTx(ctx, nil)
+	if err != nil {
+		return nil, ChainHead{}, fmt.Errorf("begin read transaction: %w", err)
+	}
+	defer tx.Rollback()
+
+	result, _, _, err := verifyChainInTransaction(ctx, tx, pub, requireSigned)
+	if err != nil {
+		return nil, ChainHead{}, err
+	}
+	if !result.Intact || result.SigState == "forged" || result.SigState == "suspect" {
+		return nil, ChainHead{}, fmt.Errorf("the audit log does not verify (%s%s)", result.BrokenReason, result.SigBrokenReason)
+	}
+	head, _, err := ReadChainHead(tx)
+	if err != nil {
+		return nil, ChainHead{}, err
+	}
+	rows, err := tx.QueryContext(ctx,
+		"SELECT id, timestamp, event_type, category, detail, blocked, session_id, prev_hash, entry_hash, entry_sig FROM events ORDER BY id ASC")
+	if err != nil {
+		return nil, ChainHead{}, fmt.Errorf("read events: %w", err)
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var r ChainRow
+		if err := rows.Scan(&r.ID, &r.Timestamp, &r.EventType, &r.Category, &r.Detail, &r.Blocked, &r.SessionID, &r.PrevHash, &r.EntryHash, &r.EntrySig); err != nil {
+			return nil, ChainHead{}, fmt.Errorf("scan events row: %w", err)
+		}
+		if err := fn(r); err != nil {
+			return nil, ChainHead{}, err
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return nil, ChainHead{}, verifyInterrupted(ctx, fmt.Errorf("iterate events: %w", err))
+	}
+	return result, head, nil
 }

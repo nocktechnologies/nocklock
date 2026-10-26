@@ -74,8 +74,27 @@ var verifyCmd = &cobra.Command{
 		pubFlag, _ := cmd.Flags().GetString("ed25519-pub")
 		anchorFile, _ := cmd.Flags().GetString("against-anchor")
 		remoteAnchor, _ := cmd.Flags().GetBool("against-remote-anchor")
+		exportFormat, _ := cmd.Flags().GetString("export")
+		outPath, _ := cmd.Flags().GetString("out")
 		if exportPub {
+			if exportFormat != "" || outPath != "" {
+				return fmt.Errorf("--export-pubkey cannot be combined with --export or --out")
+			}
 			return runExportPubkey(cmd.OutOrStdout())
+		}
+		if outPath != "" && exportFormat == "" {
+			return fmt.Errorf("--out requires --export")
+		}
+		if exportFormat != "" {
+			if anchorFile != "" || remoteAnchor {
+				return fmt.Errorf("--export cannot be combined with --against-anchor or --against-remote-anchor")
+			}
+			if asJSON || asAudit {
+				return fmt.Errorf("--export cannot be combined with --json or --audit: it runs the audit checks itself, reports them on stderr, and writes JSON lines")
+			}
+			cmd.SilenceUsage = true
+			requireClosed, _ := cmd.Flags().GetBool("require-closed")
+			return runAuditExport(cmd.Context(), cmd.OutOrStdout(), cmd.ErrOrStderr(), exportFormat, outPath, pubFlag, requireClosed)
 		}
 		if anchorFile != "" && remoteAnchor {
 			return fmt.Errorf("--against-anchor and --against-remote-anchor are mutually exclusive")
@@ -122,7 +141,9 @@ func init() {
 	verifyCmd.Flags().String("ed25519-pub", "", "trusted Ed25519 public key (base64 or hex); requires the audit log to be signed")
 	verifyCmd.Flags().String("against-anchor", "", "verify the local audit chain against an external anchor file (detects tail truncation and rollback)")
 	verifyCmd.Flags().Bool("against-remote-anchor", false, "verify the local audit chain against the latest anchor in the off-box store at $NOCKLOCK_ANCHOR_URL (absence fails)")
-	verifyCmd.Flags().Bool("require-closed", false, "with --audit, fail verification when a run has no signed session_close (a neutral unclosed run; close_mismatch and rows_after_close fail regardless)")
+	verifyCmd.Flags().String("export", "", "verify the audit chain, then write it as one OCSF JSON event per row (JSONL) plus a chain-evidence trailer; the only format is ocsf. Refuses, writing nothing, when verification fails")
+	verifyCmd.Flags().String("out", "", "with --export, write the export to this file (published by rename only when complete) instead of stdout")
+	verifyCmd.Flags().Bool("require-closed", false, "with --audit or --export, fail verification when a run has no signed session_close (a neutral unclosed run; close_mismatch and rows_after_close fail regardless)")
 	verifyCmd.Flags().Duration("walk-timeout", 0, walkTimeoutFlagUsage)
 	rootCmd.AddCommand(verifyCmd)
 }
@@ -342,6 +363,15 @@ func resolveAuditDBPath() (dbPath, projectRoot string, err error) {
 }
 
 func runAuditVerify(ctx context.Context, w io.Writer, pubFlag string, requireClosed bool) error {
+	return verifyAuditLog(ctx, w, pubFlag, requireClosed, nil)
+}
+
+// verifyAuditLog runs the verify --audit checks and prints their report to w.
+// On a passing verdict it calls onPass, when set, with the still-open event
+// log, the database path and project root it was opened from, the public key the signatures were checked against (nil for a hash-only
+// check) and the chain verdict, so verify --export reads the log it just
+// verified; an error from onPass is returned.
+func verifyAuditLog(ctx context.Context, w io.Writer, pubFlag string, requireClosed bool, onPass func(logger *logging.Logger, dbPath, projectRoot string, pub ed25519.PublicKey, checked *logging.ChainVerifyResult) error) error {
 	// unclosedRuns is populated once the run-lifecycle pass runs, so the deferred
 	// coverage notice (which may also fire on an early tamper return) can name any
 	// run missing its close. The closure reads it at return time, not defer time.
@@ -418,6 +448,9 @@ func runAuditVerify(ctx context.Context, w io.Writer, pubFlag string, requireClo
 	if requireClosed && len(unclosed) > 0 {
 		fmt.Fprintf(w, "AUDIT: UNCLOSED — %d run(s) have no signed session_close and --require-closed was set\n", len(unclosed))
 		return &exitCodeError{code: 1}
+	}
+	if onPass != nil {
+		return onPass(logger, dbPath, projectRoot, pub, result)
 	}
 	return nil
 }

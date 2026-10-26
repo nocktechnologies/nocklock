@@ -69,6 +69,7 @@ internal/
   logging/              Event logging and audit chain
     logger.go           SQLite event store — Log, LogBatch, Query, Stats, Prune
                         plus the hash chain, Ed25519 signing, chain head and anchor primitives
+  ocsf/                 OCSF event mapping for `verify --export ocsf`
   forward/              Optional asynchronous Command ops-log delivery
 pkg/
   receipt/              Public read-only VerifySession(dbPath, pub, sessionID) for one session's chain

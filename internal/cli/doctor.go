@@ -209,6 +209,9 @@ func runDoctor(caps doctorCapabilities) doctorReport {
 		})
 		return finishDoctorReport(checks, nil, doctorActivity{})
 	}
+	// Doctor has no wrapped command; it judges the run project.runtime names,
+	// wrap -- <that agent>. wrap binds the login store to the real command.
+	cfg.CommandRuntime = cfg.Project.Runtime
 
 	checks = append(checks, doctorCheck{
 		Group:    "Config",

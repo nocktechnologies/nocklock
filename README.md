@@ -148,7 +148,13 @@ A user deny list cannot remove them. Any overlapping `filesystem.root`,
 `allow`, or `allow_rw` grant (including `~/`) refuses startup with a clear error.
 macOS additionally denies home `.env*`, `.claude*`, and `.codex` paths. The
 `claude-code` and `codex` presets permit their own agent login store only;
-`init --runtime` persists that choice as `project.runtime`. Existing generated
+`init --runtime` persists that choice as `project.runtime`. Because the fenced
+agent can write the project config, `project.runtime` exempts the store only
+when the wrapped command runs that agent (`claude` or `codex`); `--profile`
+exempts it for any command, so use it when a wrapper such as `npx` or `env`
+launches the agent. Each signed `config.digest` row records the exempt
+runtime, and a change from the previous wrap prints a warning and writes a
+signed `config.runtime_changed` row. Existing generated
 configs can adopt `project.runtime = "claude-code"` or `"codex"` after reviewing
 the corresponding preset diff. `~/.npmrc` and `~/.pypirc` remain optional denies.
 
@@ -236,6 +242,8 @@ Every `wrap` also signs a `config.digest` row for its resolved policy; a changed
 `nocklock verify --audit` reports four states and never conflates them. AUTHENTIC means signed and valid. CONSISTENT means the hash chain is intact but unsigned, or signed with no key supplied to check it. FORGED means a signature does not verify, or signing artifacts remain without their adoption marker. SUSPECT means a signed check was explicitly required via `--ed25519-pub` but the log carries no signatures and no adoption markers, whether or not any events remain; this could be a full strip of every signing artifact, or a deletion of every row with the head reset, and it is reported non-zero, never as a clean pass.
 
 Supplying `--ed25519-pub` states the external expectation that the log is signed. Without it, a genuinely unsigned or pre-adoption log reads CONSISTENT. With it, a completely erased signing record reads SUSPECT. Telling a never-signed log apart from a fully stripped one cryptographically requires anchoring the signed head off-box, which is what the v1.2 external chain-head anchor below does. Signing is adopted going forward, so rows written before adoption verify as consistent-but-unsigned, not forged. Run `nocklock verify --export-pubkey` to publish the public key for out-of-band checking.
+
+`nocklock verify --export ocsf --out audit.ocsf.jsonl` writes the log as OCSF 1.9.0 events, one JSON line per row, for security tools that ingest OCSF. Each event keeps its source row verbatim, and a closing trailer carries the chain head, its signature and the public key, so the hash chain and signatures can be checked from the export alone. It verifies first and writes nothing when the chain fails. The mapping and its limits are in [the audit log page](docs/how-it-works/audit-log.md#ocsf-export).
 
 Because the head is signed, deleting the newest rows and rewriting `chain_head` in lockstep, the attack the unkeyed chain cannot resist, is now caught as FORGED: the attacker cannot re-sign the shortened head. The remaining gap is rollback. An attacker who restores an earlier, legitimately signed snapshot of the whole database presents a shorter log that still verifies, because its head was validly signed at the time. Detecting that requires anchoring the signed head off-box, which is exactly what the external chain-head anchor adds.
 

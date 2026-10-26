@@ -85,7 +85,7 @@ func TestBuiltinAgentPresetExceptions(t *testing.T) {
 	for _, agent := range []string{"", "claude-code", "codex"} {
 		t.Run(agent, func(t *testing.T) {
 			cfg, home := builtinFixture(t)
-			cfg.Project.Runtime = agent
+			cfg.Project.Runtime, cfg.CommandRuntime = agent, agent
 			if agent == "claude-code" {
 				cfg.Filesystem.Allow = []string{"~/.claude/"}
 			}
@@ -108,6 +108,49 @@ func TestBuiltinAgentPresetExceptions(t *testing.T) {
 			}
 			if slices.Contains(fc.DenyPaths, filepath.Join(fc.Root, ".env")) {
 				t.Fatal("project .env must remain readable")
+			}
+		})
+	}
+}
+
+// project.runtime is written in the project config, which the fenced child
+// can change, so it exempts a login store only when the wrapped command runs
+// that agent or --profile selects it. Control: the matching cases still exempt.
+func TestBuiltinLoginStoreNeedsProfileOrWrappedCommand(t *testing.T) {
+	for _, tc := range []struct {
+		name, profile, command string
+		exempt                 bool
+	}{
+		{name: "unrelated command", command: config.RuntimeForCommand("/bin/sh")},
+		{name: "other agent", command: config.RuntimeForCommand("codex")},
+		{name: "wrapped agent", command: config.RuntimeForCommand("/usr/local/bin/claude"), exempt: true},
+		{name: "profile", profile: "claude-code", command: config.RuntimeForCommand("/bin/sh"), exempt: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			cfg, home := builtinFixture(t)
+			cfg.Project.Runtime = "claude-code"
+			cfg.ProfileName, cfg.CommandRuntime = tc.profile, tc.command
+			fc, err := ProcessEffectiveConfig(cfg, "darwin")
+			if err != nil {
+				t.Fatal(err)
+			}
+			h, _ := resolvePath(home)
+			if slices.Contains(fc.DenyPrefixes, filepath.Join(h, ".claude")) == tc.exempt {
+				t.Fatalf("Claude login store exempt = %v, want %v", !tc.exempt, tc.exempt)
+			}
+			if !slices.Contains(fc.DenyPaths, filepath.Join(h, ".codex")) {
+				t.Fatal("Codex login store must stay denied")
+			}
+
+			// An init-style config also grants the store; without the
+			// exemption that grant must refuse startup, not open the store.
+			cfg.Filesystem.Allow = []string{"~/.claude/"}
+			_, err = ProcessEffectiveConfig(cfg, "darwin")
+			if tc.exempt != (err == nil) {
+				t.Fatalf("grant of the login store: exempt=%v, err=%v", tc.exempt, err)
+			}
+			if err != nil && !strings.Contains(err.Error(), "--profile") {
+				t.Fatalf("login-store refusal must name --profile: %v", err)
 			}
 		})
 	}

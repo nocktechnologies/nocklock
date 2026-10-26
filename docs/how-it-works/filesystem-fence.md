@@ -5,8 +5,14 @@ Citations name source files at `origin/main` 89c02fa (no line numbers, so they d
 Both platforms merge the mandatory credential deny set with user denies through
 `internal/fence/fs/builtins.go`. Grants overlapping a built-in path refuse startup.
 macOS adds home `.env*` and `.claude*` prefix rules and `.codex`, with only the
-selected agent preset exempting its own login store. Project `.env*` files stay
-readable; see the README for the complete path list and preset migration.
+selected agent preset exempting its own login store. `--profile` selects it, or
+`project.runtime` when the wrapped command runs that agent: the project config
+is writable by the fenced child, so it cannot pick the exemption on its own
+(`config.LoginStoreRuntime` in `internal/config/config.go`). Each signed
+`config.digest` row records the exempt runtime outside the hashed policy, and a
+change from the previous wrap writes a signed `config.runtime_changed` row
+(`internal/cli/config_digest.go`). Project `.env*` files stay readable; see the
+README for the complete path list and preset migration.
 
 Pre-made hard links into an allowed project tree can remain readable, including
 on macOS: Seatbelt path rules do not find every name for an inode. The CI proof

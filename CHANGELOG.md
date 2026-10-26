@@ -4,6 +4,18 @@ All notable changes to NockLock will be documented in this file.
 
 ## [Unreleased]
 
+## [0.15.0] - 2026-10-26
+
+v0.15.0 is a security release. On macOS, `project.runtime` alone no longer exempts an agent login store from the built-in credential denies; the exemption now needs `--profile` or a wrapped command that runs that agent. It also adds `nocklock verify --export ocsf`, which writes the signed audit log as OCSF 1.9.0 events. Upgrade note: if you launch an agent on macOS through a wrapper (`npx`, `env` or a renamed binary) and rely on `project.runtime` alone, its login store is now denied, and a config that also grants that store refuses to start; pass `--profile <preset>` or wrap the agent command directly.
+
+### Added
+
+- `nocklock verify --export ocsf [--out <file>]` writes the signed audit log as OCSF 1.9.0 events, one JSON line per row, for security tools that ingest OCSF. Each event carries its source row verbatim, and a closing trailer carries the chain head, the head signature and the public key, so every entry hash, row signature and the head signature can be checked from the export alone. The export verifies the chain first and refuses, exiting `1` and writing nothing, when verification fails, the log gains rows between those checks and the read, or `--out` names the audit database, its SQLite sidecars, its chain anchor, the signing key or a trusted chain identity file. The `--out` directory is opened once and the export is renamed into it, so a symlink swapped mid-export cannot redirect it. `--export` refuses `--json`, `--audit` and `--export-pubkey`. The export is built in memory and refuses past 256 MiB. CI validates the golden export against the pinned OCSF class schemas. See `docs/how-it-works/audit-log.md`.
+
+### Security
+
+- macOS: `project.runtime` alone no longer exempts an agent login store from the built-in `.claude*` and `.codex` denies. The project config is writable by the fenced child, so the exemption now comes from `--profile`, or from `project.runtime` only when the wrapped command runs that agent (`claude` for `claude-code`, `codex` for `codex`). Any other command keeps every agent login store denied, and a config that grants the store then refuses to start. This corrects the v0.14.0 note that the runtime is recorded in the signed config digest: the declared `project.runtime` and the resolved deny rules are in the hashed policy, so the digest changes when the exempt agent changes (for example `wrap -- claude` then `wrap -- make`), and the `runtime` field of each signed `config.digest` row names the agent. When it differs from the previous wrap of the same project, `wrap` prints a warning and writes a signed `config.runtime_changed` row. Other platforms have no login-store exemption and record no runtime. `doctor` and `wrap --dry-run` without a command have no wrapped command and judge the run `wrap -- <agent>` for the agent `project.runtime` names. A refused login-store grant now names `--profile` and the agent command as the fix, for example when a wrapper such as `npx` launches the agent.
+
 ## [0.14.0] - 2026-10-23
 
 v0.14.0 makes the credential-file denies mandatory on Linux and macOS (#269). A config can add paths to the deny list but can no longer remove the built-in ones, and a config that grants one of the protected folders now refuses to start. Read the upgrade note under Breaking before you upgrade.

@@ -12,7 +12,7 @@ Registered in `internal/cli/` (one file per command). `README.md` "Commands" has
 | `validate [config-path]` | | `validate.go` |
 | `config` | | `config.go` |
 | `doctor [--json]` | | `doctor.go` |
-| `verify [--json]` | `--audit`, `--export-pubkey`, `--ed25519-pub <key>`, `--against-anchor <file>`, `--against-remote-anchor` (the last two are mutually exclusive), `--require-closed`, `--walk-timeout <dur>` | `verify.go` |
+| `verify [--json]` | `--audit`, `--export-pubkey`, `--ed25519-pub <key>`, `--against-anchor <file>`, `--against-remote-anchor` (the last two are mutually exclusive), `--require-closed`, `--walk-timeout <dur>`, `--export ocsf [--out <file>]` | `verify.go`, `verify_export.go` |
 | `scan [path ...]` | `--env`, `--json` | `scan.go` |
 | `anchor emit [--out <file>]`, `anchor push [--file <file>]` | `--walk-timeout <dur>` | `anchor.go` |
 | `anchor enroll`, `anchor migrate` | enroll: `--acknowledge-no-legacy-history` | `anchor_v2.go` |
@@ -39,6 +39,10 @@ with neither a trusted record, DB identity nor retained registration request.
 
 Preserve incomplete or moved state and follow the
 [offline state-move procedure](../runbooks/chain-identity-move.md).
+
+### Audit export
+
+`verify --export ocsf` runs the `verify --audit` checks, printing their report to stderr, and then writes the whole audit log as OCSF JSON events, one per line (JSONL), to stdout or to the `--out` file. It accepts `--ed25519-pub` and `--require-closed` with their `--audit` meaning, and `--walk-timeout` as the budget for each of its two chain walks (so up to twice the value in all), and cannot be combined with `--against-anchor`, `--against-remote-anchor`, `--json` or `--audit`. A failed verification (`TAMPERED`, `FORGED`, `SUSPECT`, a run integrity failure, or an unclosed run with `--require-closed`) exits `1` and writes nothing: no stdout, and no `--out` file, which appears only by rename once complete. The `--out` directory must exist. An `--out` path that names, after symlinks, the audit database, its `-wal`, `-shm` or `-journal` file, its `chain-anchor.json`, the managed signing key, or a trusted chain identity file (`chain-identity.json`, its lock, `anchor-registration.json`) is refused once the checks pass, against the database they read and before the export is read (exit `1`, the file untouched); names compare case-insensitively. The directory is opened once, before the checks, and the export is written and renamed into that opened directory, so changing a symlink in the `--out` path while the export runs cannot move where it lands. The rows are read in the same read transaction as a second chain verification, and the export is refused (exit `1`, nothing written) unless that chain ends at the same head the checks covered, so every exported row passed the run and config-digest checks; re-run it if a wrap appended rows in between. The export is built in memory before it is written, and refuses past 256 MiB (exit `1`, nothing written). If writing to stdout fails partway (a closed pipe), it prints `EXPORT: INCOMPLETE` and exits non-zero: discard what was received, which has no trailer. The mapping and the trailer are described in `docs/how-it-works/audit-log.md`.
 
 ### Remote anchor commands
 
@@ -105,7 +109,7 @@ Strict: unknown keys are a load error (`internal/config/config.go`). Structs at 
 
 | Table | Keys |
 |---|---|
-| `[project]` | `name`, `root`, `runtime` (preset-owned login store; empty denies all agent stores on macOS) |
+| `[project]` | `name`, `root`, `runtime` (preset-owned login store on macOS, exempt only when the wrapped command runs that agent or `--profile` selects it; otherwise all agent stores are denied) |
 | `[filesystem]` | `root`, `mode` (`read-write`, `read-only`), `linux_enforcement` (`required`, `preferred`, `off`), `allow`, `allow_rw`, `deny`, `hardened`; `macos_allow_unfenced` (only `false` loads) |
 | `[network]` | `allow`, `allow_all`, `allow_private_ranges`, `require_enforced`, `require_unix_socket_isolation`, `[[network.lookback]]` (`name`, `on`, `within`, `then`) |
 | `[syscall]` | `enforcement` (`required`, `preferred`, `off`), `allow_namespaces`, `socket_families`, `extra_deny` |
