@@ -26,14 +26,35 @@ import (
 // and the export read, where a concurrent writer can append.
 var exportAfterChecks func()
 
+// exportMaxBytes caps the in-memory export. A test lowers it.
+var exportMaxBytes = 256 << 20
+
+var errExportTooLarge = errors.New("export exceeds 256 MiB; NockLock v0.15 builds the export in memory")
+
+// cappedBuffer is an in-memory buffer that refuses a write that would take it
+// past exportMaxBytes, so an oversized export fails before anything is
+// published. Write is its only way in.
+type cappedBuffer struct{ b bytes.Buffer }
+
+func (c *cappedBuffer) Write(p []byte) (int, error) {
+	if c.b.Len()+len(p) > exportMaxBytes {
+		return 0, errExportTooLarge
+	}
+	return c.b.Write(p)
+}
+
+// Bytes returns the buffered export.
+func (c *cappedBuffer) Bytes() []byte { return c.b.Bytes() }
+
 // runAuditExport implements verify --export ocsf. It runs the verify --audit
 // checks first, printing their report to stderr, and refuses to write anything
 // unless they pass. The rows are then read in the same read transaction as a
 // second chain verification (logging.ReadVerifiedChain), and the export is
 // refused unless that chain ends at the same head as the one the checks
 // covered, so the export is exactly the log those checks passed. The export is
-// built in memory and published only once complete: with --out by rename
-// inside the --out directory opened before the checks, otherwise to stdout.
+// built in memory, refused past exportMaxBytes, and published only once
+// complete: with --out by rename inside the --out directory opened before the
+// checks, otherwise to stdout.
 func runAuditExport(ctx context.Context, stdout, stderr io.Writer, format, outPath, pubFlag string, requireClosed bool) error {
 	if format != "ocsf" {
 		return fmt.Errorf("unsupported --export format %q: the supported format is ocsf", format)
@@ -49,7 +70,7 @@ func runAuditExport(ctx context.Context, stdout, stderr io.Writer, format, outPa
 	if root != nil {
 		defer root.Close()
 	}
-	var buf bytes.Buffer
+	var buf cappedBuffer
 	var trailer ocsf.Trailer
 	err = verifyAuditLog(ctx, stderr, pubFlag, requireClosed, func(logger *logging.Logger, dbPath, projectRoot string, pub ed25519.PublicKey, checked *logging.ChainVerifyResult) error {
 		if root != nil {
@@ -104,6 +125,9 @@ func runAuditExport(ctx context.Context, stdout, stderr io.Writer, format, outPa
 		}
 		return nil
 	})
+	if errors.Is(err, errExportTooLarge) {
+		return refuse(errExportTooLarge)
+	}
 	if err != nil {
 		return refuse(err)
 	}

@@ -769,3 +769,70 @@ func TestExportPubkeyRefusesExportOrOut(t *testing.T) {
 		t.Fatalf("--export-pubkey alone printed no key: %q", stdout.String())
 	}
 }
+
+func TestOCSFExportRefusesPastSizeCap(t *testing.T) {
+	db, key := setupAnchorProject(t)
+	seedOCSFFixture(t, db, key)
+	var full, stderr bytes.Buffer
+	if err := runAuditExport(context.Background(), &full, &stderr, "ocsf", "", "", false); err != nil {
+		t.Fatalf("export: %v\n%s", err, stderr.String())
+	}
+	prev := exportMaxBytes
+	t.Cleanup(func() { exportMaxBytes = prev })
+
+	for _, mode := range []string{"stdout", "file"} {
+		t.Run(mode, func(t *testing.T) {
+			// Control: a cap of exactly the export's size still exports.
+			exportMaxBytes = full.Len()
+			dir := t.TempDir()
+			out := ""
+			if mode == "file" {
+				out = filepath.Join(dir, "audit.ocsf.jsonl")
+			}
+			var stdout, stderr bytes.Buffer
+			if err := runAuditExport(context.Background(), &stdout, &stderr, "ocsf", out, "", false); err != nil {
+				t.Fatalf("export at the cap: %v\n%s", err, stderr.String())
+			}
+			got := stdout.Len()
+			if mode == "file" {
+				data, err := os.ReadFile(out)
+				if err != nil {
+					t.Fatal(err)
+				}
+				got = len(data)
+				if err := os.Remove(out); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if got != full.Len() {
+				t.Fatalf("export at the cap wrote %d bytes, want %d", got, full.Len())
+			}
+
+			// One byte under the export's size: the trailer no longer fits.
+			exportMaxBytes = full.Len() - 1
+			stdout.Reset()
+			stderr.Reset()
+			err := runAuditExport(context.Background(), &stdout, &stderr, "ocsf", out, "", false)
+			if err == nil || err.Error() != "export exceeds 256 MiB; NockLock v0.15 builds the export in memory" {
+				t.Fatalf("want the size-cap refusal, got %v\n%s", err, stderr.String())
+			}
+			var exit *exitCodeError
+			if errors.As(err, &exit) {
+				t.Fatalf("want exit 1 from a plain error, got exit %d", exit.code)
+			}
+			if !strings.Contains(stderr.String(), "EXPORT: REFUSED") {
+				t.Fatalf("refusal not reported:\n%s", stderr.String())
+			}
+			if stdout.Len() != 0 {
+				t.Fatalf("refused export wrote %d bytes to stdout", stdout.Len())
+			}
+			entries, err := os.ReadDir(dir)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(entries) != 0 {
+				t.Fatalf("refused export left files behind: %v", entries)
+			}
+		})
+	}
+}
