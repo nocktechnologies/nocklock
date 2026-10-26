@@ -77,6 +77,9 @@ var verifyCmd = &cobra.Command{
 		exportFormat, _ := cmd.Flags().GetString("export")
 		outPath, _ := cmd.Flags().GetString("out")
 		if exportPub {
+			if exportFormat != "" || outPath != "" {
+				return fmt.Errorf("--export-pubkey cannot be combined with --export or --out")
+			}
 			return runExportPubkey(cmd.OutOrStdout())
 		}
 		if outPath != "" && exportFormat == "" {
