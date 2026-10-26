@@ -720,3 +720,52 @@ func TestOCSFExportRefusesJSONOrAudit(t *testing.T) {
 		t.Fatalf("--export alone wrote no file: %v", err)
 	}
 }
+
+func TestExportPubkeyRefusesExportOrOut(t *testing.T) {
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+	out := filepath.Join(t.TempDir(), "audit.ocsf.jsonl")
+	for _, tc := range []struct{ flag, value string }{{"export", "ocsf"}, {"out", out}} {
+		t.Run(tc.flag, func(t *testing.T) {
+			var stdout bytes.Buffer
+			t.Cleanup(func() {
+				_ = verifyCmd.Flags().Set("export-pubkey", "false")
+				_ = verifyCmd.Flags().Set(tc.flag, "")
+				verifyCmd.SetOut(nil)
+			})
+			verifyCmd.SetOut(&stdout)
+			if err := verifyCmd.Flags().Set("export-pubkey", "true"); err != nil {
+				t.Fatal(err)
+			}
+			if err := verifyCmd.Flags().Set(tc.flag, tc.value); err != nil {
+				t.Fatal(err)
+			}
+			err := verifyCmd.RunE(verifyCmd, nil)
+			if err == nil || !strings.Contains(err.Error(), "--export-pubkey cannot be combined with --export or --out") {
+				t.Fatalf("want a refusal for --export-pubkey with --%s, got %v", tc.flag, err)
+			}
+			if stdout.Len() != 0 {
+				t.Fatalf("the refusal wrote output: %q", stdout.String())
+			}
+		})
+	}
+	if _, err := os.Stat(out); !os.IsNotExist(err) {
+		t.Fatalf("a refusal left an export file: %v", err)
+	}
+
+	// The allowed case: --export-pubkey alone still prints the key.
+	var stdout bytes.Buffer
+	t.Cleanup(func() {
+		_ = verifyCmd.Flags().Set("export-pubkey", "false")
+		verifyCmd.SetOut(nil)
+	})
+	verifyCmd.SetOut(&stdout)
+	if err := verifyCmd.Flags().Set("export-pubkey", "true"); err != nil {
+		t.Fatal(err)
+	}
+	if err := verifyCmd.RunE(verifyCmd, nil); err != nil {
+		t.Fatalf("--export-pubkey alone: %v", err)
+	}
+	if !strings.HasPrefix(stdout.String(), "ed25519 ") {
+		t.Fatalf("--export-pubkey alone printed no key: %q", stdout.String())
+	}
+}
