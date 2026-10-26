@@ -6,7 +6,7 @@ All notable changes to NockLock will be documented in this file.
 
 ## [0.15.0] - 2026-10-26
 
-v0.15.0 is a security release. On macOS, `project.runtime` alone no longer exempts an agent login store from the built-in credential denies; the exemption now needs `--profile` or a wrapped command that runs that agent. It also adds `nocklock verify --export ocsf`, which writes the signed audit log as OCSF 1.9.0 events.
+v0.15.0 is a security release. On macOS, `project.runtime` alone no longer exempts an agent login store from the built-in credential denies; the exemption now needs `--profile` or a wrapped command that runs that agent. It also adds `nocklock verify --export ocsf`, which writes the signed audit log as OCSF 1.9.0 events. Upgrade note: if you launch an agent on macOS through a wrapper (`npx`, `env` or a renamed binary) and rely on `project.runtime` alone, its login store is now denied, and a config that also grants that store refuses to start; pass `--profile <preset>` or wrap the agent command directly.
 
 ### Added
 
