@@ -91,5 +91,6 @@ PY
 if [[ -z "$tag" ]]; then
   python3 packaging/linux/artifact.py "$out/$root.tar.gz" "$out/SHA256SUMS" "$commit"
 else
-  go test ./internal/linuxinstall ./internal/installstate
+  NOCKLOCK_TEST_RELEASE_DIR="$out" NOCKLOCK_TEST_RELEASE_TAG="$tag" \
+    go test -count=1 ./internal/linuxinstall ./internal/installstate
 fi

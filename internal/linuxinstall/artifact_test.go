@@ -5,6 +5,8 @@ import (
 	"bytes"
 	"compress/gzip"
 	"encoding/json"
+	"os"
+	"path/filepath"
 	"testing"
 )
 
@@ -82,6 +84,31 @@ func TestPOSIXDirectoryHeader(t *testing.T) {
 	})
 	if _, err := Validate(a, m, "v1.2.3"); err != nil {
 		t.Fatal("native builder directory header refused", err)
+	}
+}
+
+// The tagged native builder runs this against its real Python-produced archive,
+// before signing. Ordinary package tests use the bounded synthetic fixtures.
+func TestBuiltReleaseArchive(t *testing.T) {
+	dir := os.Getenv("NOCKLOCK_TEST_RELEASE_DIR")
+	if dir == "" {
+		t.Skip("native tagged builder supplies its output directory")
+	}
+	tag := os.Getenv("NOCKLOCK_TEST_RELEASE_TAG")
+	name, err := ArchiveName(tag)
+	if err != nil {
+		t.Fatal(err)
+	}
+	archive, err := os.ReadFile(filepath.Join(dir, name))
+	if err != nil {
+		t.Fatal(err)
+	}
+	manifest, err := os.ReadFile(filepath.Join(dir, "SHA256SUMS"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := Validate(archive, manifest, tag); err != nil {
+		t.Fatal(err)
 	}
 }
 

@@ -9,6 +9,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/nocktechnologies/nocklock/internal/installstate"
 	"golang.org/x/sys/unix"
 )
 
@@ -18,6 +19,11 @@ func sandbox(t *testing.T) (installer, string) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	return sandboxAt(t, root)
+}
+
+func sandboxAt(t *testing.T, root string) (installer, string) {
+	t.Helper()
 	for _, n := range []string{"bin", "lib", "libexec", "sudoers.d"} {
 		if err := os.Mkdir(filepath.Join(root, n), 0o755); err != nil {
 			t.Fatal(err)
@@ -266,5 +272,42 @@ func TestManagedHelperPolicyCannotBroaden(t *testing.T) {
 				t.Fatal("unsafe helper accepted")
 			}
 		})
+	}
+}
+
+func TestRootOwnedInstallLifecycle(t *testing.T) {
+	if os.Geteuid() != 0 {
+		t.Skip("root-owned install checks run on disposable Linux hosts")
+	}
+	root, err := os.MkdirTemp("/opt", "nocklock-install-test-")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer os.RemoveAll(root)
+	i, _ := sandboxAt(t, root)
+	i.trust = installstate.Trusted
+	one, two := assets(t, root, "v1.0.0"), assets(t, root, "v1.1.0")
+	// Admins commonly use umask 077. Public release directories must still be
+	// traversable and payload modes exact, while staging remains private.
+	previous := unix.Umask(0o077)
+	defer unix.Umask(previous)
+	if err := i.apply(one); err != nil {
+		t.Fatal(err)
+	}
+	if err := i.apply(two); err != nil {
+		t.Fatal(err)
+	}
+	one.Rollback = true
+	if err := i.apply(one); err != nil {
+		t.Fatal(err)
+	}
+	for _, path := range []string{i.base, filepath.Join(i.base, "releases"), filepath.Join(i.base, "releases", one.Tag+"-linux-amd64")} {
+		info, err := os.Stat(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if info.Mode().Perm() != 0o755 {
+			t.Fatalf("non-traversable installation: %s %o", path, info.Mode().Perm())
+		}
 	}
 }

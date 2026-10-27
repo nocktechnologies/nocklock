@@ -41,11 +41,13 @@ jobs:
         run: |
           go test -race ./internal/linuxinstall ./internal/installstate
           go test -c -o "$RUNNER_TEMP/installstate.test" ./internal/installstate
+          go test -c -o "$RUNNER_TEMP/linuxinstall.test" ./internal/linuxinstall
           test "$RUNNER_ENVIRONMENT" = github-hosted
           test ! -L /opt
           sudo chown root:root /opt
           sudo chmod go-w /opt
           sudo "$RUNNER_TEMP/installstate.test" -test.v
+          sudo "$RUNNER_TEMP/linuxinstall.test" -test.run TestRootOwnedInstallLifecycle -test.v
       - name: Build native paired candidate
         id: build
         env:

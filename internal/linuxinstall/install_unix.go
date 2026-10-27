@@ -159,6 +159,13 @@ func (i installer) directory(path string) error {
 		}
 	} else if err := os.Chmod(path, 0o755); err != nil {
 		return err
+	} else {
+		if err := syncDir(path); err != nil {
+			return err
+		}
+		if err := syncDir(filepath.Dir(path)); err != nil {
+			return err
+		}
 	}
 	if err := i.trust(path); err != nil {
 		return err
@@ -248,6 +255,9 @@ func (i installer) apply(o Options) error {
 	}
 	lockPath := filepath.Join(i.base, "install.lock")
 	if err := writeNew(lockPath, nil, 0o644); err != nil && !os.IsExist(err) {
+		return err
+	}
+	if err := syncDir(i.base); err != nil {
 		return err
 	}
 	if err := i.trust(lockPath); err != nil {
