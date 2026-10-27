@@ -142,12 +142,16 @@ func boundedRead(path string, limit int64) ([]byte, error) {
 	return d, nil
 }
 
-func writeNew(path string, data []byte, mode os.FileMode) error {
+func writeNew(path string, data []byte, mode os.FileMode) (err error) {
 	f, err := os.OpenFile(path, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o600)
 	if err != nil {
 		return err
 	}
-	defer f.Close()
+	defer func() {
+		if closeErr := f.Close(); err == nil {
+			err = closeErr
+		}
+	}()
 	if _, err = f.Write(data); err != nil {
 		return err
 	}

@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -113,7 +114,18 @@ func TestBuiltReleaseArchive(t *testing.T) {
 }
 
 func TestRejectUnsafeReleaseMembers(t *testing.T) {
-	for _, c := range []string{"traversal", "absolute", "symlink", "hardlink", "device", "mode", "owner", "hash", "platform", "protocol"} {
+	for c, want := range map[string]string{
+		"traversal": "unexpected path, type, mode or size",
+		"absolute":  "unexpected path, type, mode or size",
+		"symlink":   "unexpected ownership, extension or link",
+		"hardlink":  "unexpected ownership, extension or link",
+		"device":    "unexpected path, type, mode or size",
+		"mode":      "unexpected path, type, mode or size",
+		"owner":     "unexpected ownership, extension or link",
+		"hash":      "payload hash mismatch: nocklock",
+		"platform":  "build-info does not describe",
+		"protocol":  "build-info does not describe",
+	} {
 		t.Run(c, func(t *testing.T) {
 			a, m := fixture(t, "v1.2.3", func(h *tar.Header, d *[]byte) {
 				if c == "platform" || c == "protocol" {
@@ -158,8 +170,8 @@ func TestRejectUnsafeReleaseMembers(t *testing.T) {
 					(*d)[10] = 99
 				}
 			})
-			if _, err := Validate(a, m, "v1.2.3"); err == nil {
-				t.Fatal("unsafe archive accepted")
+			if _, err := Validate(a, m, "v1.2.3"); err == nil || !strings.Contains(err.Error(), want) {
+				t.Fatalf("unsafe archive: got %v, want refusal containing %q", err, want)
 			}
 		})
 	}
