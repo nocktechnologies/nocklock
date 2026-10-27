@@ -16,6 +16,10 @@ Upgrade notes: v0.16.0 is the first version eligible for managed release assets;
 
 - A standalone Go Linux installer for signed Ubuntu 24.04 amd64 release pairs, with explicit-tag upgrades and verified rollback. It authenticates root-staged assets with the pinned Cosign verifier, rejects unmanaged installations, retains prior releases, and atomically activates the CLI with its matching interposer. Optional `--egress-user` installs a generated constrained helper and validated sudoers grant. Managed CLI invocations hold a shared installation lock, so changes refuse while commands run and stale executable launches refuse after a switch. A tagged workflow builds and signs assets and checks installation on a fresh VM; publication remains an explicit release-owner step. This does not add assets to existing releases or broaden the Linux platform support matrix. See `packaging/linux/RELEASE-INSTALL.md`.
 
+### Fixed
+
+- Linux installer staging reports writable-file close failures. Archive refusal tests check the intended rejection reason, and bootstrap instructions set the retained directory explicitly and clean unauthenticated staging on failure.
+
 ## [0.15.0] - 2026-10-26
 
 v0.15.0 is a security release. On macOS, `project.runtime` alone no longer exempts an agent login store from the built-in credential denies; the exemption now needs `--profile` or a wrapped command that runs that agent. It also adds `nocklock verify --export ocsf`, which writes the signed audit log as OCSF 1.9.0 events. Upgrade note: if you launch an agent on macOS through a wrapper (`npx`, `env` or a renamed binary) and rely on `project.runtime` alone, its login store is now denied, and a config that also grants that store refuses to start; pass `--profile <preset>` or wrap the agent command directly.
