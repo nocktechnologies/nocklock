@@ -244,6 +244,9 @@ func FromRow(r logging.ChainRow, productVersion string) (Event, error) {
 		if strings.HasPrefix(detail, "preflight ") {
 			// The secret preflight scan's JSON report; message carries it.
 			e.FindingInfo = &FindingInfo{UID: r.EntryHash, Title: "Secret preflight scan refused the run"}
+		} else if service, ok := strings.CutPrefix(detail, "mach-lookup "); ok {
+			e.FindingInfo = &FindingInfo{UID: r.EntryHash, Title: "Keychain service access denied"}
+			e.Resources = []Resource{{Name: service, Type: "Mach service"}}
 		} else {
 			e.FindingInfo = &FindingInfo{UID: r.EntryHash, Title: "Secret withheld from the wrapped agent"}
 			e.Resources = []Resource{{Name: detail, Type: "Environment variable"}}

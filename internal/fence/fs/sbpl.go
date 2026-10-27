@@ -10,6 +10,10 @@ import (
 	"strings"
 )
 
+// keychainMachService mediates the private file-keychain reads reproduced by
+// the native fixture. Other Keychain backends are not claimed isolated.
+const keychainMachService = "com.apple.SecurityServer"
+
 // SBPL (Sandbox Profile Language) generation for the macOS filesystem fence.
 //
 // macOS has no LD_PRELOAD; the fence is enforced by the kernel Seatbelt sandbox
@@ -31,8 +35,8 @@ import (
 //     error so the caller fails CLOSED rather than ship an unmatched rule.
 
 // GenerateProfile builds the Seatbelt profile string that denies read and write
-// access to every path in sensitivePaths while allowing everything else (so the
-// agent and its toolchain run normally). Each path is canonicalized; an
+// access to every path in sensitivePaths and lookups of the SecurityServer Keychain service,
+// while allowing other operations. Each path is canonicalized; an
 // unresolvable path returns an error so the caller can refuse to start.
 //
 // The profile is deterministic: paths are canonicalized, de-duplicated, and
@@ -137,6 +141,13 @@ func generateProfile(sensitivePaths []string, hardened bool, writePaths []string
 	b.WriteString(";; allow-default base; paths are canonical realpaths — required,\n")
 	b.WriteString(";; or the kernel match fails open.\n")
 	b.WriteString("(allow default)\n")
+	b.WriteString(";; Block the SecurityServer Keychain route independently of file-path denies.\n")
+	b.WriteString("(deny mach-lookup\n")
+	b.WriteString("    (global-name " + sbplString(keychainMachService) + ")\n")
+	if msg != "" {
+		b.WriteString("   " + msg + "\n")
+	}
+	b.WriteString(")\n")
 	if len(writePaths) > 0 {
 		b.WriteString(";; Root write confinement: deny all writes, then grant only\n")
 		b.WriteString(";; the canonical root/runtime paths below.\n")

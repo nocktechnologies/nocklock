@@ -6,6 +6,7 @@ import (
 	"bytes"
 	"context"
 	"database/sql"
+	"encoding/json"
 	"errors"
 	"io"
 	"os"
@@ -514,6 +515,55 @@ func TestWrapMacOSDenialLogIgnoresOtherSessions(t *testing.T) {
 	}
 	if n != 0 {
 		t.Fatalf("a denial tagged for another session was logged: %d file_blocked rows", n)
+	}
+}
+
+// Replay a kernel-shaped record through wrap's actual tailer and audit writer.
+// Native Keychain enforcement is proved separately in the fs package; unified
+// log delivery remains best effort and is not asserted by this replay test.
+func TestWrapMacOSDenialLogRecordsKeychainSecretBlockedRow(t *testing.T) {
+	project, _, run := denialLogProject(t)
+	old := denialLogArgv
+	denialLogArgv = func() []string {
+		db, err := sql.Open("sqlite", resolvedAuditDB(t, project))
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer db.Close()
+		var session string
+		if err := db.QueryRow(`SELECT session_id FROM events WHERE event_type = 'session_start' ORDER BY id DESC LIMIT 1`).Scan(&session); err != nil {
+			t.Fatal(err)
+		}
+		line, err := json.Marshal(map[string]any{
+			"eventMessage":     "Sandbox: probe(1) deny(1) mach-lookup com.apple.SecurityServer\n" + fsfence.DenialTag(session),
+			"processID":        0,
+			"processImagePath": "/kernel",
+			"senderImagePath":  "/System/Library/Extensions/Sandbox.kext/Contents/MacOS/Sandbox",
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		return []string{"/bin/sh", "-c", `printf '%s\n' "$1"; exec /bin/sleep 30`, "sh", string(line)}
+	}
+	t.Cleanup(func() { denialLogArgv = old })
+	wantExitCode(t, run("/usr/bin/true"), 0)
+	db, err := sql.Open("sqlite", resolvedAuditDB(t, project))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	var count int
+	if err := db.QueryRow(`SELECT COUNT(*) FROM events WHERE event_type = 'secret_blocked'
+		AND category = 'secret' AND blocked = 1 AND detail = 'mach-lookup com.apple.SecurityServer'
+		AND entry_sig <> '' AND session_id = (SELECT session_id FROM events WHERE event_type = 'session_end' ORDER BY id DESC LIMIT 1)`).Scan(&count); err != nil {
+		t.Fatal(err)
+	}
+	if count != 1 {
+		t.Fatalf("want one signed Keychain denial in this session, got %d", count)
+	}
+	var out bytes.Buffer
+	if err := runAuditVerify(context.Background(), &out, "", false); err != nil {
+		t.Fatalf("Keychain denial chain verification failed: %v\n%s", err, out.String())
 	}
 }
 

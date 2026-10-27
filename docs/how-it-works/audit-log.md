@@ -287,7 +287,7 @@ Every row becomes one OCSF 1.9.0 event (the version is one constant, `ocsf.Versi
 | `session_start`, `session_end` | Process Activity (1007) | Launch (1), Terminate (2); `process.name` is the base name of the executable (the recorded `command=` value, which is the executable alone; in the older bare form, the first word of the command line), never of an argument; a blocked `session_end` (a refused run) has status Failure |
 | `network_blocked`, and `network_passed` naming a `host=` | Network Activity (4001) | Refuse (5), Open (1); action Denied/Allowed, disposition Blocked/Allowed |
 | `file_blocked` | File Activity (1001) | Other (99); action Denied, disposition Blocked |
-| `secret_blocked` | Detection Finding (2004) | Create (1); a withheld variable is the resource, a `preflight` report row names none |
+| `secret_blocked` | Detection Finding (2004) | Create (1); a withheld variable or denied Keychain Mach service is the resource, a `preflight` report row names none |
 | everything else: fence state, `config_loaded`, proxy start and stop, a `network_passed` row naming no host (egress level and fence setup, not a connection), `*_passed`, `session_close`, `config.*`, `network_error`, and any type added later | Application Lifecycle (6002) | Other (99); the row type, or the fence state for `filesystem_fence_state`, in `status_detail` |
 
 The mapped fields are read from the row and nothing is guessed (a detail that is not valid UTF-8 is read in the lossy rendering described below): `dst_endpoint.hostname` comes from a `host=` token (split into `hostname` and `port` when it is `host:port`), `file.path` from `path=` or the JSON report, `exit_code` from `exit_code=`; a row without one leaves the field out (a `file_blocked` row naming no path gets file name `unknown`). The log does not record the host, so every event's `device` is `{"type_id": 0, "name": "unrecorded"}`. `time` is milliseconds; the stored nanosecond timestamp is in `metadata.original_time`. `metadata.uid` is the row's `entry_hash`.
@@ -311,7 +311,7 @@ Limits: a `CONSISTENT` export carries no key, so its rows prove internal consist
 ## Honest limits
 - Not externally anchored by default; v1 is tamper-evident, not an unforgeable receipt.
 - In-run checkpoints are opt-in. Rows written after the last confirmed pin have no off-box protection, and no checkpoint carries an independent signed time.
-- macOS records per-file denials best-effort (`filesystem-fence.md`). The HTTP proxy ignores audit-write errors on the allow path, while the netns path fails closed (`docs/design/look-back-rules.md` section 1, item 5).
+- macOS records file and recognized Keychain service denials best-effort (`filesystem-fence.md`). Keychain rows use `secret_blocked`, category `secret`, and detail `mach-lookup <service>`; their OCSF resource type is `Mach service`. Kernel provenance and the session tag are required, but unified-log loss and the shared event cap still limit coverage. The HTTP proxy ignores audit-write errors on the allow path, while the netns path fails closed (`docs/design/look-back-rules.md` section 1, item 5).
 - Allowed file reads are never logged, only denials.
 - On legacy chains, `--prune` removes history and invalidates earlier anchors;
   `verify` prints a `NOTE`. V2 local pending/enrolled state or a retained original registration request refuses prune, including state none after an interrupted write.
