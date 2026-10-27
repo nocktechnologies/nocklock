@@ -4,6 +4,11 @@ All notable changes to NockLock will be documented in this file.
 
 ## [Unreleased]
 
+### Security
+
+- macOS profiles now deny `com.apple.SecurityServer` Mach lookups independently of file-path denies, hardened mode and proxy configuration. A synthetic private-keychain regression proves both Security.framework query APIs are blocked and become readable when only the service deny is removed; ordinary file reads still work. Tools using this service for Keychain credentials inside the fence must use another supported credential source. `trustd` and `ocspd` remain allowed; other Keychain backends are not claimed isolated. System curl and Go HTTPS, git over HTTPS and the Claude Code preset have live allowed controls. Attributed kernel service denials enter the signed audit log as `secret_blocked`, subject to the existing unified-log delivery and event-cap limits; OCSF identifies the Mach service. This closes a missing service boundary, not a demonstrated bypass of an already-denied Keychain file.
+
+
 ## [0.16.0] - 2026-10-26
 
 v0.16.0 adds a standalone Linux installer that authenticates and activates the CLI and its matching filesystem interposer together, with explicit-tag upgrades and verified rollback. Its initial target is Ubuntu 24.04 amd64 with glibc 2.39. Python and Go are not installation dependencies.

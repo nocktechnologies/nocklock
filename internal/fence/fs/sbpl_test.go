@@ -428,9 +428,9 @@ func TestSbplString_Escaping(t *testing.T) {
 
 // TestGenerateTaggedWriteConfinementProfile_TagsEveryFileDeny proves the session
 // tag rides on every file-deny rule (the sensitive read/write deny, the base
-// write deny, ancestor unlink deny, and hardened /dev deny) and that an empty tag leaves the
-// profile byte-identical to the untagged generator.
-func TestGenerateTaggedWriteConfinementProfile_TagsEveryFileDeny(t *testing.T) {
+// write deny, ancestor unlink deny, and hardened /dev deny) and the Keychain
+// service rule. An empty tag leaves the profile identical to the untagged generator.
+func TestGenerateTaggedWriteConfinementProfile_TagsFileAndKeychainDenials(t *testing.T) {
 	root := t.TempDir()
 	secret := t.TempDir()
 	const tag = `nocklock:sess"1`
@@ -440,14 +440,22 @@ func TestGenerateTaggedWriteConfinementProfile_TagsEveryFileDeny(t *testing.T) {
 		t.Fatalf("GenerateTaggedWriteConfinementProfile: %v", err)
 	}
 	modifier := `(with message "nocklock:sess\"1")`
-	if got := strings.Count(profile, modifier); got != 4 {
-		t.Errorf("expected the tag on 4 file-deny rules, got %d:\n%s", got, profile)
+	if got := strings.Count(profile, modifier); got != 5 {
+		t.Errorf("expected the tag on 4 file-deny rules and the Keychain rule, got %d:\n%s", got, profile)
+	}
+	if !strings.Contains(profile, "    (global-name \"com.apple.SecurityServer\")\n    "+modifier+"\n)") {
+		t.Errorf("Keychain rule must carry its tag after the service filters:\n%s", profile)
 	}
 	if !strings.Contains(profile, "(deny file-write* "+modifier+")") {
 		t.Errorf("base write deny is untagged:\n%s", profile)
 	}
 	if strings.Contains(profile, "(deny mach-priv-host-port "+modifier) {
-		t.Errorf("non-file denials must stay untagged:\n%s", profile)
+		t.Errorf("unhandled privileged-host denials must stay untagged:\n%s", profile)
+	}
+	for _, trustService := range []string{"com.apple.trustd", "com.apple.ocspd", "com.apple.securityd", "com.apple.security.keychaind", "com.apple.secd", "com.apple.security.agent"} {
+		if strings.Contains(profile, trustService) {
+			t.Errorf("unproven service %s must stay outside the SecurityServer denylist", trustService)
+		}
 	}
 
 	plain, plainCount, err := GenerateWriteConfinementProfile([]string{secret}, root, "read-write", true)

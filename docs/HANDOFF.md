@@ -6,6 +6,8 @@ No internal host names, personal names or absolute home paths: `scripts/check-pu
 
 ## What changed
 
+- 2026-10-26: the proven macOS Keychain route, `com.apple.SecurityServer`, is now denied in every generated profile, independent of path denies, hardened mode and proxy configuration. The native synthetic-keychain regression covers both query APIs, ordinary-file controls and removal of only the service rule across five profiles; it leaves the default keychain/search list unchanged. The old profile could read a private keychain outside the path denylist, but the explicitly denied fixture was already blocked. The tailer maps recognized kernel service denials to signed `secret_blocked` rows and OCSF names the Mach service; delivery remains best effort. Authentication through this service needs an alternate credential source. Live system curl/Go HTTPS, git HTTPS and Claude Code preset controls passed, including an installed CLI version launch; CI enables the live controls explicitly. `trustd`/`ocspd` and unproven Keychain routes stay allowed; no claim covers the data-protection keychain.
+
 - 2026-10-26: the authenticated-bootstrap recipe now routes HUP, INT and TERM through cleanup before authentication, then removes those traps when retaining verified tools. SIGKILL can still leave an inert directory for administrator cleanup.
 
 - 2026-10-26: Linux installer writes now propagate close failures; archive negative controls assert the intended refusal instead of any error. Rollback fixtures clear artifact input as the CLI does. The bootstrap recipe removes unauthenticated staging after failure, retains authenticated tools for recovery and explicitly sets the retained directory for helper setup.

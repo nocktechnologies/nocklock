@@ -13,7 +13,7 @@ import (
 	"time"
 )
 
-// Best-effort capture of Seatbelt file denials from the macOS unified log.
+// Best-effort capture of Seatbelt file and Keychain service denials from the macOS unified log.
 //
 // Seatbelt has no callback like the Linux interposer socket; the kernel writes
 // each denial to the unified log (sender "Sandbox"). The generated profile tags
@@ -29,10 +29,18 @@ import (
 // DenialTag is the message tag a session's deny rules carry.
 func DenialTag(sessionID string) string { return "nocklock:" + sessionID }
 
-// Denial is one file access the Seatbelt fence refused.
+// Denial is one file access or Keychain service lookup the Seatbelt fence refused.
 type Denial struct {
 	Operation string // e.g. "file-read-data"
-	Path      string
+	Path      string // filesystem path or Mach service name
+}
+
+// IsKeychainService reports whether this denial names the fenced SecurityServer Keychain service.
+func (d Denial) IsKeychainService() bool {
+	if d.Operation != "mach-lookup" {
+		return false
+	}
+	return d.Path == keychainMachService
 }
 
 // Detail renders the audit-row detail, e.g. "file-read-data /Users/x/.ssh/id_ed25519".
@@ -43,10 +51,10 @@ const (
 	sandboxKextDir  = "/System/Library/Extensions/Sandbox.kext/"
 )
 
-// ParseDenial extracts a file denial from one `log stream --style ndjson` line.
-// It reports false for anything that is not a file denial carrying tag: the
+// ParseDenial extracts a file or Keychain service denial from one log-stream line.
+// It reports false for anything that is not a supported denial carrying tag: the
 // stream's non-JSON header, malformed or truncated JSON, denials of other
-// processes or sessions (no tag, or a different one), non-file operations, and
+// processes or sessions (no tag, or a different one), other operations, and
 // records a userland process logged under the "Sandbox" sender name.
 //
 // Provenance fields, as captured from a real Seatbelt denial on macos-latest
@@ -88,10 +96,11 @@ func ParseDenial(line []byte, tag string) (Denial, bool) {
 		return Denial{}, false
 	}
 	op, path, ok := strings.Cut(opAndPath, " ")
-	if !ok || !strings.HasPrefix(op, "file-") || path == "" {
+	d := Denial{Operation: op, Path: path}
+	if !ok || path == "" || (!strings.HasPrefix(op, "file-") && !d.IsKeychainService()) {
 		return Denial{}, false
 	}
-	return Denial{Operation: op, Path: path}, true
+	return d, true
 }
 
 func hasLine(s, want string) bool {
