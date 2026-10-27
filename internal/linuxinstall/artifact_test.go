@@ -23,7 +23,12 @@ func fixture(t *testing.T, tag string, mutate func(*tar.Header, *[]byte)) ([]byt
 	gz := gzip.NewWriter(&buf)
 	tw := tar.NewWriter(gz)
 	root := "nocklock-" + tag + "-linux-amd64"
-	if err := tw.WriteHeader(&tar.Header{Name: root, Typeflag: tar.TypeDir, Mode: 0o755}); err != nil {
+	directory := &tar.Header{Name: root, Typeflag: tar.TypeDir, Mode: 0o755}
+	if mutate != nil {
+		empty := []byte{}
+		mutate(directory, &empty)
+	}
+	if err := tw.WriteHeader(directory); err != nil {
 		t.Fatal(err)
 	}
 	for n, d := range files {
@@ -66,6 +71,17 @@ func TestValidateRelease(t *testing.T) {
 	}
 	if _, err := Validate(a, append(m, m...), "v1.2.3"); err == nil {
 		t.Fatal("duplicate manifest accepted")
+	}
+}
+
+func TestPOSIXDirectoryHeader(t *testing.T) {
+	a, m := fixture(t, "v1.2.3", func(h *tar.Header, _ *[]byte) {
+		if h.Typeflag == tar.TypeDir {
+			h.Name += "/"
+		}
+	})
+	if _, err := Validate(a, m, "v1.2.3"); err != nil {
+		t.Fatal("native builder directory header refused", err)
 	}
 }
 

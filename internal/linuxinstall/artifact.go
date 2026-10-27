@@ -75,6 +75,12 @@ func Validate(archive, manifest []byte, tag string) (map[string][]byte, error) {
 		if err != nil {
 			return nil, err
 		}
+		// POSIX tar writers (including the native Python builder) append a
+		// slash to directory headers. Canonicalize only this exact directory;
+		// files and any other spelling remain subject to the strict allowlist.
+		if h.Name == root+"/" && h.Typeflag == tar.TypeDir {
+			h.Name = root
+		}
 		if seen[h.Name] {
 			return nil, fmt.Errorf("duplicate archive member %q", h.Name)
 		}
