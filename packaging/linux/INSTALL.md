@@ -12,6 +12,10 @@ together. It is not an upgrade, rollback, or general-purpose installer. Do not
 run it on a workstation or agent host. Never run the included helper script
 directly from an untrusted download with sudo.
 
+The separate, unreleased standalone Go installer and tagged release format are
+documented in `packaging/linux/RELEASE-INSTALL.md` in the source repository. It
+does not accept this candidate archive or its candidate signing identity.
+
 The disposable-host workflow first checks that `/usr/local` and its `bin` and
 `lib` children and `/opt` are real directories, then makes only those four directories
 root-owned and removes group/other write permission. Hosted runner images can
