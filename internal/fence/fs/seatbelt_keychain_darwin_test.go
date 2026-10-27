@@ -9,6 +9,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
 )
@@ -29,7 +30,11 @@ func TestSeatbeltKeychainServiceIsolation_RealSandboxExec(t *testing.T) {
 		t.Helper()
 		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 		defer cancel()
-		out, err := exec.CommandContext(ctx, argv[0], argv[1:]...).CombinedOutput()
+		cmd := exec.CommandContext(ctx, argv[0], argv[1:]...)
+		cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+		cmd.Cancel = func() error { return syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL) }
+		cmd.WaitDelay = 5 * time.Second
+		out, err := cmd.CombinedOutput()
 		if ctx.Err() != nil {
 			t.Fatalf("Keychain proof command timed out: %s", argv[0])
 		}
