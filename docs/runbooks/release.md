@@ -1,6 +1,6 @@
 # Runbook: release
 
-`next` holds the integration batch; `main` holds released code. A maintainer reviews and merges PRs. Contributions target `next`; do not push directly to either shared branch. This repo has no publishing workflow or release script: tagging, GitHub release creation and the Homebrew tap update remain explicit release-owner actions.
+`next` holds the integration batch; `main` holds released code. A maintainer reviews and merges PRs. Contributions target `next`; do not push directly to either shared branch. The tag-only `release.yml` workflow builds signed Linux assets and fresh-VM acceptance evidence but has no publication permission. Tagging, GitHub release creation, asset publication and the Homebrew tap update remain explicit release-owner actions.
 
 ## Prepare the batch
 
@@ -25,7 +25,7 @@ Use a disposable account/project without production credentials. Follow [setup](
 
 - **macOS:** Homebrew installs the CLI. With the default policy, require `SEATBELT`; the self-test's Linux-only syscall probe is an explicit skip, while filesystem, network and secret probes must pass.
 - **Linux:** the formula installs only the CLI. Until packaging implementation ships, use the source-install binary/library steps in [setup](../setup.md#1-install); opt-in `--net-fence=netns` also requires the installed privileged helper. Run `scripts/test-init-default-linux.sh` and the applicable root/netns CI proofs. Below Landlock ABI 9, a default `CONFINED` config reports `PARTIAL` (exit 3) for Unix sockets; accept only that named limitation with the other boundaries enforced, not an arbitrary nonzero doctor result.
-- **Release assets:** the [Linux packaging design](../design/linux-packaging.md) proposes a signed tarball and clean-machine acceptance. A merged design does not supply an installer, signed assets or clean-host evidence. Publish assets only after that implementation and its acceptance gates have landed.
+- **Release assets:** after the tagged `release.yml` run succeeds, review both `linux-amd64-release-assets` and `linux-amd64-release-acceptance` from that exact run. Verify both manifests against the exact workflow/tag identity in the [installer guide](../../packaging/linux/RELEASE-INSTALL.md); record their hashes, source commit and acceptance evidence. Complete the broader network and cross-version upgrade/rollback gates in the [packaging contract](../design/linux-packaging.md). Then attach the six immutable files to that tag's GitHub release, with the acceptance evidence linked in its notes. Never upload assets from a failed acceptance job, a candidate workflow or a different run/tag. Do not replace already-published files or retrofit the installer onto a release that lacks the managed invocation protocol; issue a new release. The workflow itself never publishes.
 
 ## Rolling back
 

@@ -2,7 +2,51 @@
 
 Date: 2026-10-13
 
-Status: **Production contract proposed; N11746 implements CI candidates only**
+Status: **Installer implemented, unreleased; production receipts and publication pending**
+
+## Installer implementation (2026-10-26)
+
+`cmd/nocklock-install/` is a standalone Go installer; Python remains build/test
+tooling only. `internal/linuxinstall/` verifies staged signatures with the
+existing pinned Cosign binary, validates the bounded release archive, installs
+the immutable pair, generates the optional fixed helper/policy and activates
+through one symlink. It supports explicit-tag upgrades and authenticated
+rollback to retained releases. `internal/installstate/` supplies the permanent
+shared/exclusive lock protocol. A versioned CLI takes its shared lease before
+running any command and checks that its executable is still the active target;
+this closes the loaded-old-inode/changed-link launch race. The fixed helper
+re-enters that same CLI guard, so it cannot mix with an active old CLI.
+
+The executable and lock stay outside project grants. Locks describe live
+NockLock processes, not every descendant after a force-killed supervisor;
+orphaned agent cleanup is an operator responsibility. No process-name scan or
+PID-file heuristic is used. Source and old fresh-only candidate installations
+are refused by the lifecycle installer rather than silently adopted.
+
+The final release payload is smaller than the proposed layout below: CLI,
+interposer, build-info, license and installation guide. No archive-supplied
+installer/helper script executes. The standalone installer has its own signed
+`INSTALLER.SHA256SUMS` manifest; the paired archive has `SHA256SUMS`. Both use
+the exact tag-specific `release.yml` identity. The authenticated bootstrap is
+documented in `packaging/linux/RELEASE-INSTALL.md`. An earlier trusted installer
+may manage later releases only while their `install_protocol` remains 1.
+
+`release.yml` is tag-only and has no publication permission. It builds and signs
+assets and runs fresh-host acceptance, including actual signature checks,
+repeat-install and retained-release verification. Cross-version lifecycle
+tests exercise upgrades, explicit downgrade refusal, rollback tampering,
+interrupted activation and active-command exclusion. Those tests use a
+signature-verifier seam; they are not cross-version production receipts.
+Before the first supported binary release, run the tag workflow and the broader
+network acceptance below, verify upgrade/rollback between signed release tags,
+and explicitly publish the accepted immutable assets. No v0.15.0 assets are
+retrofitted by this change.
+
+Threat boundary: protect against modified downloads, archive traversal,
+untrusted install paths and concurrent CLI/installer activity. Root and the
+exact release signing workflow remain trusted. No runtime fence, policy, audit
+format or doctor verdict changes. Rollback plan: retain and explicitly verify
+the prior release before switching; never roll back keys/configs/audit state.
 
 Nock: N11643
 

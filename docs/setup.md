@@ -4,6 +4,11 @@ Everything here restates `README.md` (Quick start, Installation, Linux network-e
 
 ## 1. Install
 
+The unreleased [signed Linux installer](../packaging/linux/RELEASE-INSTALL.md)
+adds paired installation, upgrades and verified rollback for Ubuntu 24.04 amd64.
+Use it only once a release publishes its signed assets and acceptance evidence.
+v0.15.0 still requires the source steps below.
+
 **Homebrew** (macOS, recommended):
 
 ```bash

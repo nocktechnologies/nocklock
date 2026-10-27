@@ -1,0 +1,115 @@
+name: Linux release assets
+
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+
+# Produces signed assets and acceptance evidence. Publication remains an explicit
+# release-owner action after the existing release gates; no contents:write here.
+permissions:
+  contents: read
+
+jobs:
+  build:
+    if: startsWith(github.ref, 'refs/tags/')
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    permissions:
+      contents: read
+      id-token: write
+    outputs:
+      commit: ${{ steps.build.outputs.commit }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
+        with:
+          go-version-file: go.mod
+      - uses: sigstore/cosign-installer@6f9f17788090df1f26f669e9d70d6ae9567deba6 # v4.1.2
+        with:
+          cosign-release: v3.1.3
+      - name: Build paired tagged release and standalone installer
+        id: build
+        env:
+          RELEASE_TAG: ${{ github.ref_name }}
+        run: |
+          bash packaging/linux/build-candidate.sh "$RUNNER_TEMP/release" "$RELEASE_TAG"
+          echo "commit=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+      - name: Sign both manifests with exact release workflow identity
+        env:
+          RELEASE_IDENTITY: https://github.com/${{ github.workflow_ref }}
+        run: |
+          bash packaging/linux/sign-manifest.sh "$RUNNER_TEMP/release" "$RELEASE_IDENTITY"
+          bash packaging/linux/sign-manifest.sh "$RUNNER_TEMP/release" "$RELEASE_IDENTITY" INSTALLER.SHA256SUMS
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: linux-amd64-release-assets
+          path: ${{ runner.temp }}/release/
+          if-no-files-found: error
+          retention-days: 30
+
+  accept:
+    needs: build
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: linux-amd64-release-assets
+          path: ${{ runner.temp }}/release
+      - uses: sigstore/cosign-installer@6f9f17788090df1f26f669e9d70d6ae9567deba6 # v4.1.2
+        with:
+          cosign-release: v3.1.3
+      - name: Prepare disposable host
+        run: |
+          test "$GITHUB_ACTIONS" = true
+          test "$RUNNER_ENVIRONMENT" = github-hosted
+          sudo apt-get update
+          sudo apt-get install -y iproute2 nftables sudo python3
+          for directory in / /usr /usr/local /usr/local/bin /usr/local/lib /opt; do
+            test ! -L "$directory"
+            test -d "$directory"
+          done
+          for directory in /usr/local /usr/local/bin /usr/local/lib /opt; do
+            sudo chown root:root "$directory"
+            sudo chmod go-w "$directory"
+          done
+      - name: Authenticate bootstrap and exercise production installer
+        env:
+          RELEASE_TAG: ${{ github.ref_name }}
+        run: |
+          sudo env -i GITHUB_ACTIONS=true RUNNER_ENVIRONMENT=github-hosted \
+            /usr/bin/python3 packaging/linux/provision-release-ci.py \
+            "$RUNNER_TEMP/release" "$(command -v cosign)" "$RELEASE_TAG"
+          sudo install -m 0755 packaging/linux/accept-installed.sh /usr/local/bin/nocklock-accept-ci
+          sudo install -m 0644 packaging/linux/acceptance.py /usr/local/bin/nocklock-check-acceptance-ci.py
+      - name: Unprivileged CONFINED and KERNEL acceptance
+        env:
+          RELEASE_COMMIT: ${{ needs.build.outputs.commit }}
+          RELEASE_TAG: ${{ github.ref_name }}
+        run: |
+          sudo -u nocklock-candidate env -i HOME=/home/nocklock-candidate \
+            USER=nocklock-candidate LOGNAME=nocklock-candidate PATH=/usr/bin:/bin \
+            /bin/bash /usr/local/bin/nocklock-accept-ci \
+            "$RELEASE_COMMIT" /home/nocklock-candidate/evidence "$RELEASE_TAG"
+      - name: Collect public evidence
+        if: always()
+        run: |
+          mkdir -p "$RUNNER_TEMP/evidence"
+          if sudo test -d /home/nocklock-candidate/evidence; then
+            sudo cp -r /home/nocklock-candidate/evidence/. "$RUNNER_TEMP/evidence/"
+            sudo chown -R "$(id -u):$(id -g)" "$RUNNER_TEMP/evidence"
+          fi
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        if: always()
+        with:
+          name: linux-amd64-release-acceptance
+          path: ${{ runner.temp }}/evidence/
+          if-no-files-found: error
+          retention-days: 30

@@ -3,15 +3,25 @@
 set -euo pipefail
 export LC_ALL=C
 [[ $(id -u) != 0 && $(id -un) == nocklock-candidate ]]
-[[ $# == 2 && $1 =~ ^[0-9a-f]{40}$ && $2 == /* ]]
+[[ $# -ge 2 && $# -le 3 && $1 =~ ^[0-9a-f]{40}$ && $2 == /* ]]
 commit=$1
 evidence=$2
+tag=${3:-}
+version="0.0.0-candidate.$commit"
+directory="nocklock-candidate-$commit-linux-amd64"
+kind=ci-candidate-acceptance-not-release
+if [[ -n "$tag" ]]; then
+  [[ "$tag" =~ ^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$ ]]
+  version=${tag#v}
+  directory="$tag-linux-amd64"
+  kind=release-install-acceptance
+fi
 mkdir -m 0700 "$evidence"
 bin=/usr/local/bin/nocklock
 "$bin" version | tee "$evidence/version.txt"
-grep -Fxq "NockLock v0.0.0-candidate.$commit" "$evidence/version.txt"
+grep -Fxq "NockLock v$version" "$evidence/version.txt"
 readlink -f "$bin" > "$evidence/installed-path.txt"
-grep -Fxq "/usr/local/lib/nocklock/releases/nocklock-candidate-$commit-linux-amd64/nocklock" "$evidence/installed-path.txt"
+grep -Fxq "/usr/local/lib/nocklock/releases/$directory/nocklock" "$evidence/installed-path.txt"
 sudo -k
 sudo -n -l | tee "$evidence/sudo-l.txt" >/dev/null
 if sudo -n /usr/bin/true 2>/dev/null; then
@@ -93,17 +103,17 @@ PY
   "$bin" verify --audit --ed25519-pub "$pub" > "$record/audit.txt"
   grep -q '^AUDIT: AUTHENTIC' "$record/audit.txt"
   "$bin" log --json > "$record/events.json"
-  /usr/bin/python3 -I - "$record/events.json" "$level" "$record/receipt.json" "$commit" "$doctor_exit" <<'PY'
+  /usr/bin/python3 -I - "$record/events.json" "$level" "$record/receipt.json" "$commit" "$doctor_exit" "$kind" <<'PY'
 import json, sys
 events = json.load(open(sys.argv[1]))
 starts = [e for e in events if e['EventType'] == 'session_start']
 assert len(starts) == 1, 'expected exactly one session in a fresh project'
 assert starts[0]['egress_level'] == sys.argv[2], starts[0]
-receipt = dict(kind='ci-candidate-acceptance-not-release', commit=sys.argv[4],
+receipt = dict(kind=sys.argv[6], commit=sys.argv[4],
                egress_level=starts[0]['egress_level'], audit='AUTHENTIC',
                filesystem_allow=True, filesystem_deny_errno=True,
                doctor_exit=int(sys.argv[5]), session_id=starts[0]['SessionID'])
 with open(sys.argv[3], 'w') as f: json.dump(receipt, f, indent=2)
 PY
 done
-printf 'ACCEPTED candidate %s: signed CONFINED and KERNEL; evidence %s\n' "$commit" "$evidence"
+printf 'ACCEPTED %s %s: signed CONFINED and KERNEL; evidence %s\n' "$kind" "$commit" "$evidence"

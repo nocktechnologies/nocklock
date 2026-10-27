@@ -37,6 +37,15 @@ jobs:
           cosign-release: v3.1.3
       - name: Validate packaging rejection controls
         run: PYTHONDONTWRITEBYTECODE=1 python3 -m unittest discover -s packaging/linux -v
+      - name: Installer lifecycle and root-owned invocation controls
+        run: |
+          go test -race ./internal/linuxinstall ./internal/installstate
+          go test -c -o "$RUNNER_TEMP/installstate.test" ./internal/installstate
+          test "$RUNNER_ENVIRONMENT" = github-hosted
+          test ! -L /opt
+          sudo chown root:root /opt
+          sudo chmod go-w /opt
+          sudo "$RUNNER_TEMP/installstate.test" -test.v
       - name: Build native paired candidate
         id: build
         env:

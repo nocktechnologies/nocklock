@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
-# Native paired build. Only GitHub CI artifacts are produced; nothing is published.
+# Native paired build. Optional second argument builds a stable tagged release.
+# Neither mode publishes anything.
 set -euo pipefail
 export LC_ALL=C
 repo=$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)
@@ -10,12 +11,20 @@ source /etc/os-release
 [[ $ID:$VERSION_ID == ubuntu:24.04 ]]
 [[ $(getconf GNU_LIBC_VERSION) == 'glibc 2.39' ]]
 [[ $(go env GOHOSTOS)/$(go env GOHOSTARCH) == linux/amd64 ]]
-[[ $# == 1 && $1 == /* && ! -e $1 ]] || { echo 'Pass a new absolute output directory' >&2; exit 1; }
+[[ $# -ge 1 && $# -le 2 && $1 == /* && ! -e $1 ]] || { echo 'Pass a new absolute output directory and optional release tag' >&2; exit 1; }
 git diff --quiet HEAD || { echo 'Candidate requires a clean, committed checkout' >&2; exit 1; }
 [[ -z $(git ls-files --others --exclude-standard) ]] || { echo 'Candidate requires a clean, committed checkout' >&2; exit 1; }
 commit=$(git rev-parse HEAD)
 version="0.0.0-candidate.$commit"
 root="nocklock-candidate-$commit-linux-amd64"
+tag=${2:-}
+if [[ -n "$tag" ]]; then
+  [[ "$tag" =~ ^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$ ]]
+  [[ $(git rev-parse "$tag^{commit}") == "$commit" ]]
+  git merge-base --is-ancestor "$commit" origin/main
+  version=${tag#v}
+  root="nocklock-$tag-linux-amd64"
+fi
 mkdir -m 0755 "$1"
 out=$1
 stage=$(mktemp -d)
@@ -27,13 +36,20 @@ CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -trimpath \
   -o "$pkg/nocklock" ./cmd/nocklock
 /usr/bin/gcc -shared -fPIC -Wall -Wextra -Werror -O2 \
   -o "$pkg/libfence_fs.so" internal/fence/fs/interposer/libfence_fs.c -ldl -lpthread
-install -m 0755 scripts/install-egress-helper.sh "$pkg/install-egress-helper.sh"
-install -m 0644 packaging/linux/INSTALL.md LICENSE "$pkg/"
+if [[ -z "$tag" ]]; then
+  install -m 0755 scripts/install-egress-helper.sh "$pkg/install-egress-helper.sh"
+  install -m 0644 packaging/linux/INSTALL.md "$pkg/"
+else
+  CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -trimpath -o "$out/nocklock-install-linux-amd64" ./cmd/nocklock-install
+  install -m 0644 packaging/linux/RELEASE-INSTALL.md "$pkg/INSTALL.md"
+fi
+install -m 0644 LICENSE "$pkg/"
 "$pkg/nocklock" version
-python3 - "$pkg" "$out" "$commit" "$(git show -s --format=%ct HEAD)" <<'PY'
+python3 - "$pkg" "$out" "$commit" "$(git show -s --format=%ct HEAD)" "$tag" <<'PY'
 import hashlib, json, os, pathlib, re, subprocess, sys, tarfile
 pkg, out = map(pathlib.Path, sys.argv[1:3])
 commit, epoch = sys.argv[3], int(sys.argv[4])
+tag = sys.argv[5]
 def output(*args):
     return subprocess.check_output(args, text=True).strip()
 elf = {}
@@ -53,8 +69,10 @@ info = dict(schema=1, kind='ci-candidate-not-release', commit=commit,
             builder_image=os.environ.get('ImageVersion', 'unrecorded'),
             source_date_epoch=epoch, elf=elf,
             files={p.name: hashlib.sha256(p.read_bytes()).hexdigest() for p in sorted(pkg.iterdir())})
+if tag:
+    info.update(kind='release', tag=tag, version=tag[1:], install_protocol=1)
 (pkg / 'build-info.json').write_text(json.dumps(info, indent=2, sort_keys=True) + '\n')
-archive = out / (pkg.name + '.tar.gz')
+archive = out / (f'nocklock_{tag}_linux_amd64.tar.gz' if tag else pkg.name + '.tar.gz')
 with tarfile.open(archive, 'w:gz', format=tarfile.USTAR_FORMAT) as tar:
     for path in [pkg, *sorted(pkg.iterdir())]:
         entry = tar.gettarinfo(str(path), arcname=str(path.relative_to(pkg.parent)))
@@ -66,5 +84,12 @@ with tarfile.open(archive, 'w:gz', format=tarfile.USTAR_FORMAT) as tar:
             with path.open('rb') as data: tar.addfile(entry, data)
         else: tar.addfile(entry)
 (out / 'SHA256SUMS').write_text(hashlib.sha256(archive.read_bytes()).hexdigest() + '  ' + archive.name + '\n')
+if tag:
+    installer = out / 'nocklock-install-linux-amd64'
+    (out / 'INSTALLER.SHA256SUMS').write_text(hashlib.sha256(installer.read_bytes()).hexdigest() + '  ' + installer.name + '\n')
 PY
-python3 packaging/linux/artifact.py "$out/$root.tar.gz" "$out/SHA256SUMS" "$commit"
+if [[ -z "$tag" ]]; then
+  python3 packaging/linux/artifact.py "$out/$root.tar.gz" "$out/SHA256SUMS" "$commit"
+else
+  go test ./internal/linuxinstall ./internal/installstate
+fi
