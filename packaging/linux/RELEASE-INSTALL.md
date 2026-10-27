@@ -109,9 +109,10 @@ Every invocation from a versioned install holds a shared lock; install and
 rollback require the exclusive lock. Stop NockLock commands and retry if busy.
 An old executable loaded just before a switch refuses after it acquires the
 lock, instead of mixing its CLI with another release's helper. The lock file is
-permanent: never remove or replace it. Source installs are not enrolled in this
-protocol and are not automatically adopted. Stop them and arrange an explicit
-migration before using this installer.
+permanent: never remove or replace it. Migration from source or candidate
+installations is not supported by this installer. Use a fresh supported host
+for managed installation, or keep an existing source installation on the
+[source-install workflow](../../docs/setup.md).
 
 This lock is readable by ordinary CLI users. Any local account can deliberately
 hold it and deny service to commands or upgrades; it is a consistency mechanism,

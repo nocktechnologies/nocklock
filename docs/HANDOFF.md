@@ -6,7 +6,7 @@ No internal host names, personal names or absolute home paths: `scripts/check-pu
 
 ## What changed
 
-- 2026-10-26: v0.16.0 upgrade notes now identify it as the first version eligible for managed assets. Earlier releases have no managed upgrade or rollback path; v0.15.0 cannot be a managed rollback target. Production signed-asset acceptance and publication remain outstanding.
+- 2026-10-26: v0.16.0 upgrade notes now identify it as the first version eligible for managed assets. Earlier releases have no managed upgrade or rollback path; v0.15.0 cannot be a managed rollback target. The installer does not support migration from source or candidate installations; the guide now directs users to a fresh host or the source-install workflow. Production signed-asset acceptance and publication remain outstanding.
 
 - 2026-10-26: v0.16.0 release notes prepared for the standalone Linux installer batch. The installer entry moved verbatim out of `[Unreleased]`; the summary records platform scope, managed-install migration and rollback limits. The roadmap keeps v0.15.0 as the published baseline and the Linux installation bar open. Still open: promotion and tagging, production signed-asset acceptance, cross-version upgrade/rollback and broader network receipts, then immutable asset publication, Homebrew update and back-sync.
 
