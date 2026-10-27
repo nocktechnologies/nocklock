@@ -18,7 +18,7 @@ Upgrade notes: v0.16.0 is the first version eligible for managed release assets;
 
 ### Fixed
 
-- Linux installer staging reports writable-file close failures. Archive refusal tests check the intended rejection reason, and bootstrap instructions set the retained directory explicitly and clean unauthenticated staging on failure.
+- Linux installer staging reports writable-file close failures. Archive refusal tests check the intended rejection reason, and bootstrap instructions set the retained directory explicitly and clean unauthenticated staging on failure and HUP/INT/TERM.
 
 ## [0.15.0] - 2026-10-26
 
