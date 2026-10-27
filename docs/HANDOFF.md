@@ -6,6 +6,8 @@ No internal host names, personal names or absolute home paths: `scripts/check-pu
 
 ## What changed
 
+- 2026-10-26: v0.16.0 upgrade notes now identify it as the first version eligible for managed assets. Earlier releases have no managed upgrade or rollback path; v0.15.0 cannot be a managed rollback target. Production signed-asset acceptance and publication remain outstanding.
+
 - 2026-10-26: v0.16.0 release notes prepared for the standalone Linux installer batch. The installer entry moved verbatim out of `[Unreleased]`; the summary records platform scope, managed-install migration and rollback limits. The roadmap keeps v0.15.0 as the published baseline and the Linux installation bar open. Still open: promotion and tagging, production signed-asset acceptance, cross-version upgrade/rollback and broader network receipts, then immutable asset publication, Homebrew update and back-sync.
 
 - 2026-10-26: standalone Linux installer implemented in `cmd/nocklock-install/` and `internal/linuxinstall/`: root-staged signature verification, immutable paired install, atomic activation, explicit-tag upgrade/rollback and opt-in generated helper authorization. `internal/installstate/` holds the permanent invocation/installer lock; managed CLIs refuse a stale executable after activation changes. Candidate provisioning creates that lock too. `release.yml` builds and signs tagged artifacts and runs fresh-host acceptance without publishing. The public bootstrap is in `packaging/linux/RELEASE-INSTALL.md`. Still open: run production tagged acceptance, collect cross-version signed upgrade/rollback and broader network receipts, then publish assets from a new release; existing v0.15.0 remains source-only on Linux.
