@@ -5,9 +5,13 @@ and matching filesystem interposer together. Python and Go are not installation
 dependencies. Cosign v3.1.3 is required for verification; its Linux amd64 checksum
 is pinned in the installer. Other distributions, arm64 and musl are not supported.
 
-This is unreleased implementation. v0.15.0 has no installer assets. Use the
-[source installation](../../docs/setup.md) until a later release publishes the
-six files below and links successful release-install acceptance evidence.
+This implementation is prepared for v0.16.0; the release notes alone do not
+make its assets available. v0.15.0 has no installer assets. Use the
+[source installation](../../docs/setup.md) until a release publishes the six
+files below and links successful release-install acceptance evidence. Tagged
+production acceptance, signed cross-version upgrade/rollback evidence and the
+broader network gates in the [packaging contract](../../docs/design/linux-packaging.md)
+must be completed before asset publication.
 
 ## Obtain and authenticate the installer
 
@@ -105,9 +109,10 @@ Every invocation from a versioned install holds a shared lock; install and
 rollback require the exclusive lock. Stop NockLock commands and retry if busy.
 An old executable loaded just before a switch refuses after it acquires the
 lock, instead of mixing its CLI with another release's helper. The lock file is
-permanent: never remove or replace it. Source installs are not enrolled in this
-protocol and are not automatically adopted. Stop them and arrange an explicit
-migration before using this installer.
+permanent: never remove or replace it. Migration from source or candidate
+installations is not supported by this installer. Use a fresh supported host
+for managed installation, or keep an existing source installation on the
+[source-install workflow](../../docs/setup.md).
 
 This lock is readable by ordinary CLI users. Any local account can deliberately
 hold it and deny service to commands or upgrades; it is a consistency mechanism,

@@ -4,6 +4,14 @@ All notable changes to NockLock will be documented in this file.
 
 ## [Unreleased]
 
+## [0.16.0] - 2026-10-26
+
+v0.16.0 adds a standalone Linux installer that authenticates and activates the CLI and its matching filesystem interposer together, with explicit-tag upgrades and verified rollback. Its initial target is Ubuntu 24.04 amd64 with glibc 2.39. Python and Go are not installation dependencies.
+
+Availability: the installer requires all six signed assets and successful acceptance evidence from the same release, as described in [the installer guide](packaging/linux/RELEASE-INSTALL.md). Preparing these notes does not publish those assets. Until they are published, use the [source installation](docs/setup.md). The production tagged workflow, signed cross-version upgrade/rollback evidence and broader network acceptance remain distribution gates; the Linux installation roadmap bar remains open.
+
+Upgrade notes: v0.16.0 is the first version eligible for managed release assets; there is no earlier managed release to upgrade from or roll back to, and v0.15.0 cannot be a managed rollback target. Migration from source or candidate installations is not supported by this installer. Use a fresh supported host for managed installation, or keep an existing source installation on the [source-install workflow](docs/setup.md). For subsequent managed upgrades, stop running NockLock commands, authenticate the new release's installer and install its explicit tag. Optional kernel-egress access still needs host prerequisites and an explicit `--egress-user` grant. Rollback rechecks an already-installed release and never rewrites project config or audit state. Existing source-install and macOS workflows are unchanged; this release does not broaden Linux platform support or remove the documented Unix-socket limitation below Landlock ABI 9.
+
 ### Added
 
 - A standalone Go Linux installer for signed Ubuntu 24.04 amd64 release pairs, with explicit-tag upgrades and verified rollback. It authenticates root-staged assets with the pinned Cosign verifier, rejects unmanaged installations, retains prior releases, and atomically activates the CLI with its matching interposer. Optional `--egress-user` installs a generated constrained helper and validated sudoers grant. Managed CLI invocations hold a shared installation lock, so changes refuse while commands run and stale executable launches refuse after a switch. A tagged workflow builds and signs assets and checks installation on a fresh VM; publication remains an explicit release-owner step. This does not add assets to existing releases or broaden the Linux platform support matrix. See `packaging/linux/RELEASE-INSTALL.md`.
