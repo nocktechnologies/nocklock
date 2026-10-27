@@ -126,6 +126,10 @@ def provision(args):
             (release / name).chmod(0o644 if name.endswith(".json") else 0o755)
             trusted(release / name)
         os.symlink(release / "nocklock", "/usr/local/bin/nocklock")
+        # Versioned CLIs share this permanent inode with the lifecycle installer.
+        lease = release.parent.parent / "install.lock"
+        lease.touch(mode=0o644, exist_ok=False)
+        lease.chmod(0o644)
         if Path("/usr/local/bin/nocklock").resolve(strict=True) != release / "nocklock":
             raise ValueError("installed CLI symlink does not resolve to candidate")
         if not Path("/usr/libexec").exists():

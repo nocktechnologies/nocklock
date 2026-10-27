@@ -84,7 +84,7 @@ Things you cannot guess from the code layout:
 | `doctor` and `verify` verdicts | `internal/cli/doctor.go`, `internal/cli/verify.go`, `docs/how-it-works/doctor-and-verify.md` |
 | End-to-end tests | `integration/` |
 | The red-team bench | `bench/redteam/` |
-| Linux packaging candidate | `packaging/linux/` |
+| Linux packaging and installer | `packaging/linux/`, `cmd/nocklock-install/`, `internal/linuxinstall/` (verified lifecycle), `internal/installstate/` (root trust and invocation leases) |
 | CI | `.github/workflows/` |
 | A release | `docs/runbooks/release.md` |
 | User-facing docs | `README.md`, `docs/setup.md`, `docs/how-it-works/` |

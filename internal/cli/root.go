@@ -27,6 +27,14 @@ var rootCmd = &cobra.Command{
 
 // Execute runs the root command.
 func Execute() {
+	lease, err := acquireInstallLease()
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "NockLock: installation unavailable:", err)
+		os.Exit(2)
+	}
+	if lease != nil {
+		defer lease.Close()
+	}
 	if err := rootCmd.Execute(); err != nil {
 		var exitErr *exitCodeError
 		if errors.As(err, &exitErr) {
