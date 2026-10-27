@@ -40,7 +40,8 @@ the installer and verifier into private root-owned staging and authenticates
 those exact copies before executing anything from the download. It retains
 that bootstrap directory after authentication for future upgrades and rollback,
 even if installation then fails. Failed authentication removes its staging
-directory. Set the three absolute paths/tag first; there is no implicit `latest` selection.
+directory on ordinary failure and HUP/INT/TERM; SIGKILL can leave an inert
+directory for administrator cleanup. Set the three absolute paths/tag first; there is no implicit `latest` selection.
 
 ```bash
 : "${RELEASE_TAG:?Set the published stable tag vX.Y.Z}"
@@ -56,6 +57,7 @@ test "$(uname -s):$(uname -m)" = Linux:x86_64
 umask 077
 stage=$(mktemp -d /root/nocklock-bootstrap.XXXXXX)
 trap 'rm -rf -- "$stage"' 0
+trap 'exit 1' HUP INT TERM
 install -m 0600 "$verifier" "$stage/cosign"
 for name in nocklock-install-linux-amd64 INSTALLER.SHA256SUMS INSTALLER.SHA256SUMS.sigstore.json; do
   install -m 0600 "$assets/$name" "$stage/$name"
@@ -71,7 +73,7 @@ test "$(wc -l < INSTALLER.SHA256SUMS)" -eq 1
 grep -Eq '^[0-9a-f]{64}  nocklock-install-linux-amd64$' INSTALLER.SHA256SUMS
 sha256sum --check --strict INSTALLER.SHA256SUMS
 chmod 0700 nocklock-install-linux-amd64
-trap - 0
+trap - 0 HUP INT TERM
 printf 'Authenticated bootstrap retained in %s\n' "$stage"
 ./nocklock-install-linux-amd64 install --tag "$tag" --artifacts "$assets" --cosign "$stage/cosign"
 printf 'Verified installer and verifier retained in %s\n' "$stage"
