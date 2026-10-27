@@ -38,8 +38,10 @@ automatically.
 The following is a reviewed shell recipe, not a downloaded script. It copies
 the installer and verifier into private root-owned staging and authenticates
 those exact copies before executing anything from the download. It retains
-that bootstrap directory for future upgrades and rollback. Set the three
-absolute paths/tag first; there is no implicit `latest` selection.
+that bootstrap directory after authentication for future upgrades and rollback,
+even if installation then fails. Failed authentication removes its staging
+directory on ordinary failure and HUP/INT/TERM; SIGKILL can leave an inert
+directory for administrator cleanup. Set the three absolute paths/tag first; there is no implicit `latest` selection.
 
 ```bash
 : "${RELEASE_TAG:?Set the published stable tag vX.Y.Z}"
@@ -54,6 +56,8 @@ printf '%s\n' "$tag" | grep -Eq '^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-
 test "$(uname -s):$(uname -m)" = Linux:x86_64
 umask 077
 stage=$(mktemp -d /root/nocklock-bootstrap.XXXXXX)
+trap 'rm -rf -- "$stage"' 0
+trap 'exit 1' HUP INT TERM
 install -m 0600 "$verifier" "$stage/cosign"
 for name in nocklock-install-linux-amd64 INSTALLER.SHA256SUMS INSTALLER.SHA256SUMS.sigstore.json; do
   install -m 0600 "$assets/$name" "$stage/$name"
@@ -69,6 +73,8 @@ test "$(wc -l < INSTALLER.SHA256SUMS)" -eq 1
 grep -Eq '^[0-9a-f]{64}  nocklock-install-linux-amd64$' INSTALLER.SHA256SUMS
 sha256sum --check --strict INSTALLER.SHA256SUMS
 chmod 0700 nocklock-install-linux-amd64
+trap - 0 HUP INT TERM
+printf 'Authenticated bootstrap retained in %s\n' "$stage"
 ./nocklock-install-linux-amd64 install --tag "$tag" --artifacts "$assets" --cosign "$stage/cosign"
 printf 'Verified installer and verifier retained in %s\n' "$stage"
 ROOT
@@ -83,9 +89,12 @@ before activation. No script supplied by an archive runs as root.
 ## Optional kernel network helper
 
 Use the retained, authenticated bootstrap directory printed above. Pass the
-ordinary local account that runs wrapped agents; root is refused:
+ordinary local account that runs wrapped agents; root is refused. Set `BOOTSTRAP`
+to the exact retained directory printed by the authentication recipe (the
+placeholder below must be replaced):
 
 ```bash
+BOOTSTRAP=/root/nocklock-bootstrap.REPLACE_WITH_PRINTED_SUFFIX
 sudo "$BOOTSTRAP/nocklock-install-linux-amd64" install \
   --tag "$RELEASE_TAG" --artifacts "$DOWNLOADS" --cosign "$BOOTSTRAP/cosign" \
   --egress-user "$USER"

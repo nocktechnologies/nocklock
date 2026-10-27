@@ -138,6 +138,7 @@ func TestRollbackRechecksRetainedBytes(t *testing.T) {
 				t.Fatal(err)
 			}
 			one.Rollback = true
+			one.Artifacts = ""
 			if err := i.apply(one); err == nil {
 				t.Fatal("accepted tampered rollback")
 			}
@@ -298,6 +299,7 @@ func TestRootOwnedInstallLifecycle(t *testing.T) {
 		t.Fatal(err)
 	}
 	one.Rollback = true
+	one.Artifacts = ""
 	if err := i.apply(one); err != nil {
 		t.Fatal(err)
 	}
