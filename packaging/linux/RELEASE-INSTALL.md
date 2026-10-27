@@ -5,9 +5,13 @@ and matching filesystem interposer together. Python and Go are not installation
 dependencies. Cosign v3.1.3 is required for verification; its Linux amd64 checksum
 is pinned in the installer. Other distributions, arm64 and musl are not supported.
 
-This is unreleased implementation. v0.15.0 has no installer assets. Use the
-[source installation](../../docs/setup.md) until a later release publishes the
-six files below and links successful release-install acceptance evidence.
+This implementation is prepared for v0.16.0; the release notes alone do not
+make its assets available. v0.15.0 has no installer assets. Use the
+[source installation](../../docs/setup.md) until a release publishes the six
+files below and links successful release-install acceptance evidence. Tagged
+production acceptance, signed cross-version upgrade/rollback evidence and the
+broader network gates in the [packaging contract](../../docs/design/linux-packaging.md)
+must be completed before asset publication.
 
 ## Obtain and authenticate the installer
 

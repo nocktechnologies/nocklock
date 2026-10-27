@@ -6,6 +6,8 @@ No internal host names, personal names or absolute home paths: `scripts/check-pu
 
 ## What changed
 
+- 2026-10-26: v0.16.0 release notes prepared for the standalone Linux installer batch. The installer entry moved verbatim out of `[Unreleased]`; the summary records platform scope, managed-install migration and rollback limits. The roadmap keeps v0.15.0 as the published baseline and the Linux installation bar open. Still open: promotion and tagging, production signed-asset acceptance, cross-version upgrade/rollback and broader network receipts, then immutable asset publication, Homebrew update and back-sync.
+
 - 2026-10-26: standalone Linux installer implemented in `cmd/nocklock-install/` and `internal/linuxinstall/`: root-staged signature verification, immutable paired install, atomic activation, explicit-tag upgrade/rollback and opt-in generated helper authorization. `internal/installstate/` holds the permanent invocation/installer lock; managed CLIs refuse a stale executable after activation changes. Candidate provisioning creates that lock too. `release.yml` builds and signs tagged artifacts and runs fresh-host acceptance without publishing. The public bootstrap is in `packaging/linux/RELEASE-INSTALL.md`. Still open: run production tagged acceptance, collect cross-version signed upgrade/rollback and broader network receipts, then publish assets from a new release; existing v0.15.0 remains source-only on Linux.
 
 - 2026-10-26: v0.15.0 release notes prepared on `next`: the `[Unreleased]` entries moved verbatim under `## [0.15.0] - 2026-10-26` with a summary, and the roadmap baseline set to `v0.15.0`. The version comes from `git describe` (`Makefile` ldflags). Still open: the release PR to `main`, the tag, the Homebrew tap bump and the back-sync.
@@ -28,6 +30,8 @@ No internal host names, personal names or absolute home paths: `scripts/check-pu
 - 2026-10-19: `.github/workflows/landlock-abi9-receipt.yml` runs `bench/redteam/kernel_cases.py --require-abi 9` in a throwaway Ubuntu 26.10 KVM guest (kernel 7.3) on a GitHub-hosted runner and signs the receipt (ROADMAP bar 1: receipt produced in CI, not yet released). Landlock ABI 9 first shipped in Linux 7.1 (7.0 reports 8), so the hosted runner kernel cannot prove it itself. `packaging/linux/sign-manifest.sh` is now shared with the candidate workflow. The guest image is pinned by URL and digest; when Ubuntu prunes that release directory, bump both together.
 
 ## What bit us
+
+- 2026-10-26: config-digest tests use the checkout directory in filesystem grants. On macOS, a checkout under the protected home .codex directory correctly triggers credential-overlap refusal. A checkout under /tmp also puts the preset fixtures' fake homes beneath a default allow and triggers the same protection. Run those tests from a disposable source copy in an ordinary development directory; do not relax the policy to accommodate the checkout.
 
 - 2026-10-23: the macOS credential proof (`scripts/test-credential-denies.py`) still set only `project.runtime` and wrapped `/bin/sh`, so it failed once that key stopped unlocking a login store. It now wraps with `--profile <agent>` for the own-store read and asserts `project.runtime` alone keeps the store denied.
 
