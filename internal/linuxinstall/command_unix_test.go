@@ -4,7 +4,6 @@ package linuxinstall
 
 import (
 	"context"
-	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -42,25 +41,43 @@ func TestCommandCancelsProcessGroup(t *testing.T) {
 }
 
 func TestCommandBoundsDetachedPipeWait(t *testing.T) {
-	ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
+	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	start := time.Now()
-	out, err := commandContext(ctx, os.Args[0], "-test.run=^TestInstallerDetachedHelper$", "--", "spawn-detached")
-	pid, parseErr := strconv.Atoi(strings.TrimSpace(string(out)))
-	if parseErr != nil {
-		t.Fatalf("missing helper PID: %q (%v)", out, err)
+	pidFile := filepath.Join(t.TempDir(), "detached.pid")
+	done := make(chan error, 1)
+	go func() {
+		_, err := commandContext(ctx, os.Args[0], "-test.run=^TestInstallerDetachedHelper$", "--", "spawn-detached", pidFile)
+		done <- err
+	}()
+	// Synchronize with actual descendant startup; a tiny deadline can kill a
+	// race-instrumented helper before it has even started on a busy CI host.
+	deadline := time.Now().Add(10 * time.Second)
+	pid := 0
+	for pid == 0 {
+		if data, err := os.ReadFile(pidFile); err == nil {
+			pid, _ = strconv.Atoi(strings.TrimSpace(string(data)))
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("helper did not publish its PID")
+		}
+		if pid == 0 {
+			time.Sleep(10 * time.Millisecond)
+		}
 	}
 	defer unix.Kill(pid, unix.SIGKILL) // intentionally detached fixture, never a host process
-	if err == nil {
-		t.Fatal("open descendant pipe reported success")
-	}
-	if time.Since(start) > 4*time.Second {
+	cancel()
+	select {
+	case err := <-done:
+		if err == nil {
+			t.Fatal("open descendant pipe reported success")
+		}
+	case <-time.After(4 * time.Second):
 		t.Fatal("pipe wait exceeded cancellation bound")
 	}
 }
 
 func TestInstallerDetachedHelper(t *testing.T) {
-	if os.Args[len(os.Args)-1] != "spawn-detached" {
+	if len(os.Args) < 2 || os.Args[len(os.Args)-2] != "spawn-detached" {
 		return
 	}
 	child := exec.Command("/bin/sleep", "30")
@@ -69,6 +86,9 @@ func TestInstallerDetachedHelper(t *testing.T) {
 	if err := child.Start(); err != nil {
 		os.Exit(2)
 	}
-	fmt.Fprintln(os.Stdout, child.Process.Pid)
+	if err := os.WriteFile(os.Args[len(os.Args)-1], []byte(strconv.Itoa(child.Process.Pid)), 0o600); err != nil {
+		child.Process.Kill()
+		os.Exit(2)
+	}
 	os.Exit(0)
 }
