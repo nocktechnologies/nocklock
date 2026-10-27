@@ -109,6 +109,15 @@ permanent: never remove or replace it. Source installs are not enrolled in this
 protocol and are not automatically adopted. Stop them and arrange an explicit
 migration before using this installer.
 
+This lock is readable by ordinary CLI users. Any local account can deliberately
+hold it and deny service to commands or upgrades; it is a consistency mechanism,
+not isolation against a hostile account on a shared host. An administrator must
+stop the offending process, never replace the lock inode. Subprocess checks have
+a two-minute deadline plus a two-second pipe-drain bound and cancel their process
+group. A helper that deliberately detaches into another session can require
+administrator cleanup; the installer still returns instead of hanging on its
+output pipe. Neither case bypasses signature checks or permits mixed activation.
+
 An ordinary install refuses a downgrade. To deliberately activate an older
 **already-installed** release:
 

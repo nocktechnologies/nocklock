@@ -5,6 +5,7 @@ package linuxinstall
 import (
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"math/big"
@@ -13,6 +14,7 @@ import (
 	"path/filepath"
 	"runtime"
 	"strings"
+	"syscall"
 	"time"
 
 	"github.com/nocktechnologies/nocklock/internal/installstate"
@@ -76,8 +78,23 @@ func Run(o Options) error {
 func command(name string, args ...string) ([]byte, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
 	defer cancel()
+	return commandContext(ctx, name, args...)
+}
+
+func commandContext(ctx context.Context, name string, args ...string) ([]byte, error) {
 	cmd := exec.CommandContext(ctx, name, args...)
 	cmd.Env = []string{"PATH=/usr/sbin:/usr/bin:/sbin:/bin", "HOME=/root", "LC_ALL=C"}
+	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	cmd.Cancel = func() error {
+		err := unix.Kill(-cmd.Process.Pid, unix.SIGKILL)
+		if errors.Is(err, unix.ESRCH) {
+			return os.ErrProcessDone
+		}
+		return err
+	}
+	// sudo may create a separate session. Even then an inherited output pipe
+	// cannot hold this installer (and its lease) past the cancellation budget.
+	cmd.WaitDelay = 2 * time.Second
 	out, err := cmd.CombinedOutput()
 	if err != nil {
 		return out, fmt.Errorf("%s failed: %w: %s", name, err, out)
