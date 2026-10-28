@@ -18,7 +18,7 @@ The default network policy uses a proxy with a domain allowlist. With the defaul
 
 ## Quick start
 
-On macOS, install with Homebrew and initialize your project with the preset for your agent. This example uses Claude Code; see the credential step below before launching it. Linux users should first follow the [source installation steps](docs/setup.md#1-install).
+On macOS, install with Homebrew and initialize your project with the preset for your agent. This example uses Claude Code; see the credential step below before launching it. On a fresh Ubuntu 24.04 amd64/glibc 2.39 host, first use the [signed Linux installer](packaging/linux/RELEASE-INSTALL.md). Existing source installations follow the [source installation steps](docs/setup.md#1-install).
 
 ```bash
 brew install nocktechnologies/tap/nocklock
@@ -26,7 +26,7 @@ cd your-project
 nocklock init --runtime claude-code
 ```
 
-On a new project, `init` writes `.nock/config.toml`. On macOS that is the whole install. On Linux the Homebrew formula installs only the `nocklock` binary, and the default config's `wrap` refuses to start without `libfence_fs.so`. Until packaging lands (N11643, `docs/ROADMAP.md` bar 3), install from source: run `make build-all` as your user, then `sudo install -m 0755 nocklock /usr/local/bin/nocklock`, then copy `libfence_fs.so` to `/usr/local/lib/nocklock/` by hand (steps in `docs/setup.md`).
+On a new project, `init` writes `.nock/config.toml`. On macOS that is the whole install. On Linux the Homebrew formula installs only the `nocklock` binary, and the default config's `wrap` refuses to start without `libfence_fs.so`. The signed installer installs the matching pair on its supported Linux target. For source installations, run `make build-all` as your user, then `sudo install -m 0755 nocklock /usr/local/bin/nocklock`, then copy `libfence_fs.so` to `/usr/local/lib/nocklock/` by hand (steps in `docs/setup.md`).
 
 **macOS and Claude Code:** Claude Code keeps a `claude.ai` login in the macOS login keychain, and the fence denies `~/Library/Keychains` and the `com.apple.SecurityServer` Keychain service (the service rule cannot scope access to one keychain item). The login has to arrive through the environment, and the default secret fence blocks `*_TOKEN*`, so plain `nocklock init` strips an exported `CLAUDE_CODE_OAUTH_TOKEN`. Use the `claude-code` preset:
 

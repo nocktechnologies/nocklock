@@ -47,14 +47,16 @@ may manage later releases only while their `install_protocol` remains 1.
 
 `release.yml` is tag-only and has no publication permission. It builds and signs
 assets and runs fresh-host acceptance, including actual signature checks,
-repeat-install and retained-release verification. Cross-version lifecycle
+repeat-install and retained-release verification. Unit lifecycle
 tests exercise upgrades, explicit downgrade refusal, rollback tampering,
 interrupted activation and active-command exclusion. Those tests use a
 signature-verifier seam; they are not cross-version production receipts.
-Before the first supported binary release, run the tag workflow and the broader
-network acceptance below, verify upgrade/rollback between signed release tags,
-and explicitly publish the accepted immutable assets. No v0.15.0 assets are
-retrofitted by this change.
+The separate `linux-release-acceptance.yml` production run now verifies actual
+signed v0.16.0 and v0.16.1 assets through upgrade, retry, downgrade refusal,
+rollback and re-upgrade, with config/audit preservation and stale-binary refusal.
+It also supplies the broader Linux/macOS network receipts linked above. The
+accepted immutable assets are published on both releases. v0.15.0 has no
+managed installer assets.
 
 Threat boundary: protect against modified downloads, archive traversal,
 untrusted install paths and concurrent CLI/installer activity. Root and the
