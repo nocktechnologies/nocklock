@@ -24,14 +24,29 @@ import tempfile
 import threading
 import time
 
+if not __debug__:
+    raise RuntimeError("acceptance requires assertions; do not use Python optimization")
+
 ALLOWED = "nocklock-allowed.test"
 BLOCKED = "nocklock-blocked.test"
 PORT = 19191
 
 
-def run(*args, **kwargs):
-    return subprocess.run(args, text=True, stdout=subprocess.PIPE,
-                          stderr=subprocess.STDOUT, timeout=90, **kwargs)
+def run(*args, timeout=90, check=False, **kwargs):
+    """Bound the entire process group, without draining a leaked pipe forever."""
+    process = subprocess.Popen(args, text=True, stdout=subprocess.PIPE,
+                               stderr=subprocess.STDOUT, start_new_session=True, **kwargs)
+    try:
+        output, _ = process.communicate(timeout=timeout)
+    except BaseException:
+        stop_process_group(process)
+        raise
+    finally:
+        process.stdout.close()
+    result = subprocess.CompletedProcess(args, process.returncode, output, "")
+    if check:
+        result.check_returncode()
+    return result
 
 
 def wait_for(test, seconds=30):
@@ -73,7 +88,8 @@ def probe(address, fenced, direct_only=False):
             try:
                 client.connect((address, PORT))
                 client.sendall(b"control")
-                assert client.recv(64) == b"REACHED"
+                response = client.recv(64)
+                assert response == b"REACHED"
             except OSError as exc:
                 assert fenced, (kind, exc)
                 if not linux:
@@ -93,15 +109,18 @@ def stop_process_group(process):
     try:
         os.killpg(process.pid, signal.SIGTERM)
     except ProcessLookupError:
+        # Normal exit can remove the group before teardown signals it.
         pass
     try:
         process.wait(timeout=15)
     except subprocess.TimeoutExpired:
+        # The finally block escalates the expired grace period to SIGKILL.
         pass
     finally:
         try:
             os.killpg(process.pid, signal.SIGKILL)
         except ProcessLookupError:
+            # The group may have exited after the first signal.
             pass
         process.wait(timeout=5)
 
@@ -232,7 +251,8 @@ def accept(args):
                         counters[rule["comment"]] = sum(e.get("counter", {}).get("packets", 0) for e in rule["expr"])
                 assert set(counters) == {"acceptance-tcp", "acceptance-udp"} and min(counters.values()) > 0, counters
             (project / "finish").touch()
-            assert process.wait(timeout=30) == 0, (evidence / "wrap.txt").read_text()
+            exit_code = process.wait(timeout=30)
+            assert exit_code == 0, (evidence / "wrap.txt").read_text()
         pub = user(args.binary, "verify", "--export-pubkey").strip()
         (evidence / "public-key.txt").write_text(pub)
         audit = user(args.binary, "verify", "--audit", "--ed25519-pub", pub)

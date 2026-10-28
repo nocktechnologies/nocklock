@@ -12,6 +12,7 @@ Upgrade notes: tools that obtain macOS credentials through SecurityServer inside
 
 ### Fixed
 
+- Release acceptance bounds subprocess groups and lifecycle probes, refuses optimized Python execution, and checks the specific stale-executable refusal.
 - Linux interposer stat-family calls permit metadata on canonical ancestors of the project root, restoring path walking used by Git 2.56. Ancestor directory reads, sibling metadata and file reads remain denied; explicit denies and malformed policies retain precedence.
 
 ### Added

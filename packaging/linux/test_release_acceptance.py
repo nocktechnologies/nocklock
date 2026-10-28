@@ -3,6 +3,7 @@ import importlib.util
 import json
 from pathlib import Path
 import subprocess
+import sys
 import tempfile
 import unittest
 from unittest.mock import Mock, patch
@@ -57,6 +58,24 @@ class ReleaseSelection(unittest.TestCase):
                 self.assertEqual([c.args for c in kill.call_args_list],
                                  [(123, network.signal.SIGTERM), (123, network.signal.SIGKILL)])
                 self.assertEqual(process.wait.call_count, 2)
+
+    def test_timeout_stops_group_without_unbounded_pipe_drain(self):
+        process = Mock(pid=123)
+        process.communicate.side_effect = subprocess.TimeoutExpired("probe", 1)
+        with patch.object(network.subprocess, "Popen", return_value=process) as popen, patch.object(network, "stop_process_group") as stop:
+            with self.assertRaises(subprocess.TimeoutExpired):
+                network.run("probe", timeout=1)
+            self.assertTrue(popen.call_args.kwargs["start_new_session"])
+            stop.assert_called_once_with(process)
+            process.communicate.assert_called_once_with(timeout=1)
+            process.stdout.close.assert_called_once()
+
+    def test_optimization_cannot_emit_acceptance(self):
+        for name in ("network-acceptance.py", "cross-version-ci.py"):
+            result = subprocess.run([sys.executable, "-O", str(Path(__file__).with_name(name)), "--help"],
+                                    text=True, capture_output=True, timeout=10)
+            self.assertNotEqual(result.returncode, 0)
+            self.assertIn("acceptance requires assertions", result.stderr)
 
     def test_network_driver_refuses_resident_host(self):
         with patch.object(network.os, "geteuid", return_value=0), patch.dict(network.os.environ, {}, clear=True):
