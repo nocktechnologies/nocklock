@@ -32,7 +32,7 @@ def main(args):
     # byte of config and audit state to survive activation and rollback.
     ci.run("/usr/bin/sudo", "-u", ci.TEST_USER, "env", "-i", "HOME=" + str(home),
            "PATH=/usr/bin:/bin", "/bin/bash", "-c",
-           'cd "$HOME"; mkdir lifecycle-project; cd lifecycle-project; '
+           'set -eu; cd "$HOME"; mkdir lifecycle-project; cd lifecycle-project; '
            '/usr/local/bin/nocklock init; /usr/local/bin/nocklock wrap -- /bin/echo LIFECYCLE')
     project = home / "lifecycle-project"
     config_before = snapshot(project)

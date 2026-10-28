@@ -107,17 +107,19 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        version: [older, newer]
-    # A network-only run has just the older version.
+        version: ${{ inputs.newer_tag != '' && fromJSON('["older", "newer"]') || fromJSON('["older"]') }}
+    # A network-only run produces no misleading newer-version evidence.
     env:
       RELEASE_TAG: ${{ matrix.version == 'newer' && inputs.newer_tag || inputs.older_tag || 'v0.16.0' }}
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           persist-credentials: false
+      - name: Require a stable release tag
+        run: '[[ "$RELEASE_TAG" =~ ^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$ ]]'
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
-          ref: ${{ env.RELEASE_TAG }}
+          ref: refs/tags/${{ env.RELEASE_TAG }}
           path: release-source
           persist-credentials: false
       - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5

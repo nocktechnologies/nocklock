@@ -89,7 +89,7 @@ def probe(address, fenced, direct_only=False):
 
 
 def stop_process_group(process):
-    """Reap the leader and kill descendants even if the leader exited first."""
+    """Reap the leader and signal its group even if the leader exited first."""
     try:
         os.killpg(process.pid, signal.SIGTERM)
     except ProcessLookupError:
@@ -128,6 +128,7 @@ def accept(args):
     original_hosts = hosts.read_bytes()
     hits = []
     servers = []
+    started_servers = []
     process = None
     namespace = None
     helper = Path("/usr/libexec/nocklock-egress-helper")
@@ -172,6 +173,7 @@ def accept(args):
                     socketserver.ThreadingUDPServer((bind, PORT), UDP)]
         for server in servers:
             threading.Thread(target=server.serve_forever, daemon=True).start()
+            started_servers.append(server)
         paths = ["/usr/", "/lib/", "/lib64/", "/bin/", "/sbin/", "/etc/", "/dev/", "/proc/"] if linux else ["/usr/", "/bin/", "/sbin/", "/System/", "/Library/", "/private/etc/", "/dev/"]
         (project / ".nock/config.toml").write_text(
             '[project]\nname = "release-network-acceptance"\n[filesystem]\nroot = ' + json.dumps(str(project)) +
@@ -264,7 +266,9 @@ def accept(args):
             cleanup.append(lambda: saved_helper.rename(helper))
         cleanup.append(lambda: hosts.write_bytes(original_hosts))
         for server in servers:
-            cleanup.extend((server.shutdown, server.server_close))
+            if server in started_servers:
+                cleanup.append(server.shutdown)
+            cleanup.append(server.server_close)
         errors = []
         for action in cleanup:
             try:

@@ -47,7 +47,7 @@ class ReleaseSelection(unittest.TestCase):
                     fetcher.fetch(tag, run, Path("unused"))
                 api.assert_not_called()
 
-    def test_teardown_kills_descendants_after_leader_exit_or_timeout(self):
+    def test_teardown_signals_group_after_leader_exit_or_timeout(self):
         for timeout in (False, True):
             process = Mock(pid=123)
             if timeout:
