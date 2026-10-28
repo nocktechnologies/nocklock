@@ -318,3 +318,7 @@ Limits: a `CONSISTENT` export carries no key, so its rows prove internal consist
 
 ## Tests
 `internal/logging/*_test.go`, `internal/cli/exec_fingerprint_test.go`, `internal/cli/verify_test.go`, `verify_signing_test.go`, `verify_export_test.go`, `audit_state_*_test.go`, `anchor_*_test.go`, `internal/anchorclient/client*_test.go`, `pkg/receipt/*_test.go`.
+
+## Durable egress intent (opt-in)
+
+`network.require_durable_audit = true` requires the explicit proxy to persist a signed `network_intent` row before dialing or forwarding. The row is an authorization intent, not a delivery outcome; OCSF exports it with an unknown outcome. A failed durable write refuses egress and fails the wrapped run. The default stays off, preserving best-effort allowed-event telemetry. See [the network fence](network-fence.md#optional-durable-audit-gate) for supported modes, storage guarantees and the CONNECT-tunnel scope.

@@ -225,6 +225,10 @@ func FromRow(r logging.ChainRow, productVersion string) (Event, error) {
 		e.setClass(ClassNetworkActivity, 5, "Refuse")
 		e.DstEndpoint = endpoint(detail)
 		e.setDecision(true)
+	case logging.EventNetworkIntent:
+		e.setClass(ClassNetworkActivity, activityOther, "Other")
+		e.DstEndpoint = endpoint(detail)
+		e.StatusDetail = "Durable authorization for an upstream attempt; delivery outcome unknown"
 	case logging.EventNetworkPassed:
 		// A network_passed row naming no host= records fence setup (the egress
 		// level, staged socket rules), not a connection: it falls through to

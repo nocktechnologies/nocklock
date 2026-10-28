@@ -359,6 +359,8 @@ type SyscallConfig struct {
 
 // NetworkConfig defines network egress boundaries.
 type NetworkConfig struct {
+	// RequireDurableAudit gates explicit proxy egress on a durable signed intent.
+	RequireDurableAudit        bool     `toml:"require_durable_audit"`
 	Allow                      []string `toml:"allow"`
 	AllowAll                   bool     `toml:"allow_all"`
 	AllowPrivateRanges         bool     `toml:"allow_private_ranges"`

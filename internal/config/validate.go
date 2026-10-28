@@ -183,6 +183,9 @@ func Validate(cfg *Config) []ValidationError {
 		}
 	}
 
+	if cfg.Network.RequireDurableAudit && cfg.Network.AllowAll {
+		errs = append(errs, ValidationError{Field: "network.require_durable_audit", Message: "requires allow_all = false so egress passes through the audit-gated proxy", Severity: "error"})
+	}
 	errs = append(errs, validateLookback(cfg.Network.Lookback)...)
 
 	return errs
@@ -255,6 +258,9 @@ func (cfg *Config) EffectivePolicy() string {
 			privateRanges)
 	}
 
+	if cfg.Network.RequireDurableAudit {
+		b.WriteString("  Durable egress audit: required before explicit HTTP/CONNECT proxy attempts (netns unsupported)\n")
+	}
 	for _, r := range cfg.Network.Lookback {
 		window := r.Within
 		if window == "" {

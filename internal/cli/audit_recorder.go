@@ -14,7 +14,8 @@ import (
 // closed: the first failure is announced on stderr, the child is cancelled, and
 // the error is kept for the session_end verdict. A failed non-blocked row stays
 // best-effort, so telemetry such as the macOS denial tailer's own warnings
-// never stops the child.
+// never stops the child. Opt-in durable egress intents report through fail
+// directly because their successful commit is required before egress.
 type auditRecorder struct {
 	log       func(logging.Event) error
 	sessionID string
@@ -42,15 +43,15 @@ func (r *auditRecorder) record(eventType logging.EventType, category, detail str
 	r.fail(eventType, err)
 }
 
-// fail records err as the session's blocked-event write failure. The first
+// fail records err as the session's required audit write failure. The first
 // failure is announced on stderr and cancels the child; later ones are
 // dropped. It is the network proxy's blocked-row write failure handler too, so
 // a denied request whose network_blocked row is lost fails the run the same
-// way. Safe for concurrent use.
+// way, as does a failed required egress intent. Safe for concurrent use.
 func (r *auditRecorder) fail(eventType logging.EventType, err error) {
 	first := err // only the failure path takes an address, so a success does not allocate
 	if r.failed.CompareAndSwap(nil, &first) {
-		fmt.Fprintf(r.stderr, "NockLock: fatal: could not record a blocked %s event in the audit log: %v — failing the run\n", eventType, err)
+		fmt.Fprintf(r.stderr, "NockLock: fatal: could not record a required %s event in the audit log: %v — failing the run\n", eventType, err)
 		r.cancel()
 	}
 }
