@@ -4,10 +4,13 @@ Everything here restates `README.md` (Quick start, Installation, Linux network-e
 
 ## 1. Install
 
-The unreleased [signed Linux installer](../packaging/linux/RELEASE-INSTALL.md)
-adds paired installation, upgrades and verified rollback for Ubuntu 24.04 amd64.
-Use it only once a release publishes its signed assets and acceptance evidence.
-v0.15.0 still requires the source steps below.
+The [signed Linux installer](../packaging/linux/RELEASE-INSTALL.md) is published
+for **Ubuntu 24.04 amd64 with glibc 2.39**. Start with
+[v0.16.1](https://github.com/nocktechnologies/nocklock/releases/tag/v0.16.1);
+its six signed assets and acceptance evidence cover paired installation,
+upgrades and verified rollback. Use a fresh supported host: migration from
+source or candidate installations is unsupported. Existing source installations
+and v0.15.0 use the source steps below.
 
 **Homebrew** (macOS, recommended):
 
@@ -15,7 +18,7 @@ v0.15.0 still requires the source steps below.
 brew install nocktechnologies/tap/nocklock
 ```
 
-On Linux the formula installs only the `nocklock` binary, not `libfence_fs.so`, and the default config's `wrap` refuses to start without it. No supported Homebrew step installs the library today; use the source install below. Packaging is the open card N11643.
+On Linux the formula installs only the `nocklock` binary, not `libfence_fs.so`, and the default config's `wrap` refuses to start without it. No supported Homebrew step installs the library; use the signed installer on a fresh supported Linux host, or the source install below.
 
 **From source** (Go 1.27.3 or newer; `go.mod` requires 1.27.3):
 

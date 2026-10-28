@@ -490,7 +490,7 @@ Two candidate runtimes are deliberately left without a preset:
 brew install nocktechnologies/tap/nocklock
 ```
 
-On Linux the formula installs only the `nocklock` binary, not `libfence_fs.so`; published v0.15.0 still needs the [source installation](docs/setup.md). The unreleased [signed Linux installer](packaging/linux/RELEASE-INSTALL.md) adds paired installation, upgrades and verified rollback for Ubuntu 24.04 amd64. It becomes usable when a later release publishes the signed assets and acceptance evidence.
+On Linux the formula installs only the `nocklock` binary, not `libfence_fs.so`. For Ubuntu 24.04 amd64 with glibc 2.39, use the [signed Linux installer](packaging/linux/RELEASE-INSTALL.md) from [v0.16.1](https://github.com/nocktechnologies/nocklock/releases/tag/v0.16.1): paired installation, upgrades and verified rollback have passed fresh-host, signed cross-version and broader-network acceptance. Existing source installations use the [source workflow](docs/setup.md); migration into the managed installer is not supported. Other distributions, Linux arm64 and musl are outside this release’s supported installer matrix.
 
 ### From source
 

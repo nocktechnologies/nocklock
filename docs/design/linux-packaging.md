@@ -2,7 +2,21 @@
 
 Date: 2026-10-13
 
-Status: **Installer implemented, unreleased; production receipts and publication pending**
+Status: **Published for Ubuntu 24.04 amd64/glibc 2.39; signed lifecycle and network acceptance passed**
+
+## Publication evidence (2026-10-27)
+
+The six original signed assets are published on v0.16.0 and v0.16.1.
+[Production v0.16.1 fresh-host acceptance](https://github.com/nocktechnologies/nocklock/actions/runs/40612628058)
+and [real signed cross-version plus Linux/macOS network acceptance](https://github.com/nocktechnologies/nocklock/actions/runs/40612879908)
+passed. [Durable receipts and asset hashes](https://github.com/nocktechnologies/nocklock/releases/download/v0.16.1/linux-release-acceptance.json)
+link both immutable source commits and production runs; raw observations are
+attached to each release. Prefer v0.16.1 for installation and retain v0.16.0
+as the tested rollback target. The [installation guide](../../packaging/linux/RELEASE-INSTALL.md)
+is the current procedure. The candidate boundary and proposed scripts below
+record the earlier design; they are not alternate public installers. No claim
+adds source/candidate migration, other Linux platforms or Unix-socket isolation
+below Landlock ABI 9.
 
 ## Installer implementation (2026-10-26)
 
