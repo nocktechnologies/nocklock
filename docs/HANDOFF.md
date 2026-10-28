@@ -6,6 +6,8 @@ No internal host names, personal names or absolute home paths: `scripts/check-pu
 
 ## What changed
 
+- 2026-10-27: release acceptance now bounds command groups and lifecycle probes, closes captured pipes without unbounded draining on timeout, and refuses Python optimization before any receipt can be emitted. Stale managed binaries must fail for the specific activation-change reason.
+
 - 2026-10-27: v0.16.1 notes prepared with SecurityServer isolation, Linux project-ancestor metadata compatibility and installed-release acceptance tooling. v0.16.0 signed native installation and broader Linux/macOS network checks passed. Its six Linux assets remain withheld until upgrade/rollback against the second real signed release passes.
 
 - 2026-10-27: Git 2.56 exposed an ancestor-metadata compatibility issue in the Linux interposer. Stat-family calls now permit only canonical project ancestors while directory reads, sibling reads/metadata and explicit denies remain fenced. The native regression tests both sides; the preset Git-status proof retains stderr diagnostics.

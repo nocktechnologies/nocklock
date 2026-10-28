@@ -5,13 +5,19 @@ import hashlib
 import importlib.util
 import json
 from pathlib import Path
-import subprocess
 from types import SimpleNamespace
+
+if not __debug__:
+    raise RuntimeError("acceptance requires assertions; do not use Python optimization")
 
 spec = importlib.util.spec_from_file_location("release_ci", Path(__file__).with_name("provision-release-ci.py"))
 release = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(release)
 ci = release.ci
+network_spec = importlib.util.spec_from_file_location("network_ci", Path(__file__).with_name("network-acceptance.py"))
+network = importlib.util.module_from_spec(network_spec)
+network_spec.loader.exec_module(network)
+run = network.run
 
 
 def snapshot(path):
@@ -30,10 +36,10 @@ def main(args):
     home = Path("/home") / ci.TEST_USER
     # Establish actual signed state using the old release, then require every
     # byte of config and audit state to survive activation and rollback.
-    ci.run("/usr/bin/sudo", "-u", ci.TEST_USER, "env", "-i", "HOME=" + str(home),
+    run("/usr/bin/sudo", "-u", ci.TEST_USER, "env", "-i", "HOME=" + str(home),
            "PATH=/usr/bin:/bin", "/bin/bash", "-c",
            'set -eu; cd "$HOME"; mkdir lifecycle-project; cd lifecycle-project; '
-           '/usr/local/bin/nocklock init; /usr/local/bin/nocklock wrap -- /bin/echo LIFECYCLE')
+           '/usr/local/bin/nocklock init; /usr/local/bin/nocklock wrap -- /bin/echo LIFECYCLE', check=True, env=ci.ENV)
     project = home / "lifecycle-project"
     config_before = snapshot(project)
     state_before = snapshot(home / ".local/state/nocklock")
@@ -45,23 +51,24 @@ def main(args):
         command = [str(installer), action, "--tag", tag, "--cosign", str(cosign)]
         if artifacts:
             command += ["--artifacts", str(artifacts)]
-        result = subprocess.run(command, text=True, capture_output=True, timeout=180)
+        result = run(*command, timeout=180, env=ci.ENV)
         with (args.evidence / "lifecycle.txt").open("a") as out:
             out.write(" ".join(command) + "\n" + result.stdout + result.stderr)
         if refusal:
-            assert result.returncode != 0 and refusal in result.stderr, result
+            assert result.returncode != 0 and refusal in result.stdout, result
         else:
             assert result.returncode == 0, result
             assert link.resolve().parent.name == tag + "-linux-amd64"
-            assert subprocess.check_output([str(link), "version"], text=True).strip() == "NockLock " + tag
+            version_output = run(str(link), "version", check=True, env=ci.ENV).stdout.strip()
+            assert version_output == "NockLock " + tag, version_output
         assert snapshot(project) == config_before
         assert snapshot(home / ".local/state/nocklock") == state_before
         assert snapshot(old_path.parent) == old_tree
     activate("install", args.newer, args.new_assets)
     new_path = link.resolve()
     new_tree = snapshot(new_path.parent)
-    stale = subprocess.run([str(old_path), "version"], text=True, capture_output=True)
-    assert stale.returncode != 0, stale
+    stale = run(str(old_path), "version", env=ci.ENV)
+    assert stale.returncode != 0 and "release changed or is inactive" in stale.stdout, stale
     (args.evidence / "stale.txt").write_text(stale.stdout + stale.stderr)
     activate("install", args.newer, args.new_assets)
     activate("install", args.older, args.old_assets, refusal="downgrade refused")
@@ -69,16 +76,16 @@ def main(args):
     activate("rollback", args.older)
     assert link.resolve() == old_path and snapshot(new_path.parent) == new_tree
     # The old signed chain remains verifiable after the real downgrade.
-    verify = subprocess.run(["/usr/bin/sudo", "-u", ci.TEST_USER, "env", "-i", "HOME=" + str(home),
-                             "PATH=/usr/bin:/bin", str(link), "verify", "--audit"],
-                            cwd=project, text=True, capture_output=True, check=True)
+    verify = run("/usr/bin/sudo", "-u", ci.TEST_USER, "env", "-i", "HOME=" + str(home),
+                             "PATH=/usr/bin:/bin", str(link), "verify", "--audit",
+                            cwd=project, check=True, env=ci.ENV)
     assert "AUDIT: AUTHENTIC" in verify.stdout
     (args.evidence / "audit-after-rollback.txt").write_text(verify.stdout)
     # Reverification may checkpoint SQLite; take the baseline again before the
     # final forward switch, which leaves the new release ready for network proof.
     state_before = snapshot(home / ".local/state/nocklock")
     activate("install", args.newer, args.new_assets)
-    ci.run("/usr/bin/sudo", "-u", ci.TEST_USER, "sudo", "-n", "/usr/libexec/nocklock-egress-helper", "check")
+    run("/usr/bin/sudo", "-u", ci.TEST_USER, "sudo", "-n", "/usr/libexec/nocklock-egress-helper", "check", check=True, env=ci.ENV)
     (args.evidence / "receipt.json").write_text(json.dumps(dict(
         kind="signed-cross-version-acceptance", older=args.older, newer=args.newer,
         upgrade=True, retry=True, downgrade_refused=True, rollback=True,
