@@ -4,6 +4,10 @@ All notable changes to NockLock will be documented in this file.
 
 ## [Unreleased]
 
+### Fixed
+
+- Linux interposer stat-family calls permit metadata on canonical ancestors of the project root, restoring path walking used by Git 2.56. Ancestor directory reads, sibling metadata and file reads remain denied; explicit denies and malformed policies retain precedence.
+
 ### Added
 
 - Disposable hosted acceptance checks for immutable signed release upgrade/rollback, preserved config and audit state, and installed Linux/macOS network enforcement. Direct Linux denial requires packet counters at the unchanged default-drop policy and reachable unfenced controls. These checks do not publish assets.

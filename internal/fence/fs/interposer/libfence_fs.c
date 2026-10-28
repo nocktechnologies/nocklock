@@ -587,6 +587,23 @@ static int check_path(const char *resolved, int is_write,
     return -1;
 }
 
+/* Metadata on canonical ancestors of the project root is needed by path
+ * walkers such as Git. This does not permit opening/listing those directories
+ * or inspecting siblings. Explicit denies and malformed policy still win. */
+static int check_metadata_path(const char *resolved,
+                               char *reason_out, size_t reason_len)
+{
+    int result = check_path(resolved, 0, reason_out, reason_len);
+    if (result == 0 || g_config.deny_all ||
+        !path_starts_with(g_config.root, resolved))
+        return result;
+    for (int i = 0; i < g_config.deny_count; i++) {
+        if (path_starts_with(resolved, g_config.deny[i]))
+            return result;
+    }
+    return 0;
+}
+
 /* ------------------------------------------------------------------ */
 /* Initialization                                                      */
 /* ------------------------------------------------------------------ */
@@ -2315,7 +2332,7 @@ int stat(const char *pathname, struct stat *buf)
     }
 
     char reason[512];
-    if (check_path(resolved, 0 /* read */, reason, sizeof(reason)) != 0) {
+    if (check_metadata_path(resolved, reason, sizeof(reason)) != 0) {
         report_blocked(pathname, "stat", reason);
         errno = ENOENT;
         return -1;
@@ -2344,7 +2361,7 @@ int lstat(const char *pathname, struct stat *buf)
     }
 
     char reason[512];
-    if (check_path(resolved, 0 /* read */, reason, sizeof(reason)) != 0) {
+    if (check_metadata_path(resolved, reason, sizeof(reason)) != 0) {
         report_blocked(pathname, "lstat", reason);
         errno = ENOENT;
         return -1;
@@ -2377,7 +2394,7 @@ int fstat(int fd, struct stat *buf)
     }
 
     char reason[512];
-    if (check_path(resolved, 0 /* read */, reason, sizeof(reason)) != 0) {
+    if (check_metadata_path(resolved, reason, sizeof(reason)) != 0) {
         report_blocked(resolved, "fstat", reason);
         errno = ENOENT;
         return -1;
@@ -2431,7 +2448,7 @@ int fstatat(int dirfd, const char *pathname, struct stat *buf, int flags)
     }
 
     char reason[512];
-    if (check_path(resolved, 0 /* read */, reason, sizeof(reason)) != 0) {
+    if (check_metadata_path(resolved, reason, sizeof(reason)) != 0) {
         report_blocked((pathname[0] == '\0' && (flags & AT_EMPTY_PATH)) ? "(fd)" : pathname,
                        "fstatat", reason);
         errno = ENOENT;
@@ -2461,7 +2478,7 @@ int stat64(const char *pathname, struct stat64 *buf)
     }
 
     char reason[512];
-    if (check_path(resolved, 0 /* read */, reason, sizeof(reason)) != 0) {
+    if (check_metadata_path(resolved, reason, sizeof(reason)) != 0) {
         report_blocked(pathname, "stat64", reason);
         errno = ENOENT;
         return -1;
@@ -2486,7 +2503,7 @@ int lstat64(const char *pathname, struct stat64 *buf)
     }
 
     char reason[512];
-    if (check_path(resolved, 0 /* read */, reason, sizeof(reason)) != 0) {
+    if (check_metadata_path(resolved, reason, sizeof(reason)) != 0) {
         report_blocked(pathname, "lstat64", reason);
         errno = ENOENT;
         return -1;
@@ -2516,7 +2533,7 @@ int fstat64(int fd, struct stat64 *buf)
     }
 
     char reason[512];
-    if (check_path(resolved, 0 /* read */, reason, sizeof(reason)) != 0) {
+    if (check_metadata_path(resolved, reason, sizeof(reason)) != 0) {
         report_blocked(resolved, "fstat64", reason);
         errno = ENOENT;
         return -1;
@@ -2605,7 +2622,7 @@ int __xstat(int vers, const char *pathname, struct stat *buf)
     }
 
     char reason[512];
-    if (check_path(resolved, 0 /* read */, reason, sizeof(reason)) != 0) {
+    if (check_metadata_path(resolved, reason, sizeof(reason)) != 0) {
         report_blocked(pathname, "__xstat", reason);
         errno = ENOENT;
         return -1;
@@ -2632,7 +2649,7 @@ int __lxstat(int vers, const char *pathname, struct stat *buf)
     }
 
     char reason[512];
-    if (check_path(resolved, 0 /* read */, reason, sizeof(reason)) != 0) {
+    if (check_metadata_path(resolved, reason, sizeof(reason)) != 0) {
         report_blocked(pathname, "__lxstat", reason);
         errno = ENOENT;
         return -1;
@@ -2689,7 +2706,7 @@ int __fxstatat(int vers, int dirfd, const char *pathname, struct stat *buf, int 
     }
 
     char reason[512];
-    if (check_path(resolved, 0 /* read */, reason, sizeof(reason)) != 0) {
+    if (check_metadata_path(resolved, reason, sizeof(reason)) != 0) {
         report_blocked((pathname[0] == '\0' && (flags & AT_EMPTY_PATH)) ? "(fd)" : pathname,
                        "__fxstatat", reason);
         errno = ENOENT;
@@ -2761,7 +2778,7 @@ int statx(int dirfd, const char *pathname, int flags,
     }
 
     char reason[512];
-    if (check_path(resolved, 0 /* read */, reason, sizeof(reason)) != 0) {
+    if (check_metadata_path(resolved, reason, sizeof(reason)) != 0) {
         report_blocked((pathname[0] == '\0' && (flags & AT_EMPTY_PATH)) ? "(fd)" : pathname,
                        "statx", reason);
         errno = ENOENT;
