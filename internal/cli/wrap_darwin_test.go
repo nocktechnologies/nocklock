@@ -137,7 +137,7 @@ func TestWrapMacOSFilesystemFenceDeniesAuditStateTampering(t *testing.T) {
 
 	// Keep a parent-owned connection open so SQLite retains a real WAL sidecar
 	// while the fenced child attempts to damage it.
-	parentLogger, err := logging.NewLogger(dbPath, project, signingLoggerOpts()...)
+	parentLogger, err := logging.NewLogger(dbPath, project, mustSigningLoggerOpts(t)...)
 	if err != nil {
 		t.Fatalf("open parent audit logger: %v", err)
 	}

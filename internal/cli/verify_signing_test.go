@@ -4,12 +4,15 @@ import (
 	"bytes"
 	"crypto/ed25519"
 	"crypto/rand"
+	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/nocktechnologies/nocklock/internal/logging"
+	"github.com/spf13/cobra"
 )
 
 func TestWriteAuditVerifyResult_Authentic(t *testing.T) {
@@ -271,4 +274,135 @@ func TestExportedPubkeyRoundTripsThroughParse(t *testing.T) {
 	if _, err := logging.ParsePublicKey("rsa " + strings.TrimPrefix(line, "ed25519 ")); err == nil {
 		t.Fatal("unknown prefix must be rejected")
 	}
+}
+
+// These startup checks use the plain launch path: no kernel prerequisite can
+// skip or mask the signing refusal, and a real child supplies the allowed control.
+func TestWrapRequiresSigningKeyPath(t *testing.T) {
+	if runtime.GOOS != "linux" && runtime.GOOS != "darwin" {
+		t.Skip("Unix signing path resolution")
+	}
+	for _, source := range []string{"missing", "HOME", "XDG_CONFIG_HOME"} {
+		t.Run(source, func(t *testing.T) {
+			t.Setenv("HOME", "")
+			t.Setenv("XDG_CONFIG_HOME", "")
+			t.Setenv("NOCKLOCK_ANCHOR_URL", "")
+			if source != "missing" {
+				t.Setenv(source, isolatedTestHome(t))
+			}
+			project := resolvedTempDir(t)
+			marker, err := runWrapWithAuditDB(t, project, ".nock/events.db")
+			if source == "missing" {
+				if err == nil || !strings.Contains(err.Error(), "cannot resolve signing key path") {
+					t.Fatalf("wrap error = %v, want signing-path refusal", err)
+				}
+				assertExitCode(t, err, 2)
+				if _, err := os.Stat(marker); !os.IsNotExist(err) {
+					t.Fatalf("child started or marker check failed: %v", err)
+				}
+				return
+			}
+			assertWrapChildLaunched(t, marker, err)
+			key, err := logging.DefaultSigningKeyPath()
+			if err != nil {
+				t.Fatal(err)
+			}
+			pub, err := logging.LoadPublicKeyFile(key)
+			if err != nil {
+				t.Fatal(err)
+			}
+			logger, err := logging.NewLogger(resolvedAuditDB(t, project), project)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer logger.Close()
+			result, err := logger.VerifyChainSigned(pub, true)
+			if err != nil || !result.Intact || !result.HeadSigned || result.SignedEntries == 0 || result.UnsignedEntries != 0 {
+				t.Fatalf("signed wrap control: result=%+v error=%v", result, err)
+			}
+		})
+	}
+}
+
+func TestLogPruneRequiresSigningKeyPath(t *testing.T) {
+	if runtime.GOOS != "linux" && runtime.GOOS != "darwin" {
+		t.Skip("Unix signing path resolution")
+	}
+	for _, mode := range []string{"missing", "valid", "read-only"} {
+		t.Run(mode, func(t *testing.T) {
+			project, _ := writeProjectConfig(t, `db = ".nock/events.db"`)
+			withWorkingDir(t, project)
+			t.Setenv("HOME", "")
+			t.Setenv("XDG_CONFIG_HOME", "")
+			var opts []logging.Option
+			if mode == "valid" {
+				t.Setenv("XDG_CONFIG_HOME", isolatedTestHome(t))
+				key, err := logging.DefaultSigningKeyPath()
+				if err != nil {
+					t.Fatal(err)
+				}
+				opts = []logging.Option{logging.WithSigning(key)}
+			}
+			// An unsigned legacy log exposes the old fallback: prune used to succeed
+			// with no key. An adopted log would already reject the unsigned write.
+			db := resolvedAuditDB(t, project)
+			logger, err := logging.NewLogger(db, project, opts...)
+			if err != nil {
+				t.Fatal(err)
+			}
+			pub := logger.SigningPublicKey()
+			for _, age := range []time.Duration{48 * time.Hour, 0} {
+				if err := logger.Log(logging.Event{Timestamp: time.Now().Add(-age), EventType: logging.EventFilePassed, Category: "filesystem", Detail: "synthetic signing control"}); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if err := logger.Close(); err != nil {
+				t.Fatal(err)
+			}
+			cmd := &cobra.Command{}
+			if mode != "read-only" {
+				cmd.Flags().String("prune", "24h", "")
+			}
+			err = logCmd.RunE(cmd, nil)
+			if mode == "missing" {
+				if err == nil || !strings.Contains(err.Error(), "cannot resolve signing key path") {
+					t.Fatalf("prune error = %v, want signing-path refusal", err)
+				}
+			} else if err != nil {
+				t.Fatal(err)
+			}
+			// Open without signing so verification cannot repair a missing signature.
+			check, err := logging.NewLogger(db, project)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer check.Close()
+			stats, err := check.Stats("")
+			if err != nil {
+				t.Fatal(err)
+			}
+			want := 2
+			if mode == "valid" {
+				want = 1
+			}
+			if stats.TotalEvents != want {
+				t.Fatalf("events = %d, want %d", stats.TotalEvents, want)
+			}
+			if mode == "valid" {
+				result, err := check.VerifyChainSigned(pub, true)
+				if err != nil || !result.Intact || !result.HeadSigned || result.SignedEntries != 1 {
+					t.Fatalf("signed prune control: result=%+v error=%v", result, err)
+				}
+			}
+		})
+	}
+}
+
+func mustSigningLoggerOpts(t *testing.T) []logging.Option {
+	t.Helper()
+	opts, err := signingLoggerOpts()
+	if err != nil {
+		t.Fatal(err)
+	}
+	return opts
 }
