@@ -21,6 +21,7 @@ The default network policy uses a proxy with a domain allowlist. With the defaul
 On macOS, install with Homebrew and initialize your project with the preset for your agent. This example uses Claude Code; see the credential step below before launching it. On a fresh Ubuntu 24.04 amd64/glibc 2.39 host, first use the [signed Linux installer](packaging/linux/RELEASE-INSTALL.md). Existing source installations follow the [source installation steps](docs/setup.md#1-install).
 
 ```bash
+# macOS only; on Linux, skip this line after installing as described above.
 brew install nocktechnologies/tap/nocklock
 cd your-project
 nocklock init --runtime claude-code
