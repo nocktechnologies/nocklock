@@ -7,6 +7,7 @@ rules. The shipped default-drop policy remains responsible for denial.
 import argparse
 import errno
 import http.server
+import ipaddress
 import json
 import os
 from pathlib import Path
@@ -43,23 +44,29 @@ def wait_for(test, seconds=30):
     raise RuntimeError("timed out waiting for acceptance synchronization")
 
 
-def probe(address, fenced):
+def probe(address, fenced, direct_only=False):
     """Run as the ordinary account, both outside and inside the real CLI."""
     linux = platform.system() == "Linux"
     if fenced:
         Path("ready").touch()
         wait_for(lambda: Path("go").exists())
     results = {}
-    for scheme in ("http", "https"):
+    for scheme in (() if direct_only else ("http", "https")):
         for host in (ALLOWED, BLOCKED):
             key = scheme + "-" + host
             command = ["/usr/bin/curl", "-ksS", "--max-time", "8", "--fail"]
             if not fenced or linux:
                 command += ["--noproxy", "*"]
+            if fenced and linux:
+                # Production netns has no default route. Its DNS stub supplies
+                # loopback; the transparent proxy resolves Host/SNI on the host.
+                command += ["--resolve", host + ":" + ("80" if scheme == "http" else "443") + ":127.0.0.1"]
             result = run(*command, scheme + "://" + host + "/" + key)
             expected = not fenced or host == ALLOWED
             assert (result.returncode == 0 and result.stdout == "REACHED") == expected, (key, result)
             results[key] = "allowed" if expected else "denied"
+    if fenced and linux:
+        address = Path("direct-address").read_text()
     for kind, socktype in (("tcp", socket.SOCK_STREAM), ("udp", socket.SOCK_DGRAM)):
         with socket.socket(socket.AF_INET, socktype) as client:
             client.settimeout(2)
@@ -97,7 +104,8 @@ def accept(args):
     (project / ".nock").mkdir()
     state = fixture / "state"
     state.mkdir(mode=0o700)
-    address = "198.18.0.1" if linux else "127.0.0.1"
+    address = "127.0.0.1"
+    bind = "0.0.0.0" if linux else address
     hosts = Path("/etc/hosts")
     original_hosts = hosts.read_bytes()
     hits = []
@@ -131,23 +139,19 @@ def accept(args):
             hits.append("udp")
             self.request[1].sendto(b"REACHED", self.client_address)
     try:
-        if linux:
-            run("ip", "link", "add", "nlaccept", "type", "dummy", check=True)
-            run("ip", "addr", "add", address + "/32", "dev", "nlaccept", check=True)
-            run("ip", "link", "set", "nlaccept", "up", check=True)
         hosts.write_bytes(original_hosts + ("\n" + address + " " + ALLOWED + " " + BLOCKED + "\n").encode())
         run("openssl", "req", "-x509", "-newkey", "rsa:2048", "-nodes", "-days", "1",
             "-subj", "/CN=" + ALLOWED, "-keyout", str(fixture / "key.pem"),
             "-out", str(fixture / "cert.pem"), check=True)
         for port in (80, 443):
-            server = http.server.ThreadingHTTPServer((address, port), HTTP)
+            server = http.server.ThreadingHTTPServer((bind, port), HTTP)
             if port == 443:
                 context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
                 context.load_cert_chain(str(fixture / "cert.pem"), str(fixture / "key.pem"))
                 server.socket = context.wrap_socket(server.socket, server_side=True)
             servers.append(server)
-        servers += [socketserver.ThreadingTCPServer((address, PORT), TCP),
-                    socketserver.ThreadingUDPServer((address, PORT), UDP)]
+        servers += [socketserver.ThreadingTCPServer((bind, PORT), TCP),
+                    socketserver.ThreadingUDPServer((bind, PORT), UDP)]
         for server in servers:
             threading.Thread(target=server.serve_forever, daemon=True).start()
         paths = ["/usr/", "/lib/", "/lib64/", "/bin/", "/sbin/", "/etc/", "/dev/", "/proc/"] if linux else ["/usr/", "/bin/", "/sbin/", "/System/", "/Library/", "/private/etc/", "/dev/"]
@@ -176,9 +180,20 @@ def accept(args):
                 original = run("ip", "netns", "exec", namespace, "nft", "-j", "list", "ruleset", check=True).stdout
                 (evidence / "rules-original.json").write_text(original)
                 assert any(x.get("chain", {}).get("name") == "output" and x["chain"].get("policy") == "drop" for x in json.loads(original)["nftables"])
+                interfaces = json.loads(run("ip", "-j", "-n", namespace, "addr", "show", check=True).stdout)
+                child_ips = [a["local"] for i in interfaces for a in i["addr_info"]
+                             if a["family"] == "inet" and a["local"].startswith("169.254.")]
+                assert len(child_ips) == 1, interfaces
+                direct_address = str(ipaddress.ip_address(child_ips[0]) - 1)
+                (project / "direct-address").write_text(direct_address)
+                # Same live destination and ports as the fenced direct probes.
+                (evidence / "direct-unfenced.json").write_text(user(
+                    "/usr/bin/python3", "-I", "probe.py", "control", direct_address))
+                assert sorted(hits) == ["tcp", "udp"], hits
+                hits.clear()
                 for protocol in ("tcp", "udp"):
                     run("ip", "netns", "exec", namespace, "nft", "add", "rule", "inet", "nocklock", "output",
-                        "ip", "daddr", address, protocol, "dport", str(PORT), "counter", "comment", '"acceptance-' + protocol + '"', check=True)
+                        "ip", "daddr", direct_address, protocol, "dport", str(PORT), "counter", "comment", '"acceptance-' + protocol + '"', check=True)
             (project / "go").touch()
             wait_for(lambda: (project / "done").exists() or process.poll() is not None, 50)
             assert process.poll() is None, (evidence / "wrap.txt").read_text()
@@ -205,8 +220,10 @@ def accept(args):
         level = "KERNEL" if linux else "SEATBELT"
         assert any(e["EventType"] == "session_start" and e["egress_level"] == level for e in rows)
         for host, event in ((ALLOWED, "network_passed"), (BLOCKED, "network_blocked")):
-            for port in (80, 443):
-                assert any(e["EventType"] == event and host + ":" + str(port) in e.get("Detail", "") for e in rows), (host, port, rows)
+            for port, method in ((80, "GET"), (443, "CONNECT")):
+                marker = host + ":" + str(port) if linux else "host=" + host
+                assert any(e["EventType"] == event and marker in e.get("Detail", "")
+                           and (linux or "method=" + method in e.get("Detail", "")) for e in rows), (host, port, rows)
         if linux:
             helper.rename(saved_helper)
             failed = run(*prefix, args.binary, "wrap", "--net-fence=netns", "--", "/usr/bin/touch", "fallback-ran", cwd=project)
@@ -228,12 +245,12 @@ def accept(args):
         for server in servers:
             server.shutdown()
             server.server_close()
-        if linux:
-            run("ip", "link", "del", "nlaccept")
 
 
 if __name__ == "__main__":
-    if len(sys.argv) > 1 and sys.argv[1] == "probe":
+    if len(sys.argv) > 1 and sys.argv[1] == "control":
+        probe(sys.argv[2], False, direct_only=True)
+    elif len(sys.argv) > 1 and sys.argv[1] == "probe":
         probe(sys.argv[2], sys.argv[3] == "fenced")
     else:
         parser = argparse.ArgumentParser(description=__doc__)

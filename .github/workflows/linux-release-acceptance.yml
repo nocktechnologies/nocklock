@@ -91,7 +91,7 @@ jobs:
         if: always()
         run: |
           mkdir -p "$RUNNER_TEMP/evidence"
-          cp "$RUNNER_TEMP/assets/"*-source.json "$RUNNER_TEMP/evidence/"
+          sudo cp "$RUNNER_TEMP/assets/"*-source.json "$RUNNER_TEMP/evidence/"
           sudo chown -R "$(id -u):$(id -g)" "$RUNNER_TEMP/evidence"
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         if: always()
@@ -105,6 +105,7 @@ jobs:
     runs-on: macos-15
     timeout-minutes: 20
     strategy:
+      fail-fast: false
       matrix:
         version: [older, newer]
     # A network-only run has just the older version.
@@ -135,6 +136,7 @@ jobs:
         if: always()
         run: |
           mkdir -p "$RUNNER_TEMP/evidence"
+          sudo chown -R "$(id -u):$(id -g)" "$RUNNER_TEMP/evidence"
           git -C release-source rev-parse HEAD > "$RUNNER_TEMP/evidence/source.txt"
           shasum -a 256 /usr/local/bin/nocklock > "$RUNNER_TEMP/evidence/binary.sha256"
           sudo chown -R "$(id -u):$(id -g)" "$RUNNER_TEMP/evidence"
