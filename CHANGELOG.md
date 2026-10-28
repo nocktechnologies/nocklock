@@ -4,6 +4,12 @@ All notable changes to NockLock will be documented in this file.
 
 ## [Unreleased]
 
+## [0.16.1] - 2026-10-27
+
+v0.16.1 closes the proven macOS SecurityServer Keychain route and restores Linux project-ancestor metadata used by Git 2.56. It also adds installed-release network checks and signed cross-version upgrade/rollback acceptance. Linux support remains Ubuntu 24.04 amd64 with glibc 2.39.
+
+Upgrade notes: tools that obtain macOS credentials through SecurityServer inside the fence need an alternate supported credential source. Other Keychain backends are not claimed isolated. Managed Linux installation requires the six signed assets for the chosen release; publication remains gated on real signed cross-version and broader-network evidence. Existing source/candidate installations cannot migrate through this installer. Unix sockets remain a named limitation below Landlock ABI 9.
+
 ### Fixed
 
 - Linux interposer stat-family calls permit metadata on canonical ancestors of the project root, restoring path walking used by Git 2.56. Ancestor directory reads, sibling metadata and file reads remain denied; explicit denies and malformed policies retain precedence.
