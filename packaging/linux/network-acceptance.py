@@ -148,6 +148,10 @@ def accept(args):
             self.wfile.write(b"REACHED")
         def log_message(self, *unused):
             pass
+    class TCPServer(socketserver.ThreadingTCPServer):
+        # The second signed version reuses these ports on the same VM.
+        allow_reuse_address = True
+
     class TCP(socketserver.BaseRequestHandler):
         def handle(self):
             hits.append("tcp")
@@ -169,7 +173,7 @@ def accept(args):
                 context.load_cert_chain(str(fixture / "cert.pem"), str(fixture / "key.pem"))
                 server.socket = context.wrap_socket(server.socket, server_side=True)
             servers.append(server)
-        servers += [socketserver.ThreadingTCPServer((bind, PORT), TCP),
+        servers += [TCPServer((bind, PORT), TCP),
                     socketserver.ThreadingUDPServer((bind, PORT), UDP)]
         for server in servers:
             threading.Thread(target=server.serve_forever, daemon=True).start()
