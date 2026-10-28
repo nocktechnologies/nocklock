@@ -400,7 +400,7 @@ func TestWrapClaudeCodePresetDeviceAndSystemPaths(t *testing.T) {
 	// One wrapped shell: write /dev/null, then run git status. Any fence denial
 	// (exec failure, EACCES on /dev/null) makes the shell exit non-zero.
 	cmd := exec.Command(bin, "wrap", "--profile", "claude-code", "--",
-		"/bin/sh", "-c", "echo x > /dev/null && git status >/dev/null 2>&1")
+		"/bin/sh", "-c", "echo x > /dev/null && git status >/dev/null")
 	cmd.Dir = repo
 	out, err := cmd.CombinedOutput()
 	if err != nil {

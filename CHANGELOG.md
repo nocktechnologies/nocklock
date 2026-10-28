@@ -4,6 +4,14 @@ All notable changes to NockLock will be documented in this file.
 
 ## [Unreleased]
 
+### Fixed
+
+- Linux interposer stat-family calls permit metadata on canonical ancestors of the project root, restoring path walking used by Git 2.56. Ancestor directory reads, sibling metadata and file reads remain denied; explicit denies and malformed policies retain precedence.
+
+### Added
+
+- Disposable hosted acceptance checks for immutable signed release upgrade/rollback, preserved config and audit state, and installed Linux/macOS network enforcement. Direct Linux denial requires packet counters at the unchanged default-drop policy and reachable unfenced controls. These checks do not publish assets.
+
 ### Security
 
 - macOS profiles now deny `com.apple.SecurityServer` Mach lookups independently of file-path denies, hardened mode and proxy configuration. A synthetic private-keychain regression proves both Security.framework query APIs are blocked and become readable when only the service deny is removed; ordinary file reads still work. Tools using this service for Keychain credentials inside the fence must use another supported credential source. `trustd` and `ocspd` remain allowed; other Keychain backends are not claimed isolated. System curl and Go HTTPS, git over HTTPS and the Claude Code preset have live allowed controls. Attributed kernel service denials enter the signed audit log as `secret_blocked`, subject to the existing unified-log delivery and event-cap limits; OCSF identifies the Mach service. This closes a missing service boundary, not a demonstrated bypass of an already-denied Keychain file.
