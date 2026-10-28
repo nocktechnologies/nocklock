@@ -4,6 +4,10 @@ All notable changes to NockLock will be documented in this file.
 
 ## [Unreleased]
 
+### Documentation
+
+- Record publication of the original signed v0.16.0 and v0.16.1 Linux installer assets after real cross-version and broader-network acceptance. Update installation guidance and close the Ubuntu 24.04 amd64/glibc 2.39 installation roadmap bar, preserving migration and kernel limitations.
+
 ## [0.16.1] - 2026-10-27
 
 v0.16.1 closes the proven macOS SecurityServer Keychain route and restores Linux project-ancestor metadata used by Git 2.56. It also adds installed-release network checks and signed cross-version upgrade/rollback acceptance. Linux support remains Ubuntu 24.04 amd64 with glibc 2.39.
