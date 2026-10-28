@@ -38,11 +38,13 @@ def run(*args, timeout=90, check=False, **kwargs):
                                stderr=subprocess.STDOUT, start_new_session=True, **kwargs)
     try:
         output, _ = process.communicate(timeout=timeout)
-    except BaseException:
-        stop_process_group(process)
-        raise
     finally:
-        process.stdout.close()
+        # These short-lived probes must never leave background group members,
+        # even when the leader exits normally and closes the captured pipe.
+        try:
+            stop_process_group(process)
+        finally:
+            process.stdout.close()
     result = subprocess.CompletedProcess(args, process.returncode, output, "")
     if check:
         result.check_returncode()
