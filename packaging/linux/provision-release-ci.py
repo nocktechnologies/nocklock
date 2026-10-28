@@ -13,7 +13,7 @@ ci = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(ci)
 
 
-def provision(args):
+def authenticate(args):
     if (os.geteuid() != 0 or os.environ.get("GITHUB_ACTIONS") != "true"
             or os.environ.get("RUNNER_ENVIRONMENT") != "github-hosted"):
         raise ValueError("require root on a disposable GitHub-hosted VM")
@@ -40,14 +40,19 @@ def provision(args):
         raise ValueError("standalone installer checksum mismatch")
     installer = stage / "nocklock-install-linux-amd64"
     installer.chmod(0o700)
+    return installer, stage / "cosign"
+
+
+def provision(args):
+    installer, cosign = authenticate(args)
     ci.run("/usr/sbin/useradd", "--create-home", "--user-group", "--shell", "/bin/bash", ci.TEST_USER)
     ci.require_private_group(ci.TEST_USER)
     ci.run(str(installer), "install", "--tag", args.tag, "--artifacts", str(args.artifacts),
-           "--cosign", str(stage / "cosign"), "--egress-user", ci.TEST_USER)
+           "--cosign", str(cosign), "--egress-user", ci.TEST_USER)
     # Retry and explicit rollback reverify stored bytes through the production path.
     ci.run(str(installer), "install", "--tag", args.tag, "--artifacts", str(args.artifacts),
-           "--cosign", str(stage / "cosign"))
-    ci.run(str(installer), "rollback", "--tag", args.tag, "--cosign", str(stage / "cosign"))
+           "--cosign", str(cosign))
+    ci.run(str(installer), "rollback", "--tag", args.tag, "--cosign", str(cosign))
 
 
 if __name__ == "__main__":
