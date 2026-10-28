@@ -6,7 +6,7 @@ All notable changes to NockLock will be documented in this file.
 
 ### Security
 
-- Refuse `wrap` startup and `log --prune` when the managed signing-key path cannot be resolved, instead of silently opening an unsigned log. Read-only log listing remains available without a signing key.
+- Refuse `wrap` startup and `log --prune` when the managed signing-key path cannot be resolved, instead of silently opening an unsigned log. `wrap --dry-run` also checks signing-path resolution without creating a key or audit database. Read-only log listing remains available without a signing key.
 
 ### Documentation
 

@@ -324,6 +324,47 @@ func TestWrapRequiresSigningKeyPath(t *testing.T) {
 	}
 }
 
+// Dry-run predicts signing-path refusal without opening a logger or creating a key.
+func TestWrapDryRunRequiresSigningKeyPath(t *testing.T) {
+	if runtime.GOOS != "linux" && runtime.GOOS != "darwin" {
+		t.Skip("Unix signing path resolution")
+	}
+	for _, source := range []string{"missing", "HOME", "XDG_CONFIG_HOME"} {
+		t.Run(source, func(t *testing.T) {
+			t.Setenv("HOME", "")
+			t.Setenv("XDG_CONFIG_HOME", "")
+			if source != "missing" {
+				t.Setenv(source, isolatedTestHome(t))
+			}
+			project := resolvedTempDir(t)
+			marker, err := runWrapWithAuditDB(t, project, ".nock/events.db", "--dry-run")
+			if source == "missing" {
+				if err == nil || !strings.Contains(err.Error(), "cannot resolve signing key path") {
+					t.Fatalf("dry-run error = %v, want signing-path refusal", err)
+				}
+				assertExitCode(t, err, 2)
+			} else {
+				if err != nil {
+					t.Fatalf("dry-run with signing path: %v", err)
+				}
+				key, err := logging.DefaultSigningKeyPath()
+				if err != nil {
+					t.Fatal(err)
+				}
+				if _, err := os.Stat(key); !os.IsNotExist(err) {
+					t.Fatalf("dry-run created signing key or stat failed: %v", err)
+				}
+			}
+			if _, err := os.Stat(marker); !os.IsNotExist(err) {
+				t.Fatalf("dry-run launched child or marker check failed: %v", err)
+			}
+			if _, err := os.Stat(resolvedAuditDB(t, project)); !os.IsNotExist(err) {
+				t.Fatalf("dry-run created audit DB or stat failed: %v", err)
+			}
+		})
+	}
+}
+
 func TestLogPruneRequiresSigningKeyPath(t *testing.T) {
 	if runtime.GOOS != "linux" && runtime.GOOS != "darwin" {
 		t.Skip("Unix signing path resolution")
