@@ -4,6 +4,9 @@ import json
 from pathlib import Path
 import subprocess
 import sys
+import time
+import os
+import signal
 import tempfile
 import unittest
 from unittest.mock import Mock, patch
@@ -69,6 +72,32 @@ class ReleaseSelection(unittest.TestCase):
             stop.assert_called_once_with(process)
             process.communicate.assert_called_once_with(timeout=1)
             process.stdout.close.assert_called_once()
+
+    def test_timeout_terminates_child_holding_stdout_after_parent_exit(self):
+        with tempfile.TemporaryDirectory() as root:
+            pid_file = Path(root) / "child.pid"
+            child = "import signal,time; signal.signal(signal.SIGTERM, signal.SIG_IGN); time.sleep(30)"
+            parent = "import subprocess,sys; from pathlib import Path; p=subprocess.Popen([sys.executable,'-c',sys.argv[2]]); Path(sys.argv[1]).write_text(str(p.pid))"
+            try:
+                start = time.monotonic()
+                with self.assertRaises(subprocess.TimeoutExpired):
+                    network.run(sys.executable, "-c", parent, str(pid_file), child, timeout=1)
+                self.assertLess(time.monotonic() - start, 5)
+                pid = int(pid_file.read_text())
+                for _ in range(50):
+                    status = subprocess.run(["ps", "-o", "stat=", "-p", str(pid)], text=True,
+                                            capture_output=True, timeout=5).stdout.strip()
+                    if not status or status.startswith("Z"):
+                        break
+                    time.sleep(.02)
+                self.assertTrue(not status or status.startswith("Z"), status)
+            finally:
+                if pid_file.exists():
+                    try:
+                        os.kill(int(pid_file.read_text()), signal.SIGKILL)
+                    except ProcessLookupError:
+                        # The successful timeout path already reaped this child.
+                        pass
 
     def test_optimization_cannot_emit_acceptance(self):
         for name in ("network-acceptance.py", "cross-version-ci.py"):
