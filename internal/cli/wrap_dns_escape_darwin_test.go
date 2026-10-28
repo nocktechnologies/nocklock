@@ -132,7 +132,7 @@ func assertSessionEgressLevel(t *testing.T, project, want string) {
 	if err != nil {
 		t.Fatalf("resolve event log: %v", err)
 	}
-	logger, err := logging.NewLogger(dbPath, project, signingLoggerOpts()...)
+	logger, err := logging.NewLogger(dbPath, project, mustSigningLoggerOpts(t)...)
 	if err != nil {
 		t.Fatalf("open event log at %s: %v", dbPath, err)
 	}
@@ -161,7 +161,7 @@ func assertMacOSEgressDecisionsSigned(t *testing.T, project string) {
 	if err != nil {
 		t.Fatalf("resolve event log: %v", err)
 	}
-	logger, err := logging.NewLogger(dbPath, project, signingLoggerOpts()...)
+	logger, err := logging.NewLogger(dbPath, project, mustSigningLoggerOpts(t)...)
 	if err != nil {
 		t.Fatalf("open event log at %s: %v", dbPath, err)
 	}

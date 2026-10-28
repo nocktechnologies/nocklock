@@ -512,14 +512,14 @@ func resolveVerifyPublicKey(pubFlag string) (ed25519.PublicKey, error) {
 }
 
 // signingLoggerOpts returns the Logger options that enable Ed25519 signing with
-// the NockLock-managed key. If the key path cannot be resolved it returns no
-// options, degrading to an unsigned (hash-only) open rather than failing.
-func signingLoggerOpts() []logging.Option {
+// the NockLock-managed key. A path-resolution failure must never silently
+// downgrade a writer to an unsigned (hash-only) log.
+func signingLoggerOpts() ([]logging.Option, error) {
 	keyPath, err := logging.DefaultSigningKeyPath()
 	if err != nil {
-		return nil
+		return nil, fmt.Errorf("cannot resolve signing key path: %w; set XDG_CONFIG_HOME or HOME to a trusted directory", err)
 	}
-	return []logging.Option{logging.WithSigning(keyPath)}
+	return []logging.Option{logging.WithSigning(keyPath)}, nil
 }
 
 // runExportPubkey prints the base64 Ed25519 audit-log public key. The key is

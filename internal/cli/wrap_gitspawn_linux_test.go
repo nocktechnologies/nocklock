@@ -170,7 +170,7 @@ exit 1
 		t.Errorf("wrapped trap wrote outside the project (%s): stat err=%v", outside, err)
 	}
 
-	logger, err := logging.NewLogger(resolvedAuditDB(t, repo), repo, signingLoggerOpts()...)
+	logger, err := logging.NewLogger(resolvedAuditDB(t, repo), repo, mustSigningLoggerOpts(t)...)
 	if err != nil {
 		t.Fatalf("open event log: %v", err)
 	}

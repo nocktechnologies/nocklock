@@ -94,7 +94,11 @@ var wrapCmd = &cobra.Command{
 
 		// Generate a session ID for event logging.
 		sessionID := uuid.New().String()
-		loggerOpts := signingLoggerOpts()
+		loggerOpts, err := signingLoggerOpts()
+		if err != nil {
+			cmd.SilenceUsage = true
+			return errors.Join(fmt.Errorf("refusing to run without signed audit: %w", err), &exitCodeError{code: 2})
+		}
 		if effectiveCfg.Audit.Forward.Enabled && !wrapFlags.DryRun {
 			operatorURL := strings.TrimRight(os.Getenv(config.ForwardURLEnv), "/")
 			if operatorURL == "" || operatorURL != strings.TrimRight(effectiveCfg.Audit.Forward.URL, "/") {
@@ -191,10 +195,8 @@ var wrapCmd = &cobra.Command{
 
 		// Sign the audit trail with the NockLock-managed Ed25519 key so each
 		// recorded decision is authentic, not merely internally consistent. The
-		// key is generated 0600 on first use. If its path cannot be resolved we
-		// fall back to an unsigned (still hash-chained) open rather than refusing
-		// to run; the logger itself fails closed on any write to a log that has
-		// already adopted signing.
+		// key is generated 0600 on first use. Path resolution above and signer
+		// initialization here must both succeed before the child can start.
 		logger, logErr := logging.NewLogger(dbPath, projectRoot, loggerOpts...)
 		if logErr != nil {
 			return fmt.Errorf("could not open the event log at %s: %w\nThe audit trail is required — refusing to run unrecorded. Fix the .nock directory's permissions or free disk space", dbPath, logErr)

@@ -152,7 +152,7 @@ func assertBothEgressDecisionsSigned(t *testing.T, bin, projectDir string) {
 	// The event log lives in the audit state directory outside the project
 	// (config.AuditStateDir), so resolve it the way the CLI does.
 	dbPath := resolvedAuditDB(t, projectDir)
-	logger, err := logging.NewLogger(dbPath, projectDir, signingLoggerOpts()...)
+	logger, err := logging.NewLogger(dbPath, projectDir, mustSigningLoggerOpts(t)...)
 	if err != nil {
 		t.Fatalf("open event log at %s: %v", dbPath, err)
 	}

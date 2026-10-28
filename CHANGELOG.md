@@ -4,6 +4,10 @@ All notable changes to NockLock will be documented in this file.
 
 ## [Unreleased]
 
+### Security
+
+- Refuse `wrap` startup and `log --prune` when the managed signing-key path cannot be resolved, instead of silently opening an unsigned log. `wrap --dry-run` also checks signing-path resolution without creating a key or audit database. Read-only log listing remains available without a signing key.
+
 ### Documentation
 
 - Record publication of the original signed v0.16.0 and v0.16.1 Linux installer assets after real cross-version and broader-network acceptance. Update installation guidance and close the Ubuntu 24.04 amd64/glibc 2.39 installation roadmap bar, preserving migration and kernel limitations.

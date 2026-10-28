@@ -62,7 +62,11 @@ var logCmd = &cobra.Command{
 		// must not create a key). Open with signing only when pruning.
 		var openOpts []logging.Option
 		if pruneStr != "" {
-			openOpts = signingLoggerOpts()
+			openOpts, err = signingLoggerOpts()
+			if err != nil {
+				cmd.SilenceUsage = true
+				return fmt.Errorf("refusing to prune without signed audit: %w", err)
+			}
 		}
 		logger, err := logging.NewLogger(dbPath, projectRoot, openOpts...)
 		if err != nil {
