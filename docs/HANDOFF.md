@@ -6,6 +6,8 @@ No internal host names, personal names or absolute home paths: `scripts/check-pu
 
 ## What changed
 
+- 2026-10-27: v0.16.1 notes prepared with SecurityServer isolation, Linux project-ancestor metadata compatibility and installed-release acceptance tooling. v0.16.0 signed native installation and broader Linux/macOS network checks passed. Its six Linux assets remain withheld until upgrade/rollback against the second real signed release passes.
+
 - 2026-10-27: Git 2.56 exposed an ancestor-metadata compatibility issue in the Linux interposer. Stat-family calls now permit only canonical project ancestors while directory reads, sibling reads/metadata and explicit denies remain fenced. The native regression tests both sides; the preset Git-status proof retains stderr diagnostics.
 
 - 2026-10-27: signed-release acceptance now selects successful production workflow artifacts by tag and source commit, authenticates their installers, and exercises upgrade/rollback without rebuilding Linux binaries. The installed network driver uses controlled HTTP/TLS/TCP/UDP servers, unfenced controls, Linux drop counters and macOS denial errnos; helper failure must refuse startup. Cross-version evidence requires two distinct real signed tags.
