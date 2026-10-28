@@ -88,6 +88,24 @@ def probe(address, fenced, direct_only=False):
         wait_for(lambda: Path("finish").exists())
 
 
+def stop_process_group(process):
+    """Reap the leader and kill descendants even if the leader exited first."""
+    try:
+        os.killpg(process.pid, signal.SIGTERM)
+    except ProcessLookupError:
+        pass
+    try:
+        process.wait(timeout=15)
+    except subprocess.TimeoutExpired:
+        pass
+    finally:
+        try:
+            os.killpg(process.pid, signal.SIGKILL)
+        except ProcessLookupError:
+            pass
+        process.wait(timeout=5)
+
+
 def accept(args):
     if (os.geteuid() != 0 or os.environ.get("GITHUB_ACTIONS") != "true"
             or os.environ.get("RUNNER_ENVIRONMENT") != "github-hosted"):
@@ -236,15 +254,28 @@ def accept(args):
             allowed_http_https=True, denied_http_https=True, direct_tcp_udp=True,
             drop_counters=counters, helper_failure_no_fallback=linux), indent=2))
     finally:
-        if process is not None and process.poll() is None:
-            os.killpg(process.pid, signal.SIGTERM)
-            process.wait(timeout=15)
+        # Attempt every restoration even if termination or an earlier cleanup
+        # fails; preserve the original test exception in that case.
+        failing = sys.exc_info()[0] is not None
+        cleanup = []
+        if process is not None:
+            cleanup.append(lambda: stop_process_group(process))
         if saved_helper.exists():
-            saved_helper.rename(helper)
-        hosts.write_bytes(original_hosts)
+            cleanup.append(lambda: saved_helper.rename(helper))
+        cleanup.append(lambda: hosts.write_bytes(original_hosts))
         for server in servers:
-            server.shutdown()
-            server.server_close()
+            cleanup.extend((server.shutdown, server.server_close))
+        errors = []
+        for action in cleanup:
+            try:
+                action()
+            except Exception as exc:
+                errors.append(str(exc))
+        if errors:
+            if failing:
+                print("Additional cleanup failures: " + repr(errors), file=sys.stderr)
+            else:
+                raise RuntimeError("cleanup failed: " + repr(errors))
 
 
 if __name__ == "__main__":

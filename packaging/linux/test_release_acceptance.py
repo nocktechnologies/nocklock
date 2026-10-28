@@ -2,10 +2,10 @@
 import importlib.util
 import json
 from pathlib import Path
-import sys
+import subprocess
 import tempfile
 import unittest
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 
 def module(name):
@@ -46,6 +46,17 @@ class ReleaseSelection(unittest.TestCase):
                 with self.assertRaises(ValueError):
                     fetcher.fetch(tag, run, Path("unused"))
                 api.assert_not_called()
+
+    def test_teardown_kills_descendants_after_leader_exit_or_timeout(self):
+        for timeout in (False, True):
+            process = Mock(pid=123)
+            if timeout:
+                process.wait.side_effect = [subprocess.TimeoutExpired("probe", 15), 0]
+            with self.subTest(timeout=timeout), patch.object(network.os, "killpg") as kill:
+                network.stop_process_group(process)
+                self.assertEqual([c.args for c in kill.call_args_list],
+                                 [(123, network.signal.SIGTERM), (123, network.signal.SIGKILL)])
+                self.assertEqual(process.wait.call_count, 2)
 
     def test_network_driver_refuses_resident_host(self):
         with patch.object(network.os, "geteuid", return_value=0), patch.dict(network.os.environ, {}, clear=True):
