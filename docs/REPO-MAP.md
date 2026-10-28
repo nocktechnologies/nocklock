@@ -1,6 +1,6 @@
 # Repo map
 
-One line per directory or key package: what lives there and where its tests are. Paths verified against `origin/next` 043545b plus this change (2026-10-26). For the file-level tree see `ARCHITECTURE.md`; if this page and the code disagree, the code wins.
+One line per directory or key package: what lives there and where its tests are. Paths verified against `origin/next` de1a802 plus this change (2026-10-27). For the file-level tree see `ARCHITECTURE.md`; if this page and the code disagree, the code wins.
 
 Go tests sit beside the code as `*_test.go`. Files ending `_linux_test.go` or `_darwin_test.go` run on that OS only.
 
@@ -51,3 +51,5 @@ Go tests sit beside the code as `*_test.go`. Files ending `_linux_test.go` or `_
 - Changing a fence: the matching page in `docs/how-it-works/`, then its package above.
 - Adding a CLI flag or exit path: `docs/reference/cli.md` and `internal/cli/`.
 - Shipping: `docs/runbooks/release.md`.
+
+Signed-release acceptance: `packaging/linux/fetch-release-ci.py` selects successful tagged artifacts; `packaging/linux/cross-version-ci.py` checks the authenticated lifecycle; `packaging/linux/network-acceptance.py` drives installed Linux and macOS network probes on disposable hosted VMs. `.github/workflows/linux-release-acceptance.yml` retains their public evidence.

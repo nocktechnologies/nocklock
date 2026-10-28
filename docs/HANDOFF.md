@@ -6,6 +6,16 @@ No internal host names, personal names or absolute home paths: `scripts/check-pu
 
 ## What changed
 
+- 2026-10-27: release acceptance now bounds command groups and lifecycle probes, closes captured pipes without unbounded draining on timeout, and refuses Python optimization before any receipt can be emitted. Stale managed binaries must fail for the specific activation-change reason.
+
+- 2026-10-27: v0.16.1 notes prepared with SecurityServer isolation, Linux project-ancestor metadata compatibility and installed-release acceptance tooling. v0.16.0 signed native installation and broader Linux/macOS network checks passed. Its six Linux assets remain withheld until upgrade/rollback against the second real signed release passes.
+
+- 2026-10-27: Git 2.56 exposed an ancestor-metadata compatibility issue in the Linux interposer. Stat-family calls now permit only canonical project ancestors while directory reads, sibling reads/metadata and explicit denies remain fenced. The native regression tests both sides; the preset Git-status proof retains stderr diagnostics.
+
+- 2026-10-27: signed-release acceptance now selects successful production workflow artifacts by tag and source commit, authenticates their installers, and exercises upgrade/rollback without rebuilding Linux binaries. The installed network driver uses controlled HTTP/TLS/TCP/UDP servers, unfenced controls, Linux drop counters and macOS denial errnos; helper failure must refuse startup. Cross-version evidence requires two distinct real signed tags.
+
+- 2026-10-26: the proven macOS Keychain route, `com.apple.SecurityServer`, is now denied in every generated profile, independent of path denies, hardened mode and proxy configuration. The native synthetic-keychain regression covers both query APIs, ordinary-file controls and removal of only the service rule across five profiles; it leaves the default keychain/search list unchanged. The old profile could read a private keychain outside the path denylist, but the explicitly denied fixture was already blocked. The tailer maps recognized kernel service denials to signed `secret_blocked` rows and OCSF names the Mach service; delivery remains best effort. Authentication through this service needs an alternate credential source. Live system curl/Go HTTPS, git HTTPS and Claude Code preset controls passed, including an installed CLI version launch; CI enables the live controls explicitly. `trustd`/`ocspd` and unproven Keychain routes stay allowed; no claim covers the data-protection keychain.
+
 - 2026-10-26: the authenticated-bootstrap recipe now routes HUP, INT and TERM through cleanup before authentication, then removes those traps when retaining verified tools. SIGKILL can still leave an inert directory for administrator cleanup.
 
 - 2026-10-26: Linux installer writes now propagate close failures; archive negative controls assert the intended refusal instead of any error. Rollback fixtures clear artifact input as the CLI does. The bootstrap recipe removes unauthenticated staging after failure, retains authenticated tools for recovery and explicitly sets the retained directory for helper setup.

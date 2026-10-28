@@ -27,6 +27,18 @@ func mustMap(t *testing.T, r logging.ChainRow) Event {
 	return e
 }
 
+func TestFromRowKeychainDenial(t *testing.T) {
+	e := mustMap(t, row(logging.EventSecretBlocked, "mach-lookup com.apple.SecurityServer", true))
+	if e.FindingInfo == nil || e.FindingInfo.Title != "Keychain service access denied" ||
+		len(e.Resources) != 1 || e.Resources[0].Name != "com.apple.SecurityServer" || e.Resources[0].Type != "Mach service" {
+		t.Fatalf("Keychain denial must name a service rather than an environment variable: %+v", e)
+	}
+	control := mustMap(t, row(logging.EventSecretBlocked, "API_KEY", true))
+	if len(control.Resources) != 1 || control.Resources[0].Name != "API_KEY" || control.Resources[0].Type != "Environment variable" {
+		t.Fatalf("environment secret mapping changed: %+v", control)
+	}
+}
+
 // The golden export covers the forms wrap writes today; these are the
 // documented fallbacks for forms it does not, each beside the parsed case.
 func TestFromRowFallbacks(t *testing.T) {

@@ -4,6 +4,26 @@ All notable changes to NockLock will be documented in this file.
 
 ## [Unreleased]
 
+## [0.16.1] - 2026-10-27
+
+v0.16.1 closes the proven macOS SecurityServer Keychain route and restores Linux project-ancestor metadata used by Git 2.56. It also adds installed-release network checks and signed cross-version upgrade/rollback acceptance. Linux support remains Ubuntu 24.04 amd64 with glibc 2.39.
+
+Upgrade notes: tools that obtain macOS credentials through SecurityServer inside the fence need an alternate supported credential source. Other Keychain backends are not claimed isolated. Managed Linux installation requires the six signed assets for the chosen release; publication remains gated on real signed cross-version and broader-network evidence. Existing source/candidate installations cannot migrate through this installer. Unix sockets remain a named limitation below Landlock ABI 9.
+
+### Fixed
+
+- Release acceptance bounds subprocess groups and lifecycle probes, refuses optimized Python execution, and checks the specific stale-executable refusal.
+- Linux interposer stat-family calls permit metadata on canonical ancestors of the project root, restoring path walking used by Git 2.56. Ancestor directory reads, sibling metadata and file reads remain denied; explicit denies and malformed policies retain precedence.
+
+### Added
+
+- Disposable hosted acceptance checks for immutable signed release upgrade/rollback, preserved config and audit state, and installed Linux/macOS network enforcement. Direct Linux denial requires packet counters at the unchanged default-drop policy and reachable unfenced controls. These checks do not publish assets.
+
+### Security
+
+- macOS profiles now deny `com.apple.SecurityServer` Mach lookups independently of file-path denies, hardened mode and proxy configuration. A synthetic private-keychain regression proves both Security.framework query APIs are blocked and become readable when only the service deny is removed; ordinary file reads still work. Tools using this service for Keychain credentials inside the fence must use another supported credential source. `trustd` and `ocspd` remain allowed; other Keychain backends are not claimed isolated. System curl and Go HTTPS, git over HTTPS and the Claude Code preset have live allowed controls. Attributed kernel service denials enter the signed audit log as `secret_blocked`, subject to the existing unified-log delivery and event-cap limits; OCSF identifies the Mach service. This closes a missing service boundary, not a demonstrated bypass of an already-denied Keychain file.
+
+
 ## [0.16.0] - 2026-10-26
 
 v0.16.0 adds a standalone Linux installer that authenticates and activates the CLI and its matching filesystem interposer together, with explicit-tag upgrades and verified rollback. Its initial target is Ubuntu 24.04 amd64 with glibc 2.39. Python and Go are not installation dependencies.

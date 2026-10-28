@@ -1224,7 +1224,7 @@ var wrapCmd = &cobra.Command{
 			}()
 		}
 
-		// Best-effort: file denials of the Seatbelt fence reach the audit chain
+		// Best-effort: file and Keychain service denials reach the audit chain
 		// through the unified log. The tailer never blocks or fails the child;
 		// its problems become one warning row.
 		var denialTailer *fsfence.DenialTailer
@@ -1233,6 +1233,10 @@ var wrapCmd = &cobra.Command{
 				Argv: denialLogArgv(),
 				Tag:  fsfence.DenialTag(sessionID),
 				OnDenial: func(d fsfence.Denial) {
+					if d.IsKeychainService() {
+						logEvent(logging.EventSecretBlocked, "secret", d.Detail(), true)
+						return
+					}
 					logEvent(logging.EventFileBlocked, "filesystem", d.Detail(), true)
 				},
 				OnSuppressed: func(overCap, repeats int) {

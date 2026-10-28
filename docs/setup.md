@@ -60,7 +60,7 @@ Choose a runtime preset with `nocklock init --runtime <name>` (`claude-code`, `c
 
 `nocklock wrap --dry-run` validates the config without starting any fence or command. `nocklock validate [path]` prints the effective policy.
 
-**Claude Code on macOS**: the fence denies `~/Library/Keychains`, so the login must arrive through the environment. Run `claude setup-token`, export `CLAUDE_CODE_OAUTH_TOKEN` (or `ANTHROPIC_API_KEY`), and initialize with the `claude-code` preset as above. For an existing config, use `--diff` and apply the reviewed changes before launching. See the README note under Quick start.
+**Claude Code on macOS**: the fence denies `~/Library/Keychains` and the `com.apple.SecurityServer` Keychain service, so the login must arrive through the environment. Run `claude setup-token` outside the fence, export `CLAUDE_CODE_OAUTH_TOKEN` (or `ANTHROPIC_API_KEY`), and initialize with the `claude-code` preset as above. For an existing config, use `--diff` and apply the reviewed changes before launching. See the README note under Quick start.
 
 ## 3. Verify
 

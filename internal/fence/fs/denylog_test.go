@@ -2,6 +2,7 @@ package fs
 
 import (
 	"bufio"
+	"encoding/json"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -11,6 +12,40 @@ import (
 	"testing"
 	"time"
 )
+
+func TestParseDenial_KeychainServices(t *testing.T) {
+	for _, tc := range []struct {
+		service string
+		want    bool
+	}{
+		{"com.apple.SecurityServer", true},
+		{"com.apple.securityd", false},
+		{"com.apple.security.keychaind", false},
+		{"com.apple.secd", false},
+		{"com.apple.security.agent", false},
+		{"com.apple.securityd.extra", false},
+		{"com.apple.mDNSResponder", false},
+	} {
+		for _, pid := range []int{0, 4242} {
+			line, err := json.Marshal(map[string]any{
+				"eventMessage":     "Sandbox: probe(1) deny(1) mach-lookup " + tc.service + "\nnocklock:SESS1",
+				"processID":        pid,
+				"processImagePath": "/kernel",
+				"senderImagePath":  sandboxKextDir + "Contents/MacOS/Sandbox",
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			d, ok := ParseDenial(line, DenialTag("SESS1"))
+			if want := tc.want && pid == 0; ok != want || (ok && (!d.IsKeychainService() || d.Path != tc.service)) {
+				t.Errorf("service=%s pid=%d: got %+v, %v; want accepted=%v", tc.service, pid, d, ok, want)
+			}
+			if _, ok := ParseDenial(line, DenialTag("SESS2")); ok {
+				t.Error("accepted Keychain denial from a different session")
+			}
+		}
+	}
+}
 
 const fixturePath = "testdata/seatbelt_log_stream.ndjson"
 
