@@ -6,6 +6,8 @@ No internal host names, personal names or absolute home paths: `scripts/check-pu
 
 ## What changed
 
+- 2026-10-27: proposed [credential broker design](design/credential-broker.md) separates API-key custody from subscription OAuth. Codex SIWC provides documented building blocks, but local broker compatibility and OS isolation need proof; Claude subscription intermediation is outside scope under current provider guidance. No broker code or config added. Provider docs and pinned Codex source were inspected; no live credentials or provider flows were exercised.
+
 - 2026-10-27: the default-off `network.require_durable_audit` gate commits signed `network_intent` rows with SQLite FULL synchronization before explicit HTTP/CONNECT egress, including pooled HTTP requests. Missing signing or failed writes refuse and cancel the run. Netns remains unsupported because its decision channel is asynchronous; `allow_all` also refuses. Intent is not delivery evidence, and an established opaque tunnel is not reauthorized per request. Tests use local upstreams and synthetic audit failures, plus signed allowed and default-off controls. Removing the gate makes both closed-logger controls reach the upstream. The five touched-package suites and repeated durable-write/proxy race tests passed.
 
 - 2026-10-27: `wrap --dry-run` intentionally refuses an unresolved signing-key path with exit 2. The regression covers the missing-path refusal and both valid path sources, proving no child, key or audit database is created. A successful dry run checks path resolution, not key loading or signing.

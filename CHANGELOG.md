@@ -14,6 +14,8 @@ All notable changes to NockLock will be documented in this file.
 
 ### Documentation
 
+- Propose a local credential broker for Claude Code and Codex API keys and a separately qualified Codex subscription OAuth path; document the unsupported Claude subscription case, custody boundary and required security proofs. No runtime behavior changes.
+
 - Record publication of the original signed v0.16.0 and v0.16.1 Linux installer assets after real cross-version and broader-network acceptance. Update installation guidance and close the Ubuntu 24.04 amd64/glibc 2.39 installation roadmap bar, preserving migration and kernel limitations.
 
 ## [0.16.1] - 2026-10-27

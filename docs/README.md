@@ -21,3 +21,7 @@ The root [README](../README.md) is the user-facing guide; [AGENTS.md](../AGENTS.
 - Cite code by file path at a stated commit, no line numbers (they go stale), or match `README.md` / `CHANGELOG.md`. Do not describe a feature the code does not have.
 - State limits next to the claim, not in a footnote.
 - Update the page in the same change that alters the behavior; note it in `CHANGELOG.md`.
+
+## Proposed security designs
+
+- [Credential broker: API keys and subscription OAuth](design/credential-broker.md): proposed custody boundary, provider compatibility, unsupported cases and qualification plan.
