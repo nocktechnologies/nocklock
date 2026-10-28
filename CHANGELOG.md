@@ -4,6 +4,10 @@ All notable changes to NockLock will be documented in this file.
 
 ## [Unreleased]
 
+### Added
+
+- Optional `network.require_durable_audit` (default off): explicit HTTP requests and CONNECT tunnel attempts require a durable signed intent before upstream dialing or forwarding. Audit failure refuses the request and fails the wrapped run. Netns and `allow_all` combinations refuse startup; HTTPS contents remain opaque and advisory-mode bypass remains possible.
+
 ### Security
 
 - Refuse `wrap` startup and `log --prune` when the managed signing-key path cannot be resolved, instead of silently opening an unsigned log. `wrap --dry-run` also checks signing-path resolution without creating a key or audit database. Read-only log listing remains available without a signing key.

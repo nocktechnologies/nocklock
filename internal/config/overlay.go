@@ -26,6 +26,7 @@ func restrictOverlay(base, overlay Config) Config {
 	cfg.Network.Allow = intersectStrings(base.Network.Allow, overlay.Network.Allow)
 	cfg.Network.AllowAll = base.Network.AllowAll && overlay.Network.AllowAll
 	cfg.Network.AllowPrivateRanges = base.Network.AllowPrivateRanges && overlay.Network.AllowPrivateRanges
+	cfg.Network.RequireDurableAudit = base.Network.RequireDurableAudit || overlay.Network.RequireDurableAudit
 	cfg.Network.RequireEnforced = base.Network.RequireEnforced || overlay.Network.RequireEnforced
 	cfg.Network.RequireUnixSocketIsolation = base.Network.RequireUnixSocketIsolation || overlay.Network.RequireUnixSocketIsolation
 	// Look-back rules only narrow egress, so an overlay adds to the base's.

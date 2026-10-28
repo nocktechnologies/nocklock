@@ -78,6 +78,10 @@ var wrapCmd = &cobra.Command{
 		// rather than silently fall back to the userspace proxy. Checked before the
 		// dry-run branch so `--dry-run` on a non-Linux host reports the refusal too.
 		useNetns := wrapFlags.NetFence == "netns"
+		if useNetns && effectiveCfg.Network.RequireDurableAudit {
+			cmd.SilenceUsage = true
+			return errors.Join(fmt.Errorf("network.require_durable_audit is unsupported with --net-fence=netns: the decision channel is asynchronous; use --net-fence=proxy or disable the durable audit requirement"), &exitCodeError{code: 2})
+		}
 		if useNetns && runtime.GOOS != "linux" {
 			cmd.SilenceUsage = true
 			return fmt.Errorf("--net-fence=netns requires Linux kernel network namespaces; refusing to run without the kernel-enforced egress floor")
@@ -889,6 +893,9 @@ var wrapCmd = &cobra.Command{
 			// A denied request whose network_blocked row cannot be written fails
 			// the run (audit.failure below), like any other lost blocked row.
 			proxy.SetBlockedWriteFailureHandler(audit.fail)
+			if proxyCfg.RequireDurableAudit {
+				fmt.Fprintln(os.Stderr, "NockLock: durable signed intent required before each explicit HTTP request or CONNECT tunnel attempt; encrypted requests inside tunnels are not inspected")
+			}
 			if len(proxyCfg.Lookback) > 0 {
 				// lookbackLevelError guaranteed CONFINED, so fsFence is non-nil.
 				proxy.EnableLookback(proxyCfg.Lookback)

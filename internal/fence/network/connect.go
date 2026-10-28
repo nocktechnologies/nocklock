@@ -32,6 +32,10 @@ func (p *ProxyServer) handleConnect(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	if !p.authorizeDurableEgress(w, r.Method, r.Host) {
+		return
+	}
+
 	// Dial the destination before hijacking so we can respond with 502 cleanly on failure.
 	// p.dial defaults to safeDial, which validates the resolved IP is not loopback/private.
 	upstream, err := p.dial(r.Context(), "tcp", r.Host)
