@@ -2,9 +2,11 @@ package cli
 
 import (
 	"bytes"
+	"context"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"syscall"
 	"testing"
@@ -202,5 +204,45 @@ func TestDoctorGitConfigScanIgnoresGitConfigEnv(t *testing.T) {
 	out, _ := runProtectedDoctor(t)
 	if !strings.Contains(out, `Repo git config "core.fsmonitor" = "./trap.sh"`) {
 		t.Fatalf("GIT_CONFIG hid the repo's core.fsmonitor:\n%s", out)
+	}
+}
+
+// The deadline kills git's whole process group: a child git forked without
+// exec, still holding the output pipe, does not outlive the call.
+func TestDoctorGitTimeoutKillsForkedChild(t *testing.T) {
+	bin := t.TempDir()
+	pidFile := filepath.Join(t.TempDir(), "child.pid")
+	script := "#!/bin/sh\n(while :; do sleep 1; done) &\necho $! > '" + pidFile + "'\nwait\n"
+	if err := os.WriteFile(filepath.Join(bin, "git"), []byte(script), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	// exec resolves git on this process's PATH; the child gets the same one.
+	path := bin + string(os.PathListSeparator) + os.Getenv("PATH")
+	t.Setenv("PATH", path)
+	env := []string{"PATH=" + path}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 300*time.Millisecond)
+	defer cancel()
+	start := time.Now()
+	if _, err := doctorGit(ctx, t.TempDir(), env, "config", "--get", "user.email"); err == nil || ctx.Err() == nil {
+		t.Fatalf("hanging git returned err=%v ctx=%v; want a deadline failure", err, ctx.Err())
+	}
+	if elapsed := time.Since(start); elapsed > 3*time.Second {
+		t.Fatalf("doctorGit took %s; the deadline must stop it", elapsed)
+	}
+	raw, err := os.ReadFile(pidFile)
+	if err != nil {
+		t.Fatalf("fake git did not record its child: %v", err)
+	}
+	pid, err := strconv.Atoi(strings.TrimSpace(string(raw)))
+	if err != nil {
+		t.Fatalf("child pid %q: %v", raw, err)
+	}
+	t.Cleanup(func() { _ = syscall.Kill(pid, syscall.SIGKILL) })
+	// The orphan is reaped by init, so poll until the pid is gone.
+	for deadline := time.Now().Add(3 * time.Second); syscall.Kill(pid, 0) != syscall.ESRCH; time.Sleep(20 * time.Millisecond) {
+		if time.Now().After(deadline) {
+			t.Fatalf("forked child %d outlived the git timeout", pid)
+		}
 	}
 }
