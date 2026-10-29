@@ -394,20 +394,7 @@ var wrapCmd = &cobra.Command{
 		if fenceErr != nil {
 			return fmt.Errorf("invalid secret fence config: %w", fenceErr)
 		}
-		var blockedNames []string
-		childEnv, blockedNames := fence.Filter(os.Environ())
-		// The off-box anchor store's URL and bearer token are wrap's, never the
-		// fenced agent's: strip them before the child env is logged or launched.
-		childEnv = stripAnchorEnv(childEnv)
-		for _, name := range []string{config.ForwardKeyEnv, config.ForwardURLEnv} {
-			for _, entry := range childEnv {
-				if strings.HasPrefix(entry, name+"=") {
-					blockedNames = append(blockedNames, name)
-					break
-				}
-			}
-		}
-		childEnv = removeEnvVars(childEnv, config.ForwardKeyEnv, config.ForwardURLEnv)
+		childEnv, blockedNames := fencedChildEnv(fence, os.Environ())
 
 		// Log all blocked env vars in a single transaction.
 		if len(blockedNames) > 0 {
@@ -1541,6 +1528,25 @@ func claudeAuthEnvName(env []string) string {
 }
 
 // removeEnvVars returns env with any entries whose key matches one of the given
+// fencedChildEnv returns the environment wrap passes to the child: environ
+// filtered by the secret fence, without the anchor and forward settings. It
+// also returns the names the fence and the forward removal blocked.
+func fencedChildEnv(fence *secrets.Fence, environ []string) (env, blocked []string) {
+	env, blocked = fence.Filter(environ)
+	// The off-box anchor store's URL and bearer token are wrap's, never the
+	// fenced agent's: strip them before the child env is logged or launched.
+	env = stripAnchorEnv(env)
+	for _, name := range []string{config.ForwardKeyEnv, config.ForwardURLEnv} {
+		for _, entry := range env {
+			if strings.HasPrefix(entry, name+"=") {
+				blocked = append(blocked, name)
+				break
+			}
+		}
+	}
+	return removeEnvVars(env, config.ForwardKeyEnv, config.ForwardURLEnv), blocked
+}
+
 // keys removed. Keys are matched case-sensitively by prefix ("KEY=").
 func removeEnvVars(env []string, keys ...string) []string {
 	filtered := env[:0:len(env)]

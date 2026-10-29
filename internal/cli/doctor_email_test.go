@@ -4,7 +4,6 @@ import (
 	"bytes"
 	"encoding/json"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -32,9 +31,6 @@ func emailTestEnv(t *testing.T, extra ...string) []string {
 }
 
 func TestPersonalEmailCheck(t *testing.T) {
-	if _, err := exec.LookPath("git"); err != nil {
-		t.Skipf("personal email check needs git: %v", err)
-	}
 	tests := []struct {
 		name       string
 		gitEmail   string
@@ -58,11 +54,8 @@ func TestPersonalEmailCheck(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			root := t.TempDir()
-			if out, err := exec.Command("git", "init", "-q", root).CombinedOutput(); err != nil {
-				t.Fatalf("git init: %v\n%s", err, out)
-			}
 			if tt.gitEmail != "" {
-				appendFile(t, filepath.Join(root, ".git", "config"), "[user]\n\temail = "+tt.gitEmail+"\n")
+				gitInitRepo(t, root, "[user]\n\temail = "+tt.gitEmail+"\n")
 			}
 			for name, body := range tt.files {
 				path := filepath.Join(root, name)

@@ -10,8 +10,8 @@ import (
 	"os/exec"
 	"path/filepath"
 	"regexp"
+	"slices"
 	"strings"
-	"time"
 
 	"github.com/nocktechnologies/nocklock/internal/config"
 	fsfence "github.com/nocktechnologies/nocklock/internal/fence/fs"
@@ -32,11 +32,14 @@ const personalEmailListLimit = 10
 // versioned path such as toolchain@v0.0.1-go1.27.3.linux-amd64 does not match.
 var emailPattern = regexp.MustCompile(`([A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,})(?:[^A-Za-z0-9-]|$)`)
 
-// findEmails returns the email addresses in text.
-func findEmails(text string) []string {
+// findPersonalEmails returns the addresses in text that safeEmail does not
+// exempt.
+func findPersonalEmails(text string) []string {
 	var addrs []string
 	for _, m := range emailPattern.FindAllStringSubmatch(text, -1) {
-		addrs = append(addrs, m[1])
+		if !safeEmail(m[1]) {
+			addrs = append(addrs, m[1])
+		}
 	}
 	return addrs
 }
@@ -48,7 +51,7 @@ func personalEmailDoctorCheck(cfg *config.Config) doctorCheck {
 	env := os.Environ()
 	// wrap refuses an invalid secret fence; the unfiltered env over-reports.
 	if fence, err := secrets.NewFence(cfg.Secrets.Pass, cfg.Secrets.Block); err == nil {
-		env, _ = fence.Filter(env)
+		env, _ = fencedChildEnv(fence, env)
 	}
 	return personalEmailCheck(cfg.Filesystem.Root, env)
 }
@@ -79,10 +82,8 @@ func personalEmailCheck(root string, env []string) doctorCheck {
 		}
 	}
 	scan := func(source, text string) {
-		for _, addr := range findEmails(text) {
-			if !safeEmail(addr) {
-				note(maskEmail(addr) + " (" + source + ")")
-			}
+		for _, addr := range findPersonalEmails(text) {
+			note(maskEmail(addr) + " (" + source + ")")
 		}
 	}
 
@@ -94,22 +95,18 @@ func personalEmailCheck(root string, env []string) doctorCheck {
 
 	for _, entry := range env {
 		name, value, _ := strings.Cut(entry, "=")
-		for _, addr := range findEmails(value) {
-			if !safeEmail(addr) {
-				// Names only: even a masked value is not printed.
-				note("env " + name)
-				break
-			}
+		if len(findPersonalEmails(value)) > 0 {
+			// Names only: even a masked value is not printed.
+			note("env " + name)
 		}
 	}
 
 	for _, name := range personalEmailFiles {
-		lines, err := readInstructionFile(filepath.Join(root, name))
+		err := scanInstructionFile(filepath.Join(root, name), func(n int, line string) {
+			scan(fmt.Sprintf("%s:%d", name, n), line)
+		})
 		if err != nil {
 			return notChecked("cannot read " + name + ": " + err.Error())
-		}
-		for i, line := range lines {
-			scan(fmt.Sprintf("%s:%d", name, i+1), line)
 		}
 	}
 
@@ -118,7 +115,7 @@ func personalEmailCheck(root string, env []string) doctorCheck {
 	if len(found) > 0 {
 		listed := found
 		if len(listed) > personalEmailListLimit {
-			listed = append(listed[:personalEmailListLimit:personalEmailListLimit], fmt.Sprintf("%d more", len(found)-personalEmailListLimit))
+			listed = append(slices.Clip(found[:personalEmailListLimit]), fmt.Sprintf("%d more", len(found)-personalEmailListLimit))
 		}
 		check.Severity, check.Status = doctorWarning, "exposed"
 		check.Message = "Personal email address readable by the wrapped agent: " + strings.Join(listed, ", ") + ". An agent can copy it into commits or request headers; the network fence sees hostnames, not headers."
@@ -132,12 +129,7 @@ func personalEmailCheck(root string, env []string) doctorCheck {
 func gitUserEmail(dir string, env []string) (string, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), gitConfigScanTimeout)
 	defer cancel()
-	cmd := exec.CommandContext(ctx, "git", "-C", dir, "--no-pager", "config", "--get", "user.email")
-	// An inherited GIT_DIR, GIT_WORK_TREE or GIT_CONFIG would point git at
-	// another repo or config file.
-	cmd.Env = removeEnvVars(env, "GIT_DIR", "GIT_WORK_TREE", "GIT_COMMON_DIR", "GIT_CONFIG")
-	cmd.WaitDelay = time.Second
-	out, err := cmd.Output()
+	out, err := doctorGit(ctx, dir, env, "config", "--get", "user.email")
 	var exitErr *exec.ExitError
 	switch {
 	case ctx.Err() != nil:
@@ -150,29 +142,28 @@ func gitUserEmail(dir string, env []string) (string, error) {
 	return string(out), nil
 }
 
-// readInstructionFile returns the lines in the first personalEmailFileLimit
-// bytes of path. A missing or non-regular file (a FIFO would stall the read)
-// has no lines.
-func readInstructionFile(path string) ([]string, error) {
+// scanInstructionFile calls line for each line, numbered from 1, in the first
+// personalEmailFileLimit bytes of path. A missing or non-regular file (a FIFO
+// would stall the read) has no lines.
+func scanInstructionFile(path string, line func(n int, text string)) error {
 	info, err := os.Stat(path)
 	if errors.Is(err, os.ErrNotExist) || err == nil && !info.Mode().IsRegular() {
-		return nil, nil
+		return nil
 	}
 	if err != nil {
-		return nil, err
+		return err
 	}
 	f, err := os.Open(path)
 	if err != nil {
-		return nil, err
+		return err
 	}
 	defer f.Close()
-	var lines []string
 	sc := bufio.NewScanner(io.LimitReader(f, personalEmailFileLimit))
 	sc.Buffer(make([]byte, 0, 64<<10), personalEmailFileLimit)
-	for sc.Scan() {
-		lines = append(lines, sc.Text())
+	for n := 1; sc.Scan(); n++ {
+		line(n, sc.Text())
 	}
-	return lines, sc.Err()
+	return sc.Err()
 }
 
 // safeEmail reports whether addr is a placeholder or noreply address.
