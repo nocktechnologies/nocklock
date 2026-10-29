@@ -14,6 +14,7 @@ import (
 	"slices"
 	"strings"
 	"syscall"
+	"unicode"
 
 	"github.com/nocktechnologies/nocklock/internal/config"
 	fsfence "github.com/nocktechnologies/nocklock/internal/fence/fs"
@@ -35,13 +36,18 @@ const personalEmailListLimit = 10
 var emailPattern = regexp.MustCompile(`([A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,})(?:[^A-Za-z0-9-]|$)`)
 
 // findPersonalEmails returns the addresses in text that safeEmail does not
-// exempt. A user@host followed by ":" (an scp-style git remote such as
-// git@github.com:org/repo) or preceded by "/" (URL userinfo) is not an email.
+// exempt. Two user@host shapes are not emails: URL userinfo, whose
+// whitespace-delimited token has "://" before the match
+// (scheme://user:pass@host), and an scp-style git remote, whose ":" is
+// followed directly by a path (git@github.com:org/repo). A colon followed by a
+// space or ending the text is punctuation, so that address is flagged.
 func findPersonalEmails(text string) []string {
 	var addrs []string
 	for _, m := range emailPattern.FindAllStringSubmatchIndex(text, -1) {
 		start, end := m[2], m[3]
-		if end < len(text) && text[end] == ':' || start > 0 && text[start-1] == '/' {
+		token := text[strings.LastIndexFunc(text[:start], unicode.IsSpace)+1 : start]
+		scpRemote := end+1 < len(text) && text[end] == ':' && !unicode.IsSpace(rune(text[end+1]))
+		if strings.Contains(token, "://") || scpRemote {
 			continue
 		}
 		if addr := text[start:end]; !safeEmail(addr) {

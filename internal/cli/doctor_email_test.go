@@ -52,6 +52,11 @@ func TestPersonalEmailCheck(t *testing.T) {
 		{name: "nested instruction file", files: map[string]string{".github/copilot-instructions.md": testPersonalEmail}, wantStatus: "exposed", wantIn: []string{".github/copilot-instructions.md:1"}},
 		{name: "deeper file not scanned", files: map[string]string{"sub/CLAUDE.md": testPersonalEmail}, wantStatus: "clear"},
 		{name: "git remote and URL userinfo", env: []string{"PROXY_URL=http://pat@proxy.example.net:8080"}, files: map[string]string{"AGENTS.md": "git clone git@github.com:org/repo.git\n"}, wantStatus: "clear"},
+		{name: "URL userinfo with password", files: map[string]string{"AGENTS.md": "Fetch https://u:p@mail.example.net/feed\n"}, wantStatus: "clear"},
+		{name: "userinfo without a scheme", files: map[string]string{"AGENTS.md": "Login pat:" + testPersonalEmail + "\n"}, wantStatus: "exposed", wantIn: []string{testPersonalMask + " (AGENTS.md:1)"}},
+		{name: "scp remote", files: map[string]string{"AGENTS.md": "git@github.com:org/repo.git\n"}, wantStatus: "clear"},
+		{name: "colon at end of line", files: map[string]string{"AGENTS.md": "Owner " + testPersonalEmail + ":\n"}, wantStatus: "exposed", wantIn: []string{testPersonalMask + " (AGENTS.md:1)"}},
+		{name: "colon then text", files: map[string]string{"AGENTS.md": testPersonalEmail + ": call before deploys\n"}, wantStatus: "exposed", wantIn: []string{testPersonalMask + " (AGENTS.md:1)"}},
 		{name: "single line over the scan limit", files: map[string]string{".cursorrules": testPersonalEmail + " " + strings.Repeat("x", personalEmailFileLimit)}, wantStatus: "exposed", wantIn: []string{testPersonalMask + " (.cursorrules:1)"}},
 		{name: "no root", noRoot: true, gitEmail: testPersonalEmail, wantStatus: "not-configured"},
 	}
