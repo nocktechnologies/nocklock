@@ -36,18 +36,32 @@ const personalEmailListLimit = 10
 var emailPattern = regexp.MustCompile(`([A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,})(?:[^A-Za-z0-9-]|$)`)
 
 // findPersonalEmails returns the addresses in text that safeEmail does not
-// exempt. Two user@host shapes are not emails: URL userinfo, whose
-// whitespace-delimited token has "://" before the match
+// exempt. Two user@host shapes are not emails: URL userinfo, where "://" comes
+// before the match in the same token with only userinfo characters between
 // (scheme://user:pass@host), and an scp-style git remote, whose ":" is
 // followed directly by a path (git@github.com:org/repo). A colon followed by a
-// space or ending the text is punctuation, so that address is flagged.
+// space or ending the text is punctuation, so that address is flagged, as is
+// an address in a URL's path or query (https://host/?to=user@host).
 func findPersonalEmails(text string) []string {
 	var addrs []string
+	// schemeEnd is the offset just past the last "://" and lastBad the offset
+	// of the last character URL userinfo cannot hold (whitespace, "/", "?",
+	// "@", a quote). Both advance from the previous match, so a long line is
+	// scanned once, not once per match.
+	schemeEnd, lastBad, prev := -1, -1, 0
 	for _, m := range emailPattern.FindAllStringSubmatchIndex(text, -1) {
 		start, end := m[2], m[3]
-		token := text[strings.LastIndexFunc(text[:start], unicode.IsSpace)+1 : start]
+		seg := text[prev:start]
+		if i := strings.LastIndex(seg, "://"); i >= 0 {
+			schemeEnd = prev + i + len("://")
+		}
+		if i := strings.LastIndexFunc(seg, notURLUserinfo); i >= 0 {
+			lastBad = prev + i
+		}
+		prev = start
+		userinfo := schemeEnd >= 0 && lastBad < schemeEnd
 		scpRemote := end+1 < len(text) && text[end] == ':' && !unicode.IsSpace(rune(text[end+1]))
-		if strings.Contains(token, "://") || scpRemote {
+		if userinfo || scpRemote {
 			continue
 		}
 		if addr := text[start:end]; !safeEmail(addr) {
@@ -55,6 +69,12 @@ func findPersonalEmails(text string) []string {
 		}
 	}
 	return addrs
+}
+
+// notURLUserinfo reports whether r cannot appear in URL userinfo (RFC 3986:
+// unreserved, percent-encoded, sub-delims and ":").
+func notURLUserinfo(r rune) bool {
+	return !('a' <= r && r <= 'z' || 'A' <= r && r <= 'Z' || '0' <= r && r <= '9' || strings.ContainsRune("-._~%!$&'()*+,;=:", r))
 }
 
 // personalEmailDoctorCheck reports personal email addresses the wrapped agent

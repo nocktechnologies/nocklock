@@ -54,6 +54,9 @@ func TestPersonalEmailCheck(t *testing.T) {
 		{name: "git remote and URL userinfo", env: []string{"PROXY_URL=http://pat@proxy.example.net:8080"}, files: map[string]string{"AGENTS.md": "git clone git@github.com:org/repo.git\n"}, wantStatus: "clear"},
 		{name: "URL userinfo with password", files: map[string]string{"AGENTS.md": "Fetch https://u:p@mail.example.net/feed\n"}, wantStatus: "clear"},
 		{name: "userinfo without a scheme", files: map[string]string{"AGENTS.md": "Login pat:" + testPersonalEmail + "\n"}, wantStatus: "exposed", wantIn: []string{testPersonalMask + " (AGENTS.md:1)"}},
+		{name: "address in a URL query", files: map[string]string{"AGENTS.md": "Book at https://cal.example.net/x?email=" + testPersonalEmail + "\n"}, wantStatus: "exposed", wantIn: []string{testPersonalMask + " (AGENTS.md:1)"}},
+		{name: "address after a URL in compact JSON", env: []string{`OWNER_JSON={"url":"https://a.example.net","owner":"` + testPersonalEmail + `"}`}, wantStatus: "exposed", wantIn: []string{"env OWNER_JSON"}},
+		{name: "address after a URL in a table cell", files: map[string]string{"AGENTS.md": "|https://a.example.net|" + testPersonalEmail + "|\n"}, wantStatus: "exposed", wantIn: []string{testPersonalMask + " (AGENTS.md:1)"}},
 		{name: "scp remote", files: map[string]string{"AGENTS.md": "git@github.com:org/repo.git\n"}, wantStatus: "clear"},
 		{name: "colon at end of line", files: map[string]string{"AGENTS.md": "Owner " + testPersonalEmail + ":\n"}, wantStatus: "exposed", wantIn: []string{testPersonalMask + " (AGENTS.md:1)"}},
 		{name: "colon then text", files: map[string]string{"AGENTS.md": testPersonalEmail + ": call before deploys\n"}, wantStatus: "exposed", wantIn: []string{testPersonalMask + " (AGENTS.md:1)"}},
@@ -280,5 +283,18 @@ func TestPersonalEmailDoctorCheckUsesChildEnv(t *testing.T) {
 	cfg.Secrets.Pass = []string{"HOME", "PATH"}
 	if check := personalEmailDoctorCheck(cfg); strings.Contains(check.Message, "env GIT_AUTHOR_EMAIL") {
 		t.Fatalf("reported a variable the pass list withholds: %+v", check)
+	}
+}
+
+// A whitespace-free line packed with addresses is scanned once, not once per
+// match: a hostile instruction file cannot stall doctor.
+func TestFindPersonalEmailsLongTokenIsLinear(t *testing.T) {
+	line := strings.Repeat("a@b.co,", 30000)
+	start := time.Now()
+	if got := len(findPersonalEmails(line)); got != 30000 {
+		t.Fatalf("found %d addresses, want 30000", got)
+	}
+	if elapsed := time.Since(start); elapsed > 2*time.Second {
+		t.Fatalf("scan took %s; it must not rescan the token per match", elapsed)
 	}
 }

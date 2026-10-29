@@ -38,12 +38,13 @@ with no pass list, every variable the secret fence does not block reaches the
 child, and doctor reports each one that holds an address.
 Noreply addresses (`noreply@`, `no-reply@`, `users.noreply.github.com`) and
 `example.com`, `example.org` and `localhost` are not flagged. Two `user@host`
-shapes are not flagged either: URL userinfo, when the whitespace-delimited
-token has `://` before the address (`scheme://user:pass@host`), and an
-scp-style git remote, when `:` follows the address directly and the next
-character is not a space (`git@github.com:org/repo`). A bare `user:pass@host`
-with no scheme, an address followed by `: ` and an address with a colon at the
-end of the line are flagged. A finding is a
+shapes are not flagged either: URL userinfo, when `://` comes before the
+address in the same token with only userinfo characters between
+(`scheme://user:pass@host`), and an scp-style git remote, when `:` follows the
+address directly and the next character is not a space
+(`git@github.com:org/repo`). A bare `user:pass@host` with no scheme, an address
+in a URL's path or query, an address followed by `: ` and an address with a
+colon at the end of the line are flagged. A finding is a
 `personal-email` warning (`exposed`) naming the source: a masked address
 (`k***@domain`) with `git user.email` or `file:line`, or only the variable name
 for the environment. A git timeout or an unreadable file says `not-checked`, unless another source
