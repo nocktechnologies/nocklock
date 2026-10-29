@@ -128,6 +128,52 @@ func TestPersonalEmailCheckGitTimeout(t *testing.T) {
 	}
 }
 
+// An unreadable source is named by file and error class only. The OS error
+// text carries the path, so a root directory named like an address must not
+// reach the report through it.
+func TestPersonalEmailCheckErrorHidesAddress(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("root reads a mode-000 file")
+	}
+	const dirEmail = "root.owner@example.net"
+	root := filepath.Join(t.TempDir(), dirEmail)
+	if err := os.Mkdir(root, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(root, "CLAUDE.md"), []byte("owner: "+testPersonalEmail+"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	// AGENTS.md is read after CLAUDE.md, so the error follows a match.
+	if err := os.WriteFile(filepath.Join(root, "AGENTS.md"), []byte(testPersonalEmail), 0o000); err != nil {
+		t.Fatal(err)
+	}
+	check := personalEmailCheck(root, emailTestEnv(t))
+	if check.Status != "exposed" || !strings.Contains(check.Message, "Not checked: AGENTS.md: permission denied.") {
+		t.Fatalf("unreadable file not named by class: %+v", check)
+	}
+	var text, encoded bytes.Buffer
+	report := doctorReport{Checks: []doctorCheck{check}}
+	renderDoctorHuman(&text, report)
+	if err := renderDoctorJSON(&encoded, report); err != nil {
+		t.Fatal(err)
+	}
+	for _, out := range []string{text.String(), encoded.String()} {
+		for _, addr := range []string{testPersonalEmail, dirEmail} {
+			if strings.Contains(out, addr) {
+				t.Fatalf("full address %q printed:\n%s", addr, out)
+			}
+		}
+	}
+
+	// Control: with AGENTS.md readable the same root reports no unread source.
+	if err := os.Chmod(filepath.Join(root, "AGENTS.md"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if check := personalEmailCheck(root, emailTestEnv(t)); check.Status != "exposed" || strings.Contains(check.Message, "Not checked") {
+		t.Fatalf("readable root reported an unread source: %+v", check)
+	}
+}
+
 // A FIFO named like an instruction file must not stall doctor.
 func TestPersonalEmailCheckSkipsFIFO(t *testing.T) {
 	root := t.TempDir()

@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"io/fs"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -92,9 +93,11 @@ func personalEmailCheck(root string, env []string) doctorCheck {
 		}
 	}
 
+	// Each unread source is named with an error class only: an OS error text
+	// carries the path, and a path can hold an address.
 	root, err := fsfence.ExpandTilde(root)
 	if err != nil {
-		unread = append(unread, "filesystem.root: "+err.Error())
+		unread = append(unread, "filesystem.root: cannot expand ~")
 	} else {
 		if gitEmail, err := gitUserEmail(root, env); err != nil {
 			unread = append(unread, "git user.email: "+err.Error())
@@ -106,7 +109,7 @@ func personalEmailCheck(root string, env []string) doctorCheck {
 				scan(fmt.Sprintf("%s:%d", name, n), line)
 			})
 			if err != nil {
-				unread = append(unread, name+": "+err.Error())
+				unread = append(unread, name+": "+fileErrorClass(err))
 			}
 		}
 	}
@@ -134,7 +137,8 @@ func personalEmailCheck(root string, env []string) doctorCheck {
 }
 
 // gitUserEmail returns the effective user.email git would commit with in dir,
-// under gitConfigScanTimeout. Missing git or an unset key is no identity.
+// under gitConfigScanTimeout. Missing git or an unset key is no identity. An
+// error names its class only, never git's output or the path.
 func gitUserEmail(dir string, env []string) (string, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), gitConfigScanTimeout)
 	defer cancel()
@@ -145,10 +149,21 @@ func gitUserEmail(dir string, env []string) (string, error) {
 		return "", errors.New("timeout")
 	case errors.Is(err, exec.ErrNotFound), errors.As(err, &exitErr) && exitErr.ExitCode() == 1:
 		return "", nil
+	case exitErr != nil:
+		return "", fmt.Errorf("git exited with status %d", exitErr.ExitCode())
 	case err != nil:
-		return "", err
+		return "", errors.New("git could not run")
 	}
 	return string(out), nil
+}
+
+// fileErrorClass names the class of an instruction file error without its
+// text, which carries the path.
+func fileErrorClass(err error) string {
+	if errors.Is(err, fs.ErrPermission) {
+		return "permission denied"
+	}
+	return "read error"
 }
 
 // scanInstructionFile calls line for each line, numbered from 1, in the first
