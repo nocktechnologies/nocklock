@@ -9,7 +9,6 @@ import (
 	"slices"
 	"strconv"
 	"strings"
-	"syscall"
 	"time"
 )
 
@@ -69,15 +68,9 @@ func doctorGit(ctx context.Context, dir string, env []string, args ...string) ([
 	cmd := exec.CommandContext(ctx, "git", append([]string{"-C", dir, "--no-pager"}, args...)...)
 	// removeEnvVars filters in place; the caller keeps its env.
 	cmd.Env = removeEnvVars(slices.Clone(env), "GIT_DIR", "GIT_WORK_TREE", "GIT_COMMON_DIR", "GIT_CONFIG")
-	// git runs in its own process group and the deadline kills the whole group,
-	// so a helper or hook git forked cannot outlive the call. WaitDelay bounds
-	// the reap if a descendant that left the group still holds the output pipe.
-	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
-	cmd.Cancel = func() error {
-		// The group id is git's pid (Setpgid with Pgid 0).
-		return syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
-	}
-	cmd.WaitDelay = time.Second
+	// The deadline kills git's whole process group: a helper or hook git
+	// forked cannot outlive the call.
+	killGroupOnCancel(cmd)
 	return cmd.Output()
 }
 

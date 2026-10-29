@@ -134,13 +134,21 @@ func runSudoProbe(ctx context.Context, sudo string) error {
 	cmd.Stdin = nil
 	cmd.Stdout = nil
 	cmd.Stderr = nil
+	killGroupOnCancel(cmd)
+	return cmd.Run()
+}
+
+// killGroupOnCancel starts cmd in its own process group and makes its context
+// cancel kill the whole group, so a descendant cannot outlive the call.
+// WaitDelay bounds the reap if a descendant that left the group still holds
+// an output pipe.
+func killGroupOnCancel(cmd *exec.Cmd) {
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 	cmd.Cancel = func() error {
 		// The group id is the child's pid (Setpgid with Pgid 0).
 		return syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
 	}
 	cmd.WaitDelay = time.Second
-	return cmd.Run()
 }
 
 const (
