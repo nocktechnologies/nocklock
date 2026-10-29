@@ -142,8 +142,9 @@ func runSudoProbe(ctx context.Context, sudo string) error {
 // (cmd.Run or a wrapper around cmd.Output) and kills the whole group on every
 // exit path: a normal exit, a context cancel, and ErrWaitDelay, where cmd
 // exited but a descendant still held an output pipe. A descendant therefore
-// cannot outlive the call unless it left the group; WaitDelay bounds the reap
-// in that case.
+// cannot outlive the call, unless it left the group or runs as a user doctor
+// cannot signal (a helper setuid sudo starts as root); WaitDelay bounds the
+// reap in that case.
 func runInProbeGroup(cmd *exec.Cmd, run func() error) error {
 	cmd.SysProcAttr = probeSysProcAttr()
 	cmd.Cancel = func() error {

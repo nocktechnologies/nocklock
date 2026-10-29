@@ -180,7 +180,7 @@ func gitUserEmail(dir string, env []string) (string, error) {
 		return "", fmt.Errorf("git failed (%v)", exitErr)
 	case err != nil && !errors.Is(err, exec.ErrWaitDelay):
 		// ErrWaitDelay: git exited 0 and its output is complete, but a process
-		// it started still held the pipe; doctorGit has killed it.
+		// it started still held the pipe; doctorGit has killed git's group.
 		return "", errors.New("git could not run")
 	}
 	return string(out), nil

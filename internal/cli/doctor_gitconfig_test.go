@@ -255,12 +255,12 @@ func TestDoctorGitTimeoutKillsForkedChild(t *testing.T) {
 }
 
 // A git that starts a persistent helper and exits 0 at once returns its output,
-// and the helper is killed with git's group whether or not it holds stdout
-// (the ErrWaitDelay and the normal exit paths).
+// and the helper is killed with git's group whether or not it holds git's
+// output pipes (the ErrWaitDelay and the normal exit paths).
 func TestDoctorGitExitKillsBackgroundHelper(t *testing.T) {
 	for name, redirect := range map[string]string{
-		"holds stdout":    "",
-		"detached stdout": " >/dev/null",
+		"holds output":    "",
+		"detached output": " >/dev/null 2>&1",
 	} {
 		t.Run(name, func(t *testing.T) {
 			bin := t.TempDir()
@@ -273,7 +273,9 @@ func TestDoctorGitExitKillsBackgroundHelper(t *testing.T) {
 			t.Setenv("PATH", path)
 
 			out, err := doctorGit(context.Background(), t.TempDir(), []string{"PATH=" + path}, "config", "--get", "user.email")
-			if err != nil && !errors.Is(err, exec.ErrWaitDelay) {
+			// Only a helper on the pipe makes Wait give up with ErrWaitDelay;
+			// a detached one leaves a clean exit.
+			if redirect == "" && !errors.Is(err, exec.ErrWaitDelay) || redirect != "" && err != nil {
 				t.Fatalf("doctorGit: %v", err)
 			}
 			if string(out) != "dev@example.com\n" {
