@@ -126,8 +126,8 @@ func trustedSudoPath() (string, error) {
 }
 
 // runSudoProbe runs `sudo -k -n true`. The probe runs in its own process group
-// and a timeout kills the whole group, so a helper that sudo started cannot
-// outlive the probe.
+// and the whole group is killed when the probe returns, so a helper that sudo
+// started cannot outlive the probe.
 func runSudoProbe(ctx context.Context, sudo string) error {
 	ctx, cancel := context.WithTimeout(ctx, 3*time.Second)
 	defer cancel()
@@ -135,26 +135,34 @@ func runSudoProbe(ctx context.Context, sudo string) error {
 	cmd.Stdin = nil
 	cmd.Stdout = nil
 	cmd.Stderr = nil
-	killGroupOnCancel(cmd)
-	return cmd.Run()
+	return runInProbeGroup(cmd, cmd.Run)
 }
 
-// killGroupOnCancel starts cmd in its own process group and makes its context
-// cancel kill the whole group, so a descendant cannot outlive the call.
-// WaitDelay bounds the reap if a descendant that left the group still holds
-// an output pipe.
-func killGroupOnCancel(cmd *exec.Cmd) {
+// runInProbeGroup starts cmd in its own process group, runs it with run
+// (cmd.Run or a wrapper around cmd.Output) and kills the whole group on every
+// exit path: a normal exit, a context cancel, and ErrWaitDelay, where cmd
+// exited but a descendant still held an output pipe. A descendant therefore
+// cannot outlive the call unless it left the group; WaitDelay bounds the reap
+// in that case.
+func runInProbeGroup(cmd *exec.Cmd, run func() error) error {
 	cmd.SysProcAttr = probeSysProcAttr()
+	// The group id is the child's pid (Setpgid with Pgid 0).
 	cmd.Cancel = func() error {
-		// The group id is the child's pid (Setpgid with Pgid 0). ESRCH means
-		// the group already exited, which exec must not report as a failure.
-		err := syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
-		if errors.Is(err, syscall.ESRCH) {
-			return os.ErrProcessDone
+		// ESRCH means the group already exited, which exec must not report as
+		// a failure.
+		if err := syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL); !errors.Is(err, syscall.ESRCH) {
+			return err
 		}
-		return err
+		return os.ErrProcessDone
 	}
 	cmd.WaitDelay = time.Second
+	err := run()
+	if cmd.Process != nil {
+		// The leader is reaped, but the kernel keeps its pid reserved while a
+		// group member lives; an empty group gives ESRCH, which is ignored.
+		_ = syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
+	}
+	return err
 }
 
 const (

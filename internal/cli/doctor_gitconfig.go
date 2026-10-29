@@ -68,10 +68,14 @@ func doctorGit(ctx context.Context, dir string, env []string, args ...string) ([
 	cmd := exec.CommandContext(ctx, "git", append([]string{"-C", dir, "--no-pager"}, args...)...)
 	// removeEnvVars filters in place; the caller keeps its env.
 	cmd.Env = removeEnvVars(slices.Clone(env), "GIT_DIR", "GIT_WORK_TREE", "GIT_COMMON_DIR", "GIT_CONFIG")
-	// The deadline kills git's whole process group: a helper or hook git
-	// forked cannot outlive the call.
-	killGroupOnCancel(cmd)
-	return cmd.Output()
+	// git's whole process group is killed when the call returns: a helper or
+	// hook git forked cannot outlive it.
+	var out []byte
+	err := runInProbeGroup(cmd, func() (err error) {
+		out, err = cmd.Output()
+		return err
+	})
+	return out, err
 }
 
 // gitConfigExecDoctorChecks lists the repository git config entries for dir

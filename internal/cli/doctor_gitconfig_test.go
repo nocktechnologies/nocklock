@@ -3,6 +3,7 @@ package cli
 import (
 	"bytes"
 	"context"
+	"errors"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -250,5 +251,35 @@ func TestDoctorGitTimeoutKillsForkedChild(t *testing.T) {
 			_ = syscall.Kill(pid, syscall.SIGKILL)
 			t.Fatalf("forked child %d outlived the git timeout", pid)
 		}
+	}
+}
+
+// A git that starts a persistent helper and exits 0 at once returns its output,
+// and the helper is killed with git's group whether or not it holds stdout
+// (the ErrWaitDelay and the normal exit paths).
+func TestDoctorGitExitKillsBackgroundHelper(t *testing.T) {
+	for name, redirect := range map[string]string{
+		"holds stdout":    "",
+		"detached stdout": " >/dev/null",
+	} {
+		t.Run(name, func(t *testing.T) {
+			bin := t.TempDir()
+			pidFile := filepath.Join(t.TempDir(), "child.pid")
+			script := "#!/bin/sh\n(while :; do sleep 1; done)" + redirect + " &\necho $! > '" + pidFile + "'\necho dev@example.com\nexit 0\n"
+			if err := os.WriteFile(filepath.Join(bin, "git"), []byte(script), 0o700); err != nil {
+				t.Fatal(err)
+			}
+			path := bin + string(os.PathListSeparator) + os.Getenv("PATH")
+			t.Setenv("PATH", path)
+
+			out, err := doctorGit(context.Background(), t.TempDir(), []string{"PATH=" + path}, "config", "--get", "user.email")
+			if err != nil && !errors.Is(err, exec.ErrWaitDelay) {
+				t.Fatalf("doctorGit: %v", err)
+			}
+			if string(out) != "dev@example.com\n" {
+				t.Fatalf("output = %q, want git's complete output", out)
+			}
+			requireHelperGone(t, pidFile)
+		})
 	}
 }
