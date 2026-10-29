@@ -30,7 +30,8 @@ shallow heuristic is not a runtime fence.
 copy into commits or request headers; the network fence sees hostnames, not
 headers. It checks the effective git `user.email` at `filesystem.root` (a
 3-second bounded `git config --get`), environment variables `wrap` passes to
-the child (after the secret fence and the proxy-variable strip), and `CLAUDE.md`, `AGENTS.md`, `GEMINI.md`, `.cursorrules`
+the child (after the secret fence and the proxy-variable strip; with the
+default `secrets.pass` list only the listed variables reach the child), and `CLAUDE.md`, `AGENTS.md`, `GEMINI.md`, `.cursorrules`
 and `.github/copilot-instructions.md` at the root only (first 256 KiB each).
 Noreply addresses (`noreply@`, `no-reply@`, `users.noreply.github.com`) and
 `example.com`, `example.org` and `localhost` are not flagged, nor is a

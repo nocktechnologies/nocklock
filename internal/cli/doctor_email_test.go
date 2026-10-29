@@ -197,3 +197,37 @@ func TestDoctorPersonalEmailReport(t *testing.T) {
 		}
 	}
 }
+
+// The production entry point scans the env wrap passes: the secret fence
+// decides what reaches the child, and wrap's proxy strip removes the proxy
+// variables. GIT_AUTHOR_EMAIL and GIT_COMMITTER_EMAIL are reported by name.
+func TestPersonalEmailDoctorCheckUsesChildEnv(t *testing.T) {
+	root := t.TempDir()
+	t.Setenv("GIT_CONFIG_NOSYSTEM", "1")
+	t.Setenv("GIT_CONFIG_GLOBAL", os.DevNull)
+	t.Setenv("GIT_AUTHOR_EMAIL", testPersonalEmail)
+	t.Setenv("GIT_COMMITTER_EMAIL", testPersonalEmail)
+	t.Setenv("HTTPS_PROXY", "http://proxy.example.net/?owner="+testPersonalEmail)
+	t.Setenv("NOCKTEST_BLOCKED_CONTACT", testPersonalEmail)
+	cfg := &config.Config{}
+	cfg.Filesystem.Root = root
+	cfg.Secrets.Block = []string{"NOCKTEST_BLOCKED_*"}
+	check := personalEmailDoctorCheck(cfg)
+	for _, want := range []string{"env GIT_AUTHOR_EMAIL", "env GIT_COMMITTER_EMAIL"} {
+		if !strings.Contains(check.Message, want) {
+			t.Fatalf("message lacks %q: %+v", want, check)
+		}
+	}
+	for _, stripped := range []string{"env HTTPS_PROXY", "env NOCKTEST_BLOCKED_CONTACT"} {
+		if strings.Contains(check.Message, stripped) {
+			t.Fatalf("reported %q, which wrap does not pass to the child: %+v", stripped, check)
+		}
+	}
+
+	// A pass list (the default config has one) keeps everything else from the
+	// child, so the git variables are not reported.
+	cfg.Secrets.Pass = []string{"HOME", "PATH"}
+	if check := personalEmailDoctorCheck(cfg); strings.Contains(check.Message, "env GIT_AUTHOR_EMAIL") {
+		t.Fatalf("reported a variable the pass list withholds: %+v", check)
+	}
+}
