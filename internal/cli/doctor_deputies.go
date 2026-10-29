@@ -146,14 +146,14 @@ func runSudoProbe(ctx context.Context, sudo string) error {
 // in that case.
 func runInProbeGroup(cmd *exec.Cmd, run func() error) error {
 	cmd.SysProcAttr = probeSysProcAttr()
-	// The group id is the child's pid (Setpgid with Pgid 0).
 	cmd.Cancel = func() error {
-		// ESRCH means the group already exited, which exec must not report as
-		// a failure.
-		if err := syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL); !errors.Is(err, syscall.ESRCH) {
-			return err
+		// The group id is the child's pid (Setpgid with Pgid 0). ESRCH means
+		// the group already exited, which exec must not report as a failure.
+		err := syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
+		if errors.Is(err, syscall.ESRCH) {
+			return os.ErrProcessDone
 		}
-		return os.ErrProcessDone
+		return err
 	}
 	cmd.WaitDelay = time.Second
 	err := run()

@@ -812,15 +812,12 @@ func requireHelperGone(t *testing.T, pidFile string) {
 		t.Fatalf("bad helper pid %q", b)
 	}
 	for deadline := time.Now().Add(5 * time.Second); ; time.Sleep(50 * time.Millisecond) {
-		gone, esrch := processGone(pid)
-		if gone {
+		if gone, _ := processGone(pid); gone {
 			return
 		}
 		if time.Now().After(deadline) {
-			// Not ESRCH, so the pid is still the helper's.
-			if !esrch {
-				_ = syscall.Kill(pid, syscall.SIGKILL)
-			}
+			// Not ESRCH yet, so the pid is still the helper's.
+			_ = syscall.Kill(pid, syscall.SIGKILL)
 			t.Fatalf("helper pid %d outlived the probe", pid)
 		}
 	}
