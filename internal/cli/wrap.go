@@ -816,12 +816,7 @@ var wrapCmd = &cobra.Command{
 		// If allow_all = true, we want the child to have direct network access rather
 		// than an operator proxy whose scope we don't control. This is a deliberate
 		// security-over-convenience tradeoff; document it if it surprises users.
-		childEnv = removeEnvVars(childEnv,
-			"HTTP_PROXY", "http_proxy",
-			"HTTPS_PROXY", "https_proxy",
-			"ALL_PROXY", "all_proxy",
-			"NO_PROXY", "no_proxy",
-		)
+		childEnv = removeEnvVars(childEnv, ambientProxyEnv...)
 
 		var proxyFailed atomic.Bool
 		var netnsEgress *netns.EgressConfig
@@ -1527,7 +1522,15 @@ func claudeAuthEnvName(env []string) string {
 	return ""
 }
 
-// removeEnvVars returns env with any entries whose key matches one of the given
+// ambientProxyEnv are the inherited proxy variables wrap always removes from
+// the child environment.
+var ambientProxyEnv = []string{
+	"HTTP_PROXY", "http_proxy",
+	"HTTPS_PROXY", "https_proxy",
+	"ALL_PROXY", "all_proxy",
+	"NO_PROXY", "no_proxy",
+}
+
 // fencedChildEnv returns the environment wrap passes to the child: environ
 // filtered by the secret fence, without the anchor and forward settings. It
 // also returns the names the fence and the forward removal blocked.
@@ -1547,6 +1550,7 @@ func fencedChildEnv(fence *secrets.Fence, environ []string) (env, blocked []stri
 	return removeEnvVars(env, config.ForwardKeyEnv, config.ForwardURLEnv), blocked
 }
 
+// removeEnvVars returns env with any entries whose key matches one of the given
 // keys removed. Keys are matched case-sensitively by prefix ("KEY=").
 func removeEnvVars(env []string, keys ...string) []string {
 	filtered := env[:0:len(env)]

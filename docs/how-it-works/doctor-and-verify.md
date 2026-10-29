@@ -29,14 +29,17 @@ shallow heuristic is not a runtime fence.
 `doctor` also looks for a personal email address the wrapped agent can read and
 copy into commits or request headers; the network fence sees hostnames, not
 headers. It checks the effective git `user.email` at `filesystem.root` (a
-3-second bounded `git config --get`), environment variables the secret fence
-passes to the child, and `CLAUDE.md`, `AGENTS.md`, `GEMINI.md`, `.cursorrules`
+3-second bounded `git config --get`), environment variables `wrap` passes to
+the child (after the secret fence and the proxy-variable strip), and `CLAUDE.md`, `AGENTS.md`, `GEMINI.md`, `.cursorrules`
 and `.github/copilot-instructions.md` at the root only (first 256 KiB each).
 Noreply addresses (`noreply@`, `no-reply@`, `users.noreply.github.com`) and
-`example.com`, `example.org` and `localhost` are not flagged. A finding is a
+`example.com`, `example.org` and `localhost` are not flagged, nor is a
+`user@host` followed by `:` (an scp-style git remote) or preceded by `/` (URL
+userinfo). A finding is a
 `personal-email` warning (`exposed`) naming the source: a masked address
 (`k***@domain`) with `git user.email` or `file:line`, or only the variable name
-for the environment. A timeout or unreadable file says `not-checked`. The check
+for the environment. A git timeout or an unreadable file says `not-checked`, unless another source
+already produced a finding; the warning then names what was not checked. The check
 is informational and does not change the verdict or exit code; doctor changes
 nothing, and deeper files are not checked (`internal/cli/doctor_email.go`).
 

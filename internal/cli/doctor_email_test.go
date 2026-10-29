@@ -2,10 +2,12 @@ package cli
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"os"
 	"path/filepath"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
 
@@ -49,6 +51,8 @@ func TestPersonalEmailCheck(t *testing.T) {
 		{name: "instruction file line", files: map[string]string{"CLAUDE.md": "# Project\n\nAsk " + testPersonalEmail + " for access.\n"}, wantStatus: "exposed", wantIn: []string{testPersonalMask + " (CLAUDE.md:3)"}},
 		{name: "nested instruction file", files: map[string]string{".github/copilot-instructions.md": testPersonalEmail}, wantStatus: "exposed", wantIn: []string{".github/copilot-instructions.md:1"}},
 		{name: "deeper file not scanned", files: map[string]string{"sub/CLAUDE.md": testPersonalEmail}, wantStatus: "clear"},
+		{name: "git remote and URL userinfo", env: []string{"PROXY_URL=http://pat@proxy.example.net:8080"}, files: map[string]string{"AGENTS.md": "git clone git@github.com:org/repo.git\n"}, wantStatus: "clear"},
+		{name: "single line over the scan limit", files: map[string]string{".cursorrules": testPersonalEmail + " " + strings.Repeat("x", personalEmailFileLimit)}, wantStatus: "exposed", wantIn: []string{testPersonalMask + " (.cursorrules:1)"}},
 		{name: "no root", noRoot: true, gitEmail: testPersonalEmail, wantStatus: "not-configured"},
 	}
 	for _, tt := range tests {
@@ -115,6 +119,40 @@ func TestPersonalEmailCheckGitTimeout(t *testing.T) {
 	}
 	if check.Severity != doctorInfo || check.Status != "not-checked" || !strings.Contains(check.Message, "timeout") {
 		t.Fatalf("hanging git not reported as not-checked: %+v", check)
+	}
+
+	// A finding from another source still warns, naming what was not checked.
+	check = personalEmailCheck(t.TempDir(), emailTestEnv(t, "OWNER_CONTACT="+testPersonalEmail))
+	if check.Status != "exposed" || !strings.Contains(check.Message, "Not checked: git user.email: timeout") {
+		t.Fatalf("finding hidden by the git timeout: %+v", check)
+	}
+}
+
+// A FIFO named like an instruction file must not stall doctor.
+func TestPersonalEmailCheckSkipsFIFO(t *testing.T) {
+	root := t.TempDir()
+	if err := syscall.Mkfifo(filepath.Join(root, "CLAUDE.md"), 0o600); err != nil {
+		t.Fatalf("mkfifo: %v", err)
+	}
+	done := make(chan doctorCheck, 1)
+	go func() { done <- personalEmailCheck(root, emailTestEnv(t)) }()
+	select {
+	case check := <-done:
+		if check.Status != "clear" {
+			t.Fatalf("FIFO changed the result: %+v", check)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("personal email check blocked on a FIFO")
+	}
+}
+
+// doctorGit strips git's redirecting variables from a copy: the caller's env,
+// which the check scans afterwards, is unchanged.
+func TestDoctorGitKeepsCallerEnv(t *testing.T) {
+	env := []string{"GIT_DIR=/nonexistent", "PATH=" + os.Getenv("PATH")}
+	_, _ = doctorGit(context.Background(), t.TempDir(), env, "--version")
+	if env[0] != "GIT_DIR=/nonexistent" {
+		t.Fatalf("doctorGit modified the caller env: %q", env)
 	}
 }
 

@@ -12,6 +12,7 @@ import (
 	"regexp"
 	"slices"
 	"strings"
+	"syscall"
 
 	"github.com/nocktechnologies/nocklock/internal/config"
 	fsfence "github.com/nocktechnologies/nocklock/internal/fence/fs"
@@ -33,47 +34,43 @@ const personalEmailListLimit = 10
 var emailPattern = regexp.MustCompile(`([A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,})(?:[^A-Za-z0-9-]|$)`)
 
 // findPersonalEmails returns the addresses in text that safeEmail does not
-// exempt.
+// exempt. A user@host followed by ":" (an scp-style git remote such as
+// git@github.com:org/repo) or preceded by "/" (URL userinfo) is not an email.
 func findPersonalEmails(text string) []string {
 	var addrs []string
-	for _, m := range emailPattern.FindAllStringSubmatch(text, -1) {
-		if !safeEmail(m[1]) {
-			addrs = append(addrs, m[1])
+	for _, m := range emailPattern.FindAllStringSubmatchIndex(text, -1) {
+		start, end := m[2], m[3]
+		if end < len(text) && text[end] == ':' || start > 0 && text[start-1] == '/' {
+			continue
+		}
+		if addr := text[start:end]; !safeEmail(addr) {
+			addrs = append(addrs, addr)
 		}
 	}
 	return addrs
 }
 
 // personalEmailDoctorCheck reports personal email addresses the wrapped agent
-// can read: the git identity at filesystem.root, the environment the secret
-// fence passes to the child, and agent instruction files at the root.
+// can read: the git identity at filesystem.root, the environment wrap passes
+// to the child, and agent instruction files at the root.
 func personalEmailDoctorCheck(cfg *config.Config) doctorCheck {
 	env := os.Environ()
 	// wrap refuses an invalid secret fence; the unfiltered env over-reports.
 	if fence, err := secrets.NewFence(cfg.Secrets.Pass, cfg.Secrets.Block); err == nil {
 		env, _ = fencedChildEnv(fence, env)
 	}
-	return personalEmailCheck(cfg.Filesystem.Root, env)
+	return personalEmailCheck(cfg.Filesystem.Root, removeEnvVars(env, ambientProxyEnv...))
 }
 
 // personalEmailCheck scans root and env. The check is informational: it never
-// feeds the verdict, and it never prints a full address or an env value.
+// feeds the verdict, and it never prints a full address or an env value. A
+// finding wins over a source that could not be read.
 func personalEmailCheck(root string, env []string) doctorCheck {
 	check := doctorCheck{Group: "Secrets", Name: "personal-email", Severity: doctorInfo, Status: "not-configured", Message: "No filesystem root is configured for personal email inspection."}
 	if root == "" {
 		return check
 	}
-	notChecked := func(reason string) doctorCheck {
-		check.Status = "not-checked"
-		check.Message = "Personal email check: not checked (" + reason + "). The git identity, environment and agent instruction files may still expose an address."
-		return check
-	}
-	root, err := fsfence.ExpandTilde(root)
-	if err != nil {
-		return notChecked("cannot resolve filesystem.root: " + err.Error())
-	}
-
-	var found []string
+	var found, unread []string
 	seen := map[string]bool{}
 	note := func(finding string) {
 		if !seen[finding] {
@@ -87,12 +84,6 @@ func personalEmailCheck(root string, env []string) doctorCheck {
 		}
 	}
 
-	gitEmail, err := gitUserEmail(root, env)
-	if err != nil {
-		return notChecked("git user.email: " + err.Error())
-	}
-	scan("git user.email", gitEmail)
-
 	for _, entry := range env {
 		name, value, _ := strings.Cut(entry, "=")
 		if len(findPersonalEmails(value)) > 0 {
@@ -101,25 +92,43 @@ func personalEmailCheck(root string, env []string) doctorCheck {
 		}
 	}
 
-	for _, name := range personalEmailFiles {
-		err := scanInstructionFile(filepath.Join(root, name), func(n int, line string) {
-			scan(fmt.Sprintf("%s:%d", name, n), line)
-		})
-		if err != nil {
-			return notChecked("cannot read " + name + ": " + err.Error())
+	root, err := fsfence.ExpandTilde(root)
+	if err != nil {
+		unread = append(unread, "filesystem.root: "+err.Error())
+	} else {
+		if gitEmail, err := gitUserEmail(root, env); err != nil {
+			unread = append(unread, "git user.email: "+err.Error())
+		} else {
+			scan("git user.email", gitEmail)
+		}
+		for _, name := range personalEmailFiles {
+			err := scanInstructionFile(filepath.Join(root, name), func(n int, line string) {
+				scan(fmt.Sprintf("%s:%d", name, n), line)
+			})
+			if err != nil {
+				unread = append(unread, name+": "+err.Error())
+			}
 		}
 	}
 
-	check.Status = "clear"
-	check.Message = "No personal email address found in the git identity, the environment passed to the wrapped agent, or agent instruction files at filesystem.root. Deeper files were not checked."
-	if len(found) > 0 {
+	switch {
+	case len(found) > 0:
 		listed := found
 		if len(listed) > personalEmailListLimit {
 			listed = append(slices.Clip(found[:personalEmailListLimit]), fmt.Sprintf("%d more", len(found)-personalEmailListLimit))
 		}
 		check.Severity, check.Status = doctorWarning, "exposed"
 		check.Message = "Personal email address readable by the wrapped agent: " + strings.Join(listed, ", ") + ". An agent can copy it into commits or request headers; the network fence sees hostnames, not headers."
+		if len(unread) > 0 {
+			check.Message += " Not checked: " + strings.Join(unread, "; ") + "."
+		}
 		check.Fix = "set a noreply address for agent sessions in this repo (git config user.email <id>+<user>@users.noreply.github.com) and remove personal addresses from agent instruction files"
+	case len(unread) > 0:
+		check.Status = "not-checked"
+		check.Message = "Personal email check: not checked (" + strings.Join(unread, "; ") + "). The git identity, environment and agent instruction files may still expose an address."
+	default:
+		check.Status = "clear"
+		check.Message = "No personal email address found in the git identity, the environment passed to the wrapped agent, or agent instruction files at filesystem.root. Deeper files were not checked."
 	}
 	return check
 }
@@ -143,23 +152,23 @@ func gitUserEmail(dir string, env []string) (string, error) {
 }
 
 // scanInstructionFile calls line for each line, numbered from 1, in the first
-// personalEmailFileLimit bytes of path. A missing or non-regular file (a FIFO
-// would stall the read) has no lines.
+// personalEmailFileLimit bytes of path. A missing or non-regular file has no
+// lines; O_NONBLOCK keeps a FIFO from stalling the open.
 func scanInstructionFile(path string, line func(n int, text string)) error {
-	info, err := os.Stat(path)
-	if errors.Is(err, os.ErrNotExist) || err == nil && !info.Mode().IsRegular() {
+	f, err := os.OpenFile(path, os.O_RDONLY|syscall.O_NONBLOCK, 0)
+	if errors.Is(err, os.ErrNotExist) {
 		return nil
 	}
 	if err != nil {
 		return err
 	}
-	f, err := os.Open(path)
-	if err != nil {
+	defer f.Close()
+	if info, err := f.Stat(); err != nil || !info.Mode().IsRegular() {
 		return err
 	}
-	defer f.Close()
 	sc := bufio.NewScanner(io.LimitReader(f, personalEmailFileLimit))
-	sc.Buffer(make([]byte, 0, 64<<10), personalEmailFileLimit)
+	// One byte over the limit, so a single line filling it still fits.
+	sc.Buffer(make([]byte, 0, 64<<10), personalEmailFileLimit+1)
 	for n := 1; sc.Scan(); n++ {
 		line(n, sc.Text())
 	}
@@ -167,12 +176,13 @@ func scanInstructionFile(path string, line func(n int, text string)) error {
 }
 
 // safeEmail reports whether addr is a placeholder or noreply address.
+// @localhost never matches emailPattern, which needs a dotted TLD.
 func safeEmail(addr string) bool {
 	local, domain, _ := strings.Cut(strings.ToLower(addr), "@")
 	switch {
 	case local == "noreply", local == "no-reply":
 		return true
-	case domain == "users.noreply.github.com", domain == "example.com", domain == "example.org", domain == "localhost":
+	case domain == "users.noreply.github.com", domain == "example.com", domain == "example.org":
 		return true
 	}
 	return false

@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
@@ -67,7 +68,8 @@ func doctorGit(ctx context.Context, dir string, env []string, args ...string) ([
 	// CommandContext kills git at the deadline; WaitDelay bounds the reap if a
 	// descendant still holds the output pipe.
 	cmd := exec.CommandContext(ctx, "git", append([]string{"-C", dir, "--no-pager"}, args...)...)
-	cmd.Env = removeEnvVars(env, "GIT_DIR", "GIT_WORK_TREE", "GIT_COMMON_DIR", "GIT_CONFIG")
+	// removeEnvVars filters in place; the caller keeps its env.
+	cmd.Env = removeEnvVars(slices.Clone(env), "GIT_DIR", "GIT_WORK_TREE", "GIT_COMMON_DIR", "GIT_CONFIG")
 	cmd.WaitDelay = time.Second
 	return cmd.Output()
 }
