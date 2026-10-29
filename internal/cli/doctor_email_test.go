@@ -182,6 +182,21 @@ func TestPersonalEmailCheckErrorHidesAddress(t *testing.T) {
 	}
 }
 
+// A git that exits 0 but leaves a process holding its stdout still reports
+// the identity: exec returns the complete output with ErrWaitDelay.
+func TestPersonalEmailCheckGitWaitDelayKeepsIdentity(t *testing.T) {
+	bin := t.TempDir()
+	script := "#!/bin/sh\necho " + testPersonalEmail + "\n(sleep 2) &\nexit 0\n"
+	if err := os.WriteFile(filepath.Join(bin, "git"), []byte(script), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", bin+string(os.PathListSeparator)+os.Getenv("PATH"))
+	check := personalEmailCheck(t.TempDir(), emailTestEnv(t))
+	if check.Status != "exposed" || !strings.Contains(check.Message, testPersonalMask+" (git user.email)") || strings.Contains(check.Message, "Not checked") {
+		t.Fatalf("identity lost to a held pipe: %+v", check)
+	}
+}
+
 // A FIFO named like an instruction file must not stall doctor.
 func TestPersonalEmailCheckSkipsFIFO(t *testing.T) {
 	root := t.TempDir()

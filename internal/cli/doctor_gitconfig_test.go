@@ -221,13 +221,15 @@ func TestDoctorGitTimeoutKillsForkedChild(t *testing.T) {
 	t.Setenv("PATH", path)
 	env := []string{"PATH=" + path}
 
-	ctx, cancel := context.WithTimeout(context.Background(), 300*time.Millisecond)
+	// Long enough for the fake git to fork and record its child on a loaded
+	// runner.
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
 	defer cancel()
 	start := time.Now()
 	if _, err := doctorGit(ctx, t.TempDir(), env, "config", "--get", "user.email"); err == nil || ctx.Err() == nil {
 		t.Fatalf("hanging git returned err=%v ctx=%v; want a deadline failure", err, ctx.Err())
 	}
-	if elapsed := time.Since(start); elapsed > 3*time.Second {
+	if elapsed := time.Since(start); elapsed > 4*time.Second {
 		t.Fatalf("doctorGit took %s; the deadline must stop it", elapsed)
 	}
 	raw, err := os.ReadFile(pidFile)
@@ -238,10 +240,14 @@ func TestDoctorGitTimeoutKillsForkedChild(t *testing.T) {
 	if err != nil {
 		t.Fatalf("child pid %q: %v", raw, err)
 	}
-	t.Cleanup(func() { _ = syscall.Kill(pid, syscall.SIGKILL) })
-	// The orphan is reaped by init, so poll until the pid is gone.
-	for deadline := time.Now().Add(3 * time.Second); syscall.Kill(pid, 0) != syscall.ESRCH; time.Sleep(20 * time.Millisecond) {
+	// The orphan is reaped by init, so poll until the pid is gone; an unreaped
+	// zombie counts as gone.
+	for deadline := time.Now().Add(3 * time.Second); ; time.Sleep(20 * time.Millisecond) {
+		if gone, _ := processGone(pid); gone {
+			break
+		}
 		if time.Now().After(deadline) {
+			_ = syscall.Kill(pid, syscall.SIGKILL)
 			t.Fatalf("forked child %d outlived the git timeout", pid)
 		}
 	}

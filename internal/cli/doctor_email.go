@@ -176,8 +176,11 @@ func gitUserEmail(dir string, env []string) (string, error) {
 	case errors.Is(err, exec.ErrNotFound), errors.As(err, &exitErr) && exitErr.ExitCode() == 1:
 		return "", nil
 	case exitErr != nil:
-		return "", fmt.Errorf("git exited with status %d", exitErr.ExitCode())
-	case err != nil:
+		// "exit status N" or "signal: killed": no output, no path.
+		return "", fmt.Errorf("git failed (%v)", exitErr)
+	case err != nil && !errors.Is(err, exec.ErrWaitDelay):
+		// ErrWaitDelay: git exited 0 and its output is complete, but a process
+		// it started still held the pipe.
 		return "", errors.New("git could not run")
 	}
 	return string(out), nil

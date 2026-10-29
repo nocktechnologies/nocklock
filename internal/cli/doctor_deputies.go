@@ -2,6 +2,7 @@ package cli
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
@@ -143,10 +144,15 @@ func runSudoProbe(ctx context.Context, sudo string) error {
 // WaitDelay bounds the reap if a descendant that left the group still holds
 // an output pipe.
 func killGroupOnCancel(cmd *exec.Cmd) {
-	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	cmd.SysProcAttr = probeSysProcAttr()
 	cmd.Cancel = func() error {
-		// The group id is the child's pid (Setpgid with Pgid 0).
-		return syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
+		// The group id is the child's pid (Setpgid with Pgid 0). ESRCH means
+		// the group already exited, which exec must not report as a failure.
+		err := syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
+		if errors.Is(err, syscall.ESRCH) {
+			return os.ErrProcessDone
+		}
+		return err
 	}
 	cmd.WaitDelay = time.Second
 }
