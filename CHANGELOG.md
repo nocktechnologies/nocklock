@@ -6,6 +6,7 @@ All notable changes to NockLock will be documented in this file.
 
 ### Added
 
+- `doctor` warns (`personal-email`, Secrets group) when the wrapped agent can read a personal email address: the git `user.email` at `filesystem.root`, environment variables passed to the child, or `CLAUDE.md`, `AGENTS.md`, `GEMINI.md`, `.cursorrules` and `.github/copilot-instructions.md` at the root. Addresses are masked and env values are never printed; noreply and example addresses are not flagged. The check is informational and does not change the verdict or exit code.
 - Optional `network.require_durable_audit` (default off): explicit HTTP requests and CONNECT tunnel attempts require a durable signed intent before upstream dialing or forwarding. Audit failure refuses the request and fails the wrapped run. Netns and `allow_all` combinations refuse startup; HTTPS contents remain opaque and advisory-mode bypass remains possible.
 
 ### Security

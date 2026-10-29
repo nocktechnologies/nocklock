@@ -394,20 +394,7 @@ var wrapCmd = &cobra.Command{
 		if fenceErr != nil {
 			return fmt.Errorf("invalid secret fence config: %w", fenceErr)
 		}
-		var blockedNames []string
-		childEnv, blockedNames := fence.Filter(os.Environ())
-		// The off-box anchor store's URL and bearer token are wrap's, never the
-		// fenced agent's: strip them before the child env is logged or launched.
-		childEnv = stripAnchorEnv(childEnv)
-		for _, name := range []string{config.ForwardKeyEnv, config.ForwardURLEnv} {
-			for _, entry := range childEnv {
-				if strings.HasPrefix(entry, name+"=") {
-					blockedNames = append(blockedNames, name)
-					break
-				}
-			}
-		}
-		childEnv = removeEnvVars(childEnv, config.ForwardKeyEnv, config.ForwardURLEnv)
+		childEnv, blockedNames := fencedChildEnv(fence, os.Environ())
 
 		// Log all blocked env vars in a single transaction.
 		if len(blockedNames) > 0 {
@@ -829,12 +816,7 @@ var wrapCmd = &cobra.Command{
 		// If allow_all = true, we want the child to have direct network access rather
 		// than an operator proxy whose scope we don't control. This is a deliberate
 		// security-over-convenience tradeoff; document it if it surprises users.
-		childEnv = removeEnvVars(childEnv,
-			"HTTP_PROXY", "http_proxy",
-			"HTTPS_PROXY", "https_proxy",
-			"ALL_PROXY", "all_proxy",
-			"NO_PROXY", "no_proxy",
-		)
+		childEnv = removeEnvVars(childEnv, ambientProxyEnv...)
 
 		var proxyFailed atomic.Bool
 		var netnsEgress *netns.EgressConfig
@@ -1538,6 +1520,34 @@ func claudeAuthEnvName(env []string) string {
 		}
 	}
 	return ""
+}
+
+// ambientProxyEnv are the inherited proxy variables wrap always removes from
+// the child environment.
+var ambientProxyEnv = []string{
+	"HTTP_PROXY", "http_proxy",
+	"HTTPS_PROXY", "https_proxy",
+	"ALL_PROXY", "all_proxy",
+	"NO_PROXY", "no_proxy",
+}
+
+// fencedChildEnv returns the environment wrap passes to the child: environ
+// filtered by the secret fence, without the anchor and forward settings. It
+// also returns the names the fence and the forward removal blocked.
+func fencedChildEnv(fence *secrets.Fence, environ []string) (env, blocked []string) {
+	env, blocked = fence.Filter(environ)
+	// The off-box anchor store's URL and bearer token are wrap's, never the
+	// fenced agent's: strip them before the child env is logged or launched.
+	env = stripAnchorEnv(env)
+	for _, name := range []string{config.ForwardKeyEnv, config.ForwardURLEnv} {
+		for _, entry := range env {
+			if strings.HasPrefix(entry, name+"=") {
+				blocked = append(blocked, name)
+				break
+			}
+		}
+	}
+	return removeEnvVars(env, config.ForwardKeyEnv, config.ForwardURLEnv), blocked
 }
 
 // removeEnvVars returns env with any entries whose key matches one of the given

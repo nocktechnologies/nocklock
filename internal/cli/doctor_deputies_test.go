@@ -798,6 +798,47 @@ func TestPasswordlessSudoProbeKillsDescendants(t *testing.T) {
 	}
 }
 
+// requireHelperGone reads the pid a fake probe wrote to pidFile and fails
+// unless that process is gone within a few seconds. A helper killed with its
+// group is reaped by its new parent, so it may take a moment.
+func requireHelperGone(t *testing.T, pidFile string) {
+	t.Helper()
+	b, err := os.ReadFile(pidFile)
+	if err != nil {
+		t.Fatalf("fake probe did not record its helper: %v", err)
+	}
+	pid, err := strconv.Atoi(strings.TrimSpace(string(b)))
+	if err != nil || pid <= 0 {
+		t.Fatalf("bad helper pid %q", b)
+	}
+	for deadline := time.Now().Add(5 * time.Second); ; time.Sleep(50 * time.Millisecond) {
+		if gone, _ := processGone(pid); gone {
+			return
+		}
+		if time.Now().After(deadline) {
+			// Not ESRCH yet, so the pid is still the helper's.
+			_ = syscall.Kill(pid, syscall.SIGKILL)
+			t.Fatalf("helper pid %d outlived the probe", pid)
+		}
+	}
+}
+
+// A sudo that starts a background helper and exits 0 at once still counts as
+// passwordless, and the helper is killed with the probe's group.
+func TestPasswordlessSudoProbeKillsHelperOnExit(t *testing.T) {
+	bin := t.TempDir()
+	pidFile := filepath.Join(bin, "child.pid")
+	fake := filepath.Join(bin, "sudo")
+	script := "#!/bin/sh\n/bin/sleep 30 &\necho $! > " + pidFile + "\nexit 0\n"
+	if err := os.WriteFile(fake, []byte(script), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := runSudoProbe(context.Background(), fake); err != nil {
+		t.Fatalf("a sudo that exits 0 must count as passwordless: %v", err)
+	}
+	requireHelperGone(t, pidFile)
+}
+
 // processGone reports whether pid has exited. An unreaped zombie counts as
 // gone: it runs nothing, and a parent that never reaps it (a minimal PID 1 or a
 // subreaper) would otherwise fail the check. esrch reports that the pid no

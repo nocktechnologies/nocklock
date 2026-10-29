@@ -2,9 +2,12 @@ package cli
 
 import (
 	"bytes"
+	"context"
+	"errors"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"syscall"
 	"testing"
@@ -202,5 +205,83 @@ func TestDoctorGitConfigScanIgnoresGitConfigEnv(t *testing.T) {
 	out, _ := runProtectedDoctor(t)
 	if !strings.Contains(out, `Repo git config "core.fsmonitor" = "./trap.sh"`) {
 		t.Fatalf("GIT_CONFIG hid the repo's core.fsmonitor:\n%s", out)
+	}
+}
+
+// The deadline kills git's whole process group: a child git forked without
+// exec, still holding the output pipe, does not outlive the call.
+func TestDoctorGitTimeoutKillsForkedChild(t *testing.T) {
+	bin := t.TempDir()
+	pidFile := filepath.Join(t.TempDir(), "child.pid")
+	script := "#!/bin/sh\n(while :; do sleep 1; done) &\necho $! > '" + pidFile + "'\nwait\n"
+	if err := os.WriteFile(filepath.Join(bin, "git"), []byte(script), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	// exec resolves git on this process's PATH; the child gets the same one.
+	path := bin + string(os.PathListSeparator) + os.Getenv("PATH")
+	t.Setenv("PATH", path)
+	env := []string{"PATH=" + path}
+
+	// Long enough for the fake git to fork and record its child on a loaded
+	// runner.
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	start := time.Now()
+	if _, err := doctorGit(ctx, t.TempDir(), env, "config", "--get", "user.email"); err == nil || ctx.Err() == nil {
+		t.Fatalf("hanging git returned err=%v ctx=%v; want a deadline failure", err, ctx.Err())
+	}
+	if elapsed := time.Since(start); elapsed > 4*time.Second {
+		t.Fatalf("doctorGit took %s; the deadline must stop it", elapsed)
+	}
+	raw, err := os.ReadFile(pidFile)
+	if err != nil {
+		t.Fatalf("fake git did not record its child: %v", err)
+	}
+	pid, err := strconv.Atoi(strings.TrimSpace(string(raw)))
+	if err != nil {
+		t.Fatalf("child pid %q: %v", raw, err)
+	}
+	// The orphan is reaped by init, so poll until the pid is gone; an unreaped
+	// zombie counts as gone.
+	for deadline := time.Now().Add(3 * time.Second); ; time.Sleep(20 * time.Millisecond) {
+		if gone, _ := processGone(pid); gone {
+			break
+		}
+		if time.Now().After(deadline) {
+			_ = syscall.Kill(pid, syscall.SIGKILL)
+			t.Fatalf("forked child %d outlived the git timeout", pid)
+		}
+	}
+}
+
+// A git that starts a persistent helper and exits 0 at once returns its output,
+// and the helper is killed with git's group whether or not it holds git's
+// output pipes (the ErrWaitDelay and the normal exit paths).
+func TestDoctorGitExitKillsBackgroundHelper(t *testing.T) {
+	for name, redirect := range map[string]string{
+		"holds output":    "",
+		"detached output": " >/dev/null 2>&1",
+	} {
+		t.Run(name, func(t *testing.T) {
+			bin := t.TempDir()
+			pidFile := filepath.Join(t.TempDir(), "child.pid")
+			script := "#!/bin/sh\n(while :; do sleep 1; done)" + redirect + " &\necho $! > '" + pidFile + "'\necho dev@example.com\nexit 0\n"
+			if err := os.WriteFile(filepath.Join(bin, "git"), []byte(script), 0o700); err != nil {
+				t.Fatal(err)
+			}
+			path := bin + string(os.PathListSeparator) + os.Getenv("PATH")
+			t.Setenv("PATH", path)
+
+			out, err := doctorGit(context.Background(), t.TempDir(), []string{"PATH=" + path}, "config", "--get", "user.email")
+			// Only a helper on the pipe makes Wait give up with ErrWaitDelay;
+			// a detached one leaves a clean exit.
+			if redirect == "" && !errors.Is(err, exec.ErrWaitDelay) || redirect != "" && err != nil {
+				t.Fatalf("doctorGit: %v", err)
+			}
+			if string(out) != "dev@example.com\n" {
+				t.Fatalf("output = %q, want git's complete output", out)
+			}
+			requireHelperGone(t, pidFile)
+		})
 	}
 }

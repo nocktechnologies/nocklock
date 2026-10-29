@@ -26,6 +26,32 @@ reported, and project files remain readable. `PROTECTED` describes the configure
 fences; it does not claim a full-project secret scan or absence of secrets. This
 shallow heuristic is not a runtime fence.
 
+`doctor` also looks for a personal email address the wrapped agent can read and
+copy into commits or request headers; the network fence sees hostnames, not
+headers. It checks the effective git `user.email` at `filesystem.root` (a
+3-second bounded `git config --get`), environment variables `wrap` passes to
+the child (after the secret fence and the proxy-variable strip), and
+`CLAUDE.md`, `AGENTS.md`, `GEMINI.md`, `.cursorrules` and
+`.github/copilot-instructions.md` at the root only (first 256 KiB each). With a
+`secrets.pass` list, only the listed variables reach the child and are checked;
+with no pass list, every variable the secret fence does not block reaches the
+child, and doctor reports each one that holds an address.
+Noreply addresses (`noreply@`, `no-reply@`, `users.noreply.github.com`) and
+`example.com`, `example.org` and `localhost` are not flagged. Two `user@host`
+shapes are not flagged either: URL userinfo, when `://` comes before the
+address in the same token with only userinfo characters between
+(`scheme://user:pass@host`), and an scp-style git remote, when `:` follows the
+address directly and the next character is not a space
+(`git@github.com:org/repo`). A bare `user:pass@host` with no scheme, an address
+in a URL's path or query, an address followed by `: ` and an address with a
+colon at the end of the line are flagged. A finding is a
+`personal-email` warning (`exposed`) naming the source: a masked address
+(`k***@domain`) with `git user.email` or `file:line`, or only the variable name
+for the environment. A git timeout or an unreadable file says `not-checked`, unless another source
+already produced a finding; the warning then names what was not checked. The check
+is informational and does not change the verdict or exit code; doctor changes
+nothing, and deeper files are not checked (`internal/cli/doctor_email.go`).
+
 Limit: `doctor` reports configuration and host capability, not proof that a particular session ran with every fence. Use `verify` for an active self-test and inspect that session's signed fence-state rows for evidence.
 
 ## Repo git config that runs code ("GitSpawn")
