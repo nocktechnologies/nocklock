@@ -48,7 +48,7 @@ The resolver returns the canonical path and rechecks inode, device, owner, mode 
 
 A decoy is a fake credentials file nobody should ever open. Deny it, and any read of it by a fenced agent fails and leaves a signed `file_blocked` row, with no cooperation from the agent.
 
-1. Create a file with obviously fake values, outside any real credential path:
+1. Create a file with obviously fake values, outside any real credential path. On Linux, keep it outside the project tree the fence grants: Landlock cannot deny a path inside a granted tree, and startup refuses such a deny entry.
 
    ```sh
    mkdir -p ~/decoys

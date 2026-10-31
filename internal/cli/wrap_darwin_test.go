@@ -510,6 +510,12 @@ func TestWrapMacOSDecoyFileReadIsLogged(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
+	// The unified log reports the real path (/private/var/...), not the
+	// /var/... symlink the temp directory is reached through.
+	decoy, err := filepath.EvalSymlinks(decoy)
+	if err != nil {
+		t.Fatal(err)
+	}
 	policy := strings.Replace(config.DefaultTOML(), "allow_all = false", "allow_all = true", 1)
 	policy = strings.Replace(policy, "deny = [", "deny = [\n  \""+decoy+"\",", 1)
 	if !strings.Contains(policy, decoy) {
@@ -518,7 +524,7 @@ func TestWrapMacOSDecoyFileReadIsLogged(t *testing.T) {
 	writeTestConfig(t, project, policy)
 
 	out := filepath.Join(project, "out.txt")
-	err := run("/bin/sh", "-c", `{ cat "$1"; cat "$2"; } >"$3" 2>/dev/null; exit 7`, "sh", decoy, allowed, out)
+	err = run("/bin/sh", "-c", `{ cat "$1"; cat "$2"; } >"$3" 2>/dev/null; exit 7`, "sh", decoy, allowed, out)
 	wantExitCode(t, err, 7)
 	got, err := os.ReadFile(out)
 	if err != nil {

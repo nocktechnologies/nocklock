@@ -19,8 +19,9 @@ import (
 // dynamically linked child reads a file named in the user's own [filesystem]
 // deny. The read fails, the decoy's contents never reach the child's output,
 // and exactly one signed file_blocked row names it. The decoy sits inside the
-// project root, so Landlock grants it and only the interposer can deny it,
-// which is the path that reports. The negative control reads an undenied
+// fake HOME, outside the project tree Landlock grants (a deny path inside a
+// granted tree is refused at startup), so the interposer denies it first and
+// that is the path that reports. The negative control reads an undenied
 // sibling through the same wrap and gets its contents.
 //
 // It runs the interposer, so it needs gcc and a private directory under the
@@ -43,11 +44,6 @@ func TestWrapDecoyFileReadIsLogged(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { os.RemoveAll(binDir) })
-	home := t.TempDir()
-	t.Setenv("HOME", home)
-	t.Setenv("XDG_CONFIG_HOME", filepath.Join(home, ".config"))
-	t.Setenv("XDG_STATE_HOME", trustedStateRoot(t))
-
 	_, source, _, ok := runtime.Caller(0)
 	if !ok {
 		t.Fatal("resolve test source path")
@@ -65,11 +61,20 @@ func TestWrapDecoyFileReadIsLogged(t *testing.T) {
 		t.Fatalf("build filesystem interposer: %v\n%s", err, output)
 	}
 
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("XDG_CONFIG_HOME", filepath.Join(home, ".config"))
+	t.Setenv("XDG_STATE_HOME", trustedStateRoot(t))
+
 	projectDir := filepath.Join(t.TempDir(), "project")
 	if err := os.Mkdir(projectDir, 0o700); err != nil {
 		t.Fatal(err)
 	}
-	decoy := filepath.Join(projectDir, "credentials-decoy")
+	decoyDir := filepath.Join(home, "decoys")
+	if err := os.Mkdir(decoyDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	decoy := filepath.Join(decoyDir, "credentials-decoy")
 	allowed := filepath.Join(projectDir, "notes.txt")
 	for path, contents := range map[string]string{decoy: "FAKE-DECOY-SECRET", allowed: "ordinary-contents"} {
 		if err := os.WriteFile(path, []byte(contents), 0o600); err != nil {
@@ -87,13 +92,13 @@ name = "decoy-recipe"
 root = %q
 mode = "read-write"
 linux_enforcement = "preferred"
-allow = ["/usr/", "/bin/", "/lib/", "/lib64/", "/etc/ld.so.cache"]
+allow = ["/usr/", "/bin/", "/lib/", "/lib64/", "/etc/ld.so.cache", %q]
 deny = [%q]
 
 [network]
 allow = ["localhost"]
 allow_all = false
-`, projectDir, decoy)
+`, projectDir, binDir, decoy)
 	if err := os.WriteFile(configPath, []byte(cfgText), 0o600); err != nil {
 		t.Fatal(err)
 	}
