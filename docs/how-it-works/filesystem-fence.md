@@ -75,7 +75,7 @@ Proven by `TestWrapMacOSDecoyFileReadIsLogged` (`internal/cli/wrap_darwin_test.g
 
 What it does not catch:
 - Agents NockLock did not launch.
-- Linux: a static binary, or a child that clears `LD_PRELOAD`, bypasses the interposer. It is denied only by Landlock, only where the decoy is outside every granted root, and it writes no row. A decoy inside a granted directory (such as the project root) is not denied at all in that case.
+- Linux: a static binary, or a child that clears `LD_PRELOAD`, bypasses the interposer. Because Linux decoys sit outside every granted root (startup refuses a deny inside the granted tree), Landlock still denies the read, but no `file_blocked` row is written.
 - Linux with `linux_enforcement = "off"`, or `"preferred"` on a kernel without Landlock, adds no kernel backstop.
 - macOS rows come from the unified log, which can drop lines: a missing row is not proof that no read happened.
 
