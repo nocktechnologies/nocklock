@@ -44,6 +44,41 @@ The resolver returns the canonical path and rechecks inode, device, owner, mode 
 
 **Limits**: reads outside `filesystem.root` are not confined. `filesystem.allow` and `allow_rw` are not enforced on macOS. Apple deprecates `sandbox-exec`. The unified log can drop lines, so a missing row is not proof that no denial happened. The `macos_allow_unfenced` escape hatch was removed in v0.6.0 (`docs/decisions/009-remove-macos-unfenced-escape.md`).
 
+## Decoy files
+
+A decoy is a fake credentials file nobody should ever open. Deny it, and any read of it by a fenced agent fails and leaves a signed `file_blocked` row, with no cooperation from the agent.
+
+1. Create a file with obviously fake values, outside any real credential path:
+
+   ```sh
+   mkdir -p ~/decoys
+   printf '[default]\naws_access_key_id = FAKE-DECOY-DO-NOT-USE\n' > ~/decoys/aws-credentials
+   ```
+
+2. Add it to `.nock/config.toml`. Keep the default entries when you extend the list:
+
+   ```toml
+   [filesystem]
+   deny = ["~/.ssh/", "~/.aws/", "~/.gnupg/", "~/.nock/", "~/decoys/aws-credentials"]
+   ```
+
+3. Run the agent with `nocklock wrap -- <agent>`. Afterwards, list the denials and check the chain:
+
+   ```sh
+   nocklock log --blocked
+   nocklock verify --audit
+   ```
+
+   A read of the decoy appears as a `file_blocked` row whose detail names its path. macOS shows `file-read-data <path>`; Linux shows `op=... path=<path> reason=...`, or a JSON detail carrying the same path.
+
+Proven by `TestWrapMacOSDecoyFileReadIsLogged` (`internal/cli/wrap_darwin_test.go`) and `TestWrapDecoyFileReadIsLogged` (`internal/cli/wrap_decoy_linux_test.go`): the read fails, the decoy's contents do not reach the child, an undenied sibling stays readable, exactly one row names the decoy and the chain verifies.
+
+What it does not catch:
+- Agents NockLock did not launch.
+- Linux: a static binary, or a child that clears `LD_PRELOAD`, bypasses the interposer. It is denied only by Landlock, only where the decoy is outside every granted root, and it writes no row. A decoy inside a granted directory (such as the project root) is not denied at all in that case.
+- Linux with `linux_enforcement = "off"`, or `"preferred"` on a kernel without Landlock, adds no kernel backstop.
+- macOS rows come from the unified log, which can drop lines: a missing row is not proof that no read happened.
+
 ## Windows
 No fence. Feasibility notes: `docs/design/windows-feasibility.md`, probes in `docs/probes/`.
 

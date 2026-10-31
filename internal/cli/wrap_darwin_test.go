@@ -447,6 +447,13 @@ func TestWrapMacOSDenialLogRecordsFileBlockedRow(t *testing.T) {
 	err := run("/bin/sh", "-c", `cat "$1" >/dev/null 2>&1; exit 7`, "sh", secret)
 	wantExitCode(t, err, 7)
 
+	assertOneFileBlockedRow(t, project, secret)
+}
+
+// assertOneFileBlockedRow requires exactly one filesystem file_blocked row
+// naming path in the session's audit chain, and that the chain verifies.
+func assertOneFileBlockedRow(t *testing.T, project, path string) {
+	t.Helper()
 	db, err := sql.Open("sqlite", resolvedAuditDB(t, project))
 	if err != nil {
 		t.Fatalf("open audit log: %v", err)
@@ -469,7 +476,7 @@ func TestWrapMacOSDenialLogRecordsFileBlockedRow(t *testing.T) {
 		if err := rows.Scan(&category, &detail, &blocked, &session); err != nil {
 			t.Fatal(err)
 		}
-		if strings.HasSuffix(detail, secret) {
+		if strings.HasSuffix(detail, path) {
 			details = append(details, detail)
 		}
 		if category != "filesystem" || blocked != 1 || session != sessionID {
@@ -477,16 +484,50 @@ func TestWrapMacOSDenialLogRecordsFileBlockedRow(t *testing.T) {
 		}
 	}
 	// Other file_blocked rows may exist: every process also trips the fence's
-	// base write deny on /dev/dtracehelper at startup. The denied secret must
+	// base write deny on /dev/dtracehelper at startup. The denied path must
 	// appear exactly once.
-	if len(details) != 1 || details[0] != "file-read-data "+secret {
-		t.Fatalf("want exactly one file_blocked row %q, got %q", "file-read-data "+secret, details)
+	if len(details) != 1 || details[0] != "file-read-data "+path {
+		t.Fatalf("want exactly one file_blocked row %q, got %q", "file-read-data "+path, details)
 	}
 
 	var verifyOut bytes.Buffer
 	if err := runAuditVerify(context.Background(), &verifyOut, "", false); err != nil {
 		t.Fatalf("audit chain with denial row does not verify: %v\n%s", err, verifyOut.String())
 	}
+}
+
+// TestWrapMacOSDecoyFileReadIsLogged is the decoy-file recipe proof: a file the
+// user's own [filesystem] deny names (not a built-in credential path) is
+// unreadable to the fenced child, its contents never reach the child's output,
+// and exactly one signed file_blocked row names it. The negative control reads
+// an undenied sibling through the same wrap and gets its contents.
+func TestWrapMacOSDecoyFileReadIsLogged(t *testing.T) {
+	project, _, run := denialLogProject(t)
+	decoy := filepath.Join(project, "credentials-decoy")
+	allowed := filepath.Join(project, "notes.txt")
+	for path, contents := range map[string]string{decoy: "FAKE-DECOY-SECRET", allowed: "ordinary-contents"} {
+		if err := os.WriteFile(path, []byte(contents), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	policy := strings.Replace(config.DefaultTOML(), "allow_all = false", "allow_all = true", 1)
+	policy = strings.Replace(policy, "deny = [", "deny = [\n  \""+decoy+"\",", 1)
+	if !strings.Contains(policy, decoy) {
+		t.Fatal("decoy deny entry was not added to the test config")
+	}
+	writeTestConfig(t, project, policy)
+
+	out := filepath.Join(project, "out.txt")
+	err := run("/bin/sh", "-c", `{ cat "$1"; cat "$2"; } >"$3" 2>/dev/null; exit 7`, "sh", decoy, allowed, out)
+	wantExitCode(t, err, 7)
+	got, err := os.ReadFile(out)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(got) != "ordinary-contents" {
+		t.Fatalf("child output = %q, want only the undenied file's contents", got)
+	}
+	assertOneFileBlockedRow(t, project, decoy)
 }
 
 // TestWrapMacOSDenialLogIgnoresOtherSessions is the negative control: a denial
