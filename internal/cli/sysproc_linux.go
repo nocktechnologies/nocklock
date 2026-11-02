@@ -14,3 +14,14 @@ func childSysProcAttr() *syscall.SysProcAttr {
 		Pdeathsig: syscall.SIGKILL,
 	}
 }
+
+// probeSysProcAttr returns process attributes for doctor's bounded probes on
+// Linux. The probe gets its own process group so a timeout can kill all of it;
+// that group is not the terminal's foreground group, so Ctrl-C does not reach
+// it, and Pdeathsig kills the probe if doctor dies first.
+func probeSysProcAttr() *syscall.SysProcAttr {
+	return &syscall.SysProcAttr{
+		Setpgid:   true,
+		Pdeathsig: syscall.SIGKILL,
+	}
+}

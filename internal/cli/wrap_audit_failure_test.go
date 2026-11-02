@@ -6,11 +6,17 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"net"
+	"net/http"
+	"net/http/httptest"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/spf13/cobra"
 
@@ -234,5 +240,103 @@ func TestAuditRecorderConcurrentFailures(t *testing.T) {
 	wg.Wait()
 	if r.failure() == nil || cancels != 1 {
 		t.Fatalf("failure=%v cancels=%d, want an error and one cancel", r.failure(), cancels)
+	}
+}
+
+func TestDurableAuditHTTPChild(t *testing.T) {
+	for i, arg := range os.Args {
+		if arg == "nocklock-test-durable-url" && i+2 < len(os.Args) {
+			proxyURL, err := url.Parse(os.Getenv("HTTP_PROXY"))
+			if err != nil || proxyURL.Host == "" {
+				t.Fatalf("missing wrap proxy: %v", err)
+			}
+			// ProxyFromEnvironment bypasses localhost even without NO_PROXY. Force
+			// this synthetic loopback request through the explicit proxy under test.
+			transport := &http.Transport{Proxy: http.ProxyURL(proxyURL)}
+			defer transport.CloseIdleConnections()
+			client := &http.Client{Timeout: 5 * time.Second, Transport: transport}
+			resp, err := client.Get(os.Args[i+1])
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer resp.Body.Close()
+			if resp.StatusCode != http.StatusOK {
+				t.Fatalf("upstream status=%d", resp.StatusCode)
+			}
+			if err := os.WriteFile(os.Args[i+2], []byte("launched"), 0600); err != nil {
+				t.Fatal(err)
+			}
+			return
+		}
+	}
+}
+
+func TestWrapDurableAudit(t *testing.T) {
+	for _, mode := range []string{"allowed", "audit-failure", "netns", "netns-dry-run"} {
+		t.Run(mode, func(t *testing.T) {
+			var accepted atomic.Int32
+			upstream := httptest.NewUnstartedServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { w.WriteHeader(http.StatusOK) }))
+			upstream.Config.ConnState = func(_ net.Conn, s http.ConnState) {
+				if s == http.StateNew {
+					accepted.Add(1)
+				}
+			}
+			upstream.Start()
+			defer upstream.Close()
+			project := resolvedTempDir(t)
+			t.Setenv("XDG_CONFIG_HOME", isolatedTestHome(t))
+			t.Setenv("XDG_STATE_HOME", trustedStateRoot(t))
+			t.Setenv("NOCKLOCK_ANCHOR_URL", "")
+			writeTestConfig(t, project, `[filesystem]
+root = ""
+[network]
+allow = ["localhost"]
+allow_private_ranges = true
+require_durable_audit = true
+[syscall]
+enforcement = "off"
+`)
+			withWorkingDir(t, project)
+			if mode == "audit-failure" {
+				installAuditWriteFailure(t, project, resolvedAuditDB(t, project), logging.EventNetworkIntent)
+			}
+			child, err := os.Executable()
+			if err != nil {
+				t.Fatal(err)
+			}
+			marker := filepath.Join(project, "child-completed")
+			target := strings.Replace(upstream.URL, "127.0.0.1", "localhost", 1)
+			args := []string{"--", child, "-test.run=^TestDurableAuditHTTPChild$", "nocklock-test-durable-url", target, marker}
+			if strings.HasPrefix(mode, "netns") {
+				args = append([]string{"--net-fence=netns"}, args...)
+			}
+			if mode == "netns-dry-run" {
+				args = append([]string{"--dry-run"}, args...)
+			}
+			stderr, err := runWrapCapturingStderr(t, args)
+			if mode == "allowed" {
+				if err != nil {
+					t.Fatalf("wrap: %v\n%s", err, stderr)
+				}
+				assertChildMarker(t, marker)
+				if accepted.Load() != 1 {
+					t.Fatalf("upstream accepts=%d", accepted.Load())
+				}
+			} else {
+				assertExitCode(t, err, 2)
+				if mode == "audit-failure" && !strings.Contains(stderr, "synthetic") && !strings.Contains(stderr, "simulated audit write failure") {
+					t.Fatalf("wrong failure: %s", stderr)
+				}
+				if strings.HasPrefix(mode, "netns") && !strings.Contains(err.Error(), "decision channel is asynchronous") {
+					t.Fatalf("wrong refusal: %v", err)
+				}
+				if _, err := os.Stat(marker); !os.IsNotExist(err) {
+					t.Fatalf("child completed or stat failed: %v", err)
+				}
+				if accepted.Load() != 0 {
+					t.Fatalf("audit failure allowed %d upstream connections", accepted.Load())
+				}
+			}
+		})
 	}
 }

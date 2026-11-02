@@ -11,3 +11,12 @@ func childSysProcAttr() *syscall.SysProcAttr {
 		Setpgid: true,
 	}
 }
+
+// probeSysProcAttr returns process attributes for doctor's bounded probes on
+// non-Linux platforms: their own process group, so a timeout can kill all of
+// it. Pdeathsig is Linux-only.
+func probeSysProcAttr() *syscall.SysProcAttr {
+	return &syscall.SysProcAttr{
+		Setpgid: true,
+	}
+}

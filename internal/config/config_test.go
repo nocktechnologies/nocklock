@@ -956,3 +956,20 @@ func TestOverlayRefusesLookbackNameDuplicatingBase(t *testing.T) {
 		t.Fatalf("LoadOverlay with a duplicate rule name = %v, want a duplicate-name refusal", err)
 	}
 }
+
+func TestRequireDurableAuditLoadsAndTightensOverlay(t *testing.T) {
+	if DefaultConfig().Network.RequireDurableAudit {
+		t.Fatal("durable gate must default off")
+	}
+	cfg, err := Load(writeLookbackConfig(t, "[network]\nrequire_durable_audit = true\n"))
+	if err != nil || !cfg.Network.RequireDurableAudit {
+		t.Fatalf("load=%+v err=%v", cfg, err)
+	}
+	overlay, err := LoadOverlay(*cfg, writeLookbackConfig(t, "[network]\nrequire_durable_audit = false\n"))
+	if err != nil || !overlay.Network.RequireDurableAudit {
+		t.Fatalf("overlay weakened durable gate: %+v %v", overlay, err)
+	}
+	if _, err := Load(writeLookbackConfig(t, "[network]\nrequire_durable_audit = true\nallow_all = true\n")); err == nil || !strings.Contains(err.Error(), "allow_all = false") {
+		t.Fatalf("missing bypass refusal: %v", err)
+	}
+}

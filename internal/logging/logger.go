@@ -35,14 +35,16 @@ const (
 	EventFilesystemFenceState EventType = "filesystem_fence_state"
 	EventNetworkBlocked       EventType = "network_blocked"
 	EventNetworkPassed        EventType = "network_passed"
-	EventProxyStart           EventType = "proxy_start"
-	EventProxyStop            EventType = "proxy_stop"
-	EventNetworkError         EventType = "network_error"
-	EventSessionStart         EventType = "session_start"
-	EventSessionEnd           EventType = "session_end"
-	EventSessionClose         EventType = "session_close"
-	EventConfigLoaded         EventType = "config_loaded"
-	EventConfigDigest         EventType = "config.digest"
+	// EventNetworkIntent authorizes an upstream attempt, not successful delivery.
+	EventNetworkIntent EventType = "network_intent"
+	EventProxyStart    EventType = "proxy_start"
+	EventProxyStop     EventType = "proxy_stop"
+	EventNetworkError  EventType = "network_error"
+	EventSessionStart  EventType = "session_start"
+	EventSessionEnd    EventType = "session_end"
+	EventSessionClose  EventType = "session_close"
+	EventConfigLoaded  EventType = "config_loaded"
+	EventConfigDigest  EventType = "config.digest"
 	// EventRuntimeChanged records that the login-store runtime differs from the
 	// previous wrap of the same project.
 	EventRuntimeChanged EventType = "config.runtime_changed"
@@ -685,8 +687,19 @@ func validateAdoptedSigningHead(tx *sql.Tx, s *signer, fingerprint string) error
 // held from BEGIN through COMMIT and the run-accumulator fold, then released
 // before the observer callback runs.
 func (l *Logger) Log(event Event) error {
+	return l.log(event, false)
+}
+
+// LogDurableSigned commits a signed row and head with SQLite synchronous=FULL
+// on the transaction's own connection. It refuses unsigned loggers and returns
+// only after COMMIT succeeds. Durability relies on the storage honoring sync.
+func (l *Logger) LogDurableSigned(event Event) error {
+	return l.log(event, true)
+}
+
+func (l *Logger) log(event Event, durable bool) error {
 	l.mu.Lock()
-	hash, err := l.appendLocked(&event)
+	hash, err := l.appendWithDurabilityLocked(&event, durable)
 	l.mu.Unlock()
 	if err != nil {
 		return err
@@ -702,6 +715,13 @@ func (l *Logger) Log(event Event) error {
 // invokes the observer callback (that runs after the mutex is released) so the
 // same helper can write the session_close row inside CloseRun's critical section.
 func (l *Logger) appendLocked(event *Event) (string, error) {
+	return l.appendWithDurabilityLocked(event, false)
+}
+
+func (l *Logger) appendWithDurabilityLocked(event *Event, durable bool) (string, error) {
+	if durable && l.signer == nil {
+		return "", errors.New("durable audit requires a loaded signing key")
+	}
 	// Take the write lock up front. A deferred transaction reads the chain head
 	// first, and SQLite fails its later upgrade to write at once with
 	// SQLITE_BUSY when another process holds the lock; busy_timeout does not
@@ -712,6 +732,26 @@ func (l *Logger) appendLocked(event *Event) (string, error) {
 		return "", fmt.Errorf("failed to reserve log connection: %w", err)
 	}
 	defer conn.Close()
+	if durable {
+		// Set on the reserved connection before BEGIN; a pooled replacement must
+		// never inherit a weaker sync mode. fullfsync requests F_FULLFSYNC on macOS.
+		for _, pragma := range []string{"PRAGMA synchronous=FULL", "PRAGMA fullfsync=ON"} {
+			if _, err := conn.ExecContext(ctx, pragma); err != nil {
+				return "", fmt.Errorf("configure durable audit: %w", err)
+			}
+		}
+		var synchronous int
+		var journal string
+		if err := conn.QueryRowContext(ctx, "PRAGMA synchronous").Scan(&synchronous); err != nil {
+			return "", err
+		}
+		if err := conn.QueryRowContext(ctx, "PRAGMA journal_mode").Scan(&journal); err != nil {
+			return "", err
+		}
+		if synchronous != 2 || journal != "wal" {
+			return "", fmt.Errorf("durable audit requires synchronous=FULL and WAL (got %d, %s)", synchronous, journal)
+		}
+	}
 	if _, err := conn.ExecContext(ctx, "BEGIN IMMEDIATE"); err != nil {
 		return "", fmt.Errorf("failed to begin log transaction: %w", err)
 	}

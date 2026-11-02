@@ -78,6 +78,10 @@ var wrapCmd = &cobra.Command{
 		// rather than silently fall back to the userspace proxy. Checked before the
 		// dry-run branch so `--dry-run` on a non-Linux host reports the refusal too.
 		useNetns := wrapFlags.NetFence == "netns"
+		if useNetns && effectiveCfg.Network.RequireDurableAudit {
+			cmd.SilenceUsage = true
+			return errors.Join(fmt.Errorf("network.require_durable_audit is unsupported with --net-fence=netns: the decision channel is asynchronous; use --net-fence=proxy or disable the durable audit requirement"), &exitCodeError{code: 2})
+		}
 		if useNetns && runtime.GOOS != "linux" {
 			cmd.SilenceUsage = true
 			return fmt.Errorf("--net-fence=netns requires Linux kernel network namespaces; refusing to run without the kernel-enforced egress floor")
@@ -94,7 +98,11 @@ var wrapCmd = &cobra.Command{
 
 		// Generate a session ID for event logging.
 		sessionID := uuid.New().String()
-		loggerOpts := signingLoggerOpts()
+		loggerOpts, err := signingLoggerOpts()
+		if err != nil {
+			cmd.SilenceUsage = true
+			return errors.Join(fmt.Errorf("refusing to run without signed audit: %w", err), &exitCodeError{code: 2})
+		}
 		if effectiveCfg.Audit.Forward.Enabled && !wrapFlags.DryRun {
 			operatorURL := strings.TrimRight(os.Getenv(config.ForwardURLEnv), "/")
 			if operatorURL == "" || operatorURL != strings.TrimRight(effectiveCfg.Audit.Forward.URL, "/") {
@@ -191,10 +199,8 @@ var wrapCmd = &cobra.Command{
 
 		// Sign the audit trail with the NockLock-managed Ed25519 key so each
 		// recorded decision is authentic, not merely internally consistent. The
-		// key is generated 0600 on first use. If its path cannot be resolved we
-		// fall back to an unsigned (still hash-chained) open rather than refusing
-		// to run; the logger itself fails closed on any write to a log that has
-		// already adopted signing.
+		// key is generated 0600 on first use. Path resolution above and signer
+		// initialization here must both succeed before the child can start.
 		logger, logErr := logging.NewLogger(dbPath, projectRoot, loggerOpts...)
 		if logErr != nil {
 			return fmt.Errorf("could not open the event log at %s: %w\nThe audit trail is required — refusing to run unrecorded. Fix the .nock directory's permissions or free disk space", dbPath, logErr)
@@ -388,20 +394,7 @@ var wrapCmd = &cobra.Command{
 		if fenceErr != nil {
 			return fmt.Errorf("invalid secret fence config: %w", fenceErr)
 		}
-		var blockedNames []string
-		childEnv, blockedNames := fence.Filter(os.Environ())
-		// The off-box anchor store's URL and bearer token are wrap's, never the
-		// fenced agent's: strip them before the child env is logged or launched.
-		childEnv = stripAnchorEnv(childEnv)
-		for _, name := range []string{config.ForwardKeyEnv, config.ForwardURLEnv} {
-			for _, entry := range childEnv {
-				if strings.HasPrefix(entry, name+"=") {
-					blockedNames = append(blockedNames, name)
-					break
-				}
-			}
-		}
-		childEnv = removeEnvVars(childEnv, config.ForwardKeyEnv, config.ForwardURLEnv)
+		childEnv, blockedNames := fencedChildEnv(fence, os.Environ())
 
 		// Log all blocked env vars in a single transaction.
 		if len(blockedNames) > 0 {
@@ -823,12 +816,7 @@ var wrapCmd = &cobra.Command{
 		// If allow_all = true, we want the child to have direct network access rather
 		// than an operator proxy whose scope we don't control. This is a deliberate
 		// security-over-convenience tradeoff; document it if it surprises users.
-		childEnv = removeEnvVars(childEnv,
-			"HTTP_PROXY", "http_proxy",
-			"HTTPS_PROXY", "https_proxy",
-			"ALL_PROXY", "all_proxy",
-			"NO_PROXY", "no_proxy",
-		)
+		childEnv = removeEnvVars(childEnv, ambientProxyEnv...)
 
 		var proxyFailed atomic.Bool
 		var netnsEgress *netns.EgressConfig
@@ -887,6 +875,9 @@ var wrapCmd = &cobra.Command{
 			// A denied request whose network_blocked row cannot be written fails
 			// the run (audit.failure below), like any other lost blocked row.
 			proxy.SetBlockedWriteFailureHandler(audit.fail)
+			if proxyCfg.RequireDurableAudit {
+				fmt.Fprintln(os.Stderr, "NockLock: durable signed intent required before each explicit HTTP request or CONNECT tunnel attempt; encrypted requests inside tunnels are not inspected")
+			}
 			if len(proxyCfg.Lookback) > 0 {
 				// lookbackLevelError guaranteed CONFINED, so fsFence is non-nil.
 				proxy.EnableLookback(proxyCfg.Lookback)
@@ -1529,6 +1520,34 @@ func claudeAuthEnvName(env []string) string {
 		}
 	}
 	return ""
+}
+
+// ambientProxyEnv are the inherited proxy variables wrap always removes from
+// the child environment.
+var ambientProxyEnv = []string{
+	"HTTP_PROXY", "http_proxy",
+	"HTTPS_PROXY", "https_proxy",
+	"ALL_PROXY", "all_proxy",
+	"NO_PROXY", "no_proxy",
+}
+
+// fencedChildEnv returns the environment wrap passes to the child: environ
+// filtered by the secret fence, without the anchor and forward settings. It
+// also returns the names the fence and the forward removal blocked.
+func fencedChildEnv(fence *secrets.Fence, environ []string) (env, blocked []string) {
+	env, blocked = fence.Filter(environ)
+	// The off-box anchor store's URL and bearer token are wrap's, never the
+	// fenced agent's: strip them before the child env is logged or launched.
+	env = stripAnchorEnv(env)
+	for _, name := range []string{config.ForwardKeyEnv, config.ForwardURLEnv} {
+		for _, entry := range env {
+			if strings.HasPrefix(entry, name+"=") {
+				blocked = append(blocked, name)
+				break
+			}
+		}
+	}
+	return removeEnvVars(env, config.ForwardKeyEnv, config.ForwardURLEnv), blocked
 }
 
 // removeEnvVars returns env with any entries whose key matches one of the given

@@ -20,6 +20,8 @@ deny = [
 ]
 
 [network]
+# Default off. Signed durable intent before explicit proxy egress; not netns.
+require_durable_audit = false
 allow = [
     "github.com",
     "api.github.com",

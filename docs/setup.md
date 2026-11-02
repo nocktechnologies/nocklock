@@ -4,10 +4,13 @@ Everything here restates `README.md` (Quick start, Installation, Linux network-e
 
 ## 1. Install
 
-The unreleased [signed Linux installer](../packaging/linux/RELEASE-INSTALL.md)
-adds paired installation, upgrades and verified rollback for Ubuntu 24.04 amd64.
-Use it only once a release publishes its signed assets and acceptance evidence.
-v0.15.0 still requires the source steps below.
+The [signed Linux installer](../packaging/linux/RELEASE-INSTALL.md) is published
+for **Ubuntu 24.04 amd64 with glibc 2.39**. Start with
+[v0.16.1](https://github.com/nocktechnologies/nocklock/releases/tag/v0.16.1);
+its six signed assets and acceptance evidence cover paired installation,
+upgrades and verified rollback. Use a fresh supported host: migration from
+source or candidate installations is unsupported. Existing source installations
+and v0.15.0 use the source steps below.
 
 **Homebrew** (macOS, recommended):
 
@@ -15,7 +18,7 @@ v0.15.0 still requires the source steps below.
 brew install nocktechnologies/tap/nocklock
 ```
 
-On Linux the formula installs only the `nocklock` binary, not `libfence_fs.so`, and the default config's `wrap` refuses to start without it. No supported Homebrew step installs the library today; use the source install below. Packaging is the open card N11643.
+On Linux the formula installs only the `nocklock` binary, not `libfence_fs.so`, and the default config's `wrap` refuses to start without it. No supported Homebrew step installs the library; use the signed installer on a fresh supported Linux host, or the source install below.
 
 **From source** (Go 1.27.3 or newer; `go.mod` requires 1.27.3):
 
@@ -31,7 +34,7 @@ Build as your user, then copy with `sudo install`. Do not run `sudo make install
 
 `build-all` compiles the Linux `LD_PRELOAD` interposer to `internal/fence/fs/interposer/libfence_fs.so` and skips it on macOS (`Makefile`), where the filesystem fence uses `sandbox-exec`.
 
-**Linux: place `libfence_fs.so`.** The step above installs only `nocklock`. No `make` target installs the library, and packaging is the open card N11643. `wrap` looks for the library only in these places, in order: the directory of the `nocklock` executable, `/usr/local/lib/nocklock/`, then `/usr/lib/nocklock/` (`findTrustedLibFenceFS` in `internal/cli/wrap.go`). A copy inside the current working directory is skipped, so running `./nocklock` from the checkout does not find the library built beside it. There is no setting or environment variable that points at another path. Copying it by hand to one of those paths is the only way to satisfy the lookup today:
+**Linux source installs: place `libfence_fs.so`.** The source step above installs only `nocklock`. No `make` target installs the library; the signed installer already installs its matching pair. `wrap` looks for the library only in these places, in order: the directory of the `nocklock` executable, `/usr/local/lib/nocklock/`, then `/usr/lib/nocklock/` (`findTrustedLibFenceFS` in `internal/cli/wrap.go`). A copy inside the current working directory is skipped, so running `./nocklock` from the checkout does not find the library built beside it. There is no setting or environment variable that points at another path. For a source installation, copy it by hand to one of those trusted paths:
 
 ```bash
 sudo install -D -m 0644 internal/fence/fs/interposer/libfence_fs.so /usr/local/lib/nocklock/libfence_fs.so

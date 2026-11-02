@@ -125,6 +125,8 @@ type doctorCapabilities struct {
 	deputies func(goos string) deputyHost
 	// gitConfigExec lists repo git config that runs a program; nil skips it.
 	gitConfigExec func(dir string) []doctorCheck
+	// personalEmail finds personal email the agent can read; nil skips it.
+	personalEmail func(cfg *config.Config) doctorCheck
 	now           func() time.Time
 }
 
@@ -138,6 +140,7 @@ var currentDoctorCapabilities = doctorCapabilities{
 	egressHelper:   defaultEgressHelperState,
 	deputies:       defaultDeputyHost,
 	gitConfigExec:  gitConfigExecDoctorChecks,
+	personalEmail:  personalEmailDoctorCheck,
 	now:            time.Now,
 }
 
@@ -232,6 +235,9 @@ func runDoctor(caps doctorCapabilities) doctorReport {
 	checks = append(checks, networkDoctorCheck(cfg, caps))
 	checks = append(checks, secretDoctorCheck(cfg))
 	checks = append(checks, projectDotEnvDoctorCheck(cfg))
+	if caps.personalEmail != nil {
+		checks = append(checks, caps.personalEmail(cfg))
+	}
 	checks = append(checks, egressHelperDoctorCheck(caps))
 	checks = append(checks, sanityDoctorChecks(cfg, configPath, caps)...)
 	projectRoot := filepath.Dir(filepath.Dir(configPath))

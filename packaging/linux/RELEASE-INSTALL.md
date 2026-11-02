@@ -5,13 +5,16 @@ and matching filesystem interposer together. Python and Go are not installation
 dependencies. Cosign v3.1.3 is required for verification; its Linux amd64 checksum
 is pinned in the installer. Other distributions, arm64 and musl are not supported.
 
-This implementation is prepared for v0.16.0; the release notes alone do not
-make its assets available. v0.15.0 has no installer assets. Use the
-[source installation](../../docs/setup.md) until a release publishes the six
-files below and links successful release-install acceptance evidence. Tagged
-production acceptance, signed cross-version upgrade/rollback evidence and the
-broader network gates in the [packaging contract](../../docs/design/linux-packaging.md)
-must be completed before asset publication.
+The six signed assets are published for
+[v0.16.1](https://github.com/nocktechnologies/nocklock/releases/tag/v0.16.1)
+and v0.16.0. Prefer v0.16.1 for new installations; v0.16.0 is the verified
+managed rollback target. [Acceptance evidence](https://github.com/nocktechnologies/nocklock/releases/download/v0.16.1/linux-release-acceptance.json)
+covers tagged fresh-host installation, real signed cross-version upgrade/rollback
+and broader Linux/macOS network gates from the
+[packaging contract](../../docs/design/linux-packaging.md). v0.15.0 has no
+installer assets. Existing source or candidate installs cannot migrate through
+this installer; retain the [source installation](../../docs/setup.md) workflow
+or start on a fresh supported host.
 
 ## Obtain and authenticate the installer
 

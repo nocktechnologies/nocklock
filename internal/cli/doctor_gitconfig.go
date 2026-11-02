@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
@@ -60,6 +61,23 @@ var gitConfigExecKeys = map[string]bool{
 // gitConfigScanTimeout bounds doctor's git calls (an include can name a FIFO).
 var gitConfigScanTimeout = 3 * time.Second
 
+// doctorGit runs git in dir with env and returns its stdout. An inherited
+// GIT_DIR, GIT_WORK_TREE or GIT_CONFIG would point git at another repo or
+// config file, so they are removed.
+func doctorGit(ctx context.Context, dir string, env []string, args ...string) ([]byte, error) {
+	cmd := exec.CommandContext(ctx, "git", append([]string{"-C", dir, "--no-pager"}, args...)...)
+	// removeEnvVars filters in place; the caller keeps its env.
+	cmd.Env = removeEnvVars(slices.Clone(env), "GIT_DIR", "GIT_WORK_TREE", "GIT_COMMON_DIR", "GIT_CONFIG")
+	// git's whole process group is killed when the call returns: a helper or
+	// hook git forked cannot outlive it.
+	var out []byte
+	err := runInProbeGroup(cmd, func() (err error) {
+		out, err = cmd.Output()
+		return err
+	})
+	return out, err
+}
+
 // gitConfigExecDoctorChecks lists the repository git config entries for dir
 // (.git/config, config.worktree and the files they include) that make git run
 // a program, one warning each. Doctor only reads the config: `git config
@@ -72,17 +90,7 @@ var gitConfigScanTimeout = 3 * time.Second
 func gitConfigExecDoctorChecks(dir string) []doctorCheck {
 	ctx, cancel := context.WithTimeout(context.Background(), gitConfigScanTimeout)
 	defer cancel()
-	// An inherited GIT_DIR, GIT_WORK_TREE or GIT_CONFIG would point git at
-	// another repo or config file.
-	env := removeEnvVars(os.Environ(), "GIT_DIR", "GIT_WORK_TREE", "GIT_COMMON_DIR", "GIT_CONFIG")
-	git := func(args ...string) ([]byte, error) {
-		// CommandContext kills git at the deadline; WaitDelay bounds the
-		// reap if a descendant still holds the output pipe.
-		cmd := exec.CommandContext(ctx, "git", append([]string{"-C", dir, "--no-pager"}, args...)...)
-		cmd.Env = env
-		cmd.WaitDelay = time.Second
-		return cmd.Output()
-	}
+	git := func(args ...string) ([]byte, error) { return doctorGit(ctx, dir, os.Environ(), args...) }
 	// rev-parse reads the repo config too, so a timeout here is a stalled
 	// repository, not a missing one; the scan below then fails as a timeout.
 	if _, err := git("rev-parse", "--git-dir"); err != nil && ctx.Err() == nil {

@@ -4,6 +4,28 @@ All notable changes to NockLock will be documented in this file.
 
 ## [Unreleased]
 
+## [0.17.0] - 2026-11-02
+
+v0.17.0 makes the audit log harder to lose: `wrap` and `log --prune` refuse to start when the signing-key path cannot be resolved, and the new opt-in `network.require_durable_audit` commits a signed intent row before each explicit proxy request. `doctor` gains an informational personal-email warning, and the docs add a decoy-file recipe backed by Linux and macOS tests.
+
+### Added
+
+- `doctor` warns (`personal-email`, Secrets group) when the wrapped agent can read a personal email address: the git `user.email` at `filesystem.root`, environment variables passed to the child, or `CLAUDE.md`, `AGENTS.md`, `GEMINI.md`, `.cursorrules` and `.github/copilot-instructions.md` at the root. Addresses are masked and env values are never printed; noreply and example addresses are not flagged. The check is informational and does not change the verdict or exit code.
+- A "Decoy files" recipe in `docs/how-it-works/filesystem-fence.md`: deny a fake credentials file and find the `file_blocked` row for any read of it, with the limits stated. The recipe is backed by Linux and macOS tests: a Linux end-to-end test and a macOS test on a user-config deny path check that the read fails and the signed row is written.
+
+### Fixed
+
+- `doctor`: the personal-email check scans the agent's environment even when `filesystem.root` is empty.
+
+### Security
+
+- Optional `network.require_durable_audit` (default off): explicit HTTP requests and CONNECT tunnel attempts require a durable signed `network_intent` row before upstream dialing or forwarding. Audit failure refuses the request with 503 and fails the wrapped run with exit 2. Netns and `allow_all` combinations refuse startup; HTTPS contents remain opaque and advisory-mode bypass remains possible. Upgrade: no change unless you set the key; then use `--net-fence=proxy` and `allow_all = false`.
+- Refuse `wrap` startup and `log --prune` when the managed signing-key path cannot be resolved, instead of silently opening an unsigned log. `wrap --dry-run` also checks signing-path resolution without creating a key or audit database. Read-only log listing remains available without a signing key. Upgrade: if `wrap` or `log --prune` now exits with "cannot resolve signing key path", set `XDG_CONFIG_HOME` or `HOME` to a trusted directory.
+
+### Documentation
+
+- Record publication of the original signed v0.16.0 and v0.16.1 Linux installer assets after real cross-version and broader-network acceptance. Update installation guidance and close the Ubuntu 24.04 amd64/glibc 2.39 installation roadmap bar, preserving migration and kernel limitations.
+
 ## [0.16.1] - 2026-10-27
 
 v0.16.1 closes the proven macOS SecurityServer Keychain route and restores Linux project-ancestor metadata used by Git 2.56. It also adds installed-release network checks and signed cross-version upgrade/rollback acceptance. Linux support remains Ubuntu 24.04 amd64 with glibc 2.39.

@@ -223,6 +223,10 @@ func canonicalPolicy(cfg *config.Config, configPath, dbPath, networkFenceMode st
 			"endpoint": cfg.Cloud.Endpoint,
 		},
 	}
+	if cfg.Network.RequireDurableAudit {
+		// Preserve default-off digests from older releases.
+		policy["network"].(map[string]any)["require_durable_audit"] = true
+	}
 	if rules := cfg.Network.Lookback; len(rules) > 0 {
 		// Omitted when empty so configs without rules keep their prior digest.
 		// Rule order is kept: the first tripped rule names the denial.

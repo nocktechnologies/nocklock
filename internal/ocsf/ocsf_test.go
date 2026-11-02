@@ -162,3 +162,10 @@ func TestFromRowNetworkAndOutcome(t *testing.T) {
 		t.Fatalf("a withheld variable names its resource, got %+v", e.Resources)
 	}
 }
+
+func TestFromRowNetworkIntentIsNotDelivery(t *testing.T) {
+	e := mustMap(t, row(logging.EventNetworkIntent, "method=CONNECT host=api.example.com:443", false))
+	if e.ClassUID != ClassNetworkActivity || e.DstEndpoint == nil || e.DstEndpoint.Port != 443 || e.StatusID != 0 || e.Status != "" || e.StatusDetail == "" {
+		t.Fatalf("intent must retain unknown outcome: %+v", e)
+	}
+}

@@ -133,6 +133,9 @@ func (p *ProxyServer) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		defer release()
 	}
 
+	if !p.authorizeDurableEgress(w, r.Method, host) {
+		return
+	}
 	p.logEvent(logging.EventNetworkPassed, r.Method, host, false)
 	p.forwardHTTP(w, r)
 }
@@ -200,4 +203,27 @@ func (p *ProxyServer) logEvent(eventType logging.EventType, method, host string,
 		return
 	}
 	_ = p.logger.Log(ev)
+}
+
+// authorizeDurableEgress must run before transport or dial: even an empty HTTP
+// request or TCP handshake is egress. The row records intent, never delivery.
+func (p *ProxyServer) authorizeDurableEgress(w http.ResponseWriter, method, host string) bool {
+	if !p.requireDurableAudit {
+		return true
+	}
+	ev := logging.Event{Timestamp: time.Now(), EventType: logging.EventNetworkIntent, Category: "network", Detail: fmt.Sprintf("method=%s host=%s", method, host), SessionID: p.sessionID}
+	var err error
+	if p.logger == nil {
+		err = fmt.Errorf("durable audit requires a logger")
+	} else {
+		err = p.logger.LogDurableSigned(ev)
+	}
+	if err == nil {
+		return true
+	}
+	if p.onBlockedWriteFailure != nil {
+		p.onBlockedWriteFailure(ev.EventType, err)
+	}
+	http.Error(w, "NockLock: required egress audit unavailable", http.StatusServiceUnavailable)
+	return false
 }

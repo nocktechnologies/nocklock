@@ -5,6 +5,14 @@ Citations name source files at `v0.9.0` (`f2b0d04`) (no line numbers, so they do
 ## Default: local proxy with a domain allowlist
 `wrap` starts a local HTTP/HTTPS proxy (`internal/cli/wrap.go`, `internal/fence/network/proxy.go`) and routes the child through it. Hostnames are checked against `network.allow`; blocked requests get a 403 and a `network_blocked` row. For HTTPS only the hostname is inspected (CONNECT, `internal/fence/network/connect.go`): no certificate injection and no decryption. Private ranges are blocked unless `--allow-private-ranges` (`proxy.go`). If the proxy is not healthy, the agent does not start.
 
+## Optional durable audit gate
+
+Set `[network] require_durable_audit = true` to require a signed `network_intent` row and signed chain head to commit before the explicit proxy attempts an allowed HTTP request or CONNECT tunnel. It defaults to `false`; ordinary allowed-event telemetry remains best effort. The gate runs before dialing, and before forwarding HTTP over an existing pooled connection. The row records method and destination (including port), not request contents or credentials. It authorizes an attempt, not proof of delivery: DNS, SSRF checks, look-back rules, connection setup or the upstream can still refuse afterward.
+
+An unavailable logger, missing signer or failed transaction refuses the request with HTTP 503 and makes `wrap` cancel the child and return exit 2. The write uses SQLite WAL with `synchronous=FULL` on the transaction's connection and requests `fullfsync` on macOS. This adds synchronous storage latency; durability depends on the filesystem and device honoring sync. It does not require a remote anchor acknowledgment.
+
+This gate covers the explicit HTTP/CONNECT proxy only. `allow_all = true` and `--net-fence=netns` are refused when it is enabled: the netns decision channel is asynchronous. In `ADVISORY` mode a client can still bypass the proxy; use `require_enforced = true` if that is unacceptable. Existing platform limitations still apply. HTTPS remains opaque: one intent authorizes the CONNECT tunnel, not every encrypted request or byte inside it, and the gate does not continuously reauthorize established tunnels.
+
 ## Egress levels
 The level is computed once by `effectiveEgressLevel` (`internal/cli/egress_level.go`), printed in the `wrap` banner and signed into the audit chain.
 

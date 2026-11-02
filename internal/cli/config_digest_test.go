@@ -188,6 +188,7 @@ var configDigestPolicyFields = map[string]string{
 	"Network.Allow":                      "network.allow",
 	"Network.AllowAll":                   "network.allow_all",
 	"Network.AllowPrivateRanges":         "network.allow_private_ranges",
+	"Network.RequireDurableAudit":        "network.require_durable_audit",
 	"Network.RequireEnforced":            "network.require_enforced",
 	"Network.RequireUnixSocketIsolation": "network.require_unix_socket_isolation",
 	"Network.Lookback":                   "network.lookback",
@@ -220,6 +221,7 @@ var configDigestNotSecurityRelevantFields = map[string]struct{}{
 
 func TestConfigDigestCoversTopLevelConfigFields(t *testing.T) {
 	cfg := config.DefaultConfig()
+	cfg.Network.RequireDurableAudit = true
 	// network.lookback is omitted from the policy when empty, so seed a rule.
 	cfg.Network.Lookback = []config.LookbackRule{{Name: "r", On: "file_blocked", Within: "10m", Then: "deny_egress"}}
 	record, err := newConfigDigestRecord(&cfg, filepath.Join(t.TempDir(), config.Dir, config.File), filepath.Join(t.TempDir(), "events.db"), "proxy")
@@ -1297,5 +1299,27 @@ func TestConfigDigestRuntimeSkippedWhenEitherSideNil(t *testing.T) {
 		records[1].Runtime != nil ||
 		records[2].Runtime == nil || *records[2].Runtime != "" {
 		t.Fatalf("want no %s rows and runtimes [codex nil \"\"], got events %+v records %+v", eventType, events, records)
+	}
+}
+
+func TestConfigDigestCoversDurableAudit(t *testing.T) {
+	project := t.TempDir()
+	cfg := config.DefaultConfig()
+	cfg.Filesystem.Root = project
+	record := func() configDigestRecord {
+		r, err := newConfigDigestRecord(&cfg, filepath.Join(project, config.Dir, config.File), filepath.Join(project, "events.db"), "proxy")
+		if err != nil {
+			t.Fatal(err)
+		}
+		return r
+	}
+	before := record()
+	if jsonPathPresent(before.Policy, "network.require_durable_audit") {
+		t.Fatal("default-off must preserve the historical digest")
+	}
+	cfg.Network.RequireDurableAudit = true
+	after := record()
+	if before.Digest == after.Digest || !jsonPathPresent(after.Policy, "network.require_durable_audit") {
+		t.Fatal("enabled gate missing from signed policy")
 	}
 }

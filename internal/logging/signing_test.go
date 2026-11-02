@@ -8,6 +8,7 @@ import (
 	"encoding/binary"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -1442,5 +1443,74 @@ func rechainAll(t *testing.T, db *sql.DB) {
 	}
 	if _, err := db.Exec("UPDATE chain_head SET entry_hash = ?, row_count = ? WHERE id = 1", head, len(all)); err != nil {
 		t.Fatalf("update head: %v", err)
+	}
+}
+
+func TestLogDurableSigned(t *testing.T) {
+	t.Run("unsigned refused", func(t *testing.T) {
+		l, _ := mustNewLogger(t)
+		defer l.Close()
+		if err := l.LogDurableSigned(sampleEvent(EventNetworkIntent, "network", "method=GET host=example.com", false, "s")); err == nil {
+			t.Fatal("unsigned durable append accepted")
+		}
+		stats, err := l.Stats("")
+		if err != nil || stats.TotalEvents != 0 {
+			t.Fatalf("stats=%+v err=%v", stats, err)
+		}
+	})
+	for _, failure := range []string{"none", "insert", "commit"} {
+		t.Run(failure, func(t *testing.T) {
+			l, _, pub := newSigningLogger(t)
+			defer l.Close()
+			// Deliberately weaken the pooled connection: the durable operation must
+			// restore sync on that exact connection before opening its transaction.
+			if _, err := l.db.Exec("PRAGMA synchronous=OFF"); err != nil {
+				t.Fatal(err)
+			}
+			if failure == "insert" {
+				if _, err := l.db.Exec("CREATE TRIGGER fail_intent BEFORE INSERT ON events BEGIN SELECT RAISE(ABORT, 'synthetic insert failure'); END"); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if failure == "commit" {
+				// A deferred FK violation allows INSERT but fails COMMIT itself.
+				if _, err := l.db.Exec(`PRAGMA foreign_keys=ON;
+     CREATE TABLE durable_parent(id INTEGER PRIMARY KEY);
+     CREATE TABLE durable_child(id INTEGER REFERENCES durable_parent(id) DEFERRABLE INITIALLY DEFERRED);
+     CREATE TRIGGER fail_commit AFTER INSERT ON events BEGIN INSERT INTO durable_child VALUES(1); END;`); err != nil {
+					t.Fatal(err)
+				}
+			}
+			notified := false
+			l.onCommit = func(Event, string) { notified = true }
+			err := l.LogDurableSigned(sampleEvent(EventNetworkIntent, "network", "method=CONNECT host=example.com:443", false, "s"))
+			if (err != nil) != (failure != "none") {
+				t.Fatalf("append error=%v for %s", err, failure)
+			}
+			if failure == "commit" && !strings.Contains(err.Error(), "commit log transaction") {
+				t.Fatalf("did not reach COMMIT: %v", err)
+			}
+			if notified != (failure == "none") {
+				t.Fatalf("observer called=%v", notified)
+			}
+			var mode, fullsync int
+			if err := l.db.QueryRow("PRAGMA synchronous").Scan(&mode); err != nil {
+				t.Fatal(err)
+			}
+			if err := l.db.QueryRow("PRAGMA fullfsync").Scan(&fullsync); err != nil {
+				t.Fatal(err)
+			}
+			if mode != 2 || fullsync != 1 {
+				t.Fatalf("sync=%d fullfsync=%d", mode, fullsync)
+			}
+			result, err := l.VerifyChainSigned(pub, true)
+			want := 1
+			if failure != "none" {
+				want = 0
+			}
+			if err != nil || !result.Intact || !result.HeadSigned || result.SignedEntries != want {
+				t.Fatalf("result=%+v err=%v", result, err)
+			}
+		})
 	}
 }

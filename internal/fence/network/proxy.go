@@ -148,19 +148,20 @@ type ProxyServer struct {
 	// takes it. Lock-held code must not call a locking method; serveLocked is
 	// the lock-free helper behind the Start variants. The Serve goroutine runs
 	// outside the lock.
-	stopMu             sync.Mutex
-	listener           net.Listener
-	listenAddr         string
-	advertisedAddr     string
-	unixSocketPath     string
-	allowList          []string
-	allowAll           bool
-	allowPrivateRanges bool
-	dnsCache           *DNSCache
-	logger             *logging.Logger
-	sessionID          string
-	server             *http.Server
-	transport          *http.Transport
+	stopMu              sync.Mutex
+	listener            net.Listener
+	listenAddr          string
+	advertisedAddr      string
+	unixSocketPath      string
+	allowList           []string
+	allowAll            bool
+	allowPrivateRanges  bool
+	requireDurableAudit bool
+	dnsCache            *DNSCache
+	logger              *logging.Logger
+	sessionID           string
+	server              *http.Server
+	transport           *http.Transport
 	// dialFunc is used by handleConnect to establish upstream connections.
 	// Defaults to cachedSafeDial which uses the session DNS cache. Overridable in tests.
 	dialFunc DialFunc
@@ -170,7 +171,7 @@ type ProxyServer struct {
 	// lookbackPause is a test seam called at named points on the request path.
 	lookbackPause func(stage string)
 	// onBlockedWriteFailure, when set, receives the event type and error of
-	// every blocked row the proxy could not write. Set once before Start.
+	// every blocked row or required intent the proxy could not write. Set once before Start.
 	onBlockedWriteFailure func(logging.EventType, error)
 }
 
@@ -178,7 +179,8 @@ type ProxyServer struct {
 // error of every blocked audit row (a denied request, a look-back denial, a DNS rebind, a
 // degrade) that the proxy could not write. wrap passes its run-level audit
 // recorder here, so a lost blocked row fails the run with exit 2. fn runs
-// inline on the request path and must not block. Call it before Start.
+// inline on the request path and must not block. It also reports failed
+// durable intents when RequireDurableAudit is enabled. Call it before Start.
 func (p *ProxyServer) SetBlockedWriteFailureHandler(fn func(logging.EventType, error)) {
 	p.onBlockedWriteFailure = fn
 }
@@ -198,13 +200,14 @@ func (p *ProxyServer) writeBlockedRow(ev logging.Event) {
 // NewProxyServer creates a ProxyServer from a NetworkConfig.
 func NewProxyServer(cfg config.NetworkConfig, logger *logging.Logger, sessionID string) *ProxyServer {
 	p := &ProxyServer{
-		listenAddr:         "127.0.0.1:0",
-		allowList:          cfg.Allow,
-		allowAll:           cfg.AllowAll,
-		allowPrivateRanges: cfg.AllowPrivateRanges,
-		dnsCache:           NewDNSCache(),
-		logger:             logger,
-		sessionID:          sessionID,
+		listenAddr:          "127.0.0.1:0",
+		allowList:           cfg.Allow,
+		allowAll:            cfg.AllowAll,
+		allowPrivateRanges:  cfg.AllowPrivateRanges,
+		requireDurableAudit: cfg.RequireDurableAudit,
+		dnsCache:            NewDNSCache(),
+		logger:              logger,
+		sessionID:           sessionID,
 	}
 	p.dialFunc = p.cachedSafeDial
 	// Shared transport with:
