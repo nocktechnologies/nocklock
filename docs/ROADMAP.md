@@ -1,8 +1,8 @@
 # Roadmap to 1.0
 
-Updated 2026-10-27. Released baseline: `v0.16.1`. Release history is in `CHANGELOG.md`. The planned 0.7.1 step was split across 0.8.0 and 0.9.0; there is no `v0.7.1` tag. A gap is closed only when its fix is released from `main`, the red-team case runs in CI with an allowed-action negative control, and the docs describe the tested boundary.
+Updated 2026-11-02. Released baseline: `v0.16.1`. Release history is in `CHANGELOG.md`. The planned 0.7.1 step was split across 0.8.0 and 0.9.0; there is no `v0.7.1` tag. A gap is closed only when its fix is released from `main`, the red-team case runs in CI with an allowed-action negative control, and the docs describe the tested boundary.
 
-v0.16.1 ships macOS SecurityServer isolation, Linux ancestor-metadata compatibility and signed-release acceptance tooling. The six signed Linux assets are now published for v0.16.0 and v0.16.1 with fresh-host, cross-version and broader-network evidence. The installation bar is closed for Ubuntu 24.04 amd64 with glibc 2.39; other distributions, Linux arm64 and musl remain outside that support matrix.
+v0.16.1 ships macOS SecurityServer isolation, Linux ancestor-metadata compatibility and signed-release acceptance tooling. Prepared next release: `v0.17.0`, with a fail-closed signing path, opt-in durable egress audit and an informational `doctor` personal-email warning; promotion and tagging remain outstanding. The six signed Linux assets are now published for v0.16.0 and v0.16.1 with fresh-host, cross-version and broader-network evidence. The installation bar is closed for Ubuntu 24.04 amd64 with glibc 2.39; other distributions, Linux arm64 and musl remain outside that support matrix.
 
 ## Now: the four 1.0 bars
 

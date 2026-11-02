@@ -4,15 +4,19 @@ All notable changes to NockLock will be documented in this file.
 
 ## [Unreleased]
 
+## [0.17.0] - 2026-11-02
+
+v0.17.0 makes the audit log harder to lose: `wrap` and `log --prune` refuse to start when the signing-key path cannot be resolved, and the new opt-in `network.require_durable_audit` commits a signed intent row before each explicit proxy request. `doctor` gains an informational personal-email warning, and the docs add a decoy-file recipe proven on Linux and macOS.
+
 ### Added
 
 - `doctor` warns (`personal-email`, Secrets group) when the wrapped agent can read a personal email address: the git `user.email` at `filesystem.root`, environment variables passed to the child, or `CLAUDE.md`, `AGENTS.md`, `GEMINI.md`, `.cursorrules` and `.github/copilot-instructions.md` at the root. Addresses are masked and env values are never printed; noreply and example addresses are not flagged. The check is informational and does not change the verdict or exit code.
-- Optional `network.require_durable_audit` (default off): explicit HTTP requests and CONNECT tunnel attempts require a durable signed intent before upstream dialing or forwarding. Audit failure refuses the request and fails the wrapped run. Netns and `allow_all` combinations refuse startup; HTTPS contents remain opaque and advisory-mode bypass remains possible.
 - A "Decoy files" recipe in `docs/how-it-works/filesystem-fence.md`: deny a fake credentials file and find the `file_blocked` row for any read of it, with the limits stated. A Linux end-to-end test and a macOS test on a user-config deny path prove the read fails and the signed row is written.
 
 ### Security
 
-- Refuse `wrap` startup and `log --prune` when the managed signing-key path cannot be resolved, instead of silently opening an unsigned log. `wrap --dry-run` also checks signing-path resolution without creating a key or audit database. Read-only log listing remains available without a signing key.
+- Optional `network.require_durable_audit` (default off): explicit HTTP requests and CONNECT tunnel attempts require a durable signed `network_intent` row before upstream dialing or forwarding. Audit failure refuses the request with 503 and fails the wrapped run with exit 2. Netns and `allow_all` combinations refuse startup; HTTPS contents remain opaque and advisory-mode bypass remains possible. Upgrade: no change unless you set the key; then use `--net-fence=proxy` and `allow_all = false`.
+- Refuse `wrap` startup and `log --prune` when the managed signing-key path cannot be resolved, instead of silently opening an unsigned log. `wrap --dry-run` also checks signing-path resolution without creating a key or audit database. Read-only log listing remains available without a signing key. Upgrade: if `wrap` or `log --prune` now exits with "cannot resolve signing key path", set `XDG_CONFIG_HOME` or `HOME` to a trusted directory.
 
 ### Documentation
 
