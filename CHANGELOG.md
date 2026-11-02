@@ -4,6 +4,10 @@ All notable changes to NockLock will be documented in this file.
 
 ## [Unreleased]
 
+### Documentation
+
+- Record publication of the signed v0.17.0 Linux installer assets after signed v0.16.1 to v0.17.0 upgrade/rollback and broader-network acceptance.
+
 ## [0.17.0] - 2026-11-02
 
 v0.17.0 makes the audit log harder to lose: `wrap` and `log --prune` refuse to start when the signing-key path cannot be resolved, and the new opt-in `network.require_durable_audit` commits a signed intent row before each explicit proxy request. `doctor` gains an informational personal-email warning, and the docs add a decoy-file recipe backed by Linux and macOS tests.

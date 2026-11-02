@@ -6,7 +6,7 @@ Everything here restates `README.md` (Quick start, Installation, Linux network-e
 
 The [signed Linux installer](../packaging/linux/RELEASE-INSTALL.md) is published
 for **Ubuntu 24.04 amd64 with glibc 2.39**. Start with
-[v0.16.1](https://github.com/nocktechnologies/nocklock/releases/tag/v0.16.1);
+[v0.17.0](https://github.com/nocktechnologies/nocklock/releases/tag/v0.17.0);
 its six signed assets and acceptance evidence cover paired installation,
 upgrades and verified rollback. Use a fresh supported host: migration from
 source or candidate installations is unsupported. Existing source installations
