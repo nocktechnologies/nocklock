@@ -94,9 +94,6 @@ func personalEmailDoctorCheck(cfg *config.Config) doctorCheck {
 // finding wins over a source that could not be read.
 func personalEmailCheck(root string, env []string) doctorCheck {
 	check := doctorCheck{Group: "Secrets", Name: "personal-email", Severity: doctorInfo, Status: "not-configured", Message: "No filesystem root is configured for personal email inspection."}
-	if root == "" {
-		return check
-	}
 	var found, unread []string
 	seen := map[string]bool{}
 	note := func(finding string) {
@@ -119,23 +116,25 @@ func personalEmailCheck(root string, env []string) doctorCheck {
 		}
 	}
 
-	// Each unread source is named with an error class only: an OS error text
-	// carries the path, and a path can hold an address.
-	root, err := fsfence.ExpandTilde(root)
-	if err != nil {
-		unread = append(unread, "filesystem.root: cannot expand ~")
-	} else {
-		if gitEmail, err := gitUserEmail(root, env); err != nil {
-			unread = append(unread, "git user.email: "+err.Error())
+	if root != "" {
+		// Each unread source is named with an error class only: an OS error text
+		// carries the path, and a path can hold an address.
+		root, err := fsfence.ExpandTilde(root)
+		if err != nil {
+			unread = append(unread, "filesystem.root: cannot expand ~")
 		} else {
-			scan("git user.email", gitEmail)
-		}
-		for _, name := range personalEmailFiles {
-			err := scanInstructionFile(filepath.Join(root, name), func(n int, line string) {
-				scan(fmt.Sprintf("%s:%d", name, n), line)
-			})
-			if err != nil {
-				unread = append(unread, name+": "+fileErrorClass(err))
+			if gitEmail, err := gitUserEmail(root, env); err != nil {
+				unread = append(unread, "git user.email: "+err.Error())
+			} else {
+				scan("git user.email", gitEmail)
+			}
+			for _, name := range personalEmailFiles {
+				err := scanInstructionFile(filepath.Join(root, name), func(n int, line string) {
+					scan(fmt.Sprintf("%s:%d", name, n), line)
+				})
+				if err != nil {
+					unread = append(unread, name+": "+fileErrorClass(err))
+				}
 			}
 		}
 	}
@@ -152,6 +151,8 @@ func personalEmailCheck(root string, env []string) doctorCheck {
 			check.Message += " Not checked: " + strings.Join(unread, "; ") + "."
 		}
 		check.Fix = "set a noreply address for agent sessions in this repo (git config user.email <id>+<user>@users.noreply.github.com) and remove personal addresses from agent instruction files"
+	case root == "":
+		return check
 	case len(unread) > 0:
 		check.Status = "not-checked"
 		check.Message = "Personal email check: not checked (" + strings.Join(unread, "; ") + "). The git identity, environment and agent instruction files may still expose an address."

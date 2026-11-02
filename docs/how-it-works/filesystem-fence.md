@@ -71,7 +71,7 @@ A decoy is a fake credentials file nobody should ever open. Deny it, and any rea
 
    A read of the decoy appears as a `file_blocked` row whose detail names its path. macOS shows `file-read-data <path>`; Linux shows `op=... path=<path> reason=...`, or a JSON detail carrying the same path.
 
-Proven by `TestWrapMacOSDecoyFileReadIsLogged` (`internal/cli/wrap_darwin_test.go`) and `TestWrapDecoyFileReadIsLogged` (`internal/cli/wrap_decoy_linux_test.go`): the read fails, the decoy's contents do not reach the child, an undenied sibling stays readable, exactly one row names the decoy and the chain verifies.
+Backed by `TestWrapMacOSDecoyFileReadIsLogged` (`internal/cli/wrap_darwin_test.go`) and `TestWrapDecoyFileReadIsLogged` (`internal/cli/wrap_decoy_linux_test.go`): the read fails, the decoy's contents do not reach the child, an undenied sibling stays readable, exactly one row names the decoy and the chain verifies.
 
 What it does not catch:
 - Agents NockLock did not launch.
