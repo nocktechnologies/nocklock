@@ -13,6 +13,10 @@ v0.17.0 makes the audit log harder to lose: `wrap` and `log --prune` refuse to s
 - `doctor` warns (`personal-email`, Secrets group) when the wrapped agent can read a personal email address: the git `user.email` at `filesystem.root`, environment variables passed to the child, or `CLAUDE.md`, `AGENTS.md`, `GEMINI.md`, `.cursorrules` and `.github/copilot-instructions.md` at the root. Addresses are masked and env values are never printed; noreply and example addresses are not flagged. The check is informational and does not change the verdict or exit code.
 - A "Decoy files" recipe in `docs/how-it-works/filesystem-fence.md`: deny a fake credentials file and find the `file_blocked` row for any read of it, with the limits stated. The recipe is backed by Linux and macOS tests: a Linux end-to-end test and a macOS test on a user-config deny path check that the read fails and the signed row is written.
 
+### Fixed
+
+- `doctor`: the personal-email check scans the agent's environment even when `filesystem.root` is empty.
+
 ### Security
 
 - Optional `network.require_durable_audit` (default off): explicit HTTP requests and CONNECT tunnel attempts require a durable signed `network_intent` row before upstream dialing or forwarding. Audit failure refuses the request with 503 and fails the wrapped run with exit 2. Netns and `allow_all` combinations refuse startup; HTTPS contents remain opaque and advisory-mode bypass remains possible. Upgrade: no change unless you set the key; then use `--net-fence=proxy` and `allow_all = false`.

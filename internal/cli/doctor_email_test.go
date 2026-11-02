@@ -62,6 +62,7 @@ func TestPersonalEmailCheck(t *testing.T) {
 		{name: "colon then text", files: map[string]string{"AGENTS.md": testPersonalEmail + ": call before deploys\n"}, wantStatus: "exposed", wantIn: []string{testPersonalMask + " (AGENTS.md:1)"}},
 		{name: "single line over the scan limit", files: map[string]string{".cursorrules": testPersonalEmail + " " + strings.Repeat("x", personalEmailFileLimit)}, wantStatus: "exposed", wantIn: []string{testPersonalMask + " (.cursorrules:1)"}},
 		{name: "no root", noRoot: true, gitEmail: testPersonalEmail, wantStatus: "not-configured"},
+		{name: "no root still scans env", noRoot: true, env: []string{"OWNER_CONTACT=" + testPersonalEmail}, wantStatus: "exposed", wantIn: []string{"env OWNER_CONTACT"}},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
