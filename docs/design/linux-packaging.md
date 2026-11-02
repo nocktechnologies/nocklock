@@ -4,15 +4,19 @@ Date: 2026-10-13
 
 Status: **Published for Ubuntu 24.04 amd64/glibc 2.39; signed lifecycle and network acceptance passed**
 
-## Publication evidence (2026-10-27)
+## Publication evidence (2026-10-27, updated 2026-11-02)
 
-The six original signed assets are published on v0.16.0 and v0.16.1.
+The six original signed assets are published on v0.16.0, v0.16.1 and v0.17.0.
 [Production v0.16.1 fresh-host acceptance](https://github.com/nocktechnologies/nocklock/actions/runs/40612628058)
 and [real signed cross-version plus Linux/macOS network acceptance](https://github.com/nocktechnologies/nocklock/actions/runs/40612879908)
 passed. [Durable receipts and asset hashes](https://github.com/nocktechnologies/nocklock/releases/download/v0.16.1/linux-release-acceptance.json)
 link both immutable source commits and production runs; raw observations are
-attached to each release. Prefer v0.16.1 for installation and retain v0.16.0
-as the tested rollback target. The [installation guide](../../packaging/linux/RELEASE-INSTALL.md)
+attached to each release. v0.17.0 also carries the six signed assets and
+evidence ([release](https://github.com/nocktechnologies/nocklock/releases/tag/v0.17.0),
+tag commit `d506a9760372e8422a21436c0bb44a5cbad13912`). [Production v0.17.0 release run](https://github.com/nocktechnologies/nocklock/actions/runs/41521505626)
+and [signed v0.16.1 to v0.17.0 plus broader Linux/macOS network acceptance](https://github.com/nocktechnologies/nocklock/actions/runs/41523555745)
+passed, all jobs. The fresh-install host reports Landlock ABI 8. Prefer v0.17.0
+for installation and retain v0.16.1 as the tested rollback target. The [installation guide](../../packaging/linux/RELEASE-INSTALL.md)
 is the current procedure. The candidate boundary and proposed scripts below
 record the earlier design; they are not alternate public installers. No claim
 adds source/candidate migration, other Linux platforms or Unix-socket isolation
@@ -55,7 +59,10 @@ The separate `linux-release-acceptance.yml` production run now verifies actual
 signed v0.16.0 and v0.16.1 assets through upgrade, retry, downgrade refusal,
 rollback and re-upgrade, with config/audit preservation and stale-binary refusal.
 It also supplies the broader Linux/macOS network receipts linked above. The
-accepted immutable assets are published on both releases. v0.15.0 has no
+accepted immutable assets are published on v0.16.0 and v0.16.1; v0.17.0's
+assets were accepted by the signed v0.16.1 to v0.17.0 run
+(https://github.com/nocktechnologies/nocklock/actions/runs/41523555745) and are
+published on v0.17.0. v0.15.0 has no
 managed installer assets.
 
 Threat boundary: protect against modified downloads, archive traversal,
@@ -121,9 +128,12 @@ doctor output, public verification key, audit verdict and events; it never
 uploads the private signing key or entire account home. The resulting run is
 the acceptance receipt and must be linked in the implementation PR.
 
-Public installation, upgrades, rollback, interrupted-update recovery, expanded
-network/OS acceptance and production release publication remain later slices.
-The contract below continues to describe those required production gates.
+The publication evidence above covers fresh-host install, signed upgrade and
+rollback, and Linux/macOS network acceptance on Ubuntu 24.04 amd64 / glibc 2.39,
+with signed asset publication on v0.16.0, v0.16.1 and v0.17.0. Interrupted-update
+recovery is covered by unit tests through the signature-verifier seam described
+above, not by a production receipt, and other Linux platforms remain out of
+scope. The contract below continues to describe the required production gates.
 
 Baseline: `89c1bb6e` (v0.9.1); refreshed after the v0.8/v0.9 doctor and Unix-socket changes and the v0.9.1 signing-key fence and netns child thread lock.
 
