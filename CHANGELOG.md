@@ -6,12 +6,12 @@ All notable changes to NockLock will be documented in this file.
 
 ## [0.17.0] - 2026-11-02
 
-v0.17.0 makes the audit log harder to lose: `wrap` and `log --prune` refuse to start when the signing-key path cannot be resolved, and the new opt-in `network.require_durable_audit` commits a signed intent row before each explicit proxy request. `doctor` gains an informational personal-email warning, and the docs add a decoy-file recipe proven on Linux and macOS.
+v0.17.0 makes the audit log harder to lose: `wrap` and `log --prune` refuse to start when the signing-key path cannot be resolved, and the new opt-in `network.require_durable_audit` commits a signed intent row before each explicit proxy request. `doctor` gains an informational personal-email warning, and the docs add a decoy-file recipe backed by Linux and macOS tests.
 
 ### Added
 
 - `doctor` warns (`personal-email`, Secrets group) when the wrapped agent can read a personal email address: the git `user.email` at `filesystem.root`, environment variables passed to the child, or `CLAUDE.md`, `AGENTS.md`, `GEMINI.md`, `.cursorrules` and `.github/copilot-instructions.md` at the root. Addresses are masked and env values are never printed; noreply and example addresses are not flagged. The check is informational and does not change the verdict or exit code.
-- A "Decoy files" recipe in `docs/how-it-works/filesystem-fence.md`: deny a fake credentials file and find the `file_blocked` row for any read of it, with the limits stated. A Linux end-to-end test and a macOS test on a user-config deny path prove the read fails and the signed row is written.
+- A "Decoy files" recipe in `docs/how-it-works/filesystem-fence.md`: deny a fake credentials file and find the `file_blocked` row for any read of it, with the limits stated. The recipe is backed by Linux and macOS tests: a Linux end-to-end test and a macOS test on a user-config deny path check that the read fails and the signed row is written.
 
 ### Security
 
