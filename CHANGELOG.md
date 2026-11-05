@@ -4,9 +4,19 @@ All notable changes to NockLock will be documented in this file.
 
 ## [Unreleased]
 
+## [0.17.1] - 2026-11-05
+
+v0.17.1 requires a signed Landlock ABI 9 kernel receipt from the release commit before tagged Linux assets can be published. It also adds fence regression coverage and records publication of the signed v0.17.0 Linux installer assets.
+
+Upgrade notes: Installers from v0.16.x/v0.17.0 upgrade unchanged; `SHA256SUMS` stays archive-only, evidence hashes are in the separately signed `EVIDENCE.SHA256SUMS`.
+
 ### Added
 
 - Tagged Linux release runs now require a passing signed Landlock ABI 9 kernel receipt from the release commit. The publishable artifact includes the receipt JSON, its Sigstore bundle, Linux acceptance summary, and matching hashes in signed `EVIDENCE.SHA256SUMS` and `release-evidence.json`. The installer `SHA256SUMS` keeps its single archive entry for upgrade compatibility. Publication remains a release-owner action. On ABI 9 or later, the receipt covers an outside-root pathname socket and an abstract socket denied under `CONFINED`, plus successful connects to the named proxy and fence-event sockets; sockets inside `filesystem.root` are not claimed.
+
+### Tests
+
+- Add regression coverage for anti-spoof host checks, DNS-rebind IP counts, and macOS case-folded filesystem paths.
 
 ### Documentation
 
