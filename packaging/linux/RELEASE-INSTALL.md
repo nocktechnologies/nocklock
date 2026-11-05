@@ -6,11 +6,18 @@ dependencies. Cosign v3.1.3 is required for verification; its Linux amd64 checks
 is pinned in the installer. Other distributions, arm64 and musl are not supported.
 
 The six signed assets are published for
+[v0.17.0](https://github.com/nocktechnologies/nocklock/releases/tag/v0.17.0),
 [v0.16.1](https://github.com/nocktechnologies/nocklock/releases/tag/v0.16.1)
-and v0.16.0. Prefer v0.16.1 for new installations; v0.16.0 is the verified
-managed rollback target. [Acceptance evidence](https://github.com/nocktechnologies/nocklock/releases/download/v0.16.1/linux-release-acceptance.json)
+and v0.16.0. Prefer v0.17.0 for new installations; v0.16.1 is the verified
+managed rollback target from v0.17.0, and v0.16.0 remains the earlier rollback
+target. [Acceptance evidence](https://github.com/nocktechnologies/nocklock/releases/download/v0.16.1/linux-release-acceptance.json)
 covers tagged fresh-host installation, real signed cross-version upgrade/rollback
-and broader Linux/macOS network gates from the
+and broader Linux/macOS network gates for v0.16.1; v0.17.0 adds a
+[production release run](https://github.com/nocktechnologies/nocklock/actions/runs/41521505626)
+and a [signed v0.16.1 to v0.17.0 and broader network acceptance run](https://github.com/nocktechnologies/nocklock/actions/runs/41523555745),
+all jobs passed, with evidence attached to the release. A fresh-install host
+reports Landlock ABI 8; Unix-socket isolation remains a named limitation below
+ABI 9. See the
 [packaging contract](../../docs/design/linux-packaging.md). v0.15.0 has no
 installer assets. Existing source or candidate installs cannot migrate through
 this installer; retain the [source installation](../../docs/setup.md) workflow

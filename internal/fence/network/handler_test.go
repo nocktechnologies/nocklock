@@ -1,11 +1,18 @@
 package network
 
 import (
+	"context"
+	"errors"
 	"io"
+	"net"
 	"net/http"
 	"net/http/httptest"
+	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/nocktechnologies/nocklock/internal/config"
+	"github.com/nocktechnologies/nocklock/internal/logging"
 )
 
 // isAllowedTests covers the pure domain-matching logic.
@@ -128,6 +135,47 @@ func TestServeHTTP_BlockedDomain(t *testing.T) {
 	body, _ := io.ReadAll(w.Body)
 	if string(body) == "" {
 		t.Error("expected non-empty body for blocked request")
+	}
+}
+
+func TestServeHTTPAbsoluteURLIgnoresSpoofedHost(t *testing.T) {
+	logger, err := logging.NewLogger(filepath.Join(t.TempDir(), "events.db"), "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer logger.Close()
+	p := NewProxyServer(config.NetworkConfig{Allow: []string{"allowed.example"}}, logger, "host-spoof")
+	dials := 0
+	p.dialFunc = func(context.Context, string, string) (net.Conn, error) {
+		dials++
+		return nil, errors.New("test dial stopped")
+	}
+
+	// Control: a genuinely allowed URL reaches the forwarding path.
+	allowed := httptest.NewRequest(http.MethodGet, "http://allowed.example/path", nil)
+	allowedRec := httptest.NewRecorder()
+	p.ServeHTTP(allowedRec, allowed)
+	if allowedRec.Code != http.StatusBadGateway || dials != 1 {
+		t.Fatalf("allowed URL: status=%d dials=%d, want 502 and one dial", allowedRec.Code, dials)
+	}
+
+	blocked := httptest.NewRequest(http.MethodGet, "http://blocked.example/path", nil)
+	blocked.Host = "allowed.example"
+	blockedRec := httptest.NewRecorder()
+	p.ServeHTTP(blockedRec, blocked)
+	if blockedRec.Code != http.StatusForbidden {
+		t.Errorf("spoofed Host: status=%d, want 403", blockedRec.Code)
+	}
+	if dials != 1 {
+		t.Errorf("spoofed Host: dials=%d, want no forwarding beyond the control dial", dials)
+	}
+	blockedOnly := true
+	events, err := logger.Query(logging.QueryOptions{Blocked: &blockedOnly, SessionID: stringPtr("host-spoof")})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(events) != 1 || events[0].EventType != logging.EventNetworkBlocked || !strings.Contains(events[0].Detail, "host=blocked.example") {
+		t.Errorf("spoofed Host: blocked events=%+v, want one network_blocked for URL host", events)
 	}
 }
 

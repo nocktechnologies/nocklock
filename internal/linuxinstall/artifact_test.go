@@ -6,6 +6,7 @@ import (
 	"compress/gzip"
 	"encoding/json"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -74,6 +75,61 @@ func TestValidateRelease(t *testing.T) {
 	}
 	if _, err := Validate(a, append(m, m...), "v1.2.3"); err == nil {
 		t.Fatal("duplicate manifest accepted")
+	}
+}
+
+func TestValidateReleaseRejectsEvidenceHashesInArchiveManifest(t *testing.T) {
+	a, m := fixture(t, "v1.2.3", nil)
+	evidence := []byte(strings.Repeat("a", 64) + "  linux-release-acceptance.json\n" +
+		strings.Repeat("b", 64) + "  landlock-abi9-receipt.json\n")
+	if _, err := Validate(a, append(append([]byte{}, m...), evidence...), "v1.2.3"); err == nil {
+		t.Fatal("evidence hashes in archive manifest accepted")
+	}
+}
+
+// Exercise the actual assembler output through the same parser used by retained
+// installers. This prevents release packaging from breaking cross-version upgrades.
+func TestAssembledReleaseManifestValidates(t *testing.T) {
+	const tag = "v1.2.3"
+	const commit = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+	archive, original := fixture(t, tag, nil)
+	root := t.TempDir()
+	for _, dir := range []string{"receipt", "acceptance", "assets"} {
+		if err := os.Mkdir(filepath.Join(root, dir), 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	write := func(dir, name string, data []byte) {
+		t.Helper()
+		if err := os.WriteFile(filepath.Join(root, dir, name), data, 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	name, _ := ArchiveName(tag)
+	write("assets", name, archive)
+	write("assets", "SHA256SUMS", original)
+	for _, name := range []string{"nocklock-install-linux-amd64", "INSTALLER.SHA256SUMS", "INSTALLER.SHA256SUMS.sigstore.json"} {
+		write("assets", name, []byte("fixture"))
+	}
+	write("receipt", "landlock-abi9-receipt.json", []byte(`{"commit":"`+commit+`","verdict":"PASS","landlock_abi":9,"claims":[{"claim":"a-pathname-socket-outside-root","expected":"DENIED","actual":"DENIED"},{"claim":"b-abstract-socket","expected":"DENIED","actual":"DENIED"},{"claim":"c-allowed-proxy-socket","expected":"CONNECTED","actual":"CONNECTED"},{"claim":"c-allowed-event-socket","expected":"CONNECTED","actual":"CONNECTED"},{"claim":"d-io-uring-setup-denied","expected":"PASS","actual":"PASS"}]}`))
+	write("receipt", "landlock-abi9-receipt.json.sigstore.json", []byte("fixture"))
+	write("acceptance", "linux-release-acceptance.json", []byte(`{"kind":"release-install-acceptance","commit":"`+commit+`","tag":"`+tag+`","modes":["proxy","netns"]}`))
+	cmd := exec.Command("python3", "../../packaging/linux/assemble-release-evidence.py",
+		"--receipt", filepath.Join(root, "receipt"), "--acceptance", filepath.Join(root, "acceptance"),
+		"--assets", filepath.Join(root, "assets"), "--output", filepath.Join(root, "publish"),
+		"--commit", commit, "--tag", tag)
+	if output, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("assemble release evidence: %v: %s", err, output)
+	}
+	manifest, err := os.ReadFile(filepath.Join(root, "publish", "SHA256SUMS"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(manifest, original) {
+		t.Fatalf("assembler changed installer manifest: %q", manifest)
+	}
+	if _, err := Validate(archive, manifest, tag); err != nil {
+		t.Fatal("assembler output refused by installer:", err)
 	}
 }
 

@@ -4,6 +4,28 @@ All notable changes to NockLock will be documented in this file.
 
 ## [Unreleased]
 
+## [0.17.1] - 2026-11-05
+
+v0.17.1 requires a signed Landlock ABI 9 kernel receipt from the release commit before tagged Linux assets can be published. It also adds fence regression coverage and records publication of the signed v0.17.0 Linux installer assets.
+
+Upgrade notes: Installers from v0.16.x/v0.17.0 upgrade unchanged; `SHA256SUMS` stays archive-only, evidence hashes are in the separately signed `EVIDENCE.SHA256SUMS`.
+
+### Added
+
+- Tagged Linux release runs now require a passing signed Landlock ABI 9 kernel receipt from the release commit. The publishable artifact includes the receipt JSON, its Sigstore bundle, Linux acceptance summary, and matching hashes in signed `EVIDENCE.SHA256SUMS` and `release-evidence.json`. The installer `SHA256SUMS` keeps its single archive entry for upgrade compatibility. Publication remains a release-owner action. On ABI 9 or later, the receipt covers an outside-root pathname socket and an abstract socket denied under `CONFINED`, plus successful connects to the named proxy and fence-event sockets; sockets inside `filesystem.root` are not claimed.
+
+### Tests
+
+- Add regression coverage for anti-spoof host checks, DNS-rebind IP counts, and macOS case-folded filesystem paths.
+
+### Documentation
+
+- Record publication of the signed v0.17.0 Linux installer assets after signed v0.16.1 to v0.17.0 upgrade/rollback and broader-network acceptance.
+
+### Dependencies
+
+- Bump `modernc.org/sqlite` from 1.60.1 to 1.61.1, with its transitive `modernc.org/libc` and `golang.org/x` updates (#300).
+
 ## [0.17.0] - 2026-11-02
 
 v0.17.0 makes the audit log harder to lose: `wrap` and `log --prune` refuse to start when the signing-key path cannot be resolved, and the new opt-in `network.require_durable_audit` commits a signed intent row before each explicit proxy request. `doctor` gains an informational personal-email warning, and the docs add a decoy-file recipe backed by Linux and macOS tests.

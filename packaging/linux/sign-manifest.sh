@@ -9,7 +9,7 @@ set -euo pipefail
 dir="$1"
 identity="$2"
 manifest=${3:-SHA256SUMS}
-[[ "$manifest" == SHA256SUMS || "$manifest" == INSTALLER.SHA256SUMS ]]
+[[ "$manifest" == SHA256SUMS || "$manifest" == INSTALLER.SHA256SUMS || "$manifest" == EVIDENCE.SHA256SUMS ]]
 issuer=https://token.actions.githubusercontent.com
 diagnostics="$(mktemp -d)"
 trap 'rm -rf "$diagnostics"' EXIT

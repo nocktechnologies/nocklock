@@ -1,6 +1,6 @@
 # Runbook: release
 
-`next` holds the integration batch; `main` holds released code. A maintainer reviews and merges PRs. Contributions target `next`; do not push directly to either shared branch. The tag-only `release.yml` workflow builds signed Linux assets and fresh-VM acceptance evidence but has no publication permission. Tagging, GitHub release creation, asset publication and the Homebrew tap update remain explicit release-owner actions.
+`next` holds the integration batch; `main` holds released code. A maintainer reviews and merges PRs. Contributions target `next`; do not push directly to either shared branch. The tag-only `release.yml` workflow builds signed Linux assets, fresh-VM acceptance evidence and a signed ABI 9 kernel receipt, then assembles them into one publishable artifact. It has no publication permission. Tagging, GitHub release creation, asset publication and the Homebrew tap update remain explicit release-owner actions.
 
 ## Prepare the batch
 
@@ -25,7 +25,33 @@ Use a disposable account/project without production credentials. Follow [setup](
 
 - **macOS:** Homebrew installs the CLI. With the default policy, require `SEATBELT`; the self-test's Linux-only syscall probe is an explicit skip, while filesystem, network and secret probes must pass.
 - **Linux:** the formula installs only the CLI. On a fresh Ubuntu 24.04 amd64/glibc 2.39 host, use the [signed installer](../../packaging/linux/RELEASE-INSTALL.md) and published acceptance evidence. Existing source installations use the binary/library steps in [setup](../setup.md#1-install); migration to managed installation is unsupported. Opt-in `--net-fence=netns` also requires the installed privileged helper. Run `scripts/test-init-default-linux.sh` and the applicable root/netns CI proofs. Below Landlock ABI 9, a default `CONFINED` config reports `PARTIAL` (exit 3) for Unix sockets; accept only that named limitation with the other boundaries enforced, not an arbitrary nonzero doctor result.
-- **Release assets:** after the tagged `release.yml` run succeeds, review both `linux-amd64-release-assets` and `linux-amd64-release-acceptance` from that exact run. Verify both manifests against the exact workflow/tag identity in the [installer guide](../../packaging/linux/RELEASE-INSTALL.md); record their hashes, source commit and acceptance evidence. Complete the broader network and cross-version upgrade/rollback gates in the [packaging contract](../design/linux-packaging.md). Then attach the six immutable files to that tag's GitHub release, with the acceptance evidence linked in its notes. Never upload assets from a failed acceptance job, a candidate workflow or a different run/tag. Do not replace already-published files or retrofit the installer onto a release that lacks the managed invocation protocol; issue a new release. The workflow itself never publishes.
+- **Release assets:** after the tagged `release.yml` run succeeds, review its `linux-release-publishable-assets` artifact and the three source job artifacts from that exact run. The receipt job must have passed at the tag commit with Landlock ABI 9 or later; a failed or skipped receipt stops assembly. Set `release_commit` to the published tag's peeled commit and verify the receipt with:
+
+  ```sh
+  tag=vX.Y.Z # Replace with the published tag.
+  release_commit=$(git rev-parse "$tag^{commit}")
+  cosign verify-blob landlock-abi9-receipt.json \
+    --bundle landlock-abi9-receipt.json.sigstore.json \
+    --certificate-identity "https://github.com/nocktechnologies/nocklock/.github/workflows/landlock-abi9-receipt.yml@refs/tags/$tag" \
+    --certificate-oidc-issuer https://token.actions.githubusercontent.com \
+    --certificate-github-workflow-repository nocktechnologies/nocklock \
+    --certificate-github-workflow-sha "$release_commit"
+  ```
+
+  Verify the publishable `SHA256SUMS` and `INSTALLER.SHA256SUMS` against the release workflow's exact tag identity using the [installer guide](../../packaging/linux/RELEASE-INSTALL.md). Verify the separate evidence manifest with the same release identity, repository and commit:
+
+  ```sh
+  cosign verify-blob EVIDENCE.SHA256SUMS \
+    --bundle EVIDENCE.SHA256SUMS.sigstore.json \
+    --certificate-identity "https://github.com/nocktechnologies/nocklock/.github/workflows/release.yml@refs/tags/$tag" \
+    --certificate-oidc-issuer https://token.actions.githubusercontent.com \
+    --certificate-github-workflow-repository nocktechnologies/nocklock \
+    --certificate-github-workflow-sha "$release_commit"
+  sha256sum --check --strict SHA256SUMS
+  sha256sum --check --strict EVIDENCE.SHA256SUMS
+  ```
+
+  `SHA256SUMS` has only the archive entry so retained v0.16.x and v0.17.0 installers can upgrade; the signed evidence manifest contains the receipt and `linux-release-acceptance.json` hashes, which must agree with `release-evidence.json` and the source commit. Complete the broader network and cross-version upgrade/rollback gates in the [packaging contract](../design/linux-packaging.md). Then attach the twelve immutable files in `linux-release-publishable-assets` to the tag's GitHub release. Never upload assets from a failed run or the branch dry-run artifact, replace published files or retrofit an installer onto an incompatible release; issue a new release. A flaky KVM boot needs a manual re-run of the tagged workflow. The workflow itself never publishes.
 
 ## Rolling back
 
