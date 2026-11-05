@@ -19,7 +19,7 @@ The level is computed once by `effectiveEgressLevel` (`internal/cli/egress_level
 | Level | Boundary |
 |---|---|
 | `KERNEL` | Linux `--net-fence=netns`: network namespace, nftables default-drop floor, transparent HTTP(S) and DNS allowlist |
-| `CONFINED` | Linux proxy mode with syscall enforcement and the interposer bridge: direct AF_INET/AF_INET6 socket creation is denied and the proxy bridge uses a Unix socket; below Landlock ABI 9, other pathname and abstract Unix sockets accessible to the user remain reachable. ABI 9 rules restrict them, but have not yet run on a real kernel |
+| `CONFINED` | Linux proxy mode with syscall enforcement and the interposer bridge: direct AF_INET/AF_INET6 socket creation is denied and the proxy bridge uses a Unix socket. Below Landlock ABI 9, other pathname and abstract Unix sockets accessible to the user remain reachable. On ABI 9 or later, the tested policy denies pathname sockets outside `filesystem.root` and abstract sockets, while connecting to the exact proxy and fence-event sockets it names. It makes no claim about sockets inside `filesystem.root`. |
 | `SEATBELT` | macOS proxy with a Seatbelt kernel floor (needs `filesystem.root`) |
 | `ADVISORY` | Proxy only; a client that ignores `HTTP_PROXY` reaches any host |
 | `OFF` | `network.allow_all = true` |
@@ -48,7 +48,7 @@ With the network fence active the profile denies `network-outbound` except TCP t
 ## Honest limits
 - `ADVISORY` is advisory. Read the banner.
 - Hostname checks only: a permitted host can still receive anything the agent sends it.
-- Below Landlock ABI 9, `CONFINED` blocks direct IP socket creation but leaves other pathname and abstract Unix sockets reachable. Default `wrap` warns and signs that limitation; `doctor` returns `PARTIAL` (exit 3). `network.require_unix_socket_isolation = true` refuses launch unless Linux `CONFINED` can enforce the ABI 9 rules. Those rules allow only the exact proxy and filesystem event sockets and scope abstract sockets; they have not yet run on a real kernel. See [the Unix-socket design](../design/unix-socket-reachability.md), `internal/cli/unix_socket_policy.go`, and `internal/fence/fs/landlock/`. The `io_uring` syscall path is denied as of v0.8.0 (`internal/fence/syscallfence/denylist.go`).
+- Below Landlock ABI 9, `CONFINED` blocks direct IP socket creation but leaves other pathname and abstract Unix sockets reachable. Default `wrap` warns and signs that limitation; `doctor` returns `PARTIAL` (exit 3). `network.require_unix_socket_isolation = true` refuses launch unless Linux `CONFINED` can enforce the ABI 9 rules. On ABI 9 or later, a signed kernel receipt tests denial of an outside-root pathname socket and an abstract socket, plus successful connections to the exact proxy and fence-event sockets; it does not cover sockets inside `filesystem.root`. The release workflow requires that receipt from the release commit. See [the Unix-socket design](../design/unix-socket-reachability.md), `internal/cli/unix_socket_policy.go`, and `internal/fence/fs/landlock/`. The `io_uring` syscall path is denied as of v0.8.0 (`internal/fence/syscallfence/denylist.go`).
 - macOS: `sandbox-exec` is deprecated; reads outside the root are unconfined; with `filesystem.root = ""` there is no profile and egress is `ADVISORY`; `/etc/hosts` lookups stay allowed; resolver services not on the Mach deny list are not claimed closed. Windows has no network fence.
 - Look-back rules never see static binaries, raw syscalls, or a cleared `LD_PRELOAD`.
 

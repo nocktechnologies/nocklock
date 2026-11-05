@@ -11,12 +11,14 @@ import (
 	"fmt"
 	"io"
 	"regexp"
+	"strings"
 )
 
 const maxArchive = 128 << 20
 
 var tagPattern = regexp.MustCompile(`^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$`)
 var commitPattern = regexp.MustCompile(`^[0-9a-f]{40}$`)
+var releaseEvidencePattern = regexp.MustCompile(`^[0-9a-f]{64}  linux-release-acceptance\.json\n[0-9a-f]{64}  landlock-abi9-receipt\.json\n$`)
 var payloadModes = map[string]int64{
 	"nocklock": 0o755, "libfence_fs.so": 0o755,
 	"INSTALL.md": 0o644, "LICENSE": 0o644, "build-info.json": 0o644,
@@ -54,8 +56,10 @@ func Validate(archive, manifest []byte, tag string) (map[string][]byte, error) {
 	if err != nil {
 		return nil, err
 	}
-	if len(archive) > maxArchive || string(manifest) != hash(archive)+"  "+name+"\n" {
-		return nil, fmt.Errorf("archive exceeds limit or does not match the single signed manifest entry")
+	prefix := hash(archive) + "  " + name + "\n"
+	if len(archive) > maxArchive || !strings.HasPrefix(string(manifest), prefix) ||
+		(len(manifest) != len(prefix) && !releaseEvidencePattern.MatchString(string(manifest[len(prefix):]))) {
+		return nil, fmt.Errorf("archive exceeds limit or does not match the signed release manifest")
 	}
 	gz, err := gzip.NewReader(bytes.NewReader(archive))
 	if err != nil {

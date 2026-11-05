@@ -77,6 +77,25 @@ func TestValidateRelease(t *testing.T) {
 	}
 }
 
+func TestValidateReleaseWithEvidenceHashes(t *testing.T) {
+	a, m := fixture(t, "v1.2.3", nil)
+	evidence := []byte(strings.Repeat("a", 64) + "  linux-release-acceptance.json\n" +
+		strings.Repeat("b", 64) + "  landlock-abi9-receipt.json\n")
+	if _, err := Validate(a, append(append([]byte{}, m...), evidence...), "v1.2.3"); err != nil {
+		t.Fatal("release evidence manifest refused:", err)
+	}
+	for _, extra := range [][]byte{
+		[]byte(strings.Repeat("a", 64) + "  landlock-abi9-receipt.json\n"),
+		append(append([]byte{}, evidence...), evidence...),
+		[]byte(strings.Repeat("z", 64) + "  linux-release-acceptance.json\n" +
+			strings.Repeat("b", 64) + "  landlock-abi9-receipt.json\n"),
+	} {
+		if _, err := Validate(a, append(append([]byte{}, m...), extra...), "v1.2.3"); err == nil {
+			t.Fatal("malformed evidence manifest accepted")
+		}
+	}
+}
+
 func TestPOSIXDirectoryHeader(t *testing.T) {
 	a, m := fixture(t, "v1.2.3", func(h *tar.Header, _ *[]byte) {
 		if h.Typeflag == tar.TypeDir {

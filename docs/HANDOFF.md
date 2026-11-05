@@ -6,6 +6,8 @@ No internal host names, personal names or absolute home paths: `scripts/check-pu
 
 ## What changed
 
+- 2026-11-05: the tagged Linux release workflow now calls the ABI 9 KVM receipt job at the tag commit and requires it to pass before assembling publishable assets. The receipt JSON and its Sigstore bundle accompany a Linux acceptance summary; their hashes are in the signed release `SHA256SUMS` and `release-evidence.json`. A branch dry run exercises receipt assembly with an explicitly marked placeholder for tagged Linux acceptance. Publication remains manual, and the roadmap bar closes only when a release actually ships the receipt. The installer accepts the previous archive-only manifest and the exact new three-entry manifest. Still open: tagged production run, asset publication, and confirmation that the published receipt matches the release commit.
+
 - 2026-11-02: v0.17.0 notes prepared for the batch since back-sync `3f1340ed` (see `CHANGELOG.md`). cleanup: none, read 3f1340ed..ec1d6cb7. The decoy tests run in CI without `-v`, so no log shows `--- PASS` for them (a package `ok` can hide a skip); the notes say "backed by Linux and macOS tests", not "proven". Still open: promotion, tagging, Homebrew update and back-sync.
 
 - 2026-10-31: decoy-file recipe added to `docs/how-it-works/filesystem-fence.md`, backed by `TestWrapDecoyFileReadIsLogged` (Linux, interposer path, decoy outside the granted tree, since startup refuses a deny inside it) and `TestWrapMacOSDecoyFileReadIsLogged`. Both were written without a local enforcement run (enforcement proofs are CI-only); confirm they ran rather than skipped in the CI log. No runtime change; if the Linux test shows a missing row, fix the interposer report.
