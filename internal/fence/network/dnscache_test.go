@@ -89,6 +89,35 @@ func TestDNSCacheRejectsRebind(t *testing.T) {
 	}
 }
 
+func TestDNSCacheRejectsChangedIPCount(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		current []string
+	}{
+		{name: "added IP", current: []string{"93.184.216.34", "93.184.216.35"}},
+		{name: "removed IP", current: nil},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			current := []string{"93.184.216.34"}
+			cache := newDNSCacheWithResolver(func(context.Context, string) ([]string, error) {
+				return current, nil
+			})
+			if _, err := cache.LookupOrResolve(t.Context(), "target.example"); err != nil {
+				t.Fatalf("pin IP: %v", err)
+			}
+			if _, err := cache.LookupOrResolve(t.Context(), "target.example"); err != nil {
+				t.Fatalf("unchanged IP count should pass: %v", err)
+			}
+			current = tc.current
+			_, err := cache.LookupOrResolve(t.Context(), "target.example")
+			var rebindErr *dnsRebindError
+			if !errors.As(err, &rebindErr) {
+				t.Fatalf("changed IP count: got %v, want dnsRebindError", err)
+			}
+		})
+	}
+}
+
 // TestDNSCacheCaseVariantsShareEntry verifies that hostname case variations and
 // trailing-dot forms all hit the same cache entry, preventing DNS rebinding via
 // mixed-case hostnames.

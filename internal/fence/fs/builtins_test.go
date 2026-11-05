@@ -81,6 +81,21 @@ func TestBuiltinDeniesRefuseHomeAllow(t *testing.T) {
 	}
 }
 
+func TestBuiltinCaseVariantGrantOnDarwin(t *testing.T) {
+	for _, grant := range []string{"~/.SSH/", "~/.Claude/"} {
+		t.Run(grant, func(t *testing.T) {
+			cfg, _ := builtinFixture(t)
+			cfg.Filesystem.Allow = []string{grant}
+			if _, err := ProcessEffectiveConfig(cfg, "darwin"); err == nil || !strings.Contains(err.Error(), "built-in credential deny") {
+				t.Fatalf("darwin case-variant grant %q: want credential-overlap refusal, got %v", grant, err)
+			}
+			if _, err := ProcessEffectiveConfig(cfg, "linux"); err != nil {
+				t.Fatalf("linux case-variant grant %q should remain separate: %v", grant, err)
+			}
+		})
+	}
+}
+
 func TestBuiltinAgentPresetExceptions(t *testing.T) {
 	for _, agent := range []string{"", "claude-code", "codex"} {
 		t.Run(agent, func(t *testing.T) {
