@@ -178,7 +178,8 @@ jobs:
       - name: Authenticate ABI 9 receipt and assemble publishable assets
         env:
           RELEASE_COMMIT: ${{ needs.build.outputs.commit }}
-          RECEIPT_IDENTITY: https://github.com/${{ github.workflow_ref }}
+          RECEIPT_IDENTITY: https://github.com/${{ github.repository }}/.github/workflows/landlock-abi9-receipt.yml@${{ github.ref }}
+          RELEASE_IDENTITY: https://github.com/${{ github.workflow_ref }}
         run: |
           test "$RELEASE_COMMIT" = "$GITHUB_SHA"
           cosign verify-blob "$RUNNER_TEMP/receipt/landlock-abi9-receipt.json" \
@@ -189,7 +190,7 @@ jobs:
             --receipt "$RUNNER_TEMP/receipt" --acceptance "$RUNNER_TEMP/acceptance" \
             --assets "$RUNNER_TEMP/linux" --output "$RUNNER_TEMP/publish" \
             --commit "$GITHUB_SHA" --tag "$GITHUB_REF_NAME"
-          bash packaging/linux/sign-manifest.sh "$RUNNER_TEMP/publish" "$RECEIPT_IDENTITY"
+          bash packaging/linux/sign-manifest.sh "$RUNNER_TEMP/publish" "$RELEASE_IDENTITY"
           (cd "$RUNNER_TEMP/publish" && sha256sum --check --strict SHA256SUMS)
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
@@ -218,7 +219,8 @@ jobs:
           cosign-release: v3.1.3
       - name: Exercise release evidence assembly without a tag
         env:
-          RECEIPT_IDENTITY: https://github.com/${{ github.workflow_ref }}
+          RECEIPT_IDENTITY: https://github.com/${{ github.repository }}/.github/workflows/landlock-abi9-receipt.yml@${{ github.ref }}
+          RELEASE_IDENTITY: https://github.com/${{ github.workflow_ref }}
         run: |
           cosign verify-blob "$RUNNER_TEMP/receipt/landlock-abi9-receipt.json" \
             --bundle "$RUNNER_TEMP/receipt/landlock-abi9-receipt.json.sigstore.json" \
@@ -231,7 +233,7 @@ jobs:
           python3 packaging/linux/assemble-release-evidence.py \
             --receipt "$RUNNER_TEMP/receipt" --acceptance "$RUNNER_TEMP/acceptance" \
             --output "$RUNNER_TEMP/dry-run" --commit "$GITHUB_SHA" --dry-run
-          bash packaging/linux/sign-manifest.sh "$RUNNER_TEMP/dry-run" "$RECEIPT_IDENTITY"
+          bash packaging/linux/sign-manifest.sh "$RUNNER_TEMP/dry-run" "$RELEASE_IDENTITY"
           (cd "$RUNNER_TEMP/dry-run" && sha256sum --check --strict SHA256SUMS)
           cat "$RUNNER_TEMP/dry-run/SHA256SUMS"
           cat "$RUNNER_TEMP/dry-run/release-evidence.json"

@@ -133,7 +133,7 @@ jobs:
       - name: Sign and authenticate the receipt manifest
         if: success() && steps.collect.outputs.transfer == '0'
         env:
-          RECEIPT_IDENTITY: https://github.com/${{ github.workflow_ref }}
+          RECEIPT_IDENTITY: https://github.com/${{ github.repository }}/.github/workflows/landlock-abi9-receipt.yml@${{ github.ref }}
         run: |
           cd "$RUNNER_TEMP/receipt"
           for f in report.json REPORT.md provenance.txt unix-wrap.jsonl abi9.jsonl io-uring.jsonl; do
@@ -180,6 +180,7 @@ jobs:
           path: |
             ${{ runner.temp }}/receipt/
             !${{ runner.temp }}/receipt/SHA256SUMS*
+            !${{ runner.temp }}/receipt/*.sigstore.json
           if-no-files-found: warn
           retention-days: 90
       - name: Stop the guest

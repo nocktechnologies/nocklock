@@ -15,6 +15,13 @@ spec.loader.exec_module(assembly)
 
 COMMIT = "a" * 40
 TAG = "v1.2.3"
+CLAIMS = [
+    {"claim": "a-pathname-socket-outside-root", "expected": "DENIED", "actual": "DENIED"},
+    {"claim": "b-abstract-socket", "expected": "DENIED", "actual": "DENIED"},
+    {"claim": "c-allowed-proxy-socket", "expected": "CONNECTED", "actual": "CONNECTED"},
+    {"claim": "c-allowed-event-socket", "expected": "CONNECTED", "actual": "CONNECTED"},
+    {"claim": "d-io-uring-setup-denied", "expected": "PASS", "actual": "PASS"},
+]
 
 
 class AssembleReleaseEvidenceTest(unittest.TestCase):
@@ -29,7 +36,7 @@ class AssembleReleaseEvidenceTest(unittest.TestCase):
             path.mkdir()
         self.output = root / "output"
         self.report = {"commit": COMMIT, "verdict": "PASS", "landlock_abi": 9,
-                       "claims": [{"actual": "PASS", "expected": "PASS"} for _ in range(5)]}
+                       "claims": [claim.copy() for claim in CLAIMS]}
         self.accepted = {"kind": "release-install-acceptance", "commit": COMMIT,
                          "tag": TAG, "modes": ["proxy", "netns"]}
         (self.receipt / "landlock-abi9-receipt.json.sigstore.json").write_text("signed")
@@ -74,6 +81,19 @@ class AssembleReleaseEvidenceTest(unittest.TestCase):
         (self.assets / "SHA256SUMS").write_text("0" * 64 + "  wrong.tar.gz\n")
         with self.assertRaisesRegex(ValueError, "archive checksum mismatch"):
             self.assemble()
+
+    def test_refuses_missing_duplicate_or_mismatched_claims(self):
+        for claims in (
+            [dict(claim) for claim in CLAIMS[:-1]] + [{"claim": "other", "expected": "PASS", "actual": "PASS"}],
+            [dict(claim) for claim in CLAIMS[:-1]] + [dict(CLAIMS[0])],
+            [dict(claim) for claim in CLAIMS[:-1]] + ["not a claim"],
+            [dict(claim) for claim in CLAIMS[:-1]] + [{"claim": CLAIMS[-1]["claim"], "expected": "DENIED", "actual": "DENIED"}],
+            [dict(claim) for claim in CLAIMS[:-1]] + [{"claim": CLAIMS[-1]["claim"], "expected": "PASS", "actual": "FAIL"}],
+        ):
+            with self.subTest(claims=claims):
+                self.report["claims"] = claims
+                with self.assertRaisesRegex(ValueError, "ABI 9 receipt is incomplete"):
+                    self.assemble()
 
     def test_branch_dry_run_is_explicit_and_cannot_replace_release_acceptance(self):
         self.accepted = {"kind": "branch-dry-run-placeholder", "commit": COMMIT}

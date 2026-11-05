@@ -27,9 +27,20 @@ def assemble(args):
     bundle = args.receipt / "landlock-abi9-receipt.json.sigstore.json"
     report = json.loads(receipt.read_text())
     claims = report.get("claims", [])
+    expected_claims = {
+        "a-pathname-socket-outside-root": "DENIED",
+        "b-abstract-socket": "DENIED",
+        "c-allowed-proxy-socket": "CONNECTED",
+        "c-allowed-event-socket": "CONNECTED",
+        "d-io-uring-setup-denied": "PASS",
+    }
     if (report.get("commit") != args.commit or report.get("verdict") != "PASS" or
-            report.get("landlock_abi", 0) < 9 or len(claims) != 5 or
-            any(c.get("actual") != c.get("expected") for c in claims) or
+            report.get("landlock_abi", 0) < 9 or not isinstance(claims, list) or
+            len(claims) != len(expected_claims) or
+            not all(isinstance(c, dict) and isinstance(c.get("claim"), str) and
+                    c.get("expected") == expected_claims.get(c["claim"]) == c.get("actual")
+                    for c in claims) or
+            {c["claim"] for c in claims} != expected_claims.keys() or
             not bundle.is_file() or not bundle.stat().st_size):
         raise ValueError("ABI 9 receipt is incomplete, failed or from another commit")
     acceptance = args.acceptance / "linux-release-acceptance.json"

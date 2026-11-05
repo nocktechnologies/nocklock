@@ -6,6 +6,8 @@ No internal host names, personal names or absolute home paths: `scripts/check-pu
 
 ## What changed
 
+- 2026-11-05: The ABI 9 receipt workflow now signs and verifies with its own workflow ref when called by the release workflow; release manifests retain the release workflow identity. Failed runs omit Sigstore bundles from the unsigned diagnostic artifact. Release assembly requires the five named, matching kernel claims. Still open: a successful branch dry run, then a tagged release that publishes the receipt.
+
 - 2026-11-05: the tagged Linux release workflow now calls the ABI 9 KVM receipt job at the tag commit and requires it to pass before assembling publishable assets. The receipt JSON and its Sigstore bundle accompany a Linux acceptance summary; their hashes are in the signed release `SHA256SUMS` and `release-evidence.json`. A branch dry run exercises receipt assembly with an explicitly marked placeholder for tagged Linux acceptance. Publication remains manual, and the roadmap bar closes only when a release actually ships the receipt. The installer accepts the previous archive-only manifest and the exact new three-entry manifest. Still open: tagged production run, asset publication, and confirmation that the published receipt matches the release commit.
 
 - 2026-11-02: v0.17.0 notes prepared for the batch since back-sync `3f1340ed` (see `CHANGELOG.md`). cleanup: none, read 3f1340ed..ec1d6cb7. The decoy tests run in CI without `-v`, so no log shows `--- PASS` for them (a package `ok` can hide a skip); the notes say "backed by Linux and macOS tests", not "proven". Still open: promotion, tagging, Homebrew update and back-sync.
