@@ -214,9 +214,13 @@ cross-compile only the Go binary and label the pair tested. No Alpine/musl or
 arm64 compatibility claim follows from this build.
 
 Publish `SHA256SUMS` and `SHA256SUMS.sigstore.json` next to the tarball.
-`SHA256SUMS` names only the release assets. Cosign signs that manifest as a blob;
-the bundle supplies the signing certificate and verification material. This
-binds the checksums to a publisher, unlike a bare checksum on the same server.
+`SHA256SUMS` has a single archive entry, which retained installers parse unchanged.
+For releases carrying the ABI 9 receipt, `EVIDENCE.SHA256SUMS` records the hashes
+of `linux-release-acceptance.json` and `landlock-abi9-receipt.json`. Publish it
+with `EVIDENCE.SHA256SUMS.sigstore.json`. Cosign signs both manifests with the
+release workflow identity; each bundle supplies the signing certificate and
+verification material. This binds the checksums to a publisher, unlike a bare
+checksum on the same server.
 See the official [blob-signing instructions](https://docs.sigstore.dev/cosign/signing/signing_with_blobs/).
 
 Use a tag-triggered, protected GitHub Actions release workflow with a pinned

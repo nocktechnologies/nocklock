@@ -2,9 +2,13 @@ name: Landlock ABI 9 receipt
 
 # Runs the Unix-socket and io_uring kernel cases on a kernel that exposes
 # Landlock ABI 9+, inside a throwaway KVM guest on a GitHub-hosted runner, and
-# keeps a signed receipt. Not a required check and not a release: it changes
-# no doctor or wrap claim. Never move this job to a self-hosted runner.
+# keeps a signed receipt. Never move this job to a self-hosted runner.
 on:
+  workflow_call:
+    inputs:
+      release_invocation:
+        required: true
+        type: boolean
   # No required check lives here, so a plain filter is safe. Only code the
   # kernel cases build or run starts the guest.
   pull_request:
@@ -34,11 +38,11 @@ env:
 jobs:
   receipt:
     # Receipt signing is confined to this repository's PR refs and to manual
-    # runs on next or main: no fork PRs, no tags, no other branches. A receipt
-    # that backs a release must come from a next or main identity.
+    # runs on next or main. A called run is gated by the release workflow.
     if: >-
       (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository) ||
-      (github.event_name == 'workflow_dispatch' && (github.ref == 'refs/heads/next' || github.ref == 'refs/heads/main'))
+      (github.event_name == 'workflow_dispatch' && (github.ref == 'refs/heads/next' || github.ref == 'refs/heads/main')) ||
+      (inputs.release_invocation == true && github.repository == 'nocktechnologies/nocklock')
     runs-on: ubuntu-24.04
     timeout-minutes: 40
     permissions:
@@ -129,20 +133,38 @@ jobs:
       - name: Sign and authenticate the receipt manifest
         if: success() && steps.collect.outputs.transfer == '0'
         env:
-          RECEIPT_IDENTITY: https://github.com/${{ github.workflow_ref }}
+          RECEIPT_IDENTITY: https://github.com/${{ github.repository }}/.github/workflows/landlock-abi9-receipt.yml@${{ github.ref }}
         run: |
           cd "$RUNNER_TEMP/receipt"
           for f in report.json REPORT.md provenance.txt unix-wrap.jsonl abi9.jsonl io-uring.jsonl; do
-            test -s "$f" && ! test -L "$f" || { echo "FAIL: evidence file $f is missing, empty or a symlink; refusing to sign" >&2; exit 1; }
+            if ! test -s "$f" || test -L "$f"; then
+              echo "FAIL: evidence file $f is missing, empty or a symlink; refusing to sign" >&2; exit 1
+            fi
           done
           for f in unix-wrap.stderr.txt abi9.stderr.txt io-uring.stderr.txt; do
-            test -f "$f" && ! test -L "$f" || { echo "FAIL: evidence file $f is missing or a symlink; refusing to sign" >&2; exit 1; }
+            if ! test -f "$f" || test -L "$f"; then
+              echo "FAIL: evidence file $f is missing or a symlink; refusing to sign" >&2; exit 1
+            fi
           done
           cd "$GITHUB_WORKSPACE"
-          jq -e '.verdict == "PASS" and .landlock_abi >= 9 and (.claims | length) > 0' \
+          jq -e --arg commit "$GITHUB_SHA" \
+            '.verdict == "PASS" and .landlock_abi >= 9 and .commit == $commit and
+             (.claims | length) == 5 and all(.claims[]; .actual == .expected)' \
             "$RUNNER_TEMP/receipt/report.json"
+          cp "$RUNNER_TEMP/receipt/report.json" "$RUNNER_TEMP/receipt/landlock-abi9-receipt.json"
+          cd "$RUNNER_TEMP/receipt"
+          cosign sign-blob --yes --bundle landlock-abi9-receipt.json.sigstore.json landlock-abi9-receipt.json
+          cosign verify-blob landlock-abi9-receipt.json \
+            --bundle landlock-abi9-receipt.json.sigstore.json \
+            --certificate-identity "$RECEIPT_IDENTITY" \
+            --certificate-oidc-issuer https://token.actions.githubusercontent.com \
+            --certificate-github-workflow-repository nocktechnologies/nocklock \
+            --certificate-github-workflow-sha "$GITHUB_SHA"
+          cd "$GITHUB_WORKSPACE"
           (cd "$RUNNER_TEMP/receipt" &&
-            find . -type f ! -name SHA256SUMS -printf '%P\n' | LC_ALL=C sort | xargs -d '\n' sha256sum > SHA256SUMS)
+            find . -type f ! -name SHA256SUMS -printf '%P\n' | LC_ALL=C sort | xargs -d '\n' sha256sum) \
+            > "$RUNNER_TEMP/receipt-manifest"
+          mv "$RUNNER_TEMP/receipt-manifest" "$RUNNER_TEMP/receipt/SHA256SUMS"
           bash packaging/linux/sign-manifest.sh "$RUNNER_TEMP/receipt" "$RECEIPT_IDENTITY"
           echo "Signer identity: $RECEIPT_IDENTITY" >> "$GITHUB_STEP_SUMMARY"
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
@@ -160,6 +182,7 @@ jobs:
           path: |
             ${{ runner.temp }}/receipt/
             !${{ runner.temp }}/receipt/SHA256SUMS*
+            !${{ runner.temp }}/receipt/*.sigstore.json
           if-no-files-found: warn
           retention-days: 90
       - name: Stop the guest
