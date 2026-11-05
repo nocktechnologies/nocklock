@@ -160,6 +160,10 @@ jobs:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           persist-credentials: false
+      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
+        with:
+          go-version-file: go.mod
+          cache: false
       - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
         with:
           name: linux-amd64-release-assets
@@ -185,13 +189,20 @@ jobs:
           cosign verify-blob "$RUNNER_TEMP/receipt/landlock-abi9-receipt.json" \
             --bundle "$RUNNER_TEMP/receipt/landlock-abi9-receipt.json.sigstore.json" \
             --certificate-identity "$RECEIPT_IDENTITY" \
-            --certificate-oidc-issuer https://token.actions.githubusercontent.com
+            --certificate-oidc-issuer https://token.actions.githubusercontent.com \
+            --certificate-github-workflow-repository nocktechnologies/nocklock \
+            --certificate-github-workflow-sha "$GITHUB_SHA"
           python3 packaging/linux/assemble-release-evidence.py \
             --receipt "$RUNNER_TEMP/receipt" --acceptance "$RUNNER_TEMP/acceptance" \
             --assets "$RUNNER_TEMP/linux" --output "$RUNNER_TEMP/publish" \
             --commit "$GITHUB_SHA" --tag "$GITHUB_REF_NAME"
+          NOCKLOCK_TEST_RELEASE_DIR="$RUNNER_TEMP/publish" \
+            NOCKLOCK_TEST_RELEASE_TAG="$GITHUB_REF_NAME" \
+            go test ./internal/linuxinstall -run '^TestBuiltReleaseArchive$' -count=1
           bash packaging/linux/sign-manifest.sh "$RUNNER_TEMP/publish" "$RELEASE_IDENTITY"
+          bash packaging/linux/sign-manifest.sh "$RUNNER_TEMP/publish" "$RELEASE_IDENTITY" EVIDENCE.SHA256SUMS
           (cd "$RUNNER_TEMP/publish" && sha256sum --check --strict SHA256SUMS)
+          (cd "$RUNNER_TEMP/publish" && sha256sum --check --strict EVIDENCE.SHA256SUMS)
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: linux-release-publishable-assets
@@ -225,7 +236,9 @@ jobs:
           cosign verify-blob "$RUNNER_TEMP/receipt/landlock-abi9-receipt.json" \
             --bundle "$RUNNER_TEMP/receipt/landlock-abi9-receipt.json.sigstore.json" \
             --certificate-identity "$RECEIPT_IDENTITY" \
-            --certificate-oidc-issuer https://token.actions.githubusercontent.com
+            --certificate-oidc-issuer https://token.actions.githubusercontent.com \
+            --certificate-github-workflow-repository nocktechnologies/nocklock \
+            --certificate-github-workflow-sha "$GITHUB_SHA"
           mkdir "$RUNNER_TEMP/acceptance"
           jq -n --arg commit "$GITHUB_SHA" \
             '{kind:"branch-dry-run-placeholder",commit:$commit}' \
@@ -233,9 +246,9 @@ jobs:
           python3 packaging/linux/assemble-release-evidence.py \
             --receipt "$RUNNER_TEMP/receipt" --acceptance "$RUNNER_TEMP/acceptance" \
             --output "$RUNNER_TEMP/dry-run" --commit "$GITHUB_SHA" --dry-run
-          bash packaging/linux/sign-manifest.sh "$RUNNER_TEMP/dry-run" "$RELEASE_IDENTITY"
-          (cd "$RUNNER_TEMP/dry-run" && sha256sum --check --strict SHA256SUMS)
-          cat "$RUNNER_TEMP/dry-run/SHA256SUMS"
+          bash packaging/linux/sign-manifest.sh "$RUNNER_TEMP/dry-run" "$RELEASE_IDENTITY" EVIDENCE.SHA256SUMS
+          (cd "$RUNNER_TEMP/dry-run" && sha256sum --check --strict EVIDENCE.SHA256SUMS)
+          cat "$RUNNER_TEMP/dry-run/EVIDENCE.SHA256SUMS"
           cat "$RUNNER_TEMP/dry-run/release-evidence.json"
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:

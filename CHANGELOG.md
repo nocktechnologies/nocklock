@@ -6,7 +6,7 @@ All notable changes to NockLock will be documented in this file.
 
 ### Added
 
-- Tagged Linux release runs now require a passing signed Landlock ABI 9 kernel receipt from the release commit. The publishable artifact includes the receipt JSON, its Sigstore bundle, Linux acceptance summary, and matching hashes in `SHA256SUMS` and `release-evidence.json`. Publication remains a release-owner action. On ABI 9 or later, the receipt covers an outside-root pathname socket and an abstract socket denied under `CONFINED`, plus successful connects to the named proxy and fence-event sockets; sockets inside `filesystem.root` are not claimed.
+- Tagged Linux release runs now require a passing signed Landlock ABI 9 kernel receipt from the release commit. The publishable artifact includes the receipt JSON, its Sigstore bundle, Linux acceptance summary, and matching hashes in signed `EVIDENCE.SHA256SUMS` and `release-evidence.json`. The installer `SHA256SUMS` keeps its single archive entry for upgrade compatibility. Publication remains a release-owner action. On ABI 9 or later, the receipt covers an outside-root pathname socket and an abstract socket denied under `CONFINED`, plus successful connects to the named proxy and fence-event sockets; sockets inside `filesystem.root` are not claimed.
 
 ### Documentation
 

@@ -57,10 +57,12 @@ class AssembleReleaseEvidenceTest(unittest.TestCase):
     def test_release_hashes_both_evidence_files(self):
         self.assemble()
         manifest = (self.output / "SHA256SUMS").read_text()
+        self.assertEqual(manifest, (self.assets / "SHA256SUMS").read_text())
+        evidence_manifest = (self.output / "EVIDENCE.SHA256SUMS").read_text()
         evidence = json.loads((self.output / "release-evidence.json").read_text())
         for name in ("linux-release-acceptance.json", "landlock-abi9-receipt.json"):
             expected = assembly.digest(self.output / name)
-            self.assertIn(f"{expected}  {name}\n", manifest)
+            self.assertIn(f"{expected}  {name}\n", evidence_manifest)
             self.assertEqual(evidence["sha256"][name], expected)
         self.assertTrue((self.output / "landlock-abi9-receipt.json.sigstore.json").is_file())
 
@@ -107,6 +109,8 @@ class AssembleReleaseEvidenceTest(unittest.TestCase):
                                           commit=COMMIT, tag=None, dry_run=True))
         self.assertEqual(json.loads((self.output / "release-evidence.json").read_text())["kind"],
                          "branch-dry-run")
+        self.assertFalse((self.output / "SHA256SUMS").exists())
+        self.assertTrue((self.output / "EVIDENCE.SHA256SUMS").is_file())
 
 
 if __name__ == "__main__":

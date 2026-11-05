@@ -42,7 +42,7 @@ jobs:
     if: >-
       (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository) ||
       (github.event_name == 'workflow_dispatch' && (github.ref == 'refs/heads/next' || github.ref == 'refs/heads/main')) ||
-      inputs.release_invocation == true
+      (inputs.release_invocation == true && github.repository == 'nocktechnologies/nocklock')
     runs-on: ubuntu-24.04
     timeout-minutes: 40
     permissions:
@@ -157,7 +157,9 @@ jobs:
           cosign verify-blob landlock-abi9-receipt.json \
             --bundle landlock-abi9-receipt.json.sigstore.json \
             --certificate-identity "$RECEIPT_IDENTITY" \
-            --certificate-oidc-issuer https://token.actions.githubusercontent.com
+            --certificate-oidc-issuer https://token.actions.githubusercontent.com \
+            --certificate-github-workflow-repository nocktechnologies/nocklock \
+            --certificate-github-workflow-sha "$GITHUB_SHA"
           cd "$GITHUB_WORKSPACE"
           (cd "$RUNNER_TEMP/receipt" &&
             find . -type f ! -name SHA256SUMS -printf '%P\n' | LC_ALL=C sort | xargs -d '\n' sha256sum) \

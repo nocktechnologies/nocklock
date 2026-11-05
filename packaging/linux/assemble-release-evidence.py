@@ -70,8 +70,10 @@ def assemble(args):
         shutil.copyfile(source, args.output / source.name)
     hashes = {name: digest(args.output / name) for name in
               ("linux-release-acceptance.json", "landlock-abi9-receipt.json")}
-    (args.output / "SHA256SUMS").write_text(
-        original + "".join(f"{hashes[name]}  {name}\n" for name in hashes))
+    if original:
+        (args.output / "SHA256SUMS").write_text(original)
+    (args.output / "EVIDENCE.SHA256SUMS").write_text(
+        "".join(f"{hashes[name]}  {name}\n" for name in hashes))
     (args.output / "release-evidence.json").write_text(json.dumps({
         "schema": 1, "kind": "branch-dry-run" if args.dry_run else "release",
         "commit": args.commit, "tag": args.tag, "sha256": hashes,
