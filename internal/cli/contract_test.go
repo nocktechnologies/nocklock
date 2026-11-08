@@ -206,6 +206,16 @@ func (r constResolver) exprType(e ast.Expr) string {
 		}
 		return typ
 	case *ast.CallExpr:
+		// The built-in min and max take their arguments' type, so a constant
+		// built with one is classified, and refused when value cannot read it.
+		if fn := identName(e.Fun); fn == "min" || fn == "max" {
+			for _, a := range e.Args {
+				if t := r.exprType(a); t != "" {
+					return t
+				}
+			}
+			return ""
+		}
 		return r.canonical(identName(e.Fun))
 	case *ast.BinaryExpr:
 		switch e.Op {
@@ -300,6 +310,7 @@ func TestDeclaredConstsFindsInferredConstants(t *testing.T) {
 		{"const a Level = \"a\"\nconst b = a == \"x\"", []string{"a"}},
 		{"type alias = Level\nconst a alias = \"a\"\nconst b = alias(\"b\")", []string{"a", "b"}},
 		{"const b = name", nil},
+		{"const b = min(\"x\", name)", nil},
 	} {
 		got, err := declaredConsts(writeConstFixture(t, tc.decl), "Level")
 		if err != nil {
@@ -336,6 +347,8 @@ func TestDeclaredConstsRefusesUnreadableValues(t *testing.T) {
 		"const a Level = \"a\"\nconst bad = a + \"b\"",
 		`const bad Level = undeclared`,
 		"const bad Level = a\nconst a = bad",
+		`const bad = min(Level("a"), Level("b"))`,
+		"const a Level = \"a\"\nconst bad = max(\"b\", a)",
 	} {
 		if got, err := declaredConsts(writeConstFixture(t, decl), "Level"); err == nil {
 			t.Errorf("declaredConsts(%s) = %q, want an error", decl, got)
@@ -418,14 +431,48 @@ func commandFlags(c *cobra.Command) []*pflag.Flag {
 	return out
 }
 
+// contractHostDirs maps the host- and platform-dependent directories a flag
+// default could embed to stable placeholders, longest first so a directory
+// under the home directory keeps its own placeholder. The config and cache
+// directories differ by GOOS as well as by user. It is computed during package
+// initialization, before TestMain changes the environment, from the same
+// environment the flag defaults were registered under.
+var contractHostDirs = func() [][2]string {
+	var dirs [][2]string
+	for _, d := range []struct {
+		placeholder string
+		dir         func() (string, error)
+	}{
+		{"<config>", os.UserConfigDir},
+		{"<cache>", os.UserCacheDir},
+		{"<home>", os.UserHomeDir},
+		{"<tmp>", func() (string, error) { return os.TempDir(), nil }},
+	} {
+		if dir, err := d.dir(); err == nil && filepath.IsAbs(dir) && dir != string(filepath.Separator) {
+			dirs = append(dirs, [2]string{filepath.Clean(dir), d.placeholder})
+		}
+	}
+	slices.SortStableFunc(dirs, func(a, b [2]string) int { return len(b[0]) - len(a[0]) })
+	return dirs
+}()
+
+// contractDefault returns a flag default with each host directory replaced
+// by its placeholder, so the golden passes unchanged on every host and GOOS.
+func contractDefault(v string) string {
+	for _, d := range contractHostDirs {
+		v = strings.ReplaceAll(v, d[0], d[1])
+	}
+	return v
+}
+
 // commandsGolden renders every command path with its own flags, each with
-// its shorthand, type and default.
+// its shorthand, type and host-independent default.
 func commandsGolden(cmds []*cobra.Command) string {
 	var b strings.Builder
 	for _, c := range cmds {
 		fmt.Fprintf(&b, "%s hidden=%t\n", c.CommandPath(), c.Hidden)
 		for _, f := range commandFlags(c) {
-			fmt.Fprintf(&b, "  --%s shorthand=%q %s default=%q\n", f.Name, f.Shorthand, f.Value.Type(), f.DefValue)
+			fmt.Fprintf(&b, "  --%s shorthand=%q %s default=%q\n", f.Name, f.Shorthand, f.Value.Type(), contractDefault(f.DefValue))
 		}
 	}
 	return b.String()
@@ -573,6 +620,31 @@ func TestCheckCommandReferenceCatchesMutations(t *testing.T) {
 		}
 		requireProblem(t, checkCommandReference(mutated, cmds), `row for "log" does not name its flag --json`)
 	})
+}
+
+// A default under the home, config, cache or temp directory renders as a
+// placeholder, not the host's path; any other default renders unchanged.
+func TestCommandContractNormalizesHostDefaults(t *testing.T) {
+	if len(contractHostDirs) == 0 {
+		t.Skip("no host directory resolved")
+	}
+	root := &cobra.Command{Use: "nocklock"}
+	for i, d := range contractHostDirs {
+		root.Flags().String(fmt.Sprintf("dir%d", i), filepath.Join(d[0], "nocklock"), "")
+	}
+	root.Flags().String("plain", "/etc/nocklock", "")
+	got := commandsGolden([]*cobra.Command{root})
+	for _, d := range contractHostDirs {
+		if strings.Contains(got, `"`+d[0]) {
+			t.Errorf("golden pins host path %s:\n%s", d[0], got)
+		}
+		if !strings.Contains(got, `default="`+filepath.Join(d[1], "nocklock")+`"`) {
+			t.Errorf("golden does not render %s as %s:\n%s", d[0], d[1], got)
+		}
+	}
+	if !strings.Contains(got, `--plain shorthand="" string default="/etc/nocklock"`) {
+		t.Errorf("golden changed a host-independent default:\n%s", got)
+	}
 }
 
 // A flag's shorthand is pinned by the golden and must be named in its row.

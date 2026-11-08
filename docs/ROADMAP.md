@@ -15,7 +15,7 @@ v0.17.0 released 2026-11-02 with a fail-closed signing path, opt-in durable egre
 
 ## Next: 1.0
 
-All four bars verified. `docs/reference/cli.md` becomes the compatibility contract for the public CLI, config schema, exit codes, egress levels and `verify --audit` states. Add contract tests and update `CONTRIBUTING.md` and `AGENTS.md` when that promise takes effect.
+All four bars verified. `docs/reference/cli.md` becomes the compatibility contract for the public CLI, config schema, exit codes, egress levels and `verify --audit` states, held by the contract tests in `internal/cli/contract_test.go`. Update `CONTRIBUTING.md` and `AGENTS.md` when that promise takes effect.
 
 ## Later: outside the 1.0 bar
 
