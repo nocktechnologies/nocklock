@@ -3,11 +3,16 @@ package cli
 import (
 	"flag"
 	"fmt"
+	"go/ast"
+	"go/parser"
+	"go/token"
+	"maps"
 	"os"
 	"path/filepath"
 	"reflect"
 	"regexp"
 	"slices"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -58,8 +63,8 @@ func checkContractGolden(t *testing.T, name, got string) {
 	}
 }
 
-// sourceStrings returns every first submatch of re in a package source file.
-// It pins value sets that the code declares only as constants or switch cases.
+// sourceStrings returns every first submatch of re in a source file. wrap's
+// flag tokens exist only as switch cases and prefixes in flagparse.go.
 func sourceStrings(t *testing.T, path string, re *regexp.Regexp) []string {
 	t.Helper()
 	data, err := os.ReadFile(path)
@@ -72,6 +77,76 @@ func sourceStrings(t *testing.T, path string, re *regexp.Regexp) []string {
 	}
 	return out
 }
+
+// declaredConsts returns the values of every string constant of type
+// typeName declared in the non-test files of the package in dir, so a value
+// added in any file of that package is seen.
+func declaredConsts(t *testing.T, dir, typeName string) []string {
+	t.Helper()
+	files, err := filepath.Glob(filepath.Join(dir, "*.go"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var out []string
+	fset := token.NewFileSet()
+	for _, path := range files {
+		if strings.HasSuffix(path, "_test.go") {
+			continue
+		}
+		f, err := parser.ParseFile(fset, path, nil, 0)
+		if err != nil {
+			t.Fatal(err)
+		}
+		ast.Inspect(f, func(n ast.Node) bool {
+			spec, ok := n.(*ast.ValueSpec)
+			if !ok {
+				return true
+			}
+			if id, ok := spec.Type.(*ast.Ident); !ok || id.Name != typeName {
+				return true
+			}
+			for _, v := range spec.Values {
+				if lit, ok := v.(*ast.BasicLit); ok && lit.Kind == token.STRING {
+					value, err := strconv.Unquote(lit.Value)
+					if err != nil {
+						t.Fatal(err)
+					}
+					out = append(out, value)
+				}
+			}
+			return true
+		})
+	}
+	return out
+}
+
+// checkDeclaredSet requires the constants of typeName declared in dir to be
+// exactly the keys of want, eval to map each to its pinned value, and the
+// reference to contain docNeedle(value) for each.
+func checkDeclaredSet[K ~string, V comparable](t *testing.T, dir, typeName string, want map[K]V, eval func(K) V, docNeedle func(string) string) {
+	t.Helper()
+	declared := declaredConsts(t, dir, typeName)
+	slices.Sort(declared)
+	var pinned []string
+	for k := range maps.Keys(want) {
+		pinned = append(pinned, string(k))
+	}
+	slices.Sort(pinned)
+	if !slices.Equal(declared, pinned) {
+		t.Fatalf("%s constants declared in %s = %q, pinned %q (update docs/reference/cli.md and this test together)", typeName, dir, declared, pinned)
+	}
+	ref := readCLIReference(t)
+	for k, v := range want {
+		if got := eval(k); got != v {
+			t.Errorf("%s %q maps to %v, want %v", typeName, k, got, v)
+		}
+		if !strings.Contains(ref, docNeedle(string(k))) {
+			t.Errorf("%s does not contain %q", cliReferencePath, docNeedle(string(k)))
+		}
+	}
+}
+
+func tableRow(v string) string { return "| `" + v + "` |" }
 
 // contractCommands returns every command under the root, cobra's help and
 // completion built-ins included, as Execute registers them.
@@ -112,8 +187,9 @@ func commandFlags(c *cobra.Command) []*pflag.Flag {
 }
 
 func TestCLIContractCommandsAndFlags(t *testing.T) {
+	cmds := contractCommands()
 	var b strings.Builder
-	for _, c := range contractCommands() {
+	for _, c := range cmds {
 		fmt.Fprintf(&b, "%s hidden=%t\n", c.CommandPath(), c.Hidden)
 		for _, f := range commandFlags(c) {
 			fmt.Fprintf(&b, "  --%s %s default=%q\n", f.Name, f.Value.Type(), f.DefValue)
@@ -122,7 +198,7 @@ func TestCLIContractCommandsAndFlags(t *testing.T) {
 	checkContractGolden(t, "commands.golden", b.String())
 
 	ref := readCLIReference(t)
-	for _, c := range contractCommands() {
+	for _, c := range cmds {
 		if c == rootCmd || isCobraBuiltin(c) {
 			continue
 		}
@@ -187,7 +263,10 @@ func TestCLIContractWrapFlags(t *testing.T) {
 
 	ref := readCLIReference(t)
 	for _, tok := range want {
-		if !strings.Contains(ref, strings.TrimSuffix(tok, "=")) {
+		if strings.HasSuffix(tok, "=") {
+			continue
+		}
+		if !strings.Contains(ref, tok) {
 			t.Errorf("%s does not name wrap flag %s", cliReferencePath, tok)
 		}
 	}
@@ -209,8 +288,7 @@ func configKeys(prefix string, t reflect.Type) []string {
 		}
 		ft := f.Type
 		if ft.Kind() == reflect.Slice && ft.Elem().Kind() == reflect.Struct {
-			out = append(out, configKeys(key, ft.Elem())...)
-			continue
+			ft = ft.Elem()
 		}
 		if ft.Kind() == reflect.Struct {
 			out = append(out, configKeys(key, ft)...)
@@ -249,55 +327,27 @@ func TestCLIContractConfigSchema(t *testing.T) {
 	}
 }
 
+// The full derivation of each level is TestEffectiveEgressLevelTruthTable.
 func TestCLIContractEgressLevels(t *testing.T) {
-	want := []string{"KERNEL", "CONFINED", "SEATBELT", "ADVISORY", "OFF", "UNREACHABLE"}
-	got := sourceStrings(t, "egress_level.go", regexp.MustCompile(`egressLevel = "([A-Z]+)"`))
-	if !reflect.DeepEqual(got, want) {
-		t.Fatalf("egress levels = %q, want %q", got, want)
-	}
-	// Only the kernel-backed levels satisfy require_enforced; the full
-	// derivation is TestEffectiveEgressLevelTruthTable.
-	for _, level := range want {
-		meets := level == "KERNEL" || level == "CONFINED" || level == "SEATBELT"
-		if got := egressLevelMeetsRequirement(egressLevel(level)); got != meets {
-			t.Errorf("egressLevelMeetsRequirement(%s) = %t, want %t", level, got, meets)
-		}
-	}
-	ref := readCLIReference(t)
-	for _, level := range want {
-		if !strings.Contains(ref, "| `"+level+"` |") {
-			t.Errorf("%s egress level table has no row for %s", cliReferencePath, level)
-		}
-	}
+	checkDeclaredSet(t, ".", "egressLevel", map[egressLevel]bool{
+		egressLevelKernel:      true,
+		egressLevelConfined:    true,
+		egressLevelSeatbelt:    true,
+		egressLevelAdvisory:    false,
+		egressLevelOff:         false,
+		egressLevelUnreachable: false,
+	}, egressLevelMeetsRequirement, tableRow)
 }
 
 func TestCLIContractVerifyAuditRunStates(t *testing.T) {
-	want := map[logging.RunLifecycleStatus]bool{
+	checkDeclaredSet(t, "../logging", "RunLifecycleStatus", map[logging.RunLifecycleStatus]bool{
 		logging.RunClosed:         false,
 		logging.RunUnclosed:       false,
 		logging.RunPruned:         false,
 		logging.RunCloseMismatch:  true,
 		logging.RunRowsAfterClose: true,
 		logging.RunLegacy:         false,
-	}
-	declared := sourceStrings(t, "../logging/run_close.go", regexp.MustCompile(`RunLifecycleStatus = "([a-z_]+)"`))
-	if len(declared) != len(want) {
-		t.Fatalf("run states declared in run_close.go = %q, want the %d pinned here", declared, len(want))
-	}
-	ref := readCLIReference(t)
-	for _, s := range declared {
-		failure, ok := want[logging.RunLifecycleStatus(s)]
-		if !ok {
-			t.Errorf("run state %q is not pinned", s)
-			continue
-		}
-		if got := logging.RunLifecycleStatus(s).Failure(); got != failure {
-			t.Errorf("%s.Failure() = %t, want %t", s, got, failure)
-		}
-		if !strings.Contains(ref, "| `"+s+"` |") {
-			t.Errorf("%s run-state table has no row for %s", cliReferencePath, s)
-		}
-	}
+	}, logging.RunLifecycleStatus.Failure, tableRow)
 }
 
 func TestCLIContractDoctorExitCodes(t *testing.T) {
@@ -307,26 +357,9 @@ func TestCLIContractDoctorExitCodes(t *testing.T) {
 		doctorVerdictPartial:     3,
 		doctorVerdictUnprotected: 4,
 	}
-	declared := sourceStrings(t, "doctor.go", regexp.MustCompile(`doctorVerdict = "([A-Z ]+)"`))
-	if len(declared) != len(want) {
-		t.Fatalf("doctor verdicts declared in doctor.go = %q, want the %d pinned here", declared, len(want))
-	}
-	ref := readCLIReference(t)
-	for _, v := range declared {
-		code, ok := want[doctorVerdict(v)]
-		if !ok {
-			t.Errorf("doctor verdict %q is not pinned", v)
-			continue
-		}
-		if got := doctorExitCode(doctorVerdict(v)); got != code {
-			t.Errorf("doctorExitCode(%s) = %d, want %d", v, got, code)
-		}
-		if !strings.Contains(ref, "`"+v+"`") {
-			t.Errorf("%s does not name doctor verdict %s", cliReferencePath, v)
-		}
-	}
+	checkDeclaredSet(t, ".", "doctorVerdict", want, doctorExitCode, func(v string) string { return "`" + v + "`" })
 	// An unrecognized verdict fails closed to GAPS FOUND.
-	if got := doctorExitCode("UNKNOWN"); got != 2 {
-		t.Errorf("doctorExitCode(UNKNOWN) = %d, want 2", got)
+	if got := doctorExitCode("UNKNOWN"); got != want[doctorVerdictGapsFound] {
+		t.Errorf("doctorExitCode(UNKNOWN) = %d, want %d", got, want[doctorVerdictGapsFound])
 	}
 }
