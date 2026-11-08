@@ -102,10 +102,14 @@ func declaredConsts(t *testing.T, dir, typeName string) []string {
 			if !ok {
 				return true
 			}
-			if id, ok := spec.Type.(*ast.Ident); !ok || id.Name != typeName {
-				return true
-			}
+			typed := isIdent(spec.Type, typeName)
 			for _, v := range spec.Values {
+				// const x typeName = "v", or const x = typeName("v").
+				if call, ok := v.(*ast.CallExpr); ok && isIdent(call.Fun, typeName) && len(call.Args) == 1 {
+					v = call.Args[0]
+				} else if !typed {
+					continue
+				}
 				if lit, ok := v.(*ast.BasicLit); ok && lit.Kind == token.STRING {
 					value, err := strconv.Unquote(lit.Value)
 					if err != nil {
@@ -118,6 +122,38 @@ func declaredConsts(t *testing.T, dir, typeName string) []string {
 		})
 	}
 	return out
+}
+
+func isIdent(e ast.Expr, name string) bool {
+	id, ok := e.(*ast.Ident)
+	return ok && id.Name == name
+}
+
+func TestDeclaredConstsFindsTypedAndConvertedConstants(t *testing.T) {
+	dir := t.TempDir()
+	src := `package p
+
+type Level string
+type Other string
+
+const (
+	typed     Level = "typed"
+	converted       = Level("converted")
+	other     Other = "other"
+	otherConv       = Other("other-conv")
+	untyped         = "untyped"
+)
+
+var _ = Level("var-converted")
+`
+	if err := os.WriteFile(filepath.Join(dir, "p.go"), []byte(src), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	got := declaredConsts(t, dir, "Level")
+	slices.Sort(got)
+	if want := []string{"converted", "typed", "var-converted"}; !slices.Equal(got, want) {
+		t.Fatalf("declaredConsts(Level) = %q, want %q", got, want)
+	}
 }
 
 // checkDeclaredSet requires the constants of typeName declared in dir to be
@@ -273,7 +309,9 @@ func TestCLIContractWrapFlags(t *testing.T) {
 }
 
 // configKeys lists every TOML key reachable from t as dotted paths with their
-// Go types, in declaration order.
+// Go types, in declaration order. Each table is listed before its keys as
+// "<path> [table]" or "<path> [[table]]", so a change between a table and an
+// array of tables changes the list.
 func configKeys(prefix string, t reflect.Type) []string {
 	var out []string
 	for i := 0; i < t.NumField(); i++ {
@@ -288,9 +326,12 @@ func configKeys(prefix string, t reflect.Type) []string {
 		}
 		ft := f.Type
 		if ft.Kind() == reflect.Slice && ft.Elem().Kind() == reflect.Struct {
-			ft = ft.Elem()
+			out = append(out, key+" [[table]]")
+			out = append(out, configKeys(key, ft.Elem())...)
+			continue
 		}
 		if ft.Kind() == reflect.Struct {
+			out = append(out, key+" [table]")
 			out = append(out, configKeys(key, ft)...)
 			continue
 		}
@@ -314,7 +355,10 @@ func TestCLIContractConfigSchema(t *testing.T) {
 		}
 	}
 	for _, k := range keys {
-		path := strings.Fields(k)[0]
+		path, kind, _ := strings.Cut(k, " ")
+		if kind == "[table]" || kind == "[[table]]" {
+			continue
+		}
 		parts := strings.Split(path, ".")
 		leaf := parts[len(parts)-1]
 		row := ""
@@ -324,6 +368,26 @@ func TestCLIContractConfigSchema(t *testing.T) {
 		if !strings.Contains(row, "`"+leaf+"`") {
 			t.Errorf("%s config schema does not name %s in its table row", cliReferencePath, path)
 		}
+	}
+}
+
+func TestConfigKeysKeepsTableArrayCardinality(t *testing.T) {
+	type entry struct {
+		Name string `toml:"name"`
+	}
+	type asTable struct {
+		Rule entry `toml:"rule"`
+	}
+	type asArray struct {
+		Rule []entry `toml:"rule"`
+	}
+	table := configKeys("", reflect.TypeOf(asTable{}))
+	array := configKeys("", reflect.TypeOf(asArray{}))
+	if want := []string{"rule [table]", "rule.name string"}; !slices.Equal(table, want) {
+		t.Errorf("configKeys(table) = %q, want %q", table, want)
+	}
+	if want := []string{"rule [[table]]", "rule.name string"}; !slices.Equal(array, want) {
+		t.Errorf("configKeys(array of tables) = %q, want %q", array, want)
 	}
 }
 

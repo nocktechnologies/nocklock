@@ -6,7 +6,7 @@ All notable changes to NockLock will be documented in this file.
 
 ### Tests
 
-- CLI contract tests (`internal/cli/contract_test.go`) pin the command tree, every flag with its type and default, the `wrap` flag tokens, every config key with its type, the egress levels, the `verify --audit` run states and the `doctor` exit codes, with golden files in `internal/cli/testdata/contract/`. They fail when the code changes the surface or `docs/reference/cli.md` stops naming part of it.
+- CLI contract tests (`internal/cli/contract_test.go`) pin the command tree, every flag with its type and default, the `wrap` flag tokens, every config key with its type and whether each table is a single table or an array of tables, the egress levels, the `verify --audit` run states and the `doctor` exit codes, with golden files in `internal/cli/testdata/contract/`. They fail when the code changes the surface or `docs/reference/cli.md` stops naming part of it.
 
 ### Documentation
 
