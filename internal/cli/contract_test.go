@@ -99,11 +99,10 @@ func declaredConsts(dir, typeName string) ([]string, error) {
 		if err != nil {
 			return nil, err
 		}
-		var scanErr error
-		ast.Inspect(f, func(n ast.Node) bool {
-			decl, ok := n.(*ast.GenDecl)
-			if !ok || decl.Tok != token.CONST || scanErr != nil {
-				return scanErr == nil
+		for _, d := range f.Decls {
+			decl, ok := d.(*ast.GenDecl)
+			if !ok || decl.Tok != token.CONST {
+				continue
 			}
 			for _, s := range decl.Specs {
 				spec := s.(*ast.ValueSpec)
@@ -116,21 +115,15 @@ func declaredConsts(dir, typeName string) ([]string, error) {
 					}
 					lit, ok := ast.Unparen(v).(*ast.BasicLit)
 					if !ok || lit.Kind != token.STRING {
-						scanErr = fmt.Errorf("%s: a %s constant's value is not a string literal; declare it as one or teach declaredConsts the form", fset.Position(v.Pos()), typeName)
-						return false
+						return nil, fmt.Errorf("%s: a %s constant's value is not a string literal; declare it as one or teach declaredConsts the form", fset.Position(v.Pos()), typeName)
 					}
 					value, err := strconv.Unquote(lit.Value)
 					if err != nil {
-						scanErr = err
-						return false
+						return nil, err
 					}
 					out = append(out, value)
 				}
 			}
-			return true
-		})
-		if scanErr != nil {
-			return nil, scanErr
 		}
 	}
 	return out, nil
@@ -365,8 +358,10 @@ func configKeys(prefix string, t reflect.Type) []string {
 			key = prefix + "." + name
 		}
 		ft, kind := derefType(f.Type), "[table]"
-		if ft.Kind() == reflect.Slice && derefType(ft.Elem()).Kind() == reflect.Struct {
-			ft, kind = derefType(ft.Elem()), "[[table]]"
+		if ft.Kind() == reflect.Slice {
+			if elem := derefType(ft.Elem()); elem.Kind() == reflect.Struct {
+				ft, kind = elem, "[[table]]"
+			}
 		}
 		if ft.Kind() == reflect.Struct {
 			out = append(out, key+" "+kind)
@@ -402,21 +397,30 @@ func TestCLIContractConfigSchema(t *testing.T) {
 	}
 	for _, k := range keys {
 		path, kind, _ := strings.Cut(k, " ")
-		// The reference writes an array of tables as `[[path]]`, and only those.
-		if kind == "[table]" || kind == "[[table]]" {
-			if documented := strings.Contains(ref, "`[["+path+"]]`"); documented != (kind == "[[table]]") {
-				t.Errorf("%s writes %s as an array of tables = %t, schema says %s", cliReferencePath, path, documented, kind)
-			}
-			continue
-		}
 		parts := strings.Split(path, ".")
-		leaf := parts[len(parts)-1]
+		// A table is looked up from its own row, a key from its table's.
+		n := len(parts)
+		if !strings.HasSuffix(kind, "table]") {
+			n--
+		}
 		row := ""
-		for n := len(parts) - 1; n > 0 && row == ""; n-- {
+		for ; n > 0 && row == ""; n-- {
 			row = rows[strings.Join(parts[:n], ".")]
 		}
-		if !strings.Contains(row, "`"+leaf+"`") {
-			t.Errorf("%s config schema does not name %s in its table row", cliReferencePath, path)
+		switch kind {
+		case "[table]":
+			// Its keys carry its row; that row must not call it an array.
+			if strings.Contains(row, "`[["+path+"]]`") {
+				t.Errorf("%s writes %s as an array of tables, schema says %s", cliReferencePath, path, kind)
+			}
+		case "[[table]]":
+			if !strings.Contains(row, "`[["+path+"]]`") {
+				t.Errorf("%s config schema does not name %s as `[[%s]]` in its table row", cliReferencePath, path, path)
+			}
+		default:
+			if !strings.Contains(row, "`"+parts[len(parts)-1]+"`") {
+				t.Errorf("%s config schema does not name %s in its table row", cliReferencePath, path)
+			}
 		}
 	}
 }
