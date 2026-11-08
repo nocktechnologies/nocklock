@@ -79,18 +79,22 @@ func sourceStrings(t *testing.T, path string, re *regexp.Regexp) []string {
 }
 
 // declaredConsts returns the values of every string constant of type
-// typeName declared in the non-test files of the package in dir, so a value
-// added in any file of that package is seen. A constant is matched by its
-// declared type (x T = "v") or a conversion (x = T("v")); one whose value is
-// not a string literal is an error, not a silent skip, so a new value cannot
-// slip past the pinned set.
+// typeName declared at package level in the non-test files of the package in
+// dir, so a value added in any file of that package is seen. A constant's type
+// is its declared type (x T = "v") or, without one, the type of its value: a
+// conversion (x = T("v")), another constant of the package (x = y), or the
+// previous spec's in a const block (implicit repetition). One of typeName
+// whose value is not a string literal, a conversion of one, or such a
+// constant is an error, not a silent skip, so a new value cannot slip past
+// the pinned set.
 func declaredConsts(dir, typeName string) ([]string, error) {
 	files, err := filepath.Glob(filepath.Join(dir, "*.go"))
 	if err != nil {
 		return nil, err
 	}
-	var out []string
 	fset := token.NewFileSet()
+	var specs []*constSpec
+	named := map[string]*constSpec{}
 	for _, path := range files {
 		if strings.HasSuffix(path, "_test.go") {
 			continue
@@ -104,29 +108,108 @@ func declaredConsts(dir, typeName string) ([]string, error) {
 			if !ok || decl.Tok != token.CONST {
 				continue
 			}
+			var typ ast.Expr
+			var values []ast.Expr
 			for _, s := range decl.Specs {
 				spec := s.(*ast.ValueSpec)
-				typed := isIdent(spec.Type, typeName)
-				for _, v := range spec.Values {
-					if call, ok := v.(*ast.CallExpr); ok && isIdent(call.Fun, typeName) && len(call.Args) == 1 {
-						v = call.Args[0]
-					} else if !typed {
-						continue
+				if len(spec.Values) > 0 {
+					typ, values = spec.Type, spec.Values
+				}
+				for i, n := range spec.Names {
+					if i >= len(values) {
+						return nil, fmt.Errorf("%s: constant %s has no value", fset.Position(n.Pos()), n.Name)
 					}
-					lit, ok := ast.Unparen(v).(*ast.BasicLit)
-					if !ok || lit.Kind != token.STRING {
-						return nil, fmt.Errorf("%s: a %s constant's value is not a string literal; declare it as one or teach declaredConsts the form", fset.Position(v.Pos()), typeName)
+					c := &constSpec{typ: typ, value: values[i], pos: n.Pos()}
+					specs = append(specs, c)
+					if n.Name != "_" {
+						named[n.Name] = c
 					}
-					value, err := strconv.Unquote(lit.Value)
-					if err != nil {
-						return nil, err
-					}
-					out = append(out, value)
 				}
 			}
 		}
 	}
+	r := constResolver{typeName: typeName, named: named}
+	var out []string
+	for _, c := range specs {
+		if r.typeOf(c) != typeName {
+			continue
+		}
+		value, ok := r.value(c.value)
+		if !ok {
+			return nil, fmt.Errorf("%s: a %s constant's value is not a string literal; declare it as one or teach declaredConsts the form", fset.Position(c.pos), typeName)
+		}
+		out = append(out, value)
+	}
 	return out, nil
+}
+
+type constSpec struct {
+	typ, value ast.Expr
+	pos        token.Pos
+}
+
+// constResolver resolves package-level constants by name, enough to classify
+// string constants by type; it is no substitute for go/types.
+type constResolver struct {
+	typeName string
+	named    map[string]*constSpec
+}
+
+// typeOf returns the name of c's type, "" for an untyped constant or a type
+// declaredConsts never pins, such as one from another package.
+func (r constResolver) typeOf(c *constSpec) string {
+	if c.typ != nil {
+		if id, ok := ast.Unparen(c.typ).(*ast.Ident); ok {
+			return id.Name
+		}
+		return ""
+	}
+	return r.exprType(c.value)
+}
+
+func (r constResolver) exprType(e ast.Expr) string {
+	switch e := ast.Unparen(e).(type) {
+	case *ast.Ident:
+		if c, ok := r.named[e.Name]; ok {
+			return r.typeOf(c)
+		}
+	case *ast.CallExpr:
+		if id, ok := ast.Unparen(e.Fun).(*ast.Ident); ok {
+			return id.Name
+		}
+	case *ast.UnaryExpr:
+		return r.exprType(e.X)
+	case *ast.BinaryExpr:
+		switch e.Op {
+		case token.EQL, token.NEQ, token.LSS, token.LEQ, token.GTR, token.GEQ, token.LAND, token.LOR:
+			return "bool"
+		}
+		if x := r.exprType(e.X); x != "" {
+			return x
+		}
+		return r.exprType(e.Y)
+	}
+	return ""
+}
+
+func (r constResolver) value(e ast.Expr) (string, bool) {
+	switch e := ast.Unparen(e).(type) {
+	case *ast.BasicLit:
+		if e.Kind != token.STRING {
+			return "", false
+		}
+		v, err := strconv.Unquote(e.Value)
+		return v, err == nil
+	case *ast.Ident:
+		if c, ok := r.named[e.Name]; ok {
+			return r.value(c.value)
+		}
+	case *ast.CallExpr:
+		if isIdent(e.Fun, r.typeName) && len(e.Args) == 1 {
+			return r.value(e.Args[0])
+		}
+	}
+	return "", false
 }
 
 func isIdent(e ast.Expr, name string) bool {
@@ -167,13 +250,56 @@ var _ = Level("var-converted")
 	}
 }
 
+// A Level constant typed only by inference is found, so adding one changes
+// the declared set and fails the pinned-set check in checkDeclaredSet.
+func TestDeclaredConstsFindsInferredConstants(t *testing.T) {
+	for _, tc := range []struct {
+		decl string
+		want []string
+	}{
+		{"const a Level = \"a\"\nconst b = a", []string{"a", "a"}},
+		{"const b = a\nconst a Level = \"a\"", []string{"a", "a"}},
+		{"const a = Level(\"a\")\nconst b = (a)", []string{"a", "a"}},
+		{"const (\n\ta Level = \"a\"\n\tb\n)", []string{"a", "a"}},
+		{"const b Level = name", []string{"n"}},
+		{"const b = Level(name)", []string{"n"}},
+		{"const o Other = \"o\"\nconst b = o", nil},
+		{"const b = name", nil},
+	} {
+		got, err := declaredConsts(writeConstFixture(t, tc.decl), "Level")
+		if err != nil {
+			t.Errorf("declaredConsts(%s): %v", tc.decl, err)
+			continue
+		}
+		if !slices.Equal(got, tc.want) {
+			t.Errorf("declaredConsts(%s) = %q, want %q", tc.decl, got, tc.want)
+		}
+	}
+}
+
+// A conversion is found however it is parenthesized.
+func TestDeclaredConstsFindsParenthesizedConversions(t *testing.T) {
+	for _, decl := range []string{
+		`const x = (Level("x"))`,
+		`const x = Level(("x"))`,
+		`const x = ((Level)(("x")))`,
+	} {
+		got, err := declaredConsts(writeConstFixture(t, decl), "Level")
+		if err != nil || !slices.Equal(got, []string{"x"}) {
+			t.Errorf("declaredConsts(%s) = %q, %v, want [\"x\"]", decl, got, err)
+		}
+	}
+}
+
 // A Level constant whose value the scan cannot read fails instead of being
 // left out of the pinned set.
 func TestDeclaredConstsRefusesUnreadableValues(t *testing.T) {
 	for _, decl := range []string{
 		`const bad Level = "a" + "b"`,
-		`const bad Level = name`,
-		`const bad = Level(name)`,
+		`const bad Level = name + "b"`,
+		`const bad = Level(name + "b")`,
+		"const a Level = \"a\"\nconst bad = a + \"b\"",
+		`const bad Level = undeclared`,
 	} {
 		if got, err := declaredConsts(writeConstFixture(t, decl), "Level"); err == nil {
 			t.Errorf("declaredConsts(%s) = %q, want an error", decl, got)
@@ -229,15 +355,6 @@ func contractCommands() []*cobra.Command {
 	return out
 }
 
-func isCobraBuiltin(c *cobra.Command) bool {
-	for p := c; p != nil; p = p.Parent() {
-		if p.Name() == "help" || p.Name() == "completion" {
-			return p.Parent() == rootCmd
-		}
-	}
-	return false
-}
-
 // commandFlags lists a command's own flags, skipping cobra's help flag, which
 // only some commands carry depending on which ones a test has executed.
 func commandFlags(c *cobra.Command) []*pflag.Flag {
@@ -250,34 +367,173 @@ func commandFlags(c *cobra.Command) []*pflag.Flag {
 	return out
 }
 
-func TestCLIContractCommandsAndFlags(t *testing.T) {
-	cmds := contractCommands()
+// commandsGolden renders every command path with its own flags, each with
+// its shorthand, type and default.
+func commandsGolden(cmds []*cobra.Command) string {
 	var b strings.Builder
 	for _, c := range cmds {
 		fmt.Fprintf(&b, "%s hidden=%t\n", c.CommandPath(), c.Hidden)
 		for _, f := range commandFlags(c) {
-			fmt.Fprintf(&b, "  --%s %s default=%q\n", f.Name, f.Value.Type(), f.DefValue)
+			fmt.Fprintf(&b, "  --%s shorthand=%q %s default=%q\n", f.Name, f.Shorthand, f.Value.Type(), f.DefValue)
 		}
 	}
-	checkContractGolden(t, "commands.golden", b.String())
+	return b.String()
+}
 
-	ref := readCLIReference(t)
-	for _, c := range cmds {
-		if c == rootCmd || isCobraBuiltin(c) {
+var backtickSpanRE = regexp.MustCompile("`([^`]+)`")
+
+// commandRows maps each command named in the first cell of a row of ref's
+// Commands table to that row. The cell writes commands as backticked
+// synopses ("`anchor emit [--out <file>]`"): the name is the words before the
+// first flag, argument or placeholder, and a word written a\|b names each
+// alternative. A command named in several rows maps to all of them.
+func commandRows(ref string) map[string]string {
+	rows := map[string]string{}
+	_, section, _ := strings.Cut(ref, "\n## Commands\n")
+	section, _, _ = strings.Cut(section, "\n## ")
+	for _, line := range strings.Split(section, "\n") {
+		if !strings.HasPrefix(line, "| `") {
 			continue
 		}
-		name := strings.TrimPrefix(c.CommandPath(), "nocklock ")
-		if !strings.Contains(ref, "`"+name) {
-			t.Errorf("%s does not name command %q", cliReferencePath, name)
+		first, _, _ := strings.Cut(line, " | ")
+		for _, m := range backtickSpanRE.FindAllStringSubmatch(first, -1) {
+			names := []string{""}
+			for _, w := range strings.Fields(m[1]) {
+				if strings.ContainsAny(w[:1], "[<-") {
+					break
+				}
+				var next []string
+				for _, n := range names {
+					for _, alt := range strings.Split(w, `\|`) {
+						next = append(next, strings.TrimSpace(n+" "+alt))
+					}
+				}
+				names = next
+			}
+			for _, n := range names {
+				rows[n] += line + "\n"
+			}
+		}
+	}
+	return rows
+}
+
+// namesToken reports whether text contains tok as a whole token, so --out
+// does not match --output and -j does not match --json.
+func namesToken(text, tok string) bool {
+	return regexp.MustCompile(`(^|[^\w-])` + regexp.QuoteMeta(tok) + `($|[^\w-])`).MatchString(text)
+}
+
+// checkCommandReference returns every command of cmds, cobra's built-ins
+// included, that ref's Commands table does not name exactly, and every flag
+// or shorthand of a visible command that the command's own row does not name.
+// A group command without flags may go unnamed: its subcommands' rows name it.
+func checkCommandReference(ref string, cmds []*cobra.Command) []string {
+	rows := commandRows(ref)
+	var problems []string
+	for _, c := range cmds {
+		if !c.HasParent() {
+			continue
+		}
+		name := strings.TrimPrefix(c.CommandPath(), c.Root().Name()+" ")
+		row, ok := rows[name]
+		if !ok {
+			if !c.HasSubCommands() || len(commandFlags(c)) > 0 {
+				problems = append(problems, fmt.Sprintf("%s Commands table does not name command %q", cliReferencePath, name))
+			}
+			continue
 		}
 		if c.Hidden {
 			continue
 		}
 		for _, f := range commandFlags(c) {
-			if !strings.Contains(ref, "--"+f.Name) {
-				t.Errorf("%s does not name flag --%s of %q", cliReferencePath, f.Name, name)
+			toks := []string{"--" + f.Name}
+			if f.Shorthand != "" {
+				toks = append(toks, "-"+f.Shorthand)
+			}
+			for _, tok := range toks {
+				if !namesToken(row, tok) {
+					problems = append(problems, fmt.Sprintf("%s row for %q does not name its flag %s", cliReferencePath, name, tok))
+				}
 			}
 		}
+	}
+	return problems
+}
+
+func TestCLIContractCommandsAndFlags(t *testing.T) {
+	cmds := contractCommands()
+	checkContractGolden(t, "commands.golden", commandsGolden(cmds))
+	for _, p := range checkCommandReference(readCLIReference(t), cmds) {
+		t.Error(p)
+	}
+}
+
+// mutateReference returns ref with old replaced by new, failing when old is
+// absent so a control cannot go stale and pass vacuously.
+func mutateReference(t *testing.T, ref, old, new string) string {
+	t.Helper()
+	if !strings.Contains(ref, old) {
+		t.Fatalf("%s no longer contains %q; update this control", cliReferencePath, old)
+	}
+	return strings.Replace(ref, old, new, 1)
+}
+
+func requireProblem(t *testing.T, problems []string, want string) {
+	t.Helper()
+	for _, p := range problems {
+		if strings.Contains(p, want) {
+			return
+		}
+	}
+	t.Errorf("reference check problems %q, want one containing %q", problems, want)
+}
+
+// Each mutation of the real reference is caught by the check that passes on
+// the unmutated page.
+func TestCheckCommandReferenceCatchesMutations(t *testing.T) {
+	ref, cmds := readCLIReference(t), contractCommands()
+	if p := checkCommandReference(ref, cmds); len(p) > 0 {
+		t.Fatalf("unmutated reference: %q", p)
+	}
+	t.Run("built-ins", func(t *testing.T) {
+		mutated := mutateReference(t, ref, "| `help [command]`, `completion bash\\|zsh\\|fish\\|powershell` |", "| |")
+		p := checkCommandReference(mutated, cmds)
+		requireProblem(t, p, `command "help"`)
+		requireProblem(t, p, `command "completion zsh"`)
+	})
+	t.Run("exact name", func(t *testing.T) {
+		// The old prefix match accepted `logging` as naming `log`.
+		mutated := mutateReference(t, ref, "| `log` |", "| `logging` |")
+		requireProblem(t, checkCommandReference(mutated, cmds), `command "log"`)
+	})
+	t.Run("own row", func(t *testing.T) {
+		// --json stays on the page in the doctor, verify and scan rows.
+		mutated := mutateReference(t, ref, "`--since`, `--json`, `--stats`", "`--since`, `--stats`")
+		if !strings.Contains(mutated, "--json") {
+			t.Fatal("control needs --json elsewhere on the page")
+		}
+		requireProblem(t, checkCommandReference(mutated, cmds), `row for "log" does not name its flag --json`)
+	})
+}
+
+// A flag's shorthand is pinned by the golden and must be named in its row.
+func TestCommandContractPinsShorthands(t *testing.T) {
+	tree := func(shorthand string) []*cobra.Command {
+		root := &cobra.Command{Use: "nocklock"}
+		sub := &cobra.Command{Use: "scan", Run: func(*cobra.Command, []string) {}}
+		sub.Flags().BoolP("json", shorthand, false, "")
+		root.AddCommand(sub)
+		return []*cobra.Command{root, sub}
+	}
+	with, changed, removed := commandsGolden(tree("j")), commandsGolden(tree("J")), commandsGolden(tree(""))
+	if with == changed || with == removed {
+		t.Fatalf("golden does not pin the shorthand:\n%s", with)
+	}
+	ref := "\n## Commands\n| `scan` | `--json` | |\n"
+	requireProblem(t, checkCommandReference(ref, tree("j")), `row for "scan" does not name its flag -j`)
+	if p := checkCommandReference(strings.Replace(ref, "`--json`", "`-j`, `--json`", 1), tree("j")); len(p) > 0 {
+		t.Errorf("shorthand named in its row: %q", p)
 	}
 }
 
@@ -325,13 +581,13 @@ func TestCLIContractWrapFlags(t *testing.T) {
 		}
 	}
 
-	ref := readCLIReference(t)
+	row := commandRows(readCLIReference(t))["wrap"]
 	for _, tok := range want {
 		if strings.HasSuffix(tok, "=") {
 			continue
 		}
-		if !strings.Contains(ref, tok) {
-			t.Errorf("%s does not name wrap flag %s", cliReferencePath, tok)
+		if !namesToken(row, tok) {
+			t.Errorf("%s row for \"wrap\" does not name its flag %s", cliReferencePath, tok)
 		}
 	}
 }
