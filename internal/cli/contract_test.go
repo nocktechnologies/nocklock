@@ -80,12 +80,14 @@ func sourceStrings(t *testing.T, path string, re *regexp.Regexp) []string {
 
 // declaredConsts returns the values of every string constant of type
 // typeName declared in the non-test files of the package in dir, so a value
-// added in any file of that package is seen.
-func declaredConsts(t *testing.T, dir, typeName string) []string {
-	t.Helper()
+// added in any file of that package is seen. A constant is matched by its
+// declared type (x T = "v") or a conversion (x = T("v")); one whose value is
+// not a string literal is an error, not a silent skip, so a new value cannot
+// slip past the pinned set.
+func declaredConsts(dir, typeName string) ([]string, error) {
 	files, err := filepath.Glob(filepath.Join(dir, "*.go"))
 	if err != nil {
-		t.Fatal(err)
+		return nil, err
 	}
 	var out []string
 	fset := token.NewFileSet()
@@ -95,67 +97,94 @@ func declaredConsts(t *testing.T, dir, typeName string) []string {
 		}
 		f, err := parser.ParseFile(fset, path, nil, 0)
 		if err != nil {
-			t.Fatal(err)
+			return nil, err
 		}
+		var scanErr error
 		ast.Inspect(f, func(n ast.Node) bool {
 			decl, ok := n.(*ast.GenDecl)
-			if !ok || decl.Tok != token.CONST {
-				return true
+			if !ok || decl.Tok != token.CONST || scanErr != nil {
+				return scanErr == nil
 			}
 			for _, s := range decl.Specs {
 				spec := s.(*ast.ValueSpec)
 				typed := isIdent(spec.Type, typeName)
 				for _, v := range spec.Values {
-					// const x typeName = "v", or const x = typeName("v").
 					if call, ok := v.(*ast.CallExpr); ok && isIdent(call.Fun, typeName) && len(call.Args) == 1 {
 						v = call.Args[0]
 					} else if !typed {
 						continue
 					}
-					if lit, ok := v.(*ast.BasicLit); ok && lit.Kind == token.STRING {
-						value, err := strconv.Unquote(lit.Value)
-						if err != nil {
-							t.Fatal(err)
-						}
-						out = append(out, value)
+					lit, ok := ast.Unparen(v).(*ast.BasicLit)
+					if !ok || lit.Kind != token.STRING {
+						scanErr = fmt.Errorf("%s: a %s constant's value is not a string literal; declare it as one or teach declaredConsts the form", fset.Position(v.Pos()), typeName)
+						return false
 					}
+					value, err := strconv.Unquote(lit.Value)
+					if err != nil {
+						scanErr = err
+						return false
+					}
+					out = append(out, value)
 				}
 			}
 			return true
 		})
+		if scanErr != nil {
+			return nil, scanErr
+		}
 	}
-	return out
+	return out, nil
 }
 
 func isIdent(e ast.Expr, name string) bool {
-	id, ok := e.(*ast.Ident)
+	id, ok := ast.Unparen(e).(*ast.Ident)
 	return ok && id.Name == name
 }
 
-func TestDeclaredConstsFindsTypedAndConvertedConstants(t *testing.T) {
+func writeConstFixture(t *testing.T, consts string) string {
+	t.Helper()
 	dir := t.TempDir()
-	src := `package p
+	src := "package p\n\ntype Level string\ntype Other string\n\nconst name = \"n\"\n\n" + consts
+	if err := os.WriteFile(filepath.Join(dir, "p.go"), []byte(src), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	return dir
+}
 
-type Level string
-type Other string
-
-const (
+func TestDeclaredConstsFindsTypedAndConvertedConstants(t *testing.T) {
+	dir := writeConstFixture(t, `const (
 	typed     Level = "typed"
 	converted       = Level("converted")
+	paren           = (Level)("paren")
 	other     Other = "other"
 	otherConv       = Other("other-conv")
 	untyped         = "untyped"
 )
 
+var typedVar Level = "typed-var"
 var _ = Level("var-converted")
-`
-	if err := os.WriteFile(filepath.Join(dir, "p.go"), []byte(src), 0o644); err != nil {
+`)
+	got, err := declaredConsts(dir, "Level")
+	if err != nil {
 		t.Fatal(err)
 	}
-	got := declaredConsts(t, dir, "Level")
 	slices.Sort(got)
-	if want := []string{"converted", "typed"}; !slices.Equal(got, want) {
+	if want := []string{"converted", "paren", "typed"}; !slices.Equal(got, want) {
 		t.Fatalf("declaredConsts(Level) = %q, want %q", got, want)
+	}
+}
+
+// A Level constant whose value the scan cannot read fails instead of being
+// left out of the pinned set.
+func TestDeclaredConstsRefusesUnreadableValues(t *testing.T) {
+	for _, decl := range []string{
+		`const bad Level = "a" + "b"`,
+		`const bad Level = name`,
+		`const bad = Level(name)`,
+	} {
+		if got, err := declaredConsts(writeConstFixture(t, decl), "Level"); err == nil {
+			t.Errorf("declaredConsts(%s) = %q, want an error", decl, got)
+		}
 	}
 }
 
@@ -164,7 +193,10 @@ var _ = Level("var-converted")
 // reference to contain docNeedle(value) for each.
 func checkDeclaredSet[K ~string, V comparable](t *testing.T, dir, typeName string, want map[K]V, eval func(K) V, docNeedle func(string) string) {
 	t.Helper()
-	declared := declaredConsts(t, dir, typeName)
+	declared, err := declaredConsts(dir, typeName)
+	if err != nil {
+		t.Fatal(err)
+	}
 	slices.Sort(declared)
 	var pinned []string
 	for k := range maps.Keys(want) {
@@ -319,17 +351,22 @@ func configKeys(prefix string, t reflect.Type) []string {
 	var out []string
 	for i := 0; i < t.NumField(); i++ {
 		f := t.Field(i)
-		tag := f.Tag.Get("toml")
-		if tag == "" || tag == "-" {
+		// BurntSushi/toml decodes an untagged exported field by its name and
+		// ignores tag options after the comma.
+		name, _, _ := strings.Cut(f.Tag.Get("toml"), ",")
+		if name == "-" || (name == "" && !f.IsExported()) {
 			continue
 		}
-		key := tag
-		if prefix != "" {
-			key = prefix + "." + tag
+		if name == "" {
+			name = f.Name
 		}
-		ft, kind := f.Type, "[table]"
-		if ft.Kind() == reflect.Slice && ft.Elem().Kind() == reflect.Struct {
-			ft, kind = ft.Elem(), "[[table]]"
+		key := name
+		if prefix != "" {
+			key = prefix + "." + name
+		}
+		ft, kind := derefType(f.Type), "[table]"
+		if ft.Kind() == reflect.Slice && derefType(ft.Elem()).Kind() == reflect.Struct {
+			ft, kind = derefType(ft.Elem()), "[[table]]"
 		}
 		if ft.Kind() == reflect.Struct {
 			out = append(out, key+" "+kind)
@@ -341,6 +378,13 @@ func configKeys(prefix string, t reflect.Type) []string {
 	return out
 }
 
+func derefType(t reflect.Type) reflect.Type {
+	for t.Kind() == reflect.Pointer {
+		t = t.Elem()
+	}
+	return t
+}
+
 func TestCLIContractConfigSchema(t *testing.T) {
 	keys := configKeys("", reflect.TypeOf(config.Config{}))
 	checkContractGolden(t, "config-schema.golden", strings.Join(keys, "\n")+"\n")
@@ -350,14 +394,19 @@ func TestCLIContractConfigSchema(t *testing.T) {
 	// for network.lookback.name.
 	rowRE := regexp.MustCompile("^\\| `\\[([a-z_.]+)\\]` \\|")
 	rows := map[string]string{}
-	for _, line := range strings.Split(readCLIReference(t), "\n") {
+	ref := readCLIReference(t)
+	for _, line := range strings.Split(ref, "\n") {
 		if m := rowRE.FindStringSubmatch(line); m != nil {
 			rows[m[1]] = line
 		}
 	}
 	for _, k := range keys {
 		path, kind, _ := strings.Cut(k, " ")
+		// The reference writes an array of tables as `[[path]]`, and only those.
 		if kind == "[table]" || kind == "[[table]]" {
+			if documented := strings.Contains(ref, "`[["+path+"]]`"); documented != (kind == "[[table]]") {
+				t.Errorf("%s writes %s as an array of tables = %t, schema says %s", cliReferencePath, path, documented, kind)
+			}
 			continue
 		}
 		parts := strings.Split(path, ".")
@@ -374,21 +423,32 @@ func TestCLIContractConfigSchema(t *testing.T) {
 
 func TestConfigKeysKeepsTableArrayCardinality(t *testing.T) {
 	type entry struct {
-		Name string `toml:"name"`
+		Name    string `toml:"name,omitempty"`
+		Timeout string
+		hidden  string
 	}
-	type asTable struct {
-		Rule entry `toml:"rule"`
-	}
-	type asArray struct {
-		Rule []entry `toml:"rule"`
-	}
-	table := configKeys("", reflect.TypeOf(asTable{}))
-	array := configKeys("", reflect.TypeOf(asArray{}))
-	if want := []string{"rule [table]", "rule.name string"}; !slices.Equal(table, want) {
-		t.Errorf("configKeys(table) = %q, want %q", table, want)
-	}
-	if want := []string{"rule [[table]]", "rule.name string"}; !slices.Equal(array, want) {
-		t.Errorf("configKeys(array of tables) = %q, want %q", array, want)
+	leaves := []string{"rule.name string", "rule.Timeout string"}
+	for _, tc := range []struct {
+		typ  reflect.Type
+		kind string
+	}{
+		{reflect.TypeOf(struct {
+			Rule entry `toml:"rule"`
+		}{}), "[table]"},
+		{reflect.TypeOf(struct {
+			Rule *entry `toml:"rule"`
+		}{}), "[table]"},
+		{reflect.TypeOf(struct {
+			Rule []entry `toml:"rule"`
+		}{}), "[[table]]"},
+		{reflect.TypeOf(struct {
+			Rule []*entry `toml:"rule"`
+		}{}), "[[table]]"},
+	} {
+		got := configKeys("", tc.typ)
+		if want := append([]string{"rule " + tc.kind}, leaves...); !slices.Equal(got, want) {
+			t.Errorf("configKeys(%v) = %q, want %q", tc.typ, got, want)
+		}
 	}
 }
 
