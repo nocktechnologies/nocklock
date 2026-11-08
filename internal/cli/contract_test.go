@@ -431,14 +431,19 @@ func commandFlags(c *cobra.Command) []*pflag.Flag {
 	return out
 }
 
-// contractHostDirs maps the host- and platform-dependent directories a flag
-// default could embed to stable placeholders, longest first so a directory
-// under the home directory keeps its own placeholder. The config and cache
-// directories differ by GOOS as well as by user. It is computed during package
-// initialization, before TestMain changes the environment, from the same
-// environment the flag defaults were registered under.
-var contractHostDirs = func() [][2]string {
-	var dirs [][2]string
+// hostDir is a host- or platform-dependent directory and the placeholder the
+// command golden writes in its place.
+type hostDir struct{ dir, placeholder string }
+
+// contractHostDirs lists the directories a flag default could embed, longest
+// first so a directory under the home directory keeps its own placeholder.
+// The config and cache directories differ by GOOS as well as by user, and /tmp
+// is listed on every platform so a fixed /tmp default renders as <tmp> on
+// Linux and macOS alike. It is computed during package initialization, before
+// TestMain changes the environment, from the environment the flag defaults
+// were registered under.
+var contractHostDirs = func() []hostDir {
+	dirs := []hostDir{{"/tmp", "<tmp>"}}
 	for _, d := range []struct {
 		placeholder string
 		dir         func() (string, error)
@@ -449,18 +454,21 @@ var contractHostDirs = func() [][2]string {
 		{"<tmp>", func() (string, error) { return os.TempDir(), nil }},
 	} {
 		if dir, err := d.dir(); err == nil && filepath.IsAbs(dir) && dir != string(filepath.Separator) {
-			dirs = append(dirs, [2]string{filepath.Clean(dir), d.placeholder})
+			dirs = append(dirs, hostDir{filepath.Clean(dir), d.placeholder})
 		}
 	}
-	slices.SortStableFunc(dirs, func(a, b [2]string) int { return len(b[0]) - len(a[0]) })
+	slices.SortStableFunc(dirs, func(a, b hostDir) int { return len(b.dir) - len(a.dir) })
 	return dirs
 }()
 
-// contractDefault returns a flag default with each host directory replaced
-// by its placeholder, so the golden passes unchanged on every host and GOOS.
+// contractDefault returns a flag default with a leading host directory
+// replaced by its placeholder, so the golden passes unchanged on every host
+// and GOOS. Only a whole leading path element matches: /tmpfs stays /tmpfs.
 func contractDefault(v string) string {
 	for _, d := range contractHostDirs {
-		v = strings.ReplaceAll(v, d[0], d[1])
+		if rest, ok := strings.CutPrefix(v, d.dir); ok && (rest == "" || rest[0] == filepath.Separator) {
+			return d.placeholder + rest
+		}
 	}
 	return v
 }
@@ -623,27 +631,28 @@ func TestCheckCommandReferenceCatchesMutations(t *testing.T) {
 }
 
 // A default under the home, config, cache or temp directory renders as a
-// placeholder, not the host's path; any other default renders unchanged.
+// placeholder, not the host's path; any other default, including one that
+// merely starts with a host directory's name, renders unchanged.
 func TestCommandContractNormalizesHostDefaults(t *testing.T) {
-	if len(contractHostDirs) == 0 {
-		t.Skip("no host directory resolved")
-	}
 	root := &cobra.Command{Use: "nocklock"}
 	for i, d := range contractHostDirs {
-		root.Flags().String(fmt.Sprintf("dir%d", i), filepath.Join(d[0], "nocklock"), "")
+		root.Flags().String(fmt.Sprintf("dir%d", i), filepath.Join(d.dir, "nocklock"), "")
 	}
 	root.Flags().String("plain", "/etc/nocklock", "")
+	root.Flags().String("prefix", "/tmpfs/nocklock", "")
 	got := commandsGolden([]*cobra.Command{root})
 	for _, d := range contractHostDirs {
-		if strings.Contains(got, `"`+d[0]) {
-			t.Errorf("golden pins host path %s:\n%s", d[0], got)
+		if strings.Contains(got, `"`+d.dir+"/") {
+			t.Errorf("golden pins host path %s:\n%s", d.dir, got)
 		}
-		if !strings.Contains(got, `default="`+filepath.Join(d[1], "nocklock")+`"`) {
-			t.Errorf("golden does not render %s as %s:\n%s", d[0], d[1], got)
+		if !strings.Contains(got, `default="`+d.placeholder+`/nocklock"`) {
+			t.Errorf("golden does not render %s as %s:\n%s", d.dir, d.placeholder, got)
 		}
 	}
-	if !strings.Contains(got, `--plain shorthand="" string default="/etc/nocklock"`) {
-		t.Errorf("golden changed a host-independent default:\n%s", got)
+	for _, want := range []string{`default="/etc/nocklock"`, `default="/tmpfs/nocklock"`} {
+		if !strings.Contains(got, want) {
+			t.Errorf("golden changed a host-independent default, want %s:\n%s", want, got)
+		}
 	}
 }
 
