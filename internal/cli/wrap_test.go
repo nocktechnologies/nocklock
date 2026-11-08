@@ -493,6 +493,22 @@ func TestWrapAcceptsAuditDBInStateDirectory(t *testing.T) {
 func runWrapWithAuditDB(t *testing.T, projectRoot, db string, flags ...string) (string, error) {
 	t.Helper()
 	t.Setenv("XDG_STATE_HOME", trustedStateRoot(t))
+	child, err := os.Executable()
+	if err != nil {
+		t.Fatalf("locate test binary: %v", err)
+	}
+	marker := filepath.Join(t.TempDir(), "child-launched")
+	err = runWrapCommand(t, projectRoot, db, append(flags,
+		"--", child, "-test.run=^TestWrapChildLaunchMarker$", wrapChildMarkerArg+marker,
+	)...)
+	return marker, err
+}
+
+// runWrapCommand runs wrap with args in projectRoot under a config with the
+// filesystem and syscall fences off, all egress allowed, and the audit log at
+// db.
+func runWrapCommand(t *testing.T, projectRoot, db string, args ...string) error {
+	t.Helper()
 	contents := fmt.Sprintf(`[filesystem]
 root = ""
 
@@ -507,17 +523,9 @@ db = %q
 `, db)
 	writeTestConfig(t, projectRoot, contents)
 	withWorkingDir(t, projectRoot)
-	child, err := os.Executable()
-	if err != nil {
-		t.Fatalf("locate test binary: %v", err)
-	}
-	marker := filepath.Join(t.TempDir(), "child-launched")
 	cmd := &cobra.Command{}
 	cmd.SetContext(context.Background())
-	err = wrapCmd.RunE(cmd, append(flags,
-		"--", child, "-test.run=^TestWrapChildLaunchMarker$", wrapChildMarkerArg+marker,
-	))
-	return marker, err
+	return wrapCmd.RunE(cmd, args)
 }
 
 func assertWrapChildLaunched(t *testing.T, marker string, err error) {

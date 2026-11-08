@@ -4,6 +4,14 @@ All notable changes to NockLock will be documented in this file.
 
 ## [Unreleased]
 
+### Tests
+
+- CLI contract tests (`internal/cli/contract_test.go`) pin the command tree (cobra's `help` and `completion` included) with each command's aliases, every flag with its shorthand, type and default, the `wrap` flag tokens, every config key with its type and whether each table is a single table or an array of tables, the egress levels, the `verify --audit` run states and the exit codes, with golden files in `internal/cli/testdata/contract/`. The exit-code tests cover `doctor`'s verdicts, `Execute()` in a subprocess (the installation-lease exit `2`, `1` for an unknown command or flag, an `exitCodeError` code passed through) and `wrap` (startup refusals at `1` and `2`, a command that cannot be launched, a failed `session_end` write, and the child's code passed through, a signal becoming `1`). They fail when the code changes the surface or `docs/reference/cli.md` stops naming part of it: each command by its exact name in the Commands table, and each flag in that command's own row. A flag default that starts with the XDG state home, the config, cache, home or temp directory, or `/tmp` is pinned with that directory written as `<state>`, `<config>`, `<cache>`, `<home>` or `<tmp>`, so it pins the same on every host and platform. Every other default is pinned literally: one that differs by platform outside those directories needs a per-platform golden, and a hard-coded `<home>/.config` path renders as `<config>` where that is the config directory (Linux) and as `<home>/.config` elsewhere. A constant built with the built-in `min` or `max` is classified by its arguments' type and refused rather than skipped.
+
+### Documentation
+
+- `docs/reference/cli.md` now matches the code. It documents the installation-lease exit `2`, the `wrap` startup refusals that exit `1` rather than `2`, how to tell a child's exit code from a NockLock failure, the egress levels, the `help` and `completion` commands, every hidden entry point, the `--profile=` and `--net-fence=` forms, the `logging.level` values, and `XDG_RUNTIME_DIR` and `SUDO_UID`. No behavior changed.
+
 ## [0.17.1] - 2026-11-05
 
 v0.17.1 requires a signed Landlock ABI 9 kernel receipt from the release commit before tagged Linux assets can be published. It also adds fence regression coverage and records publication of the signed v0.17.0 Linux installer assets.

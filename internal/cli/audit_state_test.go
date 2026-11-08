@@ -21,6 +21,7 @@ var cliTestWorkDir string
 // would scatter test audit chains through the developer's actual
 // ~/.local/state/nocklock and leave them behind.
 func TestMain(m *testing.M) {
+	runContractProcess()
 	workDir, err := os.Getwd()
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "locate test working directory: %v\n", err)

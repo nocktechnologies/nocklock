@@ -44,7 +44,7 @@ The full list is `docs/context/invariants.md`. The ones that break builds or rev
 - A test that proves a block also proves the allowed case still passes.
 - Every fence decision is written to the signed, hash-chained event log. No decision path skips it.
 - Docs, `doctor`, `wrap` banners and the README say only what is enforced, with the limits next to the claim.
-- `doctor` exits 0/2/3/4; `wrap` exits 2 on startup failure or a failed blocked-event or `session_end` audit write, otherwise with the child's code. Use `exec.ExitError.ExitCode()`, never `syscall.WaitStatus`.
+- `doctor` exits 0/2/3/4; `wrap` exits with the child's code, or 2 on a failed blocked-event or `session_end` audit write and on the startup refusals listed in `docs/reference/cli.md`; other startup errors exit 1. `internal/cli/contract_test.go` pins the CLI, config keys, egress levels and `verify --audit` states against that page. Use `exec.ExitError.ExitCode()`, never `syscall.WaitStatus`.
 - Egress levels are defined once, in `internal/cli/egress_level.go`. Do not restate them elsewhere in code.
 - Exported functions have doc comments; error messages are actionable.
 - No new dependencies without discussion.

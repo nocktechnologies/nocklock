@@ -25,9 +25,12 @@ var rootCmd = &cobra.Command{
 	Long:  "NockLock wraps AI coding agents with filesystem, network, and secret isolation.",
 }
 
+// installLease is acquireInstallLease, replaceable in tests.
+var installLease = acquireInstallLease
+
 // Execute runs the root command.
 func Execute() {
-	lease, err := acquireInstallLease()
+	lease, err := installLease()
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "NockLock: installation unavailable:", err)
 		os.Exit(2)
@@ -37,10 +40,22 @@ func Execute() {
 	}
 	if err := rootCmd.Execute(); err != nil {
 		var exitErr *exitCodeError
-		if errors.As(err, &exitErr) {
-			os.Exit(exitErr.code)
+		if !errors.As(err, &exitErr) {
+			fmt.Fprintln(os.Stderr, err)
 		}
-		fmt.Fprintln(os.Stderr, err)
-		os.Exit(1)
+		os.Exit(exitCode(err))
 	}
+}
+
+// exitCode returns the process exit code for a command's error: 0 for nil,
+// the code an exitCodeError carries, and 1 for any other error.
+func exitCode(err error) int {
+	var exitErr *exitCodeError
+	switch {
+	case err == nil:
+		return 0
+	case errors.As(err, &exitErr):
+		return exitErr.code
+	}
+	return 1
 }
