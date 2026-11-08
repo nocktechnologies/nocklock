@@ -4,6 +4,14 @@ All notable changes to NockLock will be documented in this file.
 
 ## [Unreleased]
 
+### Tests
+
+- CLI contract tests (`internal/cli/contract_test.go`) pin the command tree, every flag with its type and default, the `wrap` flag tokens, every config key with its type, the egress levels, the `verify --audit` run states and the `doctor` exit codes, with golden files in `internal/cli/testdata/contract/`. They fail when the code changes the surface or `docs/reference/cli.md` stops naming part of it.
+
+### Documentation
+
+- `docs/reference/cli.md` now matches the code. It documents the installation-lease exit `2`, the `wrap` startup refusals that exit `1` rather than `2`, how to tell a child's exit code from a NockLock failure, the egress levels, the `help` and `completion` commands, every hidden entry point, the `--profile=` and `--net-fence=` forms, the `logging.level` values, and `XDG_RUNTIME_DIR` and `SUDO_UID`. No behavior changed.
+
 ## [0.17.1] - 2026-11-05
 
 v0.17.1 requires a signed Landlock ABI 9 kernel receipt from the release commit before tagged Linux assets can be published. It also adds fence regression coverage and records publication of the signed v0.17.0 Linux installer assets.

@@ -2,12 +2,14 @@
 
 This page records current code behavior, starting from the `v0.9.0` baseline (`f2b0d04`) and including later changes listed in `CHANGELOG.md`. It is **not yet a compatibility promise**. Making it one is the fourth bar for 1.0 (`docs/ROADMAP.md`); until then, anything here can change in a minor release with a `CHANGELOG.md` "Breaking" entry.
 
+Contract tests in `internal/cli/contract_test.go` pin the surface this page describes: the command tree and every cobra flag with its type and default (`internal/cli/testdata/contract/commands.golden`), the tokens `wrap` accepts, every config key with its type (`internal/cli/testdata/contract/config-schema.golden`), the egress levels, the `verify --audit` run states and the `doctor` exit codes. They fail when the code changes any of these, and when this page stops naming one of them. A deliberate change updates this page, then regenerates the golden files with `go test ./internal/cli -run TestCLIContract -update-contract-golden` and reviews the diff.
+
 ## Commands
 Registered in `internal/cli/` (one file per command). `README.md` "Commands" has the user-facing table.
 
 | Command | Flags | Source |
 |---|---|---|
-| `wrap [flags] -- <cmd> [args]` | `--profile <name>` (`list` lists presets), `--dry-run`, `--net-fence=netns`, `--require-enforced-egress`, `--allow-private-ranges`; `--allow-unfenced` is removed and errors | `wrap.go`, `flagparse.go` |
+| `wrap [flags] -- <cmd> [args]` | `--profile <name>` or `--profile=<name>` (`list` lists presets), `--dry-run`, `--net-fence netns` or `--net-fence=netns` (`netns` is the only accepted value), `--require-enforced-egress`, `--allow-private-ranges`; `--allow-unfenced` is removed and errors. Any other token before `--` is an error. Without `--`, the arguments are NockLock flags only when every one is a recognized flag; otherwise they are all the child command | `wrap.go`, `flagparse.go` |
 | `init [--runtime <name>]` | `--diff` with `--runtime` prints policy changes without writing; an existing config makes plain `init` fail | `init_cmd.go` |
 | `validate [config-path]` | | `validate.go` |
 | `config` | | `config.go` |
@@ -19,7 +21,10 @@ Registered in `internal/cli/` (one file per command). `README.md` "Commands" has
 | `log` | `--session`, `--blocked`, `--since`, `--json`, `--stats`, `--prune <age>` | `log.go` |
 | `status`, `version` | | `status.go`, `version.go` |
 | `egress-probe [--json]` | Linux feasibility probe | `egress_probe.go` |
-| `__landlock-exec`, `__netns-*`, `__probe` | Hidden internal re-exec entry points; not part of the interface | `landlock_exec.go`, `netns_helper.go`, `probe.go` |
+| `help [command]`, `completion bash\|zsh\|fish\|powershell` | Added by cobra; `completion` subcommands take `--no-descriptions` | cobra |
+| `__landlock-exec`, `__netns-helper`, `__netns-proxy`, `__netns-host-proxy`, `__netns-child`, `__netns-cleanup`, `__netns-child-kill-watchdog`, `__probe` | Hidden internal re-exec entry points; not part of the interface, nor are their flags | `landlock_exec.go`, `netns_helper.go`, `probe.go` |
+
+There are no global flags beyond cobra's `-h`/`--help`.
 
 `log --prune` passes the project root resolved from its configuration. Library
 callers must also supply an explicit project root; rootless prune is refused,
@@ -90,19 +95,40 @@ result. A neutral `unclosed` run fails only when `--require-closed` is set (then
 extent is complete.
 
 ## Exit codes
-Exit codes travel as `exitCodeError` and `Execute()` calls `os.Exit` once (`root.go`). Any other error prints to stderr and exits `1` (`root.go`).
+Exit codes travel as `exitCodeError` and `Execute()` calls `os.Exit` once (`root.go`). Any other error prints to stderr and exits `1` (`root.go`). Before any command runs, `Execute()` acquires the installation lease; if a managed installation is unavailable (for example, a stale binary after an upgrade), every command prints `NockLock: installation unavailable:` and exits `2` (`root.go`, `install_lease_linux.go`).
 
 | Code | Meaning | Where |
 |---|---|---|
 | `0` | Success; for `wrap`, the child exited 0 | |
-| `1` | A verification or validation failure: `verify` not blocked / not consistent (`verify.go`), `scan` finding or incomplete (`scan.go`), `validate` errors (`validate.go`), config-digest mismatch (`config_digest.go`), `__probe` escape (`probe.go`); any unhandled error | |
-| `2` | `doctor` `GAPS FOUND`, including a missing or unparseable `.nock/config.toml` (`doctor.go`); `wrap` refused to start or lost its proxy: egress `UNREACHABLE`, look-back rule at the wrong level, `require_enforced` not met, a required fence unavailable, an unwritable audit decision, proxy failure (`wrap.go`); `wrap` could not write one of its own blocked-event rows (filesystem denials, macOS denial rows, network fence errors, each blocked network request including allowlist and look-back denials, DNS rebinding blocks and the row for a degraded network fence), the blocked-secret rows or `session_end` to the audit log, which overrides the child's exit code and stops the child if it is still running (`wrap.go`, `audit_recorder.go`); a denied request is still refused. Rows for allowed network requests stay best-effort by default; with `network.require_durable_audit = true`, a failed signed intent commit refuses the request and fails the run with exit 2 | |
+| `1` | A verification or validation failure: `verify` not blocked / not consistent (`verify.go`), an anchor verification that does not pass (`verify.go`, `anchor_v2.go`), `scan` finding or incomplete (`scan.go`), `validate` errors (`validate.go`), config-digest mismatch (`config_digest.go`), `__probe` escape (`probe.go`); any other error, including flag and usage errors. For `wrap` this includes every startup refusal not listed under `2`: no command, an invalid or untrusted config, `--net-fence=netns` off Linux or without `network.allow`, an `[audit.forward]` mismatch with the operator environment, an audit database that cannot be resolved or opened, a failed config-digest write, a syscall or filesystem fence that cannot be enforced (Landlock missing, interposer or Seatbelt setup failure), an unprotectable signing key or trusted chain identity, and proxy socket setup errors (`wrap.go`). A child that cannot be launched at all also exits `1`, with `session_end` `exit_code=1` (`wrap.go`) | |
+| `2` | `doctor` `GAPS FOUND`, including a missing or unparseable `.nock/config.toml` (`doctor.go`); the installation lease is unavailable (`root.go`); `wrap` refused to start for one of these reasons: signing unavailable (`refusing to run without signed audit`), `network.require_durable_audit` with `--net-fence=netns`, the blocked-environment rows or the effective egress level could not be written to the audit log, egress `UNREACHABLE`, `require_enforced` or `--require-enforced-egress` not met, a look-back rule at the wrong level, `require_unix_socket_isolation` not satisfiable, Landlock Unix-socket isolation could not be configured, the netns helper preflight failed, or the proxy failed to start or become healthy (`wrap.go`); `wrap` lost its proxy during the run or could not sign an egress decision (`wrap.go`); `wrap` could not write one of its own blocked-event rows (filesystem denials, macOS denial rows, network fence errors, each blocked network request including allowlist and look-back denials, DNS rebinding blocks and the row for a degraded network fence), the blocked-secret rows or `session_end` to the audit log, which overrides the child's exit code and stops the child if it is still running (`wrap.go`, `audit_recorder.go`); a denied request is still refused. Rows for allowed network requests stay best-effort by default; with `network.require_durable_audit = true`, a failed signed intent commit refuses the request and fails the run with exit 2 | |
 | `3` / `4` | `doctor` `PARTIAL` / `UNPROTECTED` (`doctor.go`); a reachable [deputy](../how-it-works/deputies.md) the fence does not block also keeps `doctor` at `PARTIAL` (`doctor_deputies.go`) | |
 | child's code | `wrap` returns the child's exit code when every blocked-event row and `session_end` were written (`wrap.go`); a negative code (signal or abnormal exit) becomes `1` (`internal/cli/wrap.go`) | |
 
-Caveat: a wrapped child exiting `1` or `2` can overlap CLI failure codes. The banner on stderr (`NockLock: fatal:`) and the `session_end` audit row (`exit_code=<n>`) disambiguate (`wrap.go`).
+### Child exit codes and NockLock failures overlap
+
+`wrap` passes the child's exit code through unchanged, so a child exiting `1` or `2` cannot be told apart from a NockLock failure by the exit code alone; no exit code is reserved for NockLock. Scripts that must tell them apart read stderr and the audit log:
+
+- A NockLock failure always writes a line to stderr: `Error: <reason>` (cobra) for exit-1 errors and the two errors-joined refusals (durable audit with netns, signing unavailable), otherwise a line starting `NockLock: fatal:` or `NockLock: installation unavailable:`. NockLock writes none of these when it passes a child's code through, but the child shares stderr and can print the same text.
+- Once a run has started, its `session_end` row records the verdict: `exit_code=<n>` alone for a child's own code, and `exit_code=2` with `decision_audit_failed=true`, `audit_write_failed=true` or `proxy_failed=true` when NockLock overrode it. If `session_end` itself cannot be written, `wrap` prints `NockLock: fatal: failed to record session_end` and exits `2`. A refusal before the run starts has no `session_end` row; some refusals write a blocked row first (`wrap.go`).
+
+Reserving exit codes for NockLock, or moving every startup refusal to `2`, would change behavior and is not part of the current contract.
 
 `doctor` checks the managed Ed25519 signing-key directory resolved from `XDG_CONFIG_HOME` (or `~/.config`) against the effective filesystem fence. On macOS it must be inside a Seatbelt deny path. On Linux with Landlock it must be outside every read grant; if a deny overlaps a grant (for example, a key under the project or `/tmp`), `wrap` refuses to start and `doctor` reports `GAPS FOUND` (exit 2). With Landlock disabled, the userspace-only signing-key boundary is `advisory`, so the verdict cannot be `PROTECTED`. `doctor --json` includes `signing_key.directory` and `signing_key.posture`; the `signing-key` check and boundary explain any gap.
+
+## Egress levels
+`wrap` reports one effective egress level in its banner, the signed audit log and `doctor` (`internal/cli/egress_level.go`, the only definition):
+
+| Level | When | Meets `require_enforced` |
+|---|---|---|
+| `KERNEL` | Linux with `--net-fence=netns` | yes |
+| `CONFINED` | Linux proxy mode with syscall enforcement and the filesystem interposer's proxy bridge | yes |
+| `SEATBELT` | macOS with the Seatbelt network floor (`filesystem.root` set, `network.allow_all = false`) | yes |
+| `ADVISORY` | Userspace proxy only; a client that ignores `HTTP_PROXY` reaches any host | no |
+| `OFF` | `network.allow_all = true` | no |
+| `UNREACHABLE` | Linux syscall enforcement without the interposer's proxy bridge; `wrap` refuses to start (exit `2`). `--net-fence=netns` off Linux would also be `UNREACHABLE`, but `wrap` refuses it earlier (exit `1`) | no |
+
+`network.allow_all = true` gives `OFF` before any other rule applies.
 
 ## Config schema (`.nock/config.toml`)
 Strict: unknown keys are a load error (`internal/config/config.go`). Structs at `internal/config/config.go`; defaults in `internal/config/defaults.go`; validation in `internal/config/validate.go`.
@@ -114,7 +140,7 @@ Strict: unknown keys are a load error (`internal/config/config.go`). Structs at 
 | `[network]` | `allow`, `allow_all`, `allow_private_ranges`, `require_enforced`, `require_durable_audit` (default off; explicit proxy only), `require_unix_socket_isolation`, `[[network.lookback]]` (`name`, `on`, `within`, `then`) |
 | `[syscall]` | `enforcement` (`required`, `preferred`, `off`), `allow_namespaces`, `socket_families`, `extra_deny` |
 | `[secrets]` | `pass`, `block`, `scan_env`, `scan_paths`, `scan_env_allow` |
-| `[logging]` | `db`, `level` |
+| `[logging]` | `db`, `level` (`info`, `debug`, `warn`, `error` or empty; `internal/config/validate.go`) |
 | `[audit.forward]` | `enabled`, `url`, `api_key_env` (the operator environment must supply the matching URL and key; README "Forward fence decisions") |
 | `[cloud]` | Legacy settings: `enabled`, `api_key`, `endpoint`. An enabled section without a key fails validation; with a key it is accepted but sends nothing. Use `[audit.forward]` for delivery |
 
@@ -123,4 +149,4 @@ Strict: unknown keys are a load error (`internal/config/config.go`). Structs at 
 Runtime presets (`internal/config/presets/*.toml`) use the same schema. Profile overlays may only tighten a base profile (`wrap.go`).
 
 ## Environment variables read by NockLock
-`NOCKLOCK_ANCHOR_URL`, `NOCKLOCK_ANCHOR_TOKEN` (`internal/cli/anchor_push.go`), `NOCKLOCK_ANCHOR_CHECKPOINT_INTERVAL`, `NOCKLOCK_ANCHOR_CHECKPOINT_DEADLINE` (`internal/cli/anchor_checkpoint.go`), `NOCKLOCK_FORWARD_URL`, `NOCKLOCK_FORWARD_KEY` (`internal/cli/wrap.go`, `internal/config/config.go`), `NOCKLOCK_ALLOW_UNTRUSTED_CONFIG` (operator opt-in to accept a config in a directory other users can write; read from the environment only, never from the config file, and only a value of `1`, `true`, `yes` or `on` counts; `internal/config/config_trust.go`), `NOCKLOCK_EGRESS_USER` (installer, `scripts/install-egress-helper.sh`), `XDG_STATE_HOME` (audit state, `internal/config/state.go`), `XDG_CONFIG_HOME` (managed signing key, `internal/logging/signing.go`). The first six are stripped from the child.
+`NOCKLOCK_ANCHOR_URL`, `NOCKLOCK_ANCHOR_TOKEN` (`internal/cli/anchor_push.go`), `NOCKLOCK_ANCHOR_CHECKPOINT_INTERVAL`, `NOCKLOCK_ANCHOR_CHECKPOINT_DEADLINE` (`internal/cli/anchor_checkpoint.go`), `NOCKLOCK_FORWARD_URL`, `NOCKLOCK_FORWARD_KEY` (`internal/cli/wrap.go`, `internal/config/config.go`), `NOCKLOCK_ALLOW_UNTRUSTED_CONFIG` (operator opt-in to accept a config in a directory other users can write; read from the environment only, never from the config file, and only a value of `1`, `true`, `yes` or `on` counts; `internal/config/config_trust.go`), `NOCKLOCK_EGRESS_USER` (installer, `scripts/install-egress-helper.sh`), `XDG_STATE_HOME` (audit state, `internal/config/state.go`), `XDG_CONFIG_HOME` (managed signing key, `internal/logging/signing.go`), `XDG_RUNTIME_DIR` (Linux proxy socket directory and `doctor` deputy socket search, `internal/cli/wrap.go`, `internal/cli/doctor_deputies.go`), `SUDO_UID` (the invoking user, read by the root netns helper, `internal/fence/network/netns/helper_linux.go`). The first six are stripped from the child. Other `NOCKLOCK_*` variables pass state between NockLock and its own hidden re-exec entry points or test fixtures; they are not part of the interface.
