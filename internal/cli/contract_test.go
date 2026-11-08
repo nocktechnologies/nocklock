@@ -159,10 +159,7 @@ type constResolver struct {
 // declaredConsts never pins, such as one from another package.
 func (r constResolver) typeOf(c *constSpec) string {
 	if c.typ != nil {
-		if id, ok := ast.Unparen(c.typ).(*ast.Ident); ok {
-			return id.Name
-		}
-		return ""
+		return identName(c.typ)
 	}
 	return r.exprType(c.value)
 }
@@ -174,16 +171,8 @@ func (r constResolver) exprType(e ast.Expr) string {
 			return r.typeOf(c)
 		}
 	case *ast.CallExpr:
-		if id, ok := ast.Unparen(e.Fun).(*ast.Ident); ok {
-			return id.Name
-		}
-	case *ast.UnaryExpr:
-		return r.exprType(e.X)
+		return identName(e.Fun)
 	case *ast.BinaryExpr:
-		switch e.Op {
-		case token.EQL, token.NEQ, token.LSS, token.LEQ, token.GTR, token.GEQ, token.LAND, token.LOR:
-			return "bool"
-		}
 		if x := r.exprType(e.X); x != "" {
 			return x
 		}
@@ -205,16 +194,19 @@ func (r constResolver) value(e ast.Expr) (string, bool) {
 			return r.value(c.value)
 		}
 	case *ast.CallExpr:
-		if isIdent(e.Fun, r.typeName) && len(e.Args) == 1 {
+		if identName(e.Fun) == r.typeName && len(e.Args) == 1 {
 			return r.value(e.Args[0])
 		}
 	}
 	return "", false
 }
 
-func isIdent(e ast.Expr, name string) bool {
-	id, ok := ast.Unparen(e).(*ast.Ident)
-	return ok && id.Name == name
+// identName returns the name e spells, "" when it is not an identifier.
+func identName(e ast.Expr) string {
+	if id, ok := ast.Unparen(e).(*ast.Ident); ok {
+		return id.Name
+	}
+	return ""
 }
 
 func writeConstFixture(t *testing.T, consts string) string {
