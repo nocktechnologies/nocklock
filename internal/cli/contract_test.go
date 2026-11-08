@@ -728,8 +728,9 @@ func TestCommandContractPinsShorthands(t *testing.T) {
 func TestCommandContractPinsAliases(t *testing.T) {
 	golden := func(aliases ...string) string {
 		root := &cobra.Command{Use: "nocklock"}
-		root.AddCommand(&cobra.Command{Use: "status", Aliases: aliases, Run: func(*cobra.Command, []string) {}})
-		return commandsGolden(contractTree(root))
+		status := &cobra.Command{Use: "status", Aliases: aliases, Run: func(*cobra.Command, []string) {}}
+		root.AddCommand(status)
+		return commandsGolden([]*cobra.Command{root, status})
 	}
 	with := golden("st")
 	if !strings.Contains(with, `nocklock status hidden=false aliases=["st"]`) {
@@ -740,11 +741,6 @@ func TestCommandContractPinsAliases(t *testing.T) {
 			t.Errorf("golden does not pin the aliases:\n%s", with)
 		}
 	}
-}
-
-// contractTree lists root and its direct subcommands.
-func contractTree(root *cobra.Command) []*cobra.Command {
-	return append([]*cobra.Command{root}, root.Commands()...)
 }
 
 // wrap disables cobra flag parsing (wrap.go), so its flags live in
@@ -977,7 +973,6 @@ func runContractProcess() {
 	if len(os.Args) < 2 {
 		return
 	}
-	args := os.Args[2:]
 	if v, ok := strings.CutPrefix(os.Args[1], contractChildExitArg); ok {
 		if v == "signal" {
 			_ = syscall.Kill(os.Getpid(), syscall.SIGKILL)
@@ -991,6 +986,7 @@ func runContractProcess() {
 	if os.Args[1] != contractExecuteArg {
 		return
 	}
+	args := os.Args[2:]
 	if len(args) > 0 && args[0] == contractNoLeaseArg {
 		installLease = func() (*os.File, error) { return nil, errors.New("simulated inactive release") }
 		args = args[1:]
