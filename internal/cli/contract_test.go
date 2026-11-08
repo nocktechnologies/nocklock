@@ -1,6 +1,7 @@
 package cli
 
 import (
+	"errors"
 	"flag"
 	"fmt"
 	"go/ast"
@@ -8,12 +9,14 @@ import (
 	"go/token"
 	"maps"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"reflect"
 	"regexp"
 	"slices"
 	"strconv"
 	"strings"
+	"syscall"
 	"testing"
 
 	"github.com/nocktechnologies/nocklock/internal/config"
@@ -23,8 +26,9 @@ import (
 )
 
 // The contract tests pin the public CLI surface recorded in
-// docs/reference/cli.md: commands and flags, wrap's own flags, config keys,
-// egress levels, verify --audit run states and doctor exit codes. Each fails
+// docs/reference/cli.md: commands with their aliases and flags, wrap's own
+// flags, config keys, egress levels, verify --audit run states and the exit
+// codes of doctor, Execute and wrap. Each fails
 // when the code changes the surface, and when the reference stops naming a
 // part of it. A deliberate change regenerates the golden files with
 // -update-contract-golden and updates the reference in the same change.
@@ -504,12 +508,12 @@ func leadingHostDir(v string) (hostDir, bool) {
 	return hostDir{}, false
 }
 
-// commandsGolden renders every command path with its own flags, each with
-// its shorthand, type and host-independent default.
+// commandsGolden renders every command path with its aliases and its own
+// flags, each with its shorthand, type and host-independent default.
 func commandsGolden(cmds []*cobra.Command) string {
 	var b strings.Builder
 	for _, c := range cmds {
-		fmt.Fprintf(&b, "%s hidden=%t\n", c.CommandPath(), c.Hidden)
+		fmt.Fprintf(&b, "%s hidden=%t aliases=%q\n", c.CommandPath(), c.Hidden, c.Aliases)
 		for _, f := range commandFlags(c) {
 			fmt.Fprintf(&b, "  --%s shorthand=%q %s default=%q\n", f.Name, f.Shorthand, f.Value.Type(), contractDefault(f.DefValue))
 		}
@@ -717,6 +721,30 @@ func TestCommandContractPinsShorthands(t *testing.T) {
 	if p := checkCommandReference(strings.Replace(ref, "`--json`", "`-j`, `--json`", 1), tree("j")); len(p) > 0 {
 		t.Errorf("shorthand named in its row: %q", p)
 	}
+}
+
+// A command's aliases are pinned by the golden: adding, changing or removing
+// one changes it.
+func TestCommandContractPinsAliases(t *testing.T) {
+	golden := func(aliases ...string) string {
+		root := &cobra.Command{Use: "nocklock"}
+		root.AddCommand(&cobra.Command{Use: "status", Aliases: aliases, Run: func(*cobra.Command, []string) {}})
+		return commandsGolden(contractTree(root))
+	}
+	with := golden("st")
+	if !strings.Contains(with, `nocklock status hidden=false aliases=["st"]`) {
+		t.Fatalf("golden does not render the alias:\n%s", with)
+	}
+	for _, other := range []string{golden(), golden("stat"), golden("st", "stat")} {
+		if other == with {
+			t.Errorf("golden does not pin the aliases:\n%s", with)
+		}
+	}
+}
+
+// contractTree lists root and its direct subcommands.
+func contractTree(root *cobra.Command) []*cobra.Command {
+	return append([]*cobra.Command{root}, root.Commands()...)
 }
 
 // wrap disables cobra flag parsing (wrap.go), so its flags live in
@@ -928,5 +956,154 @@ func TestCLIContractDoctorExitCodes(t *testing.T) {
 	// An unrecognized verdict fails closed to GAPS FOUND.
 	if got := doctorExitCode("UNKNOWN"); got != want[doctorVerdictGapsFound] {
 		t.Errorf("doctorExitCode(UNKNOWN) = %d, want %d", got, want[doctorVerdictGapsFound])
+	}
+}
+
+// Markers that make the test binary run as nocklock or as a wrapped child for
+// the exit-code contract tests. TestMain checks them before it creates any
+// state, since both exit without returning to it.
+const (
+	contractExecuteArg   = "nocklock-contract-execute"
+	contractNoLeaseArg   = "nocklock-contract-no-lease"
+	contractChildExitArg = "nocklock-contract-child-exit="
+)
+
+// runContractProcess returns unless the test binary's first argument is a
+// contract marker. contractChildExitArg<n> exits n, or kills the process
+// with SIGKILL for "signal". contractExecuteArg runs Execute with the
+// remaining arguments, after contractNoLeaseArg makes the installation lease
+// unavailable.
+func runContractProcess() {
+	if len(os.Args) < 2 {
+		return
+	}
+	args := os.Args[2:]
+	if v, ok := strings.CutPrefix(os.Args[1], contractChildExitArg); ok {
+		if v == "signal" {
+			_ = syscall.Kill(os.Getpid(), syscall.SIGKILL)
+		}
+		code, err := strconv.Atoi(v)
+		if err != nil {
+			code = 125
+		}
+		os.Exit(code)
+	}
+	if os.Args[1] != contractExecuteArg {
+		return
+	}
+	if len(args) > 0 && args[0] == contractNoLeaseArg {
+		installLease = func() (*os.File, error) { return nil, errors.New("simulated inactive release") }
+		args = args[1:]
+	}
+	rootCmd.SetArgs(args)
+	Execute()
+	os.Exit(0)
+}
+
+// Execute exits 2 when the installation lease is unavailable, whatever the
+// command, and otherwise with exitCode of the command's error. It runs in a
+// subprocess: it calls os.Exit and mutates the shared command tree.
+func TestCLIContractExecuteExitCodes(t *testing.T) {
+	exe, err := os.Executable()
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, tc := range []struct {
+		name   string
+		args   []string
+		code   int
+		stderr string
+	}{
+		{"help", []string{"--help"}, 0, ""},
+		{"installation unavailable", []string{contractNoLeaseArg, "--help"}, 2, "NockLock: installation unavailable: simulated inactive release"},
+		{"unknown command", []string{"no-such-command"}, 1, `unknown command "no-such-command"`},
+		{"unknown flag", []string{"status", "--no-such-flag"}, 1, "unknown flag: --no-such-flag"},
+		// A missing .nock/config.toml is GAPS FOUND: an exitCodeError other
+		// than 1 reaches the process unchanged.
+		{"exitCodeError code", []string{"doctor"}, 2, ""},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			cmd := exec.Command(exe, append([]string{contractExecuteArg}, tc.args...)...)
+			cmd.Dir = t.TempDir()
+			cmd.Env = append(os.Environ(), "XDG_CONFIG_HOME="+t.TempDir())
+			var stderr strings.Builder
+			cmd.Stderr = &stderr
+			err := cmd.Run()
+			got := 0
+			var exitErr *exec.ExitError
+			if errors.As(err, &exitErr) {
+				got = exitErr.ExitCode()
+			} else if err != nil {
+				t.Fatal(err)
+			}
+			if got != tc.code {
+				t.Errorf("nocklock %q exited %d, want %d; stderr:\n%s", tc.args, got, tc.code, stderr.String())
+			}
+			if !strings.Contains(stderr.String(), tc.stderr) {
+				t.Errorf("nocklock %q stderr does not contain %q:\n%s", tc.args, tc.stderr, stderr.String())
+			}
+		})
+	}
+}
+
+func TestExitCodeMapsCommandErrors(t *testing.T) {
+	for _, tc := range []struct {
+		err  error
+		code int
+	}{
+		{nil, 0},
+		{errors.New("usage"), 1},
+		{&exitCodeError{code: 1}, 1},
+		{&exitCodeError{code: 2}, 2},
+		{&exitCodeError{code: 7}, 7},
+		{errors.Join(errors.New("refusing"), &exitCodeError{code: 2}), 2},
+	} {
+		if got := exitCode(tc.err); got != tc.code {
+			t.Errorf("exitCode(%v) = %d, want %d", tc.err, got, tc.code)
+		}
+	}
+}
+
+// wrap's exit codes as Execute maps them: a startup refusal, a child that
+// cannot be launched, a failed audit write, and the child's own code passed
+// through. Each exit-2 row differs from "child exits 0" only in its cause.
+// TestWrapFailsWhenAuditWritesFail and TestWrapDurableAudit cover the other
+// audit-failure paths.
+func TestCLIContractWrapExitCodes(t *testing.T) {
+	exe, err := os.Executable()
+	if err != nil {
+		t.Fatal(err)
+	}
+	child := func(code string) []string { return []string{"--", exe, contractChildExitArg + code} }
+	for _, tc := range []struct {
+		name        string
+		args        []string
+		failAuditOf logging.EventType
+		code        int
+	}{
+		{name: "no command", args: []string{"--"}, code: 1},
+		{name: "unknown flag", args: []string{"--no-such-flag", "--", exe}, code: 1},
+		{name: "require enforced egress unmet", args: append([]string{"--require-enforced-egress"}, child("0")...), code: 2},
+		{name: "command not found", args: []string{"--", "nocklock-contract-no-such-command"}, code: 1},
+		{name: "session_end write fails", args: child("0"), failAuditOf: logging.EventSessionEnd, code: 2},
+		{name: "child exits 0", args: child("0"), code: 0},
+		{name: "child exits 1", args: child("1"), code: 1},
+		{name: "child exits 2", args: child("2"), code: 2},
+		{name: "child exits 3", args: child("3"), code: 3},
+		{name: "child exits 125", args: child("125"), code: 125},
+		{name: "child killed by a signal", args: child("signal"), code: 1},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Setenv("XDG_STATE_HOME", trustedStateRoot(t))
+			projectRoot := resolvedTempDir(t)
+			db := filepath.Join(projectRoot, "fresh", config.Dir, "events.db")
+			if tc.failAuditOf != "" {
+				installAuditWriteFailure(t, projectRoot, db, tc.failAuditOf)
+			}
+			err := runWrapCommand(t, projectRoot, db, tc.args...)
+			if got := exitCode(err); got != tc.code {
+				t.Errorf("wrap %q exits %d (error %v), want %d", tc.args, got, err, tc.code)
+			}
+		})
 	}
 }

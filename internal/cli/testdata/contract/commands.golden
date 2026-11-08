@@ -1,58 +1,58 @@
-nocklock hidden=false
-nocklock __landlock-exec hidden=true
-nocklock __netns-child hidden=true
-nocklock __netns-child-kill-watchdog hidden=true
-nocklock __netns-cleanup hidden=true
-nocklock __netns-helper hidden=true
-nocklock __netns-host-proxy hidden=true
-nocklock __netns-proxy hidden=true
-nocklock __probe hidden=true
+nocklock hidden=false aliases=[]
+nocklock __landlock-exec hidden=true aliases=[]
+nocklock __netns-child hidden=true aliases=[]
+nocklock __netns-child-kill-watchdog hidden=true aliases=[]
+nocklock __netns-cleanup hidden=true aliases=[]
+nocklock __netns-helper hidden=true aliases=[]
+nocklock __netns-host-proxy hidden=true aliases=[]
+nocklock __netns-proxy hidden=true aliases=[]
+nocklock __probe hidden=true aliases=[]
   --canary-known shorthand="" bool default="false"
   --canary-path shorthand="" string default=""
   --canary-token shorthand="" string default=""
   --network-url shorthand="" string default=""
   --write-canary shorthand="" bool default="false"
-nocklock anchor hidden=false
-nocklock anchor emit hidden=false
+nocklock anchor hidden=false aliases=[]
+nocklock anchor emit hidden=false aliases=[]
   --out shorthand="" string default=""
   --walk-timeout shorthand="" duration default="0s"
-nocklock anchor enroll hidden=false
+nocklock anchor enroll hidden=false aliases=[]
   --acknowledge-no-legacy-history shorthand="" bool default="false"
-nocklock anchor migrate hidden=false
-nocklock anchor push hidden=false
+nocklock anchor migrate hidden=false aliases=[]
+nocklock anchor push hidden=false aliases=[]
   --file shorthand="" string default=""
   --walk-timeout shorthand="" duration default="0s"
-nocklock completion hidden=false
-nocklock completion bash hidden=false
+nocklock completion hidden=false aliases=[]
+nocklock completion bash hidden=false aliases=[]
   --no-descriptions shorthand="" bool default="false"
-nocklock completion fish hidden=false
+nocklock completion fish hidden=false aliases=[]
   --no-descriptions shorthand="" bool default="false"
-nocklock completion powershell hidden=false
+nocklock completion powershell hidden=false aliases=[]
   --no-descriptions shorthand="" bool default="false"
-nocklock completion zsh hidden=false
+nocklock completion zsh hidden=false aliases=[]
   --no-descriptions shorthand="" bool default="false"
-nocklock config hidden=false
-nocklock doctor hidden=false
+nocklock config hidden=false aliases=[]
+nocklock doctor hidden=false aliases=[]
   --json shorthand="" bool default="false"
-nocklock egress-probe hidden=false
+nocklock egress-probe hidden=false aliases=[]
   --json shorthand="" bool default="false"
-nocklock help hidden=false
-nocklock init hidden=false
+nocklock help hidden=false aliases=[]
+nocklock init hidden=false aliases=[]
   --diff shorthand="" bool default="false"
   --runtime shorthand="" string default=""
-nocklock log hidden=false
+nocklock log hidden=false aliases=[]
   --blocked shorthand="" bool default="false"
   --json shorthand="" bool default="false"
   --prune shorthand="" string default=""
   --session shorthand="" string default=""
   --since shorthand="" string default=""
   --stats shorthand="" bool default="false"
-nocklock scan hidden=false
+nocklock scan hidden=false aliases=[]
   --env shorthand="" bool default="false"
   --json shorthand="" bool default="false"
-nocklock status hidden=false
-nocklock validate hidden=false
-nocklock verify hidden=false
+nocklock status hidden=false aliases=[]
+nocklock validate hidden=false aliases=[]
+nocklock verify hidden=false aliases=[]
   --against-anchor shorthand="" string default=""
   --against-remote-anchor shorthand="" bool default="false"
   --audit shorthand="" bool default="false"
@@ -63,5 +63,5 @@ nocklock verify hidden=false
   --out shorthand="" string default=""
   --require-closed shorthand="" bool default="false"
   --walk-timeout shorthand="" duration default="0s"
-nocklock version hidden=false
-nocklock wrap hidden=false
+nocklock version hidden=false aliases=[]
+nocklock wrap hidden=false aliases=[]
