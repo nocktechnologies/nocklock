@@ -83,7 +83,8 @@ func sourceStrings(t *testing.T, path string, re *regexp.Regexp) []string {
 // dir, so a value added in any file of that package is seen. A constant's type
 // is its declared type (x T = "v") or, without one, the type of its value: a
 // conversion (x = T("v")), another constant of the package (x = y), or the
-// previous spec's in a const block (implicit repetition). One of typeName
+// previous spec's in a const block (implicit repetition); a type alias of
+// typeName counts as typeName. One of typeName
 // whose value is not a string literal, a conversion of one, or such a
 // constant is an error, not a silent skip, so a new value cannot slip past
 // the pinned set.
@@ -94,7 +95,7 @@ func declaredConsts(dir, typeName string) ([]string, error) {
 	}
 	fset := token.NewFileSet()
 	var specs []*constSpec
-	named := map[string]*constSpec{}
+	r := constResolver{typeName: typeName, named: map[string][]*constSpec{}, aliases: map[string]string{}, visiting: map[*constSpec]bool{}}
 	for _, path := range files {
 		if strings.HasSuffix(path, "_test.go") {
 			continue
@@ -105,6 +106,13 @@ func declaredConsts(dir, typeName string) ([]string, error) {
 		}
 		for _, d := range f.Decls {
 			decl, ok := d.(*ast.GenDecl)
+			if ok && decl.Tok == token.TYPE {
+				for _, s := range decl.Specs {
+					if spec := s.(*ast.TypeSpec); spec.Assign.IsValid() {
+						r.aliases[spec.Name.Name] = identName(spec.Type)
+					}
+				}
+			}
 			if !ok || decl.Tok != token.CONST {
 				continue
 			}
@@ -122,13 +130,12 @@ func declaredConsts(dir, typeName string) ([]string, error) {
 					c := &constSpec{typ: typ, value: values[i], pos: n.Pos()}
 					specs = append(specs, c)
 					if n.Name != "_" {
-						named[n.Name] = c
+						r.named[n.Name] = append(r.named[n.Name], c)
 					}
 				}
 			}
 		}
 	}
-	r := constResolver{typeName: typeName, named: named}
 	var out []string
 	for _, c := range specs {
 		if r.typeOf(c) != typeName {
@@ -149,30 +156,62 @@ type constSpec struct {
 }
 
 // constResolver resolves package-level constants by name, enough to classify
-// string constants by type; it is no substitute for go/types.
+// string constants by type; it is no substitute for go/types. A name declared
+// in more than one file (a build-tagged pair) has every declaration's type
+// considered and no readable value, so a pinned constant defined through one
+// is an error rather than whichever file sorts last. A reference cycle, which
+// Go rejects, resolves to no type and no value instead of overflowing the
+// stack.
 type constResolver struct {
 	typeName string
-	named    map[string]*constSpec
+	named    map[string][]*constSpec
+	aliases  map[string]string
+	visiting map[*constSpec]bool
 }
 
 // typeOf returns the name of c's type, "" for an untyped constant or a type
 // declaredConsts never pins, such as one from another package.
 func (r constResolver) typeOf(c *constSpec) string {
+	if r.visiting[c] {
+		return ""
+	}
+	r.visiting[c] = true
+	defer delete(r.visiting, c)
 	if c.typ != nil {
-		return identName(c.typ)
+		return r.canonical(identName(c.typ))
 	}
 	return r.exprType(c.value)
+}
+
+// canonical follows type aliases declared in the package to the named type.
+func (r constResolver) canonical(name string) string {
+	for range len(r.aliases) {
+		target, ok := r.aliases[name]
+		if !ok {
+			break
+		}
+		name = target
+	}
+	return name
 }
 
 func (r constResolver) exprType(e ast.Expr) string {
 	switch e := ast.Unparen(e).(type) {
 	case *ast.Ident:
-		if c, ok := r.named[e.Name]; ok {
-			return r.typeOf(c)
+		typ := ""
+		for _, c := range r.named[e.Name] {
+			if t := r.typeOf(c); t != "" && typ != r.typeName {
+				typ = t
+			}
 		}
+		return typ
 	case *ast.CallExpr:
-		return identName(e.Fun)
+		return r.canonical(identName(e.Fun))
 	case *ast.BinaryExpr:
+		switch e.Op {
+		case token.EQL, token.NEQ, token.LSS, token.LEQ, token.GTR, token.GEQ:
+			return "bool"
+		}
 		if x := r.exprType(e.X); x != "" {
 			return x
 		}
@@ -190,11 +229,13 @@ func (r constResolver) value(e ast.Expr) (string, bool) {
 		v, err := strconv.Unquote(e.Value)
 		return v, err == nil
 	case *ast.Ident:
-		if c, ok := r.named[e.Name]; ok {
-			return r.value(c.value)
+		if cs := r.named[e.Name]; len(cs) == 1 && !r.visiting[cs[0]] {
+			r.visiting[cs[0]] = true
+			defer delete(r.visiting, cs[0])
+			return r.value(cs[0].value)
 		}
 	case *ast.CallExpr:
-		if identName(e.Fun) == r.typeName && len(e.Args) == 1 {
+		if r.canonical(identName(e.Fun)) == r.typeName && len(e.Args) == 1 {
 			return r.value(e.Args[0])
 		}
 	}
@@ -256,6 +297,8 @@ func TestDeclaredConstsFindsInferredConstants(t *testing.T) {
 		{"const b Level = name", []string{"n"}},
 		{"const b = Level(name)", []string{"n"}},
 		{"const o Other = \"o\"\nconst b = o", nil},
+		{"const a Level = \"a\"\nconst b = a == \"x\"", []string{"a"}},
+		{"type alias = Level\nconst a alias = \"a\"\nconst b = alias(\"b\")", []string{"a", "b"}},
 		{"const b = name", nil},
 	} {
 		got, err := declaredConsts(writeConstFixture(t, tc.decl), "Level")
@@ -292,10 +335,26 @@ func TestDeclaredConstsRefusesUnreadableValues(t *testing.T) {
 		`const bad = Level(name + "b")`,
 		"const a Level = \"a\"\nconst bad = a + \"b\"",
 		`const bad Level = undeclared`,
+		"const bad Level = a\nconst a = bad",
 	} {
 		if got, err := declaredConsts(writeConstFixture(t, decl), "Level"); err == nil {
 			t.Errorf("declaredConsts(%s) = %q, want an error", decl, got)
 		}
+	}
+}
+
+// A Level constant defined through a name a build-tagged pair of files both
+// declare fails instead of taking whichever file sorts last.
+func TestDeclaredConstsRefusesPlatformDuplicates(t *testing.T) {
+	dir := writeConstFixture(t, "const v Level = shared\n")
+	for file, value := range map[string]string{"shared_unix.go": "a", "shared_other.go": "b"} {
+		src := "package p\n\nconst shared = \"" + value + "\"\n"
+		if err := os.WriteFile(filepath.Join(dir, file), []byte(src), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if got, err := declaredConsts(dir, "Level"); err == nil {
+		t.Errorf("declaredConsts = %q, want an error", got)
 	}
 }
 
@@ -420,11 +479,18 @@ func namesToken(text, tok string) bool {
 // included, that ref's Commands table does not name exactly, and every flag
 // or shorthand of a visible command that the command's own row does not name.
 // A group command without flags may go unnamed: its subcommands' rows name it.
+// The root has no row; its flags, global to every command, must be named
+// somewhere on the page.
 func checkCommandReference(ref string, cmds []*cobra.Command) []string {
 	rows := commandRows(ref)
 	var problems []string
 	for _, c := range cmds {
 		if !c.HasParent() {
+			for _, f := range commandFlags(c) {
+				if !namesToken(ref, "--"+f.Name) {
+					problems = append(problems, fmt.Sprintf("%s does not name global flag --%s", cliReferencePath, f.Name))
+				}
+			}
 			continue
 		}
 		name := strings.TrimPrefix(c.CommandPath(), c.Root().Name()+" ")
@@ -524,6 +590,9 @@ func TestCommandContractPinsShorthands(t *testing.T) {
 	}
 	ref := "\n## Commands\n| `scan` | `--json` | |\n"
 	requireProblem(t, checkCommandReference(ref, tree("j")), `row for "scan" does not name its flag -j`)
+	global := tree("j")
+	global[0].Flags().Bool("verbose", false, "")
+	requireProblem(t, checkCommandReference(ref, global), "global flag --verbose")
 	if p := checkCommandReference(strings.Replace(ref, "`--json`", "`-j`, `--json`", 1), tree("j")); len(p) > 0 {
 		t.Errorf("shorthand named in its row: %q", p)
 	}
