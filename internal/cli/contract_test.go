@@ -98,24 +98,27 @@ func declaredConsts(t *testing.T, dir, typeName string) []string {
 			t.Fatal(err)
 		}
 		ast.Inspect(f, func(n ast.Node) bool {
-			spec, ok := n.(*ast.ValueSpec)
-			if !ok {
+			decl, ok := n.(*ast.GenDecl)
+			if !ok || decl.Tok != token.CONST {
 				return true
 			}
-			typed := isIdent(spec.Type, typeName)
-			for _, v := range spec.Values {
-				// const x typeName = "v", or const x = typeName("v").
-				if call, ok := v.(*ast.CallExpr); ok && isIdent(call.Fun, typeName) && len(call.Args) == 1 {
-					v = call.Args[0]
-				} else if !typed {
-					continue
-				}
-				if lit, ok := v.(*ast.BasicLit); ok && lit.Kind == token.STRING {
-					value, err := strconv.Unquote(lit.Value)
-					if err != nil {
-						t.Fatal(err)
+			for _, s := range decl.Specs {
+				spec := s.(*ast.ValueSpec)
+				typed := isIdent(spec.Type, typeName)
+				for _, v := range spec.Values {
+					// const x typeName = "v", or const x = typeName("v").
+					if call, ok := v.(*ast.CallExpr); ok && isIdent(call.Fun, typeName) && len(call.Args) == 1 {
+						v = call.Args[0]
+					} else if !typed {
+						continue
 					}
-					out = append(out, value)
+					if lit, ok := v.(*ast.BasicLit); ok && lit.Kind == token.STRING {
+						value, err := strconv.Unquote(lit.Value)
+						if err != nil {
+							t.Fatal(err)
+						}
+						out = append(out, value)
+					}
 				}
 			}
 			return true
@@ -151,7 +154,7 @@ var _ = Level("var-converted")
 	}
 	got := declaredConsts(t, dir, "Level")
 	slices.Sort(got)
-	if want := []string{"converted", "typed", "var-converted"}; !slices.Equal(got, want) {
+	if want := []string{"converted", "typed"}; !slices.Equal(got, want) {
 		t.Fatalf("declaredConsts(Level) = %q, want %q", got, want)
 	}
 }
@@ -324,14 +327,12 @@ func configKeys(prefix string, t reflect.Type) []string {
 		if prefix != "" {
 			key = prefix + "." + tag
 		}
-		ft := f.Type
+		ft, kind := f.Type, "[table]"
 		if ft.Kind() == reflect.Slice && ft.Elem().Kind() == reflect.Struct {
-			out = append(out, key+" [[table]]")
-			out = append(out, configKeys(key, ft.Elem())...)
-			continue
+			ft, kind = ft.Elem(), "[[table]]"
 		}
 		if ft.Kind() == reflect.Struct {
-			out = append(out, key+" [table]")
+			out = append(out, key+" "+kind)
 			out = append(out, configKeys(key, ft)...)
 			continue
 		}
