@@ -1035,7 +1035,11 @@ func TestCLIContractExecuteExitCodes(t *testing.T) {
 			if got != tc.code {
 				t.Errorf("nocklock %q exited %d, want %d; stderr:\n%s", tc.args, got, tc.code, stderr.String())
 			}
-			if !strings.Contains(stderr.String(), tc.stderr) {
+			if tc.stderr == "" {
+				if stderr.Len() != 0 {
+					t.Errorf("nocklock %q stderr is not empty:\n%s", tc.args, stderr.String())
+				}
+			} else if !strings.Contains(stderr.String(), tc.stderr) {
 				t.Errorf("nocklock %q stderr does not contain %q:\n%s", tc.args, tc.stderr, stderr.String())
 			}
 		})
@@ -1078,7 +1082,9 @@ func TestCLIContractWrapExitCodes(t *testing.T) {
 		code        int
 	}{
 		{name: "no command", args: []string{"--"}, code: 1},
-		{name: "unknown flag", args: []string{"--no-such-flag", "--", exe}, code: 1},
+		// If the flag were ever accepted, the child exits 0 at once and the
+		// case fails on the code instead of re-running the test binary.
+		{name: "unknown flag", args: append([]string{"--no-such-flag"}, child("0")...), code: 1},
 		{name: "require enforced egress unmet", args: append([]string{"--require-enforced-egress"}, child("0")...), code: 2},
 		{name: "command not found", args: []string{"--", "nocklock-contract-no-such-command"}, code: 1},
 		{name: "session_end write fails", args: child("0"), failAuditOf: logging.EventSessionEnd, code: 2},
