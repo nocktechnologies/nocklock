@@ -3,7 +3,7 @@
 **Date:** 2026-06-04
 **Status:** Shipped (Phase 1: v0.2.0, #27, `internal/fence/fs/sbpl.go`), checked 2026-11-09
 
-**Status:** Shipped (Phase 2, `log stream` denial logging: v0.6.0, `internal/fence/fs/denylog.go`), checked 2026-11-09
+**Status:** Shipped (Phase 2, `log stream` denial logging: v0.6.0, #149, `internal/fence/fs/denylog.go`), checked 2026-11-09
 
 **Status:** Open (Phase 3, Endpoint Security system extension: macOS still uses Seatbelt, and `internal/fence/fs/sbpl.go` defers strict allowlisting to it), checked 2026-11-09
 

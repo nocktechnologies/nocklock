@@ -292,7 +292,7 @@ direction is decided here.
 items in "Still open (not yet probed)" above; the amendment decides the Q6 *direction*
 only):
 - **(a) Prove the AppArmor cause** via a toggle test: upgrade *indicated* to *proven*
-  (still pending, per the status line and the Cause block above).
+  (still pending, per the Cause block above).
 - **(b) CI-runner kernel coverage for Q1**: run the now-repeatable `egress-probe` on
   `ubuntu-latest` once PR #70 merges.
 - **(c) The Q6 acceptance test**: that the post-cap-drop child provably cannot mutate
