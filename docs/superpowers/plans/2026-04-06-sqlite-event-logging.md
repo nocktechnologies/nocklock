@@ -1,5 +1,7 @@
 # SQLite Event Logging Implementation Plan
 
+**Status:** Shipped (#4, `internal/logging/logger.go`), checked 2026-11-09
+
 > **STATUS: SHIPPED (as of 2026-09.** `internal/logging/logger.go` + tests are
 > built and integrated into `wrap`, `log`, and `status`. The unchecked `- [ ]`
 > boxes below are the original TDD steps and are historical, do NOT read them

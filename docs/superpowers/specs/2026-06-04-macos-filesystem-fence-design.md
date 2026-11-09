@@ -1,7 +1,7 @@
 # macOS Filesystem Fence Design: NockLock
 
 **Date:** 2026-06-04
-**Status:** Draft (awaiting approval)
+**Status:** Superseded (by the shipped Seatbelt fence: v0.2.0, #27, `internal/fence/fs/sbpl.go`), checked 2026-11-09
 **Branch:** `docs/macos-fs-fence-spec`
 
 ---
