@@ -2,9 +2,13 @@
 
 **Date:** 2026-06-11
 **Status:** Shipped (Phase 1: v0.2.0, #36, `internal/fence/fs/landlock/landlock_linux.go`), checked 2026-11-09
+
 **Status:** Open (later phase, macOS Endpoint Security: macOS still uses Seatbelt, `internal/fence/fs/sbpl.go`), checked 2026-11-09
+
 **Status:** Open (later phase, Landlock network rules, ABI 4: `HandledAccessNet` is never set in `internal/fence/fs/landlock/landlock_linux.go`), checked 2026-11-09
+
 **Status:** Shipped (later phase, per-rule device ioctl, ABI 5: `RightIOCTLDev` in `internal/fence/fs/landlock/rules.go`), checked 2026-11-09
+
 **Tracks:** Linux kernel-enforced fence backend (the Landlock half of the
 filesystem fence). Mirrors the macOS Seatbelt decision: a userspace interposer
 fails open against a determined process; the kernel-enforced backend is the

@@ -1,12 +1,10 @@
 # SQLite Event Logging Implementation Plan
 
-**Status:** Shipped (#4, `internal/logging/logger.go`), checked 2026-11-09
-
-> **STATUS: SHIPPED (as of 2026-09.** `internal/logging/logger.go` + tests are
+> **STATUS: SHIPPED (as of 2026-09).** `internal/logging/logger.go` + tests are
 > built and integrated into `wrap`, `log`, and `status`. The unchecked `- [ ]`
 > boxes below are the original TDD steps and are historical, do NOT read them
 > as "not built." Next work on the audit log is tamper-evidence:
-> `docs/superpowers/specs/2026-09-14-tamper-evident-audit-log.md`.)
+> `docs/superpowers/specs/2026-09-14-tamper-evident-audit-log.md`.
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
