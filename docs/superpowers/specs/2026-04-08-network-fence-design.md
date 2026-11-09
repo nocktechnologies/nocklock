@@ -1,7 +1,7 @@
 # Network Fence Design: NockLock PR #7
 
 **Date:** 2026-04-08  
-**Status:** Approved  
+**Status:** Shipped (#7, `internal/fence/network/proxy.go`; fail-closed proxy hardening in v0.2.0), checked 2026-11-09  
 **Branch:** `feature/network-fence`
 
 ---
