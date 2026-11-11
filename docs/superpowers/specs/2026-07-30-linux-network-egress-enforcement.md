@@ -1,7 +1,12 @@
 # Linux Network Egress Enforcement: Design
 
 **Date:** 2026-07-30
-**Status:** Proposed (product lead), problem confirmed, mechanism recommended. **Phase 0 STARTED (2026-08-03): VPS target probed with receipts, unprivileged-clean netns RULED OUT on the tested target (AppArmor indicated; toggle test pending), privileged-helper setup path CONFIRMED viable. See "Phase 0 results, VPS probe (2026-08-03)" below.**
+**Status:** Shipped (Phase 0 feasibility probe: v0.5.0, #70, `internal/cli/egress_probe.go`), checked 2026-11-09
+
+**Status:** Shipped (Phase 1 netns default-drop floor and transparent HTTP(S)/DNS allowlist: v0.5.0, #84, `internal/fence/network/netns/base.go`, `internal/fence/network/netns/transparent_linux.go`), checked 2026-11-09; body text below predates the build
+
+**Status:** Open (Phase 2: `--net-fence=netns` stays opt-in and the env proxy is still the default path, `docs/decisions/008-netns-kernel-egress-fence.md`), checked 2026-11-09
+
 **Tracks:** Making NockLock's headline domain-allowlist feature both *working* and
 *bypass-resistant* on Linux. Mirrors the Landlock and seccomp decisions: a
 userspace boundary fails open against a determined child; the kernel-enforced
@@ -287,7 +292,7 @@ direction is decided here.
 items in "Still open (not yet probed)" above; the amendment decides the Q6 *direction*
 only):
 - **(a) Prove the AppArmor cause** via a toggle test: upgrade *indicated* to *proven*
-  (still pending, per the status line and the Cause block above).
+  (still pending, per the Cause block above).
 - **(b) CI-runner kernel coverage for Q1**: run the now-repeatable `egress-probe` on
   `ubuntu-latest` once PR #70 merges.
 - **(c) The Q6 acceptance test**: that the post-cap-drop child provably cannot mutate

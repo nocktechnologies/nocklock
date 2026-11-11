@@ -21,11 +21,10 @@ import (
 // It deliberately does NOT use requireRoot: the test invokes wrap AS THE RUNNER
 // USER (wrap sudo's the privileged helper internally, and the fenced child drops
 // to the invoking uid — a root invoker would be rejected as the child credential).
-// Instead it self-skips unless the DECIDED privileged path is actually reachable
-// via passwordless sudo, exactly as wrap's own preflight probes it. On any dev
-// host (helper not installed, or no NOPASSWD sudo) it skips and never runs. Under
-// NOCKLOCK_AUDIT_REQUIRE=1 (set by the CI job) a would-be skip HARD-FAILS instead,
-// so a misconfigured runner is loud, not green.
+// Instead it requires NOCKLOCK_AUDIT_REQUIRE=1 (CI) or NOCKLOCK_NETNS_TESTS=1
+// (local opt-in), then checks the privileged path via passwordless sudo, exactly
+// as wrap's own preflight probes it. Under NOCKLOCK_AUDIT_REQUIRE=1 a would-be
+// prerequisite skip HARD-FAILS instead, so a misconfigured runner is loud.
 //
 // SAFETY: this test is the CI-only bar. It must not be run on the resident host.
 
@@ -33,12 +32,14 @@ const netnsHelperInstalledPath = "/usr/libexec/nocklock-egress-helper"
 
 func auditStrictlyRequired() bool { return os.Getenv("NOCKLOCK_AUDIT_REQUIRE") == "1" }
 
-// requireNetnsHelperSudo skips (or, under NOCKLOCK_AUDIT_REQUIRE=1, fails) unless
-// `sudo -n <helper> check` succeeds — the identical probe wrap runs before it
-// will attempt --net-fence=netns. This self-skips on every host that has not
-// installed the helper with the passwordless-sudo policy from the spec.
+// requireNetnsHelperSudo skips unless the caller opts in, then skips (or, under
+// NOCKLOCK_AUDIT_REQUIRE=1, fails) unless `sudo -n <helper> check` succeeds —
+// the identical probe wrap runs before it will attempt --net-fence=netns.
 func requireNetnsHelperSudo(t *testing.T) {
 	t.Helper()
+	if !auditStrictlyRequired() && os.Getenv("NOCKLOCK_NETNS_TESTS") != "1" {
+		t.Skip("netns acceptance tests require NOCKLOCK_AUDIT_REQUIRE=1 or NOCKLOCK_NETNS_TESTS=1")
+	}
 	if os.Geteuid() == 0 {
 		const msg = "egress audit acceptance test must run as the UNPRIVILEGED runner user (wrap sudo's the helper itself; a root invoker is rejected as the child credential)"
 		if auditStrictlyRequired() {
@@ -54,6 +55,64 @@ func requireNetnsHelperSudo(t *testing.T) {
 			t.Fatalf("%s; strict-required mode forbids skipping: %v\n%s", msg, err, strings.TrimSpace(string(out)))
 		}
 		t.Skipf("%s; skipping: %v", msg, err)
+	}
+}
+
+func TestRequireNetnsHelperSudoNeedsOptIn(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("default-skip control requires an unprivileged test runner")
+	}
+	t.Setenv("NOCKLOCK_AUDIT_REQUIRE", "")
+	t.Setenv("NOCKLOCK_NETNS_TESTS", "")
+	fakeBin := t.TempDir()
+	if err := os.WriteFile(filepath.Join(fakeBin, "sudo"), []byte("#!/bin/sh\nprintf called > \"$0.called\"\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", fakeBin)
+
+	reachedHelper := false
+	t.Run("no opt-in", func(t *testing.T) {
+		requireNetnsHelperSudo(t)
+		reachedHelper = true
+	})
+	if reachedHelper {
+		t.Fatal("netns helper guard did not skip without explicit opt-in")
+	}
+	if _, err := os.Stat(filepath.Join(fakeBin, "sudo.called")); !os.IsNotExist(err) {
+		t.Fatalf("netns helper guard probed sudo without opt-in: %v", err)
+	}
+}
+
+func TestRequireNetnsHelperSudoOptIn(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("opt-in control requires an unprivileged test runner")
+	}
+	for _, envName := range []string{"NOCKLOCK_AUDIT_REQUIRE", "NOCKLOCK_NETNS_TESTS"} {
+		t.Run(envName, func(t *testing.T) {
+			fakeBin := t.TempDir()
+			if err := os.WriteFile(filepath.Join(fakeBin, "sudo"), []byte("#!/bin/sh\nprintf '%s\\n' \"$*\" > \"$0.called\"\n"), 0o755); err != nil {
+				t.Fatal(err)
+			}
+			t.Setenv("PATH", fakeBin)
+			t.Setenv("NOCKLOCK_AUDIT_REQUIRE", "")
+			t.Setenv("NOCKLOCK_NETNS_TESTS", "")
+			t.Setenv(envName, "1")
+			completed := false
+			t.Run("guard", func(t *testing.T) {
+				requireNetnsHelperSudo(t)
+				completed = true
+			})
+			got, err := os.ReadFile(filepath.Join(fakeBin, "sudo.called"))
+			if err != nil {
+				t.Fatalf("opt-in did not probe the fake sudo helper: %v", err)
+			}
+			if want := "-n " + netnsHelperInstalledPath + " check\n"; string(got) != want {
+				t.Fatalf("fake sudo helper arguments = %q, want %q", got, want)
+			}
+			if !completed {
+				t.Fatal("opted-in netns helper guard skipped after probing sudo")
+			}
+		})
 	}
 }
 

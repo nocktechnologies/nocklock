@@ -1,7 +1,7 @@
 # Secret Fence Design: PR #3
 
 **Date:** 2026-04-06
-**Status:** Approved
+**Status:** Shipped (#3, `internal/fence/secrets/secrets.go`), checked 2026-11-09
 **Branch:** `feature/secret-fence`
 
 ## Purpose

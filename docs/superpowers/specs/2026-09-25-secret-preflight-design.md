@@ -1,5 +1,7 @@
 # Secret preflight scanning
 
+**Status:** Shipped (v0.5.0, #101, `internal/fence/secrets/scan.go`), checked 2026-11-09
+
 The project owner approved starting the promised-feature plan on September 25, 2026.
 This first increment adds local detection and a prelaunch gate. It does not
 rewrite reads, monitor agent context, or promise detection of arbitrary secrets.

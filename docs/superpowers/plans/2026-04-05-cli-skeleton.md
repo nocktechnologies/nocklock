@@ -1,5 +1,7 @@
 # NockLock CLI Skeleton Implementation Plan
 
+**Status:** Shipped (v0.1.0, #1 and #2, `internal/cli/root.go`), checked 2026-11-09
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** Build the NockLock CLI skeleton with cobra commands, TOML config parsing, passthrough wrap, and project structure, no fence implementations.

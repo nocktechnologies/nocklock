@@ -21,7 +21,7 @@ This is a public repository. Keep `AGENTS.md` and `docs/HANDOFF.md` product-only
 - `go test -tags=integration ./...`: end-to-end tests against the built binary
 - `GOOS=darwin GOARCH=arm64 go vet ./...`: compiles the darwin code and test files from Linux; CI runs it on every push
 - `go fmt ./...` / `go vet ./...`: format and lint; `make lint` runs both. CI fails if `gofmt -l .` prints anything.
-- Stack: Go 1.27.3+, cobra, BurntSushi/toml, SQLite via modernc.org/sqlite. Python 3 for scripts and the red-team bench.
+- Stack: Go 1.27.4+, cobra, BurntSushi/toml, SQLite via modernc.org/sqlite. Python 3 for scripts and the red-team bench.
 
 ## Required checks
 
@@ -32,6 +32,8 @@ Before you push:
 3. Self-review for hardcoded secrets, path traversal, race conditions and subprocess injection.
 4. The PR follows `CONTRIBUTING.md` and targets `next`.
 5. `CHANGELOG.md` has an `[Unreleased]` entry; this file and `docs/REPO-MAP.md` are updated if structure changed.
+
+The CLI, config and exit-code contract is in `docs/reference/cli.md` and checked by `internal/cli/contract_test.go`. The compatibility promise is in effect from v1.0.0. Removing or changing a documented command, command alias, flag, default, config key, egress level, run state or exit code is breaking: add a `CHANGELOG.md` Breaking entry and release a new major version. Adding one is not breaking: make an ordinary `CHANGELOG.md` entry, update `docs/reference/cli.md`, and update the contract goldens.
 
 CI: `.github/workflows/test.yml` runs build, darwin cross-vet, vet, gofmt, the content gates, the unit suite, race regressions, fuzz smoke tests, Landlock and macOS Seatbelt enforcement proofs. `.github/workflows/network-egress.yml` runs the root netns, egress and red-team jobs. `.github/workflows/gitleaks.yml` scans for secrets against `.gitleaks-baseline.json`. `.github/workflows/linux-candidate.yml` builds the Linux install candidate. `.github/workflows/landlock-abi9-receipt.yml` runs the Unix-socket and io_uring kernel cases in a KVM guest with Landlock ABI 9+ and signs the receipt.
 
@@ -44,7 +46,7 @@ The full list is `docs/context/invariants.md`. The ones that break builds or rev
 - A test that proves a block also proves the allowed case still passes.
 - Every fence decision is written to the signed, hash-chained event log. No decision path skips it.
 - Docs, `doctor`, `wrap` banners and the README say only what is enforced, with the limits next to the claim.
-- `doctor` exits 0/2/3/4; `wrap` exits 2 on startup failure or a failed blocked-event or `session_end` audit write, otherwise with the child's code. Use `exec.ExitError.ExitCode()`, never `syscall.WaitStatus`.
+- `doctor` exits 0/2/3/4; `wrap` exits with the child's code, or 2 on a failed blocked-event or `session_end` audit write and on the startup refusals listed in `docs/reference/cli.md`; other startup errors exit 1. `internal/cli/contract_test.go` pins the CLI, config keys, egress levels and `verify --audit` states against that page. Use `exec.ExitError.ExitCode()`, never `syscall.WaitStatus`.
 - Egress levels are defined once, in `internal/cli/egress_level.go`. Do not restate them elsewhere in code.
 - Exported functions have doc comments; error messages are actionable.
 - No new dependencies without discussion.
@@ -65,7 +67,7 @@ Things you cannot guess from the code layout:
 - **Linux `wrap` needs the interposer** at its trusted path, not just a built binary (`docs/setup.md`). The privileged egress helper for `--net-fence=netns` installs separately with `sudo make install-egress-helper`.
 - **The claude-code preset tests create preset-* directories in `internal/cli/`.** They are gitignored and normally cleaned up; delete leftovers from a crashed run, do not commit them.
 - **Run the suite with umask 022.** Under umask 002 the temp directories come out 0775, and the audit state trust check in `internal/logging/` refuses them, so prune and receipt tests fail with "group- or world-writable". CI runners use 022.
-- **Root netns tests are CI-only and run the installed binary.** They self-skip unless the egress helper is reachable through passwordless sudo, so a plain `go test ./...` on a host with the helper installed runs them. Do not run them on a shared host. The helper execs the root-owned nocklock in /usr/local/bin, not your build, so a stale install fails tests that the code under test passes; `make install` first.
+- **CLI netns acceptance tests need explicit opt-in and run the installed binary.** They skip unless `NOCKLOCK_AUDIT_REQUIRE=1` (CI) or `NOCKLOCK_NETNS_TESTS=1` (local opt-in); then they check the egress helper through passwordless sudo. Do not opt in on a shared host. The helper execs the root-owned nocklock in /usr/local/bin, not your build, so a stale install fails tests that the code under test passes; `make install` first.
 - **Race-sensitive code has its own CI steps** (`go test -race -count=20` on the proxy and netns packages). Run them locally when you touch proxy shutdown.
 - **Decision records live in two places:** 001 to 005 in `.claude/decisions/`, 006 onward in `docs/decisions/`. New records go in `docs/decisions/`.
 
@@ -92,7 +94,7 @@ Things you cannot guess from the code layout:
 ## Other files
 
 - Changelog: `CHANGELOG.md` (add to `[Unreleased]` in every PR).
-- Roadmap: `docs/ROADMAP.md` (the path to 1.0).
+- Roadmap: `docs/ROADMAP.md` (the completed 1.0 bars and later work).
 - Architecture: `ARCHITECTURE.md` (deep package tree); `docs/REPO-MAP.md` (every package and where its tests are).
 - Contributor notes: `docs/HANDOFF.md`.
 - Docs index: `docs/README.md`. Designs and specs: `docs/design/`, `docs/superpowers/specs/`. Lessons: `.claude/lessons/`.

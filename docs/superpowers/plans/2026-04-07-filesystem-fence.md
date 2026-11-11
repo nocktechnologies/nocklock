@@ -1,5 +1,7 @@
 # Filesystem Fence (LD_PRELOAD Interception) Implementation Plan
 
+**Status:** Shipped (#6, `internal/fence/fs/interposer/libfence_fs.c`), checked 2026-11-09
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** Intercept file system calls made by wrapped processes via LD_PRELOAD, blocking access outside allowed directory trees, Linux only.

@@ -34,9 +34,9 @@ import (
 // sibling acceptance test uses — so we assert that here.)
 //
 // It reuses requireNetnsHelperSudo / nocklockBinary / hasDecisionRow /
-// detailList from wrap_egress_audit_linux_test.go, so it self-skips on any host
-// without the privileged helper reachable via passwordless sudo (and, under
-// NOCKLOCK_AUDIT_REQUIRE=1, HARD-FAILS instead of skipping).
+// detailList from wrap_egress_audit_linux_test.go, so it needs an explicit netns
+// test opt-in and a privileged helper reachable via passwordless sudo (under
+// NOCKLOCK_AUDIT_REQUIRE=1, missing prerequisites fail instead of skipping).
 //
 // SAFETY: CI-only, exactly like the sibling test — never run on the resident host.
 func TestWrapComposedDefaultEgressAudit(t *testing.T) {

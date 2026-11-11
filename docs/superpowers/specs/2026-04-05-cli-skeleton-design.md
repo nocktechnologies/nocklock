@@ -1,6 +1,6 @@
 # NockLock PR #1: CLI Skeleton + Project Structure, Design Spec
 
-**Status:** Approved  
+**Status:** Shipped (v0.1.0, #1 and #2, `internal/cli/root.go`), checked 2026-11-09  
 **Date:** 2026-04-05  
 **Branch:** `feature/cli-skeleton` from `main`
 
