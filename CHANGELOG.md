@@ -4,6 +4,10 @@ All notable changes to NockLock will be documented in this file.
 
 ## [Unreleased]
 
+### Security
+
+- Require Go 1.27.4 for GO-2026-6859 / CVE-2026-97054 in `net/http`. NockLock does not use the `MaxBytesReader` or `MaxBytesHandler` crash trigger; this is a toolchain-only bump.
+
 ### Tests
 
 - Linux CLI netns egress acceptance tests now require explicit opt-in before checking the privileged helper, so a normal test run skips them even when passwordless helper access is installed.
