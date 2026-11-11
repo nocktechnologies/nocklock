@@ -20,7 +20,6 @@ This release requires Go 1.27.4 for a security fix and updates `golang.org/x/sys
 
 ### Documentation
 
-- Correct the documented netns refusal and narrow the stated `wrap` exit-code test coverage for the 1.0 compatibility promise.
 - Make `docs/reference/cli.md` the 1.0 compatibility promise for the public CLI, config and exit codes. `wrap` continues to pass the child's exit code through unchanged; its own startup refusals retain the documented `1` and `2`. Stderr and a signed `session_end` row, when the run started, distinguish overlapping codes in the cases `docs/reference/cli.md` lists. No behavior changed.
 - `docs/reference/cli.md` now matches the code. It documents the installation-lease exit `2`, the `wrap` startup refusals that exit `1` rather than `2`, how to tell a child's exit code from a NockLock failure, the egress levels, the `help` and `completion` commands, every hidden entry point, the `--profile=` and `--net-fence=` forms, the `logging.level` values, and `XDG_RUNTIME_DIR` and `SUDO_UID`. No behavior changed.
 
