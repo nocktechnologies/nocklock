@@ -37,7 +37,7 @@ On Linux below Landlock ABI 9, `doctor` returns `PARTIAL` (exit 3) because other
 
 ## What we're looking for
 
-The [roadmap to 1.0](docs/ROADMAP.md) tracks the current priorities:
+The [1.0 roadmap](docs/ROADMAP.md) records the completed release bars and later work:
 
 - Real-kernel validation of the Linux Unix-socket rules, with red-team coverage and allowed-action controls
 - Complete Linux packaging and clean-host installation verification
@@ -48,7 +48,7 @@ Bug reports with reproduction steps, documentation improvements, test coverage i
 
 Some changes need a conversation first. Open an issue before building a new fence type or making a major architectural change. Changes to the config format need discussion because backwards compatibility matters, and so does anything that adds an external dependency.
 
-The CLI, config and exit-code contract is in [the CLI reference](docs/reference/cli.md) and checked by `internal/cli/contract_test.go`. Removing or changing a documented command, command alias, flag, default, config key, egress level, run state or exit code is breaking: add a `CHANGELOG.md` Breaking entry and, from 1.0, release a new major version. Adding one is not breaking: make an ordinary `CHANGELOG.md` entry, update `docs/reference/cli.md`, and update the contract goldens.
+The CLI, config and exit-code contract is in [the CLI reference](docs/reference/cli.md) and checked by `internal/cli/contract_test.go`. The compatibility promise is in effect from v1.0.0. Removing or changing a documented command, command alias, flag, default, config key, egress level, run state or exit code is breaking: add a `CHANGELOG.md` Breaking entry and, from 1.0, release a new major version. Adding one is not breaking: make an ordinary `CHANGELOG.md` entry, update `docs/reference/cli.md`, and update the contract goldens.
 
 ## How to contribute
 
