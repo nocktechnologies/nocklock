@@ -6,7 +6,7 @@ Contract tests in `internal/cli/contract_test.go` pin the surface this page desc
 
 ## Compatibility promise
 
-Starting with 1.0, the public commands, command aliases, flags, defaults, config keys, egress levels, run states and exit codes documented on this page are the compatibility contract. Flag defaults are held by the contract tests; config-key defaults are the values in internal/config/defaults.go (noted on this page where a key's default matters) and are enforced in review.
+Starting with 1.0, the public commands, command aliases, flags, defaults, config keys, egress levels, run states and exit codes documented on this page are the compatibility contract. Flag defaults are held by the contract tests; config-key defaults are the values in `internal/config/defaults.go` (noted on this page where a key's default matters) and are enforced in review.
 
 Removing or changing a documented command, command alias, flag, default, config key, egress level, run state or exit code is breaking: add a `CHANGELOG.md` Breaking entry and, from 1.0, release a new major version. Adding one is not breaking: make an ordinary `CHANGELOG.md` entry, update this page, and update the contract goldens.
 

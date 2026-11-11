@@ -37,18 +37,22 @@ On Linux below Landlock ABI 9, `doctor` returns `PARTIAL` (exit 3) because other
 
 ## What we're looking for
 
-The [roadmap to 1.0](docs/ROADMAP.md) tracks the current priorities:
+The [1.0 roadmap](docs/ROADMAP.md) records the completed release bars. Open work is in its Later section:
 
-- Real-kernel validation of the Linux Unix-socket rules, with red-team coverage and allowed-action controls
-- Complete Linux packaging and clean-host installation verification
-- A tested CLI, config and exit-code compatibility contract
+- macOS read confinement outside `filesystem.root`
+- A Windows fence
+- Look-back rules beyond slice 1
+- Default off-box audit anchoring; per-chain v2 anchors shipped in v0.10.0 and in-run checkpoints in v0.12.0, both opt-in
+- Signing-key rotation: the offline endorsement format and library verifier shipped in v0.12.0, but no command switches keys
+- A public timestamp over the v2 snapshot digest, design only
+- Kernel-drop observation, design only
 - Integration testing with more AI agents and performance benchmarks across supported hosts
 
 Bug reports with reproduction steps, documentation improvements, test coverage improvements, and CI/CD improvements are always welcome. Windows is a separate feasibility effort; read [the design](docs/design/windows-feasibility.md) before proposing a backend.
 
 Some changes need a conversation first. Open an issue before building a new fence type or making a major architectural change. Changes to the config format need discussion because backwards compatibility matters, and so does anything that adds an external dependency.
 
-The CLI, config and exit-code contract is in [the CLI reference](docs/reference/cli.md) and checked by `internal/cli/contract_test.go`. Removing or changing a documented command, command alias, flag, default, config key, egress level, run state or exit code is breaking: add a `CHANGELOG.md` Breaking entry and, from 1.0, release a new major version. Adding one is not breaking: make an ordinary `CHANGELOG.md` entry, update `docs/reference/cli.md`, and update the contract goldens.
+The CLI, config and exit-code contract is in [the CLI reference](docs/reference/cli.md) and checked by `internal/cli/contract_test.go`. The compatibility promise is in effect from v1.0.0. Removing or changing a documented command, command alias, flag, default, config key, egress level, run state or exit code is breaking: add a `CHANGELOG.md` Breaking entry and release a new major version. Adding one is not breaking: make an ordinary `CHANGELOG.md` entry, update `docs/reference/cli.md`, and update the contract goldens.
 
 ## How to contribute
 

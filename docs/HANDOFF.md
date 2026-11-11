@@ -6,6 +6,8 @@ No internal host names, personal names or absolute home paths: `scripts/check-pu
 
 ## What changed
 
+- 2026-11-11: Prepared v1.0.0 release notes from the completed four-bar roadmap, set the CLI compatibility promise in effect from v1.0.0, and clarified the documented overlapping exit-code cases. Tagging, asset publication and back-sync remain release steps.
+
 - 2026-11-11: The 1.0 CLI promise now distinguishes additions (ordinary release note and golden update) from removals or changes (Breaking note and major version). The unskipped Go packages passed with a trusted temp directory and umask 022.
 - 2026-11-11: The CLI reference now states the 1.0 compatibility promise for public commands, flags, config keys, egress levels, `verify --audit` run states and exit codes. `wrap` keeps passing the child's exit code through; its own startup refusals remain at the documented 1 and 2, with stderr and signed run records explaining overlaps. The contract tests are unchanged. `[Unreleased]` now records the `golang.org/x/sys` and `modernc.org/sqlite` updates already on next. Still open: merge to next, promotion to main and release.
 - 2026-11-11: the source-build minimum is Go 1.27.4 for GO-2026-6859 / CVE-2026-97054. Workflows read the version from `go.mod`; no runtime code changed. Production code does not call `MaxBytesReader` or `MaxBytesHandler`. The CLI package tests, build, vet, formatting and vulnerability scan passed with the new toolchain.
