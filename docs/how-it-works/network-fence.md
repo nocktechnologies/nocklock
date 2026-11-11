@@ -54,3 +54,4 @@ With the network fence active the profile denies `network-outbound` except TCP t
 
 ## Tests
 `internal/fence/network/*_test.go`, `internal/fence/network/netns/*_linux_test.go` (bypass, protocol matrix, DNS escape), `internal/cli/egress_level_test.go`, `internal/cli/wrap_egress_*_test.go`, `internal/cli/seatbelt_floor_test.go`, `wrap_network_floor_darwin_test.go`. CI: `.github/workflows/network-egress.yml`.
+The CLI netns helper acceptance tests require `NOCKLOCK_AUDIT_REQUIRE=1` in CI or `NOCKLOCK_NETNS_TESTS=1` for a local opt-in; without either, they skip before probing sudo.

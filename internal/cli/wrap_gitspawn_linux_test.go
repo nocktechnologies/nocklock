@@ -28,8 +28,9 @@ import (
 // each action and passes `verify --audit` as AUTHENTIC.
 //
 // It reuses the netns acceptance gate (requireNetnsHelperSudo, nocklockBinary),
-// so it self-skips without the privileged helper and HARD-FAILS instead under
-// NOCKLOCK_AUDIT_REQUIRE=1. SAFETY: it runs only on a disposable GitHub-hosted
+// so it needs an explicit netns test opt-in and the privileged helper, and
+// HARD-FAILS on missing prerequisites under NOCKLOCK_AUDIT_REQUIRE=1.
+// SAFETY: it runs only on a disposable GitHub-hosted
 // runner, never on a development host that happens to have the helper.
 func TestWrapGitSpawnFsmonitorTrapIsFenced(t *testing.T) {
 	if os.Getenv("GITHUB_ACTIONS") != "true" || os.Getenv("RUNNER_ENVIRONMENT") != "github-hosted" {
