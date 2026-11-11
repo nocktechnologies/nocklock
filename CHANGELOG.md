@@ -4,7 +4,7 @@ All notable changes to NockLock will be documented in this file.
 
 ## [Unreleased]
 
-## [1.0.0] - 2026-11-11
+## [1.0.0] - 2026-11-12
 
 NockLock 1.0.0 is the first stable release. `docs/reference/cli.md` is the compatibility promise for the public CLI, config and exit codes.
 This release requires Go 1.27.4 for a security fix and updates `golang.org/x/sys` and `modernc.org/sqlite`.
