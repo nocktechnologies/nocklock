@@ -1,8 +1,14 @@
 # CLI, exit codes and config schema
 
-This page records current code behavior, starting from the `v0.9.0` baseline (`f2b0d04`) and including later changes listed in `CHANGELOG.md`. It is **not yet a compatibility promise**. Making it one is the fourth bar for 1.0 (`docs/ROADMAP.md`); until then, anything here can change in a minor release with a `CHANGELOG.md` "Breaking" entry.
+This page records current code behavior, starting from the `v0.9.0` baseline (`f2b0d04`) and including later changes listed in `CHANGELOG.md`.
 
 Contract tests in `internal/cli/contract_test.go` pin the surface this page describes: the command tree with each command's aliases and every cobra flag with its shorthand, type and default (`internal/cli/testdata/contract/commands.golden`), the tokens `wrap` accepts, every config key with its type (`internal/cli/testdata/contract/config-schema.golden`), the egress levels, the `verify --audit` run states, and the exit codes below for `doctor`, `Execute()` and `wrap`. They fail when the code changes any of these, and when this page stops naming one of them. A deliberate change updates this page, then regenerates the golden files with `go test ./internal/cli -run TestCLIContract -update-contract-golden` and reviews the diff.
+
+## Compatibility promise
+
+Starting with 1.0, the public commands, command aliases, flags, defaults, config keys, egress levels, run states and exit codes documented on this page are the compatibility contract. Flag defaults are held by the contract tests; config-key defaults are the values in internal/config/defaults.go (noted on this page where a key's default matters) and are enforced in review.
+
+Removing or changing a documented command, command alias, flag, default, config key, egress level, run state or exit code is breaking: add a `CHANGELOG.md` Breaking entry and, from 1.0, release a new major version. Adding one is not breaking: make an ordinary `CHANGELOG.md` entry, update this page, and update the contract goldens.
 
 ## Commands
 Registered in `internal/cli/` (one file per command). `README.md` "Commands" has the user-facing table.
@@ -112,7 +118,7 @@ Exit codes travel as `exitCodeError` and `Execute()` calls `os.Exit` once (`root
 - A NockLock failure always writes a line to stderr: `Error: <reason>` (cobra) for exit-1 errors other than a child that could not be resolved or launched (the bare error, `root.go`) and for the two errors-joined refusals (durable audit with netns, signing unavailable), otherwise a line starting `NockLock: fatal:` or `NockLock: installation unavailable:`. NockLock writes none of these when it passes a child's code through, but the child shares stderr and can print the same text.
 - Once a run has started, its `session_end` row records the verdict: `exit_code=<n>` alone for a child's own code or for a child that could not be resolved or launched (`exit_code=1`; `wrap` silences cobra here and `Execute()` prints the bare error to stderr, `root.go`), and `exit_code=2` with `decision_audit_failed=true`, `audit_write_failed=true` or `proxy_failed=true` when NockLock overrode it. The signed `session_close` row's `end=` field separates the launch cases: `end=refused` when the command could not be resolved or the netns helper request could not be built, `end=child_exit` for a child's own code and for an exec that failed (`wrap.go`, `internal/logging/run_close.go`), so an exec failure and a child exiting `1` differ only on stderr. If `session_end` itself cannot be written, `wrap` prints `NockLock: fatal: failed to record session_end` and exits `2`. A refusal before the run starts has no `session_end` row; some refusals write a blocked row first (`wrap.go`).
 
-Reserving exit codes for NockLock, or moving every startup refusal to `2`, would change behavior and is not part of the current contract.
+The 1.0 contract keeps this pass-through behavior and the existing `1` and `2` startup refusals. Moving every refusal to `2` would still collide with a child exiting `2` and would change existing scripts.
 
 `doctor` checks the managed Ed25519 signing-key directory resolved from `XDG_CONFIG_HOME` (or `~/.config`) against the effective filesystem fence. On macOS it must be inside a Seatbelt deny path. On Linux with Landlock it must be outside every read grant; if a deny overlaps a grant (for example, a key under the project or `/tmp`), `wrap` refuses to start and `doctor` reports `GAPS FOUND` (exit 2). With Landlock disabled, the userspace-only signing-key boundary is `advisory`, so the verdict cannot be `PROTECTED`. `doctor --json` includes `signing_key.directory` and `signing_key.posture`; the `signing-key` check and boundary explain any gap.
 

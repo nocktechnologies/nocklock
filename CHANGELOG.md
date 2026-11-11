@@ -15,7 +15,13 @@ All notable changes to NockLock will be documented in this file.
 
 ### Documentation
 
+- Make `docs/reference/cli.md` the 1.0 compatibility promise for the public CLI, config and exit codes. `wrap` continues to pass the child's exit code through unchanged; its own startup refusals retain the documented `1` and `2`. Stderr and a signed `session_end` row, when the run started, distinguish overlapping codes. No behavior changed.
 - `docs/reference/cli.md` now matches the code. It documents the installation-lease exit `2`, the `wrap` startup refusals that exit `1` rather than `2`, how to tell a child's exit code from a NockLock failure, the egress levels, the `help` and `completion` commands, every hidden entry point, the `--profile=` and `--net-fence=` forms, the `logging.level` values, and `XDG_RUNTIME_DIR` and `SUDO_UID`. No behavior changed.
+
+### Dependencies
+
+- Bump `golang.org/x/sys` from 0.49.0 to 0.50.0 (#309).
+- Bump `modernc.org/sqlite` from 1.61.1 to 1.62.0 (#308).
 
 ## [0.17.1] - 2026-11-05
 
