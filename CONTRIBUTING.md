@@ -48,7 +48,7 @@ Bug reports with reproduction steps, documentation improvements, test coverage i
 
 Some changes need a conversation first. Open an issue before building a new fence type or making a major architectural change. Changes to the config format need discussion because backwards compatibility matters, and so does anything that adds an external dependency.
 
-The CLI, config and exit-code contract is in [the CLI reference](docs/reference/cli.md) and checked by `internal/cli/contract_test.go`. Removing or changing a documented command, flag, default, config key, egress level, run state or exit code is breaking: add a `CHANGELOG.md` Breaking entry and, from 1.0, release a new major version. Adding one is not breaking: make an ordinary `CHANGELOG.md` entry, update `docs/reference/cli.md`, and update the contract goldens.
+The CLI, config and exit-code contract is in [the CLI reference](docs/reference/cli.md) and checked by `internal/cli/contract_test.go`. Removing or changing a documented command, command alias, flag, default, config key, egress level, run state or exit code is breaking: add a `CHANGELOG.md` Breaking entry and, from 1.0, release a new major version. Adding one is not breaking: make an ordinary `CHANGELOG.md` entry, update `docs/reference/cli.md`, and update the contract goldens.
 
 ## How to contribute
 
