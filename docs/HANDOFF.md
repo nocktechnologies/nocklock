@@ -6,7 +6,9 @@ No internal host names, personal names or absolute home paths: `scripts/check-pu
 
 ## What changed
 
+- 2026-11-11: The 1.0 CLI promise now distinguishes additions (ordinary release note and golden update) from removals or changes (Breaking note and major version). The unskipped Go packages passed with a trusted temp directory and umask 022.
 - 2026-11-11: The CLI reference now states the 1.0 compatibility promise for public commands, flags, config keys, egress levels, `verify --audit` run states and exit codes. `wrap` keeps passing the child's exit code through; its own startup refusals remain at the documented 1 and 2, with stderr and signed run records explaining overlaps. The contract tests are unchanged. `[Unreleased]` now records the `golang.org/x/sys` and `modernc.org/sqlite` updates already on next. Still open: merge to next, promotion to main and release.
+- 2026-11-11: the source-build minimum is Go 1.27.4 for GO-2026-6859 / CVE-2026-97054. Workflows read the version from `go.mod`; no runtime code changed. Production code does not call `MaxBytesReader` or `MaxBytesHandler`. The CLI package tests, build, vet, formatting and vulnerability scan passed with the new toolchain.
 
 - 2026-11-11: Linux CLI netns egress acceptance tests now require `NOCKLOCK_AUDIT_REQUIRE=1` or `NOCKLOCK_NETNS_TESTS=1` before probing the privileged helper. A unit test proves the default skip without invoking a fake sudo probe, and controls prove both opt-ins reach it. The CLI package passed locally with the four privileged acceptance tests explicitly excluded; the dedicated CI jobs retain the strict opt-in. A package run with a temporary directory beneath a protected credential path failed unrelated fixture trust checks; using `/tmp` passed.
 

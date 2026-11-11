@@ -6,7 +6,7 @@ Contract tests in `internal/cli/contract_test.go` pin the surface this page desc
 
 ## Compatibility promise
 
-Starting with 1.0, the public commands, flags, config keys, egress levels, `verify --audit` run states and exit codes documented on this page are the compatibility contract held by `internal/cli/contract_test.go`. Changing any of them is a breaking change and requires a major version.
+Starting with 1.0, the public commands, flags, defaults, config keys, egress levels, run states and exit codes documented on this page are the compatibility contract held by `internal/cli/contract_test.go`. Removing or changing a documented command, flag, default, config key, egress level, run state or exit code is breaking: add a `CHANGELOG.md` Breaking entry and release a new major version. Adding one is not breaking: make an ordinary `CHANGELOG.md` entry, update this page, and update the contract goldens.
 
 ## Commands
 Registered in `internal/cli/` (one file per command). `README.md` "Commands" has the user-facing table.

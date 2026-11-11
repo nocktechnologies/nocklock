@@ -21,7 +21,7 @@ This is a public repository. Keep `AGENTS.md` and `docs/HANDOFF.md` product-only
 - `go test -tags=integration ./...`: end-to-end tests against the built binary
 - `GOOS=darwin GOARCH=arm64 go vet ./...`: compiles the darwin code and test files from Linux; CI runs it on every push
 - `go fmt ./...` / `go vet ./...`: format and lint; `make lint` runs both. CI fails if `gofmt -l .` prints anything.
-- Stack: Go 1.27.3+, cobra, BurntSushi/toml, SQLite via modernc.org/sqlite. Python 3 for scripts and the red-team bench.
+- Stack: Go 1.27.4+, cobra, BurntSushi/toml, SQLite via modernc.org/sqlite. Python 3 for scripts and the red-team bench.
 
 ## Required checks
 
@@ -33,7 +33,7 @@ Before you push:
 4. The PR follows `CONTRIBUTING.md` and targets `next`.
 5. `CHANGELOG.md` has an `[Unreleased]` entry; this file and `docs/REPO-MAP.md` are updated if structure changed.
 
-The CLI, config and exit-code contract is in `docs/reference/cli.md` and checked by `internal/cli/contract_test.go`. A change that fails those contract tests is breaking; update their goldens only with a `CHANGELOG.md` Breaking entry.
+The CLI, config and exit-code contract is in `docs/reference/cli.md` and checked by `internal/cli/contract_test.go`. Removing or changing a documented command, flag, default, config key, egress level, run state or exit code is breaking: add a `CHANGELOG.md` Breaking entry and, from 1.0, release a new major version. Adding one is not breaking: make an ordinary `CHANGELOG.md` entry, update `docs/reference/cli.md`, and update the contract goldens.
 
 CI: `.github/workflows/test.yml` runs build, darwin cross-vet, vet, gofmt, the content gates, the unit suite, race regressions, fuzz smoke tests, Landlock and macOS Seatbelt enforcement proofs. `.github/workflows/network-egress.yml` runs the root netns, egress and red-team jobs. `.github/workflows/gitleaks.yml` scans for secrets against `.gitleaks-baseline.json`. `.github/workflows/linux-candidate.yml` builds the Linux install candidate. `.github/workflows/landlock-abi9-receipt.yml` runs the Unix-socket and io_uring kernel cases in a KVM guest with Landlock ABI 9+ and signs the receipt.
 
