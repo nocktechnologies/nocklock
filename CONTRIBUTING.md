@@ -48,6 +48,8 @@ Bug reports with reproduction steps, documentation improvements, test coverage i
 
 Some changes need a conversation first. Open an issue before building a new fence type or making a major architectural change. Changes to the config format need discussion because backwards compatibility matters, and so does anything that adds an external dependency.
 
+The CLI, config and exit-code contract is in [the CLI reference](docs/reference/cli.md) and checked by `internal/cli/contract_test.go`. A change that fails those contract tests is breaking; update their goldens only with a `CHANGELOG.md` Breaking entry.
+
 ## How to contribute
 
 Outside contributors can start with a GitHub issue and a fork. A maintainer reviews PRs and merges accepted changes. If a required check cannot run on a fork, a maintainer arranges an in-repository branch for review.
