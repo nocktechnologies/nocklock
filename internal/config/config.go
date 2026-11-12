@@ -326,8 +326,10 @@ type FilesystemConfig struct {
 	Mode             string   `toml:"mode"`
 	LinuxEnforcement string   `toml:"linux_enforcement"`
 	Allow            []string `toml:"allow"`
-	AllowRW          []string `toml:"allow_rw"`
-	Deny             []string `toml:"deny"`
+	// ReadAllow grants explicit macOS home reads when ConfineHomeReads is on.
+	ReadAllow []string `toml:"read_allow"`
+	AllowRW   []string `toml:"allow_rw"`
+	Deny      []string `toml:"deny"`
 	// MacOSAllowUnfenced is the removed v0.5 macOS escape hatch. The key is
 	// still decoded so configs written by v0.5 (`= false`) keep loading and the
 	// signed policy digest stays stable; Validate rejects `= true`.
@@ -336,6 +338,9 @@ type FilesystemConfig struct {
 	// mach-priv-host-port, iokit-open, system-socket; tightened /dev). It is a
 	// no-op on Linux. Absent/false = no behaviour change.
 	Hardened bool `toml:"hardened"`
+	// ConfineHomeReads opts in to a macOS Seatbelt data-read boundary for the
+	// invoking UID's home. Absent/false leaves the current read policy unchanged.
+	ConfineHomeReads bool `toml:"confine_home_reads"`
 }
 
 // SyscallConfig defines the syscall-surface fence (Linux seccomp-BPF). It is

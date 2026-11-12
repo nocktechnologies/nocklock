@@ -2,8 +2,10 @@ package fs
 
 import (
 	"os"
+	"os/user"
 	"path/filepath"
 	"slices"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -24,6 +26,35 @@ func builtinFixture(t *testing.T) (*config.Config, string) {
 	cfg.Filesystem.Root, cfg.Filesystem.Allow = project, nil
 	cfg.Filesystem.Deny = []string{filepath.Join(base, "user-private")}
 	return &cfg, home
+}
+
+func TestMacOSHomeReadRootUsesPasswdHome(t *testing.T) {
+	cfg, _ := builtinFixture(t)
+	cfg.Filesystem.ConfineHomeReads = true
+	account, err := user.LookupId(strconv.Itoa(os.Getuid()))
+	if err != nil {
+		t.Fatal(err)
+	}
+	want, err := canonicalizeForProfile(account.HomeDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, err := ProcessEffectiveConfig(cfg, "darwin")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.HomeReadRoot != want {
+		t.Fatalf("home read root = %q, want passwd home %q (HOME is %q)", got.HomeReadRoot, want, os.Getenv("HOME"))
+	}
+	cfg.Filesystem.ReadAllow = []string{filepath.Join(want, ".ssh")}
+	if _, err := ProcessEffectiveConfig(cfg, "darwin"); err == nil || !strings.Contains(err.Error(), "built-in credential deny") {
+		t.Fatalf("passwd-home credential grant was accepted: %v", err)
+	}
+	cfg.Filesystem.ReadAllow = nil
+	cfg.Filesystem.Root = ""
+	if _, err := ProcessEffectiveConfig(cfg, "darwin"); err == nil {
+		t.Fatal("confine_home_reads with no filesystem.root was accepted")
+	}
 }
 
 func TestBuiltinDeniesSurviveUserDeny(t *testing.T) {
@@ -231,5 +262,25 @@ func TestBuiltinPrefixAliasesStayEnforcedButOutOfPolicy(t *testing.T) {
 	}
 	if slices.Contains(after.PrefixAliasPaths, filepath.Join(h, ".ssh")) {
 		t.Fatal("static deny recorded as a prefix alias")
+	}
+}
+
+func TestBuiltinPrefixAliasesWithTrailingHomeSlash(t *testing.T) {
+	cfg, home := builtinFixture(t)
+	alias := filepath.Join(home, ".env.production")
+	if err := os.WriteFile(alias, []byte("fake-canary"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("HOME", home+string(os.PathSeparator))
+	fc, err := ProcessEffectiveConfig(cfg, "darwin")
+	if err != nil {
+		t.Fatal(err)
+	}
+	resolved, err := resolvePath(alias)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !slices.Contains(fc.PrefixAliasPaths, resolved) {
+		t.Fatalf("trailing HOME slash dropped credential alias %q", resolved)
 	}
 }

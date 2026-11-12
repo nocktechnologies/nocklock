@@ -182,6 +182,11 @@ func Validate(cfg *Config) []ValidationError {
 			})
 		}
 	}
+	for _, p := range cfg.Filesystem.ReadAllow {
+		if strings.TrimSpace(p) == "" || containsTraversal(p) {
+			errs = append(errs, ValidationError{Field: "filesystem.read_allow", Message: "must be a nonempty path without '..' components", Severity: "error"})
+		}
+	}
 
 	if cfg.Network.RequireDurableAudit && cfg.Network.AllowAll {
 		errs = append(errs, ValidationError{Field: "network.require_durable_audit", Message: "requires allow_all = false so egress passes through the audit-gated proxy", Severity: "error"})
@@ -291,6 +296,9 @@ func (cfg *Config) EffectivePolicy() string {
 	}
 	if cfg.Filesystem.Hardened {
 		b.WriteString(" hardened=true")
+	}
+	if cfg.Filesystem.ConfineHomeReads {
+		fmt.Fprintf(&b, " confine_home_reads=true read_allow=%d path(s) (macOS home data reads)", len(cfg.Filesystem.ReadAllow))
 	}
 	b.WriteString("\n")
 

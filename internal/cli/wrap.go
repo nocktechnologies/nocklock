@@ -180,7 +180,7 @@ var wrapCmd = &cobra.Command{
 			// A dry run opens no event log, so report the built-in deny
 			// refusal that a real macOS run records as REFUSED-TO-START.
 			// validateWrapRuntimeConfig already resolved it on Linux.
-			if runtime.GOOS == "darwin" && effectiveCfg.Filesystem.Root != "" {
+			if runtime.GOOS == "darwin" && (effectiveCfg.Filesystem.Root != "" || effectiveCfg.Filesystem.ConfineHomeReads) {
 				if _, err := fsfence.ProcessEffectiveConfig(&effectiveCfg, runtime.GOOS); err != nil {
 					cmd.SilenceUsage = true
 					return fmt.Errorf("invalid config at %s: invalid filesystem fence config: %w", configPath, err)
@@ -230,11 +230,15 @@ var wrapCmd = &cobra.Command{
 		// ordinary best-effort access telemetry: the child must not run unless
 		// ENGAGED or the explicit filesystem.root = "" DEGRADED state is durably recorded.
 		recordMacOSFilesystemFenceState := func(state, detail string, blocked bool) error {
+			homeReadMode := "off"
+			if effectiveCfg.Filesystem.ConfineHomeReads {
+				homeReadMode = "file-read-data"
+			}
 			return logger.Log(logging.Event{
 				Timestamp: time.Now(),
 				EventType: logging.EventFilesystemFenceState,
 				Category:  "filesystem",
-				Detail:    "macOS filesystem-fence " + state + ": " + detail,
+				Detail:    "macOS filesystem-fence " + state + ": " + detail + "; home_read=" + homeReadMode,
 				Blocked:   blocked,
 				SessionID: sessionID,
 			})
@@ -242,9 +246,9 @@ var wrapCmd = &cobra.Command{
 
 		// The digest below resolves the built-in credential denies, so a macOS
 		// refusal of them (an overlapping grant, no resolvable HOME) is
-		// recorded here first. Like the digest, skip it for filesystem.root = "",
-		// which resolves no built-in denies and records DEGRADED later.
-		if runtime.GOOS == "darwin" && effectiveCfg.Filesystem.Root != "" {
+		// recorded here first. A rootless home-read opt-in also reaches this
+		// check so its required-root refusal is recorded before child launch.
+		if runtime.GOOS == "darwin" && (effectiveCfg.Filesystem.Root != "" || effectiveCfg.Filesystem.ConfineHomeReads) {
 			if _, err := fsfence.ProcessEffectiveConfig(&effectiveCfg, runtime.GOOS); err != nil {
 				cmd.SilenceUsage = true
 				if logErr := recordMacOSFilesystemFenceState("REFUSED-TO-START", "invalid filesystem configuration: "+err.Error(), true); logErr != nil {
@@ -671,7 +675,7 @@ var wrapCmd = &cobra.Command{
 					fsSandboxPrefix = sandboxArgv[:len(sandboxArgv)-len(args)]
 					macOSDenialLog = true
 
-					if err := recordMacOSFilesystemFenceState("ENGAGED", fmt.Sprintf("Seatbelt root-write confinement applied; root=%s mode=%s sensitive_paths=%d network_floor=%s", fsCfg.Root, fsCfg.Mode, pathCount, networkFloorDetail(seatbeltProxyAddr)), false); err != nil {
+					if err := recordMacOSFilesystemFenceState("ENGAGED", fmt.Sprintf("Seatbelt root-write confinement applied; root=%s mode=%s sensitive_paths=%d read_allow=%d network_floor=%s", fsCfg.Root, fsCfg.Mode, pathCount, len(fsCfg.ReadAllowPaths), networkFloorDetail(seatbeltProxyAddr)), false); err != nil {
 						return fmt.Errorf("cannot record macOS filesystem fence engagement; refusing to start: %w", err)
 					}
 					if macOSHardened {

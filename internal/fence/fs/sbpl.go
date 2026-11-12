@@ -73,7 +73,7 @@ func GenerateHardenedProfile(sensitivePaths []string) (string, error) {
 // lets callers audit the exact applied policy without over-reporting duplicate
 // configuration entries.
 func GenerateProfileAndCount(sensitivePaths []string, hardened bool) (string, int, error) {
-	return generateProfile(sensitivePaths, hardened, nil, "", 0)
+	return generateProfile(sensitivePaths, hardened, nil, "", 0, "", "", nil)
 }
 
 // GenerateWriteConfinementProfile builds the macOS Seatbelt profile used when
@@ -103,6 +103,10 @@ func GenerateWriteConfinementProfile(sensitivePaths []string, root, mode string,
 // on the proxy's port at ::1 is also reachable; the caller must hold that port
 // (wrap does, see reserveSeatbeltProxyListeners).
 func GenerateTaggedWriteConfinementProfile(sensitivePaths []string, root, mode string, hardened bool, tag string, proxyPort int) (string, int, error) {
+	return generateTaggedWriteConfinementProfile(sensitivePaths, root, mode, hardened, tag, proxyPort, "", nil)
+}
+
+func generateTaggedWriteConfinementProfile(sensitivePaths []string, root, mode string, hardened bool, tag string, proxyPort int, homeReadRoot string, readAllow []string) (string, int, error) {
 	if strings.TrimSpace(root) == "" {
 		return "", 0, fmt.Errorf("refusing to generate write-confinement profile with an empty root")
 	}
@@ -114,10 +118,10 @@ func GenerateTaggedWriteConfinementProfile(sensitivePaths []string, root, mode s
 	if err != nil {
 		return "", 0, err
 	}
-	return generateProfile(sensitivePaths, hardened, writePaths, tag, proxyPort)
+	return generateProfile(sensitivePaths, hardened, writePaths, tag, proxyPort, homeReadRoot, root, readAllow)
 }
 
-func generateProfile(sensitivePaths []string, hardened bool, writePaths []string, tag string, proxyPort int) (string, int, error) {
+func generateProfile(sensitivePaths []string, hardened bool, writePaths []string, tag string, proxyPort int, homeReadRoot, root string, readAllow []string) (string, int, error) {
 	if proxyPort < 0 || proxyPort > 65535 {
 		return "", 0, fmt.Errorf("invalid proxy port %d for the network floor", proxyPort)
 	}
@@ -133,6 +137,29 @@ func generateProfile(sensitivePaths []string, hardened bool, writePaths []string
 	}
 	if len(canonical) == 0 {
 		return "", 0, fmt.Errorf("refusing to generate a fence profile with no resolvable sensitive paths")
+	}
+	var home string
+	var readGrants []string
+	var gitConfig string
+	if homeReadRoot != "" {
+		home, err = canonicalizeForProfile(homeReadRoot)
+		if err != nil {
+			return "", 0, fmt.Errorf("cannot canonicalize home-read path: %w", err)
+		}
+		readGrants, err = canonicalProfilePaths(append([]string{root}, readAllow...), "home-read allow")
+		if err != nil {
+			return "", 0, err
+		}
+		gitConfigPath := filepath.Join(home, ".gitconfig")
+		if info, statErr := os.Stat(gitConfigPath); statErr == nil && !info.Mode().IsRegular() {
+			return "", 0, fmt.Errorf("home Git config %q must be a regular file", gitConfigPath)
+		} else if statErr != nil && !os.IsNotExist(statErr) {
+			return "", 0, fmt.Errorf("cannot inspect home Git config %q: %w", gitConfigPath, statErr)
+		}
+		gitConfig, err = canonicalizeForProfile(gitConfigPath)
+		if err != nil {
+			return "", 0, fmt.Errorf("cannot canonicalize home Git config: %w", err)
+		}
 	}
 
 	var b strings.Builder
@@ -164,18 +191,45 @@ func generateProfile(sensitivePaths []string, hardened bool, writePaths []string
 		b.WriteString("    (literal \"/dev/fd\")\n")
 		b.WriteString("    (regex #\"^/dev/fd/\"))\n")
 	}
-	b.WriteString(";; Sensitive paths remain denied for reads and writes, including\n")
-	b.WriteString(";; when they are nested below a write-allowed root.\n")
-	b.WriteString("(deny file-read* file-write*\n")
-	for _, c := range canonical {
-		b.WriteString("    (subpath ")
-		b.WriteString(sbplString(c))
+	writeSensitiveDeny := func() {
+		b.WriteString(";; Sensitive paths remain denied for reads and writes, including\n")
+		b.WriteString(";; when they are nested below a write-allowed root.\n")
+		b.WriteString("(deny file-read* file-write*\n")
+		for _, c := range canonical {
+			b.WriteString("    (subpath ")
+			b.WriteString(sbplString(c))
+			b.WriteString(")\n")
+		}
+		if msg != "" {
+			b.WriteString("   " + msg + "\n")
+		}
 		b.WriteString(")\n")
+		if home != "" {
+			// Seatbelt ranks an exact operation above file-read*. The root's
+			// file-read-data allow would otherwise beat this broader deny even
+			// though the deny is emitted later.
+			b.WriteString("(deny file-read-data\n")
+			for _, c := range canonical {
+				b.WriteString("    (subpath " + sbplString(c) + ")\n")
+			}
+			if msg != "" {
+				b.WriteString("   " + msg + "\n")
+			}
+			b.WriteString(")\n")
+		}
 	}
-	if msg != "" {
-		b.WriteString("   " + msg + "\n")
+	if home != "" {
+		b.WriteString(";; Opt-in home data-read boundary; metadata remains available.\n")
+		b.WriteString("(deny file-read-data (subpath " + sbplString(home) + ")" + msg + ")\n")
+		b.WriteString("(allow file-read-data\n")
+		for _, p := range readGrants {
+			b.WriteString("    (subpath " + sbplString(p) + ")\n")
+		}
+		b.WriteString("    (literal " + sbplString(gitConfig) + ")\n")
+		b.WriteString(")\n")
+	} else {
+		writeSensitiveDeny()
 	}
-	b.WriteString(")\n")
 	// Seatbelt subpath rules follow path names, not inodes. Renaming a
 	// writable ancestor would move a protected tree outside its deny rule.
 	// Keep those ancestor entries fixed without denying ordinary writes to
@@ -241,6 +295,9 @@ func generateProfile(sensitivePaths []string, hardened bool, writePaths []string
 		b.WriteString("(deny mach-lookup" + msg + "\n")
 		b.WriteString("    (global-name \"com.apple.mDNSResponder\")\n")
 		b.WriteString("    (global-name \"com.apple.mDNSResponderHelper\"))\n")
+	}
+	if home != "" {
+		writeSensitiveDeny()
 	}
 
 	return b.String(), len(canonical), nil

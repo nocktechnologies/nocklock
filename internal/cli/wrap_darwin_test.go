@@ -10,8 +10,10 @@ import (
 	"errors"
 	"io"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"slices"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -57,6 +59,109 @@ func TestWrapMacOSFilesystemFenceRecordsOneEngagedState(t *testing.T) {
 	}
 	if !strings.Contains(states[0], "ENGAGED") || !strings.Contains(states[0], "Seatbelt root-write confinement applied") {
 		t.Fatalf("expected an engaged Seatbelt state record, got %q", states[0])
+	}
+}
+
+// TestWrapMacOSConfineHomeReads proves the opt-in profile through wrap, including
+// metadata, Git, explicit grants, sensitive denies, and the default-off control.
+func TestWrapMacOSConfineHomeReads(t *testing.T) {
+	requireSandboxExecForWrap(t)
+	home, err := os.UserHomeDir()
+	if err != nil || home == "" {
+		t.Fatalf("passwd home: %v", err)
+	}
+	base, err := os.MkdirTemp(home, ".nocklock-home-read-")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer os.RemoveAll(base)
+	project := filepath.Join(base, "project")
+	outside := filepath.Join(base, "outside")
+	shared := filepath.Join(base, "shared")
+	secret := filepath.Join(project, "secret")
+	for _, dir := range []string{project, outside, shared, secret} {
+		if err := os.Mkdir(dir, 0700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	insideFile := filepath.Join(project, "inside.txt")
+	outsideFile := filepath.Join(outside, "outside.txt")
+	sharedFile := filepath.Join(shared, "shared.txt")
+	secretFile := filepath.Join(secret, "secret.txt")
+	for _, path := range []string{insideFile, outsideFile, sharedFile, secretFile} {
+		if err := os.WriteFile(path, []byte("fixture"), 0600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if out, err := exec.Command("git", "-C", project, "init", "-q").CombinedOutput(); err != nil {
+		t.Fatalf("git init: %v: %s", err, out)
+	}
+	policy := strings.Replace(config.DefaultTOML(), "allow_all = false", "allow_all = true", 1)
+	policy = strings.Replace(policy, "confine_home_reads = false", "confine_home_reads = true", 1)
+	policy = strings.Replace(policy, "read_allow = []", "read_allow = ["+strconv.Quote(shared)+"]", 1)
+	policy = strings.Replace(policy, "deny = [\n", "deny = [\n    "+strconv.Quote(secret)+",\n", 1)
+	writeTestConfig(t, project, policy)
+	withWorkingDir(t, project)
+	fakeHome := t.TempDir()
+	t.Setenv("HOME", fakeHome) // Must not move the passwd-home boundary.
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+	run := func(args ...string) error {
+		t.Helper()
+		cmd := &cobra.Command{}
+		cmd.SetContext(context.Background())
+		return wrapCmd.RunE(cmd, append([]string{"--"}, args...))
+	}
+	read := func(path string) error {
+		return run("/bin/cat", path)
+	}
+	if err := read(outsideFile); err == nil {
+		t.Fatal("FENCE FAILED OPEN: outside-home-root data read succeeded")
+	}
+	if err := run("/usr/bin/stat", "-f", "%N", outsideFile); err != nil {
+		t.Fatalf("outside-root metadata failed: %v", err)
+	}
+	for _, path := range []string{insideFile, sharedFile} {
+		if err := read(path); err != nil {
+			t.Fatalf("allowed read %q failed: %v", path, err)
+		}
+	}
+	t.Setenv("HOME", home) // Exercise Git's ordinary per-user config lookup.
+	if err := run("/usr/bin/git", "-C", project, "status", "--porcelain"); err != nil {
+		t.Fatalf("git status inside root failed: %v", err)
+	}
+	t.Setenv("HOME", fakeHome)
+	if err := read(secretFile); err == nil {
+		t.Fatal("FENCE FAILED OPEN: sensitive read succeeded")
+	}
+	if err := run("/bin/sh", "-c", `printf changed > "$1"`, "sh", secretFile); err == nil {
+		t.Fatal("FENCE FAILED OPEN: sensitive write succeeded")
+	}
+	db, err := sql.Open("sqlite", resolvedAuditDB(t, project))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	states := macOSFilesystemFenceStates(t, db)
+	if len(states) != 7 {
+		t.Fatalf("fence states = %d, want 7: %q", len(states), states)
+	}
+	for _, state := range states {
+		if !strings.Contains(state, "ENGAGED") || !strings.Contains(state, "home_read=file-read-data") || !strings.Contains(state, "read_allow=1") {
+			t.Fatalf("missing read-mode audit receipt: %q", state)
+		}
+	}
+	var verified bytes.Buffer
+	if err := runAuditVerify(context.Background(), &verified, "", true); err != nil {
+		t.Fatalf("verify --audit rejected home-read sessions: %v: %s", err, verified.String())
+	}
+	if !strings.Contains(verified.String(), "AUDIT: AUTHENTIC") {
+		t.Fatalf("verify --audit did not authenticate receipt: %s", verified.String())
+	}
+
+	// Existing configs retain the pre-opt-in read behavior.
+	writeTestConfig(t, project, strings.Replace(policy, "confine_home_reads = true", "confine_home_reads = false", 1))
+	if err := read(outsideFile); err != nil {
+		t.Fatalf("default-off outside read failed: %v", err)
 	}
 }
 

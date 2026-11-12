@@ -51,6 +51,8 @@ root = "."
 
 [filesystem]
 allow = ["."]
+read_allow = ["~/shared/"]
+confine_home_reads = true
 allow_rw = ["~/.claude/"]
 deny = ["~/.ssh/"]
 
@@ -101,6 +103,9 @@ endpoint = "https://cc.nocktechnologies.io/api/fence/events/"
 	}
 	if len(cfg.Filesystem.AllowRW) != 1 || cfg.Filesystem.AllowRW[0] != "~/.claude/" {
 		t.Errorf("unexpected filesystem allow_rw: %v", cfg.Filesystem.AllowRW)
+	}
+	if !cfg.Filesystem.ConfineHomeReads || !reflect.DeepEqual(cfg.Filesystem.ReadAllow, []string{"~/shared/"}) {
+		t.Errorf("unexpected home read policy: confine=%t read_allow=%v", cfg.Filesystem.ConfineHomeReads, cfg.Filesystem.ReadAllow)
 	}
 	if len(cfg.Secrets.Block) != 1 || cfg.Secrets.Block[0] != "AWS_*" {
 		t.Errorf("unexpected secrets block: %v", cfg.Secrets.Block)
@@ -335,6 +340,24 @@ socket_families = ["unix", "netlink"]
 	}
 	if !reflect.DeepEqual(cfg.Syscall.SocketFamilies, []string{"unix"}) {
 		t.Fatalf("syscall.socket_families = %v, want only unix", cfg.Syscall.SocketFamilies)
+	}
+}
+
+func TestOverlayHomeReadPolicyOnlyTightens(t *testing.T) {
+	base := DefaultConfig()
+	base.Filesystem.ReadAllow = []string{"~/shared"}
+	overlay := cloneConfig(base)
+	overlay.Filesystem.ConfineHomeReads = true
+	overlay.Filesystem.ReadAllow = []string{"~/shared", "~/extra"}
+	got := restrictOverlay(base, overlay)
+	if !got.Filesystem.ConfineHomeReads || !reflect.DeepEqual(got.Filesystem.ReadAllow, []string{"~/shared"}) {
+		t.Fatalf("overlay widened read policy: %+v", got.Filesystem)
+	}
+	base.Filesystem.ConfineHomeReads = true
+	overlay.Filesystem.ConfineHomeReads = false
+	got = restrictOverlay(base, overlay)
+	if !got.Filesystem.ConfineHomeReads {
+		t.Fatal("overlay disabled base home read confinement")
 	}
 }
 

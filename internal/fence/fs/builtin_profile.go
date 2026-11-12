@@ -10,7 +10,7 @@ import (
 // GenerateEffectiveProfile includes the mandatory home filename prefixes in the
 // resolved policy. Prefix rules also protect names created after wrap starts.
 func GenerateEffectiveProfile(fc *FenceConfig, hardened bool, tag string, proxyPort int) (string, int, error) {
-	profile, count, err := GenerateTaggedWriteConfinementProfile(fc.DenyPaths, fc.Root, fc.Mode, hardened, tag, proxyPort)
+	profile, count, err := generateTaggedWriteConfinementProfile(fc.DenyPaths, fc.Root, fc.Mode, hardened, tag, proxyPort, fc.HomeReadRoot, fc.ReadAllowPaths)
 	if err != nil {
 		return "", 0, err
 	}
@@ -23,13 +23,21 @@ func GenerateEffectiveProfile(fc *FenceConfig, hardened bool, tag string, proxyP
 	// Case-fold the additional matches explicitly: APFS can accept a spelling
 	// different from the configured name. ASCII bracket classes work in SBPL.
 	for _, path := range fc.DenyPaths {
-		b.WriteString("(deny file-read* file-write* (regex #" + sbplString("^"+caseFoldPattern(path)+"(/|$)") + ")" + msg + ")\n")
+		filter := "(regex #" + sbplString("^"+caseFoldPattern(path)+"(/|$)") + ")"
+		b.WriteString("(deny file-read* file-write* " + filter + msg + ")\n")
+		if fc.HomeReadRoot != "" {
+			b.WriteString("(deny file-read-data " + filter + msg + ")\n")
+		}
 	}
 	for _, prefix := range fc.DenyPrefixes {
 		if !filepath.IsAbs(prefix) {
 			return "", 0, fmt.Errorf("credential prefix must be absolute")
 		}
-		b.WriteString("(deny file-read* file-write* (regex #" + sbplString("^"+caseFoldPattern(prefix)+".*") + ")" + msg + ")\n")
+		filter := "(regex #" + sbplString("^"+caseFoldPattern(prefix)+".*") + ")"
+		b.WriteString("(deny file-read* file-write* " + filter + msg + ")\n")
+		if fc.HomeReadRoot != "" {
+			b.WriteString("(deny file-read-data " + filter + msg + ")\n")
+		}
 		for p := filepath.Dir(prefix); filepath.Dir(p) != p; p = filepath.Dir(p) {
 			b.WriteString("(deny file-write-unlink (literal " + sbplString(p) + ")" + msg + ")\n")
 		}

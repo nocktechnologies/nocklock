@@ -87,6 +87,65 @@ func TestSeatbeltEnforcement_RealSandboxExec(t *testing.T) {
 	}
 }
 
+// TestSeatbeltHomeReadWildcardRejectsMetadata shows why the home rule uses
+// file-read-data: a file-read* variant also blocks stat outside the root.
+func TestSeatbeltHomeReadWildcardRejectsMetadata(t *testing.T) {
+	requireSandboxExec(t)
+	home, err := os.UserHomeDir()
+	if err != nil || home == "" {
+		t.Fatalf("home: %v", err)
+	}
+	base, err := os.MkdirTemp(home, ".nocklock-read-op-")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer os.RemoveAll(base)
+	root := filepath.Join(base, "project")
+	outside := filepath.Join(base, "outside.txt")
+	gitConfig := filepath.Join(base, ".gitconfig")
+	if err := os.Mkdir(root, 0700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(outside, []byte("fixture"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(gitConfig, []byte("[core]\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	profile, _, err := GenerateEffectiveProfile(&FenceConfig{
+		Root: root, Mode: "read-write", DenyPaths: []string{filepath.Join(base, "secret")}, HomeReadRoot: base,
+	}, false, "", 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	run := func(profile string, command ...string) error {
+		t.Helper()
+		path, err := WriteProfile(profile)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer os.Remove(path)
+		argv, err := WrapArgv(path, command)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return exec.Command(argv[0], argv[1:]...).Run()
+	}
+	if err := run(profile, "/usr/bin/stat", "-f", "%N", outside); err != nil {
+		t.Fatalf("file-read-data profile blocked metadata: %v", err)
+	}
+	if err := run(profile, "/bin/cat", gitConfig); err != nil {
+		t.Fatalf("small Git config read exception failed: %v", err)
+	}
+	if err := run(profile, "/bin/cat", outside); err == nil {
+		t.Fatal("file-read-data profile allowed outside data read")
+	}
+	wildcard := strings.ReplaceAll(profile, "file-read-data", "file-read*")
+	if err := run(wildcard, "/usr/bin/stat", "-f", "%N", outside); err == nil {
+		t.Fatal("file-read* variant unexpectedly allowed outside-root metadata")
+	}
+}
+
 // TestSeatbeltWriteConfinement_RealSandboxExec is the negative control for
 // Phase 2: a write inside filesystem.root succeeds while a sibling directory
 // in the invoking user's home is denied. The test deliberately avoids t.TempDir
