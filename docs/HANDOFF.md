@@ -6,7 +6,7 @@ No internal host names, personal names or absolute home paths: `scripts/check-pu
 
 ## What changed
 
-- 2026-11-12: The opt-in macOS home read fence now grants reads to nine documented developer-tool folders beneath the user cache directory while leaving the full cache write grant in place. Other app caches remain write-only unless explicitly allowed. Generated-profile and native Seatbelt tests cover the narrow read list, an unlisted cache, an outside-root read, and a sensitive cache deny. Native enforcement still needs the macOS CI runner.
+- 2026-11-12: The opt-in macOS home read fence now grants both reads and writes to nine documented developer-tool folders beneath the passwd home's `Library/Caches` directory. Other app caches remain inaccessible unless explicitly allowed, and a dangling cache-directory symlink refuses startup. Generated-profile tests cover the narrowed grants; native Seatbelt tests cover go-build access, blocked rename and hard-link attempts from an unlisted cache, outside-root reads, and sensitive denies. Native enforcement still needs the macOS CI runner.
 
 - 2026-11-12: With macOS home read confinement enabled, resolved `filesystem.allow` and `allow_rw` entries now join the existing home read grants. A generated-profile regression covers both entry types, and a native Seatbelt test checks write then read under the home cache and continued denial of a sensitive child. The Linux-hosted Go suite passed (2,582 tests, 36 skips); darwin cross-vet passed, while native Seatbelt enforcement remains for the macOS CI job. The CLI and filesystem-fence docs describe the grant and Claude Code token requirement.
 

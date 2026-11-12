@@ -235,10 +235,7 @@ func TestSeatbeltHomeReadBuiltinCacheRemainsReadable(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	cache, err := os.UserCacheDir()
-	if err != nil {
-		t.Fatal(err)
-	}
+	cache := filepath.Join(home, "Library", "Caches")
 	if err := os.MkdirAll(cache, 0700); err != nil {
 		t.Fatal(err)
 	}
@@ -314,11 +311,34 @@ func TestSeatbeltHomeReadBuiltinCacheRemainsReadable(t *testing.T) {
 		t.Fatalf("built-in cache write then read = %q, %v; want readable", out, err)
 	}
 	unlistedFile := filepath.Join(unlistedBase, "cache.txt")
-	if out, err := run("/bin/sh", "-c", `printf UNLISTED_CACHE_PROBE_73c8 > "$1"`, "sh", unlistedFile); err != nil {
-		t.Fatalf("unlisted cache write failed: %q, %v", out, err)
+	if err := os.WriteFile(unlistedFile, []byte("UNLISTED_CACHE_PROBE_73c8"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if out, err := run("/bin/sh", "-c", `printf changed > "$1"`, "sh", unlistedFile); err == nil {
+		t.Fatalf("unlisted cache write succeeded: %q", out)
 	}
 	if out, err := run("/bin/cat", unlistedFile); err == nil || strings.Contains(out, "UNLISTED_CACHE_PROBE_73c8") {
 		t.Fatalf("unlisted cache read = %q, %v; want denial", out, err)
+	}
+	for _, tc := range []struct{ name, command string }{
+		{"rename", "/bin/mv"},
+		{"hard link", "/bin/ln"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if _, err := os.Stat(tc.command); err != nil {
+				t.Fatalf("cannot run %s control: %v", tc.name, err)
+			}
+			target := filepath.Join(cacheBase, strings.ReplaceAll(tc.name, " ", "-")+".txt")
+			if out, err := run(tc.command, unlistedFile, target); err == nil {
+				t.Fatalf("%s from unlisted cache into go-build succeeded: %q", tc.name, out)
+			}
+			if _, err := os.Stat(target); !os.IsNotExist(err) {
+				t.Fatalf("%s created target in go-build: %v", tc.name, err)
+			}
+			if got, err := os.ReadFile(unlistedFile); err != nil || string(got) != "UNLISTED_CACHE_PROBE_73c8" {
+				t.Fatalf("%s changed unlisted cache source to %q: %v", tc.name, got, err)
+			}
+		})
 	}
 	if out, err := run("/bin/cat", outside); err == nil || strings.Contains(out, outsideMarker) {
 		t.Fatalf("outside-root read = %q, %v; want denial", out, err)
