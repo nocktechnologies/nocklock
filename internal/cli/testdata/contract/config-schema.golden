@@ -7,10 +7,12 @@ filesystem.root string
 filesystem.mode string
 filesystem.linux_enforcement string
 filesystem.allow []string
+filesystem.read_allow []string
 filesystem.allow_rw []string
 filesystem.deny []string
 filesystem.macos_allow_unfenced bool
 filesystem.hardened bool
+filesystem.confine_home_reads bool
 network [table]
 network.require_durable_audit bool
 network.allow []string

@@ -19,7 +19,7 @@ All four bars are complete. The public CLI, config and exit-code promise in `doc
 
 ## Later: outside the 1.0 bar
 
-- macOS read confinement outside `filesystem.root` (`ARCHITECTURE.md`)
+- macOS home read fence shipped opt-in; Endpoint Security still later (`ARCHITECTURE.md`)
 - A Windows fence (`docs/design/windows-feasibility.md`)
 - Look-back rules beyond slice 1 (`docs/design/look-back-rules.md`)
 - Default off-box audit anchoring (`docs/how-it-works/audit-log.md`); per-chain v2 anchors shipped in v0.10.0 and in-run checkpoints in v0.12.0, both opt-in

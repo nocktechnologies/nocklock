@@ -6,6 +6,8 @@ No internal host names, personal names or absolute home paths: `scripts/check-pu
 
 ## What changed
 
+- 2026-11-12: Added default-off macOS passwd-home data-read confinement with explicit `read_allow` paths and a `.gitconfig` read exception. Sensitive denies still follow grants, and a spoofed `HOME` does not move the boundary or drop passwd-home credential denies. The signed fence-state row and doctor expose the mode. Linux-hosted Go packages, vet and Darwin cross-vet passed; the native macOS wrap proof is added to CI but has not run locally. `file-read-data` preserves metadata operations such as `stat`; `file-read*` would include them. Reads outside the passwd home remain outside this boundary.
+
 - 2026-11-12: Corrected the 1.0 CLI reference's netns exit-1 condition and limited its `wrap` exit-code test claim to the cases the contract test runs. The roadmap and release notes now use the same scope; no runtime behavior changed. The specified Go suite passed with `TMPDIR=/tmp` and umask 022 after the default temp path under a protected credential directory caused unrelated fixture failures.
 
 - 2026-11-11: Prepared v1.0.0 release notes from the completed four-bar roadmap, set the CLI compatibility promise in effect from v1.0.0, and clarified the documented overlapping exit-code cases. Tagging, asset publication and back-sync remain release steps.

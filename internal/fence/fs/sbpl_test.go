@@ -118,6 +118,39 @@ func TestGenerateProfileAndCountReportsDistinctCanonicalPaths(t *testing.T) {
 	}
 }
 
+func TestGenerateEffectiveProfileConfinesHomeReadsAfterGrants(t *testing.T) {
+	home := t.TempDir()
+	root := filepath.Join(home, "project")
+	grant := filepath.Join(home, "shared")
+	secret := filepath.Join(root, "secret")
+	for _, path := range []string{root, grant, secret} {
+		if err := os.Mkdir(path, 0700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	fc := &FenceConfig{Root: root, Mode: "read-write", DenyPaths: []string{secret}, HomeReadRoot: home, ReadAllowPaths: []string{grant}}
+	profile, _, err := GenerateEffectiveProfile(fc, false, "test-tag", 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	deny := strings.Index(profile, "(deny file-read-data")
+	allow := strings.Index(profile, "(allow file-read-data")
+	sensitive := strings.LastIndex(profile, "(deny file-read* file-write*")
+	if deny < 0 || allow < deny || sensitive < allow {
+		t.Fatalf("home-read and sensitive rule order is wrong:\n%s", profile)
+	}
+	for _, path := range []string{home, root, grant} {
+		if !strings.Contains(profile, "(subpath "+sbplString(path)+")") {
+			t.Fatalf("missing %q in profile:\n%s", path, profile)
+		}
+	}
+	fc.HomeReadRoot = ""
+	profile, _, err = GenerateEffectiveProfile(fc, false, "", 0)
+	if err != nil || strings.Contains(profile, "(deny file-read-data") {
+		t.Fatalf("default-off profile unexpectedly confines reads: %v\n%s", err, profile)
+	}
+}
+
 // TestGenerateWriteConfinementProfile_EmitsRootAndRuntimeAllows proves the
 // Phase 2 profile keeps allow-default for process startup while adding the
 // deny-all-writes then narrow-allow shape. The sensitive deny is deliberately

@@ -14,6 +14,7 @@ func restrictOverlay(base, overlay Config) Config {
 	cfg.Project.Runtime = base.Project.Runtime
 
 	cfg.Filesystem.Allow = intersectStrings(base.Filesystem.Allow, overlay.Filesystem.Allow)
+	cfg.Filesystem.ReadAllow = intersectStrings(base.Filesystem.ReadAllow, overlay.Filesystem.ReadAllow)
 	cfg.Filesystem.AllowRW = intersectStrings(base.Filesystem.AllowRW, overlay.Filesystem.AllowRW)
 	cfg.Filesystem.Deny = unionStrings(base.Filesystem.Deny, overlay.Filesystem.Deny)
 	cfg.Filesystem.Mode = restrictiveFilesystemMode(base.Filesystem.Mode, overlay.Filesystem.Mode)
@@ -22,6 +23,7 @@ func restrictOverlay(base, overlay Config) Config {
 	}
 	cfg.Filesystem.LinuxEnforcement = restrictiveEnforcement(base.Filesystem.LinuxEnforcement, overlay.Filesystem.LinuxEnforcement)
 	cfg.Filesystem.Hardened = base.Filesystem.Hardened || overlay.Filesystem.Hardened
+	cfg.Filesystem.ConfineHomeReads = base.Filesystem.ConfineHomeReads || overlay.Filesystem.ConfineHomeReads
 
 	cfg.Network.Allow = intersectStrings(base.Network.Allow, overlay.Network.Allow)
 	cfg.Network.AllowAll = base.Network.AllowAll && overlay.Network.AllowAll
@@ -79,6 +81,7 @@ func tightenInvertedAllowlist(base, overlay []string) []string {
 
 func cloneConfig(cfg Config) Config {
 	cfg.Filesystem.Allow = append([]string(nil), cfg.Filesystem.Allow...)
+	cfg.Filesystem.ReadAllow = append([]string(nil), cfg.Filesystem.ReadAllow...)
 	cfg.Filesystem.AllowRW = append([]string(nil), cfg.Filesystem.AllowRW...)
 	cfg.Filesystem.Deny = append([]string(nil), cfg.Filesystem.Deny...)
 	cfg.Network.Allow = append([]string(nil), cfg.Network.Allow...)

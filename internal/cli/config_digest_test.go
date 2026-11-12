@@ -181,6 +181,8 @@ var configDigestPolicyFields = map[string]string{
 	"Filesystem.Mode":                    "filesystem.mode",
 	"Filesystem.LinuxEnforcement":        "filesystem.linux_enforcement",
 	"Filesystem.Allow":                   "filesystem.allow",
+	"Filesystem.ReadAllow":               "filesystem.read_allow",
+	"Filesystem.ConfineHomeReads":        "filesystem.confine_home_reads",
 	"Filesystem.AllowRW":                 "filesystem.allow_rw",
 	"Filesystem.Deny":                    "filesystem.deny",
 	"Filesystem.MacOSAllowUnfenced":      "filesystem.macos_allow_unfenced",

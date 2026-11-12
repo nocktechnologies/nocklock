@@ -49,6 +49,29 @@ func TestDoctorSigningKeyPolicyNegativeControls(t *testing.T) {
 	}
 }
 
+func TestDoctorReportsMacOSHomeReadMode(t *testing.T) {
+	t.Setenv("TMPDIR", "/tmp")
+	root := t.TempDir()
+	cfg := config.DefaultConfig()
+	cfg.Filesystem.Root = root
+	cfg.Filesystem.Allow = nil
+	caps := doctorCapabilities{goos: "darwin", sandboxExec: func() error { return nil }}
+	check := filesystemDoctorCheck(&cfg, caps)
+	if check.Severity != doctorOK || !strings.Contains(check.Message, "home data-read confinement is off") {
+		t.Fatalf("default-off doctor check: %+v", check)
+	}
+	cfg.Filesystem.ConfineHomeReads = true
+	check = filesystemDoctorCheck(&cfg, caps)
+	if check.Severity != doctorOK || !strings.Contains(check.Message, "opt-in home data-read confinement") {
+		t.Fatalf("opt-in doctor check: %+v", check)
+	}
+	cfg.Filesystem.Root = ""
+	check = filesystemDoctorCheck(&cfg, caps)
+	if check.Severity != doctorCritical || check.Status != "will-refuse" {
+		t.Fatalf("rootless opt-in doctor check: %+v", check)
+	}
+}
+
 func TestDoctorSigningKeyMissingFromDenyPathsFailsClosed(t *testing.T) {
 	project := resolvedTempDir(t)
 	keyDir := filepath.Join(project, "xdg", "nocklock")

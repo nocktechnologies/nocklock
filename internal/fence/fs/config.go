@@ -62,11 +62,12 @@ func SelfProcFiles() []string {
 // for enforcement. All paths have been cleaned, expanded, and (for Root)
 // symlink-resolved.
 type FenceConfig struct {
-	Root         string
-	Mode         string
-	AllowPaths   []string
-	AllowRWPaths []string
-	DenyPaths    []string
+	Root           string
+	Mode           string
+	AllowPaths     []string
+	ReadAllowPaths []string
+	AllowRWPaths   []string
+	DenyPaths      []string
 	// DenyPrefixes are macOS home filename prefixes (not user-config globs).
 	DenyPrefixes []string
 	// PrefixAliasPaths are the DenyPaths entries added only because an existing
@@ -75,6 +76,9 @@ type FenceConfig struct {
 	// signed policy digest, which records the prefix rules instead, so the
 	// digest does not change when such a home entry appears or goes away.
 	PrefixAliasPaths []string
+	// HomeReadRoot is the canonical passwd home when macOS home data reads are
+	// confined. Empty means the opt-in is off.
+	HomeReadRoot string
 
 	// ProtectedRootSubdir, when set, is a directory INSIDE Root that must not
 	// become writable — in practice a legacy in-project audit directory. It
@@ -235,6 +239,17 @@ func ProcessConfig(cfg config.FilesystemConfig) (*FenceConfig, error) {
 		allowPaths = append(allowPaths, resolved)
 	}
 	allowRWPaths := make([]string, 0, len(cfg.AllowRW))
+	readAllowPaths := make([]string, 0, len(cfg.ReadAllow))
+	for _, p := range cfg.ReadAllow {
+		if strings.TrimSpace(p) == "" {
+			return nil, fmt.Errorf("read allow path must not be empty")
+		}
+		resolved, err := resolvePath(p)
+		if err != nil {
+			return nil, fmt.Errorf("cannot resolve read allow path %q: %w", p, err)
+		}
+		readAllowPaths = append(readAllowPaths, resolved)
+	}
 	for _, p := range cfg.AllowRW {
 		if strings.TrimSpace(p) == "" {
 			return nil, fmt.Errorf("read-write allow path must not be empty")
@@ -270,6 +285,11 @@ func ProcessConfig(cfg config.FilesystemConfig) (*FenceConfig, error) {
 			return nil, err
 		}
 	}
+	for _, p := range readAllowPaths {
+		if err := validateNoSeparator(p, "read_allow"); err != nil {
+			return nil, err
+		}
+	}
 	for _, p := range denyPaths {
 		if err := validateNoSeparator(p, "deny"); err != nil {
 			return nil, err
@@ -277,11 +297,12 @@ func ProcessConfig(cfg config.FilesystemConfig) (*FenceConfig, error) {
 	}
 
 	return &FenceConfig{
-		Root:         rootPath,
-		Mode:         mode,
-		AllowPaths:   allowPaths,
-		AllowRWPaths: allowRWPaths,
-		DenyPaths:    denyPaths,
+		Root:           rootPath,
+		Mode:           mode,
+		AllowPaths:     allowPaths,
+		ReadAllowPaths: readAllowPaths,
+		AllowRWPaths:   allowRWPaths,
+		DenyPaths:      denyPaths,
 	}, nil
 }
 

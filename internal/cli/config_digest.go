@@ -153,12 +153,14 @@ func canonicalPolicy(cfg *config.Config, configPath, dbPath, networkFenceMode st
 		projectRoot = abs
 	}
 	filesystem := map[string]any{
-		"root":              canonicalConfigPath(projectRoot, cfg.Filesystem.Root),
-		"mode":              cfg.Filesystem.Mode,
-		"linux_enforcement": cfg.Filesystem.LinuxEnforcement,
-		"allow":             canonicalConfigPaths(projectRoot, cfg.Filesystem.Allow),
-		"allow_rw":          canonicalConfigPaths(projectRoot, cfg.Filesystem.AllowRW),
-		"deny":              canonicalConfigPaths(projectRoot, cfg.Filesystem.Deny),
+		"root":               canonicalConfigPath(projectRoot, cfg.Filesystem.Root),
+		"mode":               cfg.Filesystem.Mode,
+		"linux_enforcement":  cfg.Filesystem.LinuxEnforcement,
+		"allow":              canonicalConfigPaths(projectRoot, cfg.Filesystem.Allow),
+		"read_allow":         canonicalConfigPaths(projectRoot, cfg.Filesystem.ReadAllow),
+		"confine_home_reads": cfg.Filesystem.ConfineHomeReads,
+		"allow_rw":           canonicalConfigPaths(projectRoot, cfg.Filesystem.AllowRW),
+		"deny":               canonicalConfigPaths(projectRoot, cfg.Filesystem.Deny),
 		// Removed in v0.6.0 and always false; kept so signed policy digests stay stable.
 		"macos_allow_unfenced": cfg.Filesystem.MacOSAllowUnfenced,
 		"hardened":             cfg.Filesystem.Hardened,
@@ -171,6 +173,7 @@ func canonicalPolicy(cfg *config.Config, configPath, dbPath, networkFenceMode st
 		filesystem["root"] = resolved.Root
 		filesystem["mode"] = resolved.Mode
 		filesystem["allow"] = canonicalStrings(resolved.AllowPaths)
+		filesystem["read_allow"] = canonicalStrings(resolved.ReadAllowPaths)
 		filesystem["allow_rw"] = canonicalStrings(resolved.AllowRWPaths)
 		// Hash the prefix rules, not the home entries they matched at launch.
 		filesystem["deny"] = canonicalStrings(resolved.PolicyDenyPaths())

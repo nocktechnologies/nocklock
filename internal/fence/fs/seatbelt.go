@@ -24,6 +24,10 @@ func DefaultSensitivePaths() []string {
 	if err != nil || home == "" {
 		return nil
 	}
+	return defaultSensitivePathsAt(home)
+}
+
+func defaultSensitivePathsAt(home string) []string {
 	rel := []string{
 		".nock",
 		".ssh",

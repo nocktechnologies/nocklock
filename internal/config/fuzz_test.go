@@ -125,6 +125,9 @@ func assertOverlayNotWidened(t *testing.T, base, ov *Config) {
 	if ov.Cloud.Enabled && !base.Cloud.Enabled {
 		t.Fatalf("overlay turned cloud.enabled ON (base off): fence WIDENED")
 	}
+	if base.Filesystem.ConfineHomeReads && !ov.Filesystem.ConfineHomeReads {
+		t.Fatal("overlay turned filesystem.confine_home_reads OFF: fence WIDENED")
+	}
 
 	// Read-only can never be loosened to read-write.
 	if base.Filesystem.Mode == "read-only" && ov.Filesystem.Mode != "read-only" {
@@ -152,6 +155,9 @@ func assertOverlayNotWidened(t *testing.T, base, ov *Config) {
 	}
 	if !isSubset(ov.Filesystem.AllowRW, base.Filesystem.AllowRW) {
 		t.Fatalf("overlay widened filesystem.allow_rw beyond base: got %v, base %v", ov.Filesystem.AllowRW, base.Filesystem.AllowRW)
+	}
+	if !isSubset(ov.Filesystem.ReadAllow, base.Filesystem.ReadAllow) {
+		t.Fatalf("overlay widened filesystem.read_allow beyond base: got %v, base %v", ov.Filesystem.ReadAllow, base.Filesystem.ReadAllow)
 	}
 
 	// Denylists can only grow: the base denies must all survive.
