@@ -2,10 +2,120 @@ package fs
 
 import (
 	"os"
+	"os/user"
 	"path/filepath"
+	"slices"
+	"strconv"
 	"strings"
 	"testing"
+
+	"github.com/nocktechnologies/nocklock/internal/config"
 )
+
+func TestClaudeCodePresetConfinedHomeCacheProfile(t *testing.T) {
+	account, err := user.LookupId(strconv.Itoa(os.Getuid()))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("HOME", account.HomeDir)
+	cfg, err := config.LoadProfile("claude-code")
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg.Filesystem.Root = t.TempDir()
+	cfg.Filesystem.ConfineHomeReads = true
+	if len(cfg.Filesystem.AllowRW) != 0 {
+		t.Fatalf("cross-platform preset must not grant a macOS cache path: %v", cfg.Filesystem.AllowRW)
+	}
+	fc, err := ProcessEffectiveConfig(cfg, "darwin")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !fc.ClaudeCodeCache {
+		t.Fatal("macOS confined Claude Code preset did not enable its cache")
+	}
+	profile, _, err := GenerateEffectiveProfile(fc, false, "", 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cache, err := canonicalizeForProfile(filepath.Join(account.HomeDir, "Library", "Caches"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	readStart := strings.Index(profile, "(allow file-read-data\n")
+	writeStart := strings.Index(profile, "(allow file-write*\n")
+	if readStart < 0 || writeStart < 0 || !strings.Contains(profile, "(deny file-read-data (subpath "+sbplString(fc.HomeReadRoot)+")") || !strings.Contains(profile, "(deny file-write*") {
+		t.Fatalf("missing home read or write grant in profile:\n%s", profile)
+	}
+	readEnd := strings.Index(profile[readStart:], "\n)\n") + readStart
+	writeEnd := strings.Index(profile[writeStart:], "    (literal \"/dev/null\")") + writeStart
+	if readEnd < readStart || writeEnd < writeStart {
+		t.Fatalf("missing home read or write grant in profile:\n%s", profile)
+	}
+	readGrants, writeGrants := profile[readStart:readEnd], profile[writeStart:writeEnd]
+	for _, grants := range []string{readGrants, writeGrants} {
+		if !strings.Contains(grants, "(subpath "+sbplString(filepath.Join(cache, "claude-cli-nodejs"))+")") {
+			t.Fatalf("Claude Code cache is not granted for both read and write:\n%s", profile)
+		}
+		for _, path := range []string{fc.HomeReadRoot, filepath.Join(fc.HomeReadRoot, "Library"), cache, filepath.Join(cache, "unlisted-app")} {
+			if strings.Contains(grants, "(subpath "+sbplString(path)+")") {
+				t.Fatalf("unlisted cache path %q was granted:\n%s", path, profile)
+			}
+		}
+	}
+	linux, err := ProcessEffectiveConfig(cfg, "linux")
+	if err != nil || linux.ClaudeCodeCache {
+		t.Fatalf("Linux preset cache grant = %v, %v; want disabled", linux, err)
+	}
+	cfg.Filesystem.ConfineHomeReads = false
+	unconfined, err := ProcessEffectiveConfig(cfg, "darwin")
+	if err != nil || unconfined.ClaudeCodeCache {
+		t.Fatalf("unconfined macOS preset cache grant = %v, %v; want disabled", unconfined, err)
+	}
+	cfg.Filesystem.ConfineHomeReads = true
+	cfg.ProfileName = "codex"
+	cfg.Filesystem.Allow = nil // Claude Code's own login store is not available to another preset.
+	otherRoot, err := os.MkdirTemp("/tmp", "nocklock-other-preset-")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer os.RemoveAll(otherRoot)
+	cfg.Filesystem.Root = otherRoot
+	otherPreset, err := ProcessEffectiveConfig(cfg, "darwin")
+	if err != nil || otherPreset.ClaudeCodeCache {
+		t.Fatalf("other macOS preset cache grant = %v, %v; want disabled", otherPreset, err)
+	}
+}
+
+func TestClaudeCodeCacheGrantBeforeDirectoryExists(t *testing.T) {
+	home := t.TempDir()
+	home, err := filepath.EvalSymlinks(home)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cache := filepath.Join(home, "Library", "Caches")
+	if err := os.MkdirAll(cache, 0700); err != nil {
+		t.Fatal(err)
+	}
+	target := filepath.Join(cache, "claude-cli-nodejs")
+	if _, err := os.Lstat(target); !os.IsNotExist(err) {
+		t.Fatalf("cache folder must start absent: %v", err)
+	}
+	_, paths, err := developerToolCachePaths(home, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !slices.Contains(paths, target) {
+		t.Fatalf("missing first-run cache grant %q in %v", target, paths)
+	}
+	_, paths, err = developerToolCachePaths(home, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if slices.Contains(paths, target) {
+		t.Fatalf("Claude Code cache granted without the preset: %v", paths)
+	}
+}
 
 func TestGenerateProfile_EmptyErrors(t *testing.T) {
 	if _, err := GenerateProfile(nil); err == nil {

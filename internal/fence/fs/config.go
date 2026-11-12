@@ -79,6 +79,8 @@ type FenceConfig struct {
 	// HomeReadRoot is the canonical passwd home when macOS home data reads are
 	// confined. Empty means the opt-in is off.
 	HomeReadRoot string
+	// ClaudeCodeCache adds the Claude Code cache to macOS confined-home grants.
+	ClaudeCodeCache bool
 
 	// ProtectedRootSubdir, when set, is a directory INSIDE Root that must not
 	// become writable — in practice a legacy in-project audit directory. It

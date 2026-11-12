@@ -6,6 +6,8 @@ No internal host names, personal names or absolute home paths: `scripts/check-pu
 
 ## What changed
 
+- 2026-11-12: The Claude Code cache grant now runs through the macOS confined-home cache profile, where a missing cache folder still receives read and write rules for first-run creation. Generated-profile tests cover platform and mode boundaries; a native Seatbelt test covers first-run mkdir, write, read and unlisted-cache denial. Native enforcement still needs the macOS CI runner.
+
 - 2026-11-12: The macOS home cache profile now limits explicit cache write grants to `allow_rw`; `allow` and `read_allow` remain read-only. The profile test compares canonical paths and checks both read-only negative controls. The native Seatbelt test now checks blocked rename and hard-link attempts into both go-build and the configured root. The Linux-hosted Go suite and Darwin test compilation pass; native enforcement remains for macOS CI.
 
 - 2026-11-12: The opt-in macOS home read fence now grants both reads and writes to nine documented developer-tool folders beneath the passwd home's `Library/Caches` directory. Other app caches remain inaccessible unless explicitly allowed, and a dangling cache-directory symlink refuses startup. Generated-profile tests cover the narrowed grants; native Seatbelt tests cover go-build access, blocked rename and hard-link attempts from an unlisted cache, outside-root reads, and sensitive denies. Native enforcement still needs the macOS CI runner.

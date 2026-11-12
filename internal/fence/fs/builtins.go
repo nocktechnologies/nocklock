@@ -31,6 +31,7 @@ func ProcessEffectiveConfig(cfg *config.Config, goos string) (*FenceConfig, erro
 	var aliases []string
 	if goos == "darwin" {
 		if cfg.Filesystem.ConfineHomeReads {
+			fc.ClaudeCodeCache = cfg.ProfileName == "claude-code"
 			account, err := user.LookupId(strconv.Itoa(os.Getuid()))
 			if err != nil {
 				return nil, fmt.Errorf("cannot resolve invoking UID's passwd home for macOS read confinement: %w", err)
