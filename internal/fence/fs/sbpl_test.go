@@ -2,10 +2,61 @@ package fs
 
 import (
 	"os"
+	"os/user"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
+
+	"github.com/nocktechnologies/nocklock/internal/config"
 )
+
+func TestClaudeCodePresetConfinedHomeCacheProfile(t *testing.T) {
+	account, err := user.LookupId(strconv.Itoa(os.Getuid()))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("HOME", account.HomeDir)
+	cfg, err := config.LoadProfile("claude-code")
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg.Filesystem.Root = t.TempDir()
+	cfg.Filesystem.ConfineHomeReads = true
+	fc, err := ProcessEffectiveConfig(cfg, "darwin")
+	if err != nil {
+		t.Fatal(err)
+	}
+	profile, _, err := GenerateEffectiveProfile(fc, false, "", 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cache, err := canonicalizeForProfile(filepath.Join(account.HomeDir, "Library", "Caches"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	readStart := strings.Index(profile, "(allow file-read-data\n")
+	writeStart := strings.Index(profile, "(allow file-write*\n")
+	if readStart < 0 || writeStart < 0 || !strings.Contains(profile, "(deny file-read-data (subpath "+sbplString(fc.HomeReadRoot)+")") || !strings.Contains(profile, "(deny file-write*") {
+		t.Fatalf("missing home read or write grant in profile:\n%s", profile)
+	}
+	readEnd := strings.Index(profile[readStart:], "\n)\n") + readStart
+	writeEnd := strings.Index(profile[writeStart:], "    (literal \"/dev/null\")") + writeStart
+	if readEnd < readStart || writeEnd < writeStart {
+		t.Fatalf("missing home read or write grant in profile:\n%s", profile)
+	}
+	readGrants, writeGrants := profile[readStart:readEnd], profile[writeStart:writeEnd]
+	for _, grants := range []string{readGrants, writeGrants} {
+		if !strings.Contains(grants, "(subpath "+sbplString(filepath.Join(cache, "claude-cli-nodejs"))+")") {
+			t.Fatalf("Claude Code cache is not granted for both read and write:\n%s", profile)
+		}
+		for _, path := range []string{fc.HomeReadRoot, filepath.Join(fc.HomeReadRoot, "Library"), cache, filepath.Join(cache, "unlisted-app")} {
+			if strings.Contains(grants, "(subpath "+sbplString(path)+")") {
+				t.Fatalf("unlisted cache path %q was granted:\n%s", path, profile)
+			}
+		}
+	}
+}
 
 func TestGenerateProfile_EmptyErrors(t *testing.T) {
 	if _, err := GenerateProfile(nil); err == nil {

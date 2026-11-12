@@ -54,6 +54,7 @@ allow = [
     "/etc/",
     "/sys/",
 ]
+allow_rw = ["~/Library/Caches/claude-cli-nodejs/"]
 deny = [
     "~/.ssh/",
     "~/.aws/",
