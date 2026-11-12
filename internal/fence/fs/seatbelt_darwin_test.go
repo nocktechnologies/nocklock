@@ -387,7 +387,8 @@ func TestSeatbeltClaudeCodeCacheFirstRun(t *testing.T) {
 		t.Fatalf("Claude Code cache must be absent before profile generation: %v", err)
 	}
 	unlistedFile := filepath.Join(unlisted, "cache.txt")
-	if err := os.WriteFile(unlistedFile, []byte("unlisted"), 0600); err != nil {
+	const unlistedContent = "denied-cache-content-marker"
+	if err := os.WriteFile(unlistedFile, []byte(unlistedContent), 0600); err != nil {
 		t.Fatal(err)
 	}
 	profile, _, err := GenerateEffectiveProfile(&FenceConfig{
@@ -421,7 +422,7 @@ func TestSeatbeltClaudeCodeCacheFirstRun(t *testing.T) {
 	if out, err := run("/bin/sh", "-c", `printf changed > "$1"`, "sh", unlistedFile); err == nil {
 		t.Fatalf("unlisted cache write succeeded: %q", out)
 	}
-	if out, err := run("/bin/cat", unlistedFile); err == nil || strings.Contains(out, "unlisted") {
+	if out, err := run("/bin/cat", unlistedFile); err == nil || strings.Contains(out, unlistedContent) {
 		t.Fatalf("unlisted cache read = %q, %v; want denial", out, err)
 	}
 }

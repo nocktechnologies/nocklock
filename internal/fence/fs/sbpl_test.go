@@ -89,6 +89,10 @@ func TestClaudeCodePresetConfinedHomeCacheProfile(t *testing.T) {
 
 func TestClaudeCodeCacheGrantBeforeDirectoryExists(t *testing.T) {
 	home := t.TempDir()
+	home, err := filepath.EvalSymlinks(home)
+	if err != nil {
+		t.Fatal(err)
+	}
 	cache := filepath.Join(home, "Library", "Caches")
 	if err := os.MkdirAll(cache, 0700); err != nil {
 		t.Fatal(err)
