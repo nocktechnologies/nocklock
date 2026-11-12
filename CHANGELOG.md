@@ -4,9 +4,13 @@ All notable changes to NockLock will be documented in this file.
 
 ## [Unreleased]
 
+### Fixed
+
+- On macOS with `filesystem.confine_home_reads` enabled, explicit `filesystem.allow` and `allow_rw` paths beneath the passwd home remain readable; sensitive paths inside them stay denied.
+
 ### Added
 
-- Add default-off `filesystem.confine_home_reads` on macOS. It confines file data reads under the invoking UID's home to `filesystem.root`, explicit `filesystem.read_allow` paths, and `.gitconfig`; metadata queries remain available, while sensitive paths still deny reads and writes. The signed fence-state row and `doctor` show the mode. Other volumes and shared/temp directories remain outside this read boundary.
+- Add default-off `filesystem.confine_home_reads` on macOS. It confines file data reads under the invoking UID's home to `filesystem.root`, explicit `filesystem.allow`, `filesystem.allow_rw` and `filesystem.read_allow` paths, and `.gitconfig`; metadata queries remain available, while sensitive paths still deny reads and writes. The signed fence-state row and `doctor` show the mode. Other volumes and shared/temp directories remain outside this read boundary.
 
 ## [1.0.0] - 2026-11-12
 

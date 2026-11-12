@@ -122,8 +122,10 @@ func TestGenerateEffectiveProfileConfinesHomeReadsAfterGrants(t *testing.T) {
 	home := t.TempDir()
 	root := filepath.Join(home, "project")
 	grant := filepath.Join(home, "shared")
+	allowPath := filepath.Join(home, "cache")
+	allowRWPath := filepath.Join(home, "agent")
 	secret := filepath.Join(root, "secret")
-	for _, path := range []string{root, grant, secret} {
+	for _, path := range []string{root, grant, allowPath, allowRWPath, secret} {
 		if err := os.Mkdir(path, 0700); err != nil {
 			t.Fatal(err)
 		}
@@ -132,7 +134,7 @@ func TestGenerateEffectiveProfileConfinesHomeReadsAfterGrants(t *testing.T) {
 	if err := os.WriteFile(gitConfig, []byte("[user]\n"), 0600); err != nil {
 		t.Fatal(err)
 	}
-	fc := &FenceConfig{Root: root, Mode: "read-write", DenyPaths: []string{secret}, DenyPrefixes: []string{filepath.Join(root, "credential-")}, HomeReadRoot: home, ReadAllowPaths: []string{grant}}
+	fc := &FenceConfig{Root: root, Mode: "read-write", DenyPaths: []string{secret}, DenyPrefixes: []string{filepath.Join(root, "credential-")}, HomeReadRoot: home, ReadAllowPaths: []string{grant}, AllowPaths: []string{allowPath}, AllowRWPaths: []string{allowRWPath}}
 	profile, _, err := GenerateEffectiveProfile(fc, false, "test-tag", 0)
 	if err != nil {
 		t.Fatal(err)
@@ -146,13 +148,14 @@ func TestGenerateEffectiveProfileConfinesHomeReadsAfterGrants(t *testing.T) {
 	if exact := strings.LastIndex(profile, "(deny file-read-data\n"); exact < sensitive {
 		t.Fatalf("exact sensitive data-read deny must follow the root grant and broad deny:\n%s", profile)
 	}
-	for _, path := range []string{home, root, grant} {
+	readBlock := profile[allow:sensitive]
+	for _, path := range []string{root, grant, allowPath, allowRWPath} {
 		canonical, err := canonicalizeForProfile(path)
 		if err != nil {
 			t.Fatal(err)
 		}
-		if !strings.Contains(profile, "(subpath "+sbplString(canonical)+")") {
-			t.Fatalf("missing canonical %q in profile:\n%s", canonical, profile)
+		if !strings.Contains(readBlock, "(subpath "+sbplString(canonical)+")") {
+			t.Fatalf("missing home-read grant for %q in profile:\n%s", canonical, profile)
 		}
 	}
 	canonicalGitConfig, err := canonicalizeForProfile(gitConfig)
