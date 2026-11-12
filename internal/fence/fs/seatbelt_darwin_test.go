@@ -213,7 +213,20 @@ func TestSeatbeltHomeReadAllowPathsRemainReadable(t *testing.T) {
 				return string(out), err
 			}
 			written := filepath.Join(allowed, "cache.txt")
-			if out, err := run("/bin/sh", "-c", `printf readable > "$1" && /bin/cat "$1"`, "sh", written); err != nil || out != "readable" {
+			if grantType == "allow" {
+				if err := os.WriteFile(written, []byte("readable"), 0600); err != nil {
+					t.Fatal(err)
+				}
+				if out, err := run("/bin/cat", written); err != nil || out != "readable" {
+					t.Fatalf("allowed read = %q, %v; want readable", out, err)
+				}
+				if out, err := run("/bin/sh", "-c", `printf changed > "$1"`, "sh", written); err == nil {
+					t.Fatalf("read-only allow write succeeded: %q", out)
+				}
+				if got, err := os.ReadFile(written); err != nil || string(got) != "readable" {
+					t.Fatalf("read-only allow file changed to %q: %v", got, err)
+				}
+			} else if out, err := run("/bin/sh", "-c", `printf readable > "$1" && /bin/cat "$1"`, "sh", written); err != nil || out != "readable" {
 				t.Fatalf("allowed write then read = %q, %v; want readable", out, err)
 			}
 			if out, err := run("/bin/cat", secretFile); err == nil || strings.Contains(out, "sensitive") {
