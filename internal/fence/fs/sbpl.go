@@ -146,7 +146,7 @@ func generateProfile(sensitivePaths []string, hardened bool, writePaths []string
 		if err != nil {
 			return "", 0, fmt.Errorf("cannot canonicalize home-read path: %w", err)
 		}
-		readGrants, err = canonicalProfilePaths(append([]string{root}, readPaths...), "home-read allow")
+		readGrants, err = canonicalProfilePaths(append(append([]string{root}, readPaths...), writePaths...), "home-read allow")
 		if err != nil {
 			return "", 0, err
 		}

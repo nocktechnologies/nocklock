@@ -229,6 +229,88 @@ func TestSeatbeltHomeReadAllowPathsRemainReadable(t *testing.T) {
 	}
 }
 
+func TestSeatbeltHomeReadBuiltinCacheRemainsReadable(t *testing.T) {
+	requireSandboxExec(t)
+	home, err := os.UserHomeDir()
+	if err != nil {
+		t.Fatal(err)
+	}
+	cache, err := os.UserCacheDir()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(cache, 0700); err != nil {
+		t.Fatal(err)
+	}
+	canonicalHome, err := canonicalizeForProfile(home)
+	if err != nil {
+		t.Fatal(err)
+	}
+	canonicalCache, err := canonicalizeForProfile(cache)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !pathContains(canonicalHome, canonicalCache) {
+		t.Fatalf("cache %q is outside home %q; cannot prove the home-read grant", canonicalCache, canonicalHome)
+	}
+	base, err := os.MkdirTemp(home, ".nocklock-home-read-")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer os.RemoveAll(base)
+	root := filepath.Join(base, "project")
+	if err := os.Mkdir(root, 0700); err != nil {
+		t.Fatal(err)
+	}
+	outside := filepath.Join(base, "outside.txt")
+	if err := os.WriteFile(outside, []byte("outside"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	cacheBase, err := os.MkdirTemp(cache, ".nocklock-home-read-")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer os.RemoveAll(cacheBase)
+	secret := filepath.Join(cacheBase, "secret")
+	if err := os.Mkdir(secret, 0700); err != nil {
+		t.Fatal(err)
+	}
+	secretFile := filepath.Join(secret, "credential")
+	if err := os.WriteFile(secretFile, []byte("sensitive"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	profile, _, err := GenerateEffectiveProfile(&FenceConfig{
+		Root: root, Mode: "read-write", DenyPaths: []string{secret}, HomeReadRoot: home,
+	}, false, "", 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	pf, err := WriteProfile(profile)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer os.Remove(pf)
+	run := func(command ...string) (string, error) {
+		t.Helper()
+		argv, err := WrapArgv(pf, command)
+		if err != nil {
+			t.Fatal(err)
+		}
+		out, err := exec.Command(argv[0], argv[1:]...).CombinedOutput()
+		return string(out), err
+	}
+	written := filepath.Join(cacheBase, "cache.txt")
+	if out, err := run("/bin/sh", "-c", `printf readable > "$1" && /bin/cat "$1"`, "sh", written); err != nil || out != "readable" {
+		t.Fatalf("built-in cache write then read = %q, %v; want readable", out, err)
+	}
+	if out, err := run("/bin/cat", outside); err == nil || strings.Contains(out, "outside") {
+		t.Fatalf("outside-root read = %q, %v; want denial", out, err)
+	}
+	if out, err := run("/bin/cat", secretFile); err == nil || strings.Contains(out, "sensitive") {
+		t.Fatalf("sensitive cache read = %q, %v; want denial", out, err)
+	}
+}
+
 // TestSeatbeltWriteConfinement_RealSandboxExec is the negative control for
 // Phase 2: a write inside filesystem.root succeeds while a sibling directory
 // in the invoking user's home is denied. The test deliberately avoids t.TempDir

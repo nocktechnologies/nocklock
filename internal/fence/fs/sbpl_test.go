@@ -158,6 +158,17 @@ func TestGenerateEffectiveProfileConfinesHomeReadsAfterGrants(t *testing.T) {
 			t.Fatalf("missing home-read grant for %q in profile:\n%s", canonical, profile)
 		}
 	}
+	cacheDir, err := os.UserCacheDir()
+	if err != nil {
+		t.Fatal(err)
+	}
+	canonicalCache, err := canonicalizeForProfile(cacheDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(readBlock, "(subpath "+sbplString(canonicalCache)+")") {
+		t.Fatalf("missing built-in cache read grant for %q in profile:\n%s", canonicalCache, profile)
+	}
 	canonicalGitConfig, err := canonicalizeForProfile(gitConfig)
 	if err != nil {
 		t.Fatal(err)

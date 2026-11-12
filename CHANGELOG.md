@@ -6,6 +6,7 @@ All notable changes to NockLock will be documented in this file.
 
 ### Fixed
 
+- On macOS with `filesystem.confine_home_reads` enabled, built-in write-granted paths beneath the passwd home, including the user cache directory, remain readable while sensitive paths stay denied.
 - On macOS with `filesystem.confine_home_reads` enabled, explicit `filesystem.allow` and `allow_rw` paths beneath the passwd home remain readable; sensitive paths inside them stay denied.
 
 ### Added
