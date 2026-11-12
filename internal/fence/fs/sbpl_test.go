@@ -87,6 +87,55 @@ func TestClaudeCodePresetConfinedHomeCacheProfile(t *testing.T) {
 	}
 }
 
+func TestClaudeCodeRuntimeConfinedHomeCacheProfile(t *testing.T) {
+	account, err := user.LookupId(strconv.Itoa(os.Getuid()))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("HOME", account.HomeDir)
+	cache, err := canonicalizeForProfile(filepath.Join(account.HomeDir, "Library", "Caches", "claude-cli-nodejs"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	grant := "(subpath " + sbplString(cache) + ")"
+	for _, tc := range []struct {
+		name, profile, command string
+		wantGrants             int
+	}{
+		{name: "profile route", profile: "claude-code", command: "/bin/sh", wantGrants: 2},
+		{name: "wrapped claude route", command: "/usr/local/bin/claude", wantGrants: 2},
+		{name: "other command", command: "/bin/sh"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			cfg := config.DefaultConfig()
+			cfg.Project.Runtime = "claude-code"
+			cfg.ProfileName = tc.profile
+			cfg.CommandRuntime = config.RuntimeForCommand(tc.command)
+			root, err := os.MkdirTemp("/tmp", "nocklock-claude-cache-")
+			if err != nil {
+				t.Fatal(err)
+			}
+			t.Cleanup(func() { os.RemoveAll(root) })
+			cfg.Filesystem.Root = root
+			cfg.Filesystem.ConfineHomeReads = true
+			fc, err := ProcessEffectiveConfig(&cfg, "darwin")
+			if err != nil {
+				t.Fatal(err)
+			}
+			if fc.ClaudeCodeCache != (tc.wantGrants != 0) {
+				t.Fatalf("Claude Code cache enabled = %v, want %v", fc.ClaudeCodeCache, tc.wantGrants != 0)
+			}
+			profile, _, err := GenerateEffectiveProfile(fc, false, "", 0)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if got := strings.Count(profile, grant); got != tc.wantGrants {
+				t.Fatalf("Claude Code cache read/write grants = %d, want %d", got, tc.wantGrants)
+			}
+		})
+	}
+}
+
 func TestClaudeCodeCacheGrantBeforeDirectoryExists(t *testing.T) {
 	home := t.TempDir()
 	home, err := filepath.EvalSymlinks(home)
