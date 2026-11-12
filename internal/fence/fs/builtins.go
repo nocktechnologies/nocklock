@@ -54,6 +54,9 @@ func ProcessEffectiveConfig(cfg *config.Config, goos string) (*FenceConfig, erro
 			builtins = append(builtins, defaultSensitivePathsAt(fc.HomeReadRoot)...)
 		}
 		home, _ := os.UserHomeDir()
+		if home != "" {
+			home = filepath.Clean(home)
+		}
 		homes := []string{home}
 		if fc.HomeReadRoot != "" && fc.HomeReadRoot != home {
 			homes = append(homes, fc.HomeReadRoot)

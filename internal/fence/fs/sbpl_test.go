@@ -128,7 +128,11 @@ func TestGenerateEffectiveProfileConfinesHomeReadsAfterGrants(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	fc := &FenceConfig{Root: root, Mode: "read-write", DenyPaths: []string{secret}, HomeReadRoot: home, ReadAllowPaths: []string{grant}}
+	gitConfig := filepath.Join(home, ".gitconfig")
+	if err := os.WriteFile(gitConfig, []byte("[user]\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	fc := &FenceConfig{Root: root, Mode: "read-write", DenyPaths: []string{secret}, DenyPrefixes: []string{filepath.Join(root, "credential-")}, HomeReadRoot: home, ReadAllowPaths: []string{grant}}
 	profile, _, err := GenerateEffectiveProfile(fc, false, "test-tag", 0)
 	if err != nil {
 		t.Fatal(err)
@@ -151,10 +155,51 @@ func TestGenerateEffectiveProfileConfinesHomeReadsAfterGrants(t *testing.T) {
 			t.Fatalf("missing canonical %q in profile:\n%s", canonical, profile)
 		}
 	}
+	canonicalGitConfig, err := canonicalizeForProfile(gitConfig)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(profile, "(literal "+sbplString(canonicalGitConfig)+")") || strings.Contains(profile, "(subpath "+sbplString(canonicalGitConfig)+")") {
+		t.Fatalf("home Git config must have only a literal read grant:\n%s", profile)
+	}
+	for _, pattern := range []string{
+		"^" + caseFoldPattern(secret) + "(/|$)",
+		"^" + caseFoldPattern(fc.DenyPrefixes[0]) + ".*",
+	} {
+		if !strings.Contains(profile, "(deny file-read-data (regex #"+sbplString(pattern)+")") {
+			t.Fatalf("missing exact data-read deny for %q:\n%s", pattern, profile)
+		}
+	}
 	fc.HomeReadRoot = ""
 	profile, _, err = GenerateEffectiveProfile(fc, false, "", 0)
 	if err != nil || strings.Contains(profile, "(deny file-read-data") {
 		t.Fatalf("default-off profile unexpectedly confines reads: %v\n%s", err, profile)
+	}
+}
+
+func TestGenerateEffectiveProfileRejectsDirectoryGitConfig(t *testing.T) {
+	home := t.TempDir()
+	root := filepath.Join(home, "project")
+	secret := filepath.Join(root, "secret")
+	for _, path := range []string{root, secret} {
+		if err := os.Mkdir(path, 0700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	fc := &FenceConfig{Root: root, Mode: "read-write", DenyPaths: []string{secret}, HomeReadRoot: home}
+	for _, path := range []string{home, root} {
+		if err := os.Symlink(path, filepath.Join(home, ".gitconfig")); err != nil {
+			t.Fatal(err)
+		}
+		if _, _, err := GenerateEffectiveProfile(fc, false, "", 0); err == nil {
+			t.Fatalf("directory Git config pointing to %q must refuse", path)
+		}
+		if err := os.Remove(filepath.Join(home, ".gitconfig")); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if _, _, err := GenerateEffectiveProfile(fc, false, "", 0); err != nil {
+		t.Fatalf("missing Git config must remain optional: %v", err)
 	}
 }
 

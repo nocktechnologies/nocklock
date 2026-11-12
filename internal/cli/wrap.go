@@ -246,8 +246,8 @@ var wrapCmd = &cobra.Command{
 
 		// The digest below resolves the built-in credential denies, so a macOS
 		// refusal of them (an overlapping grant, no resolvable HOME) is
-		// recorded here first. Like the digest, skip it for filesystem.root = "",
-		// which resolves no built-in denies and records DEGRADED later.
+		// recorded here first. A rootless home-read opt-in also reaches this
+		// check so its required-root refusal is recorded before child launch.
 		if runtime.GOOS == "darwin" && (effectiveCfg.Filesystem.Root != "" || effectiveCfg.Filesystem.ConfineHomeReads) {
 			if _, err := fsfence.ProcessEffectiveConfig(&effectiveCfg, runtime.GOOS); err != nil {
 				cmd.SilenceUsage = true

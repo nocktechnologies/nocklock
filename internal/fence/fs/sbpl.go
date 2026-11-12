@@ -140,14 +140,25 @@ func generateProfile(sensitivePaths []string, hardened bool, writePaths []string
 	}
 	var home string
 	var readGrants []string
+	var gitConfig string
 	if homeReadRoot != "" {
 		home, err = canonicalizeForProfile(homeReadRoot)
 		if err != nil {
 			return "", 0, fmt.Errorf("cannot canonicalize home-read path: %w", err)
 		}
-		readGrants, err = canonicalProfilePaths(append([]string{root, filepath.Join(home, ".gitconfig")}, readAllow...), "home-read allow")
+		readGrants, err = canonicalProfilePaths(append([]string{root}, readAllow...), "home-read allow")
 		if err != nil {
 			return "", 0, err
+		}
+		gitConfigPath := filepath.Join(home, ".gitconfig")
+		if info, statErr := os.Stat(gitConfigPath); statErr == nil && !info.Mode().IsRegular() {
+			return "", 0, fmt.Errorf("home Git config %q must be a regular file", gitConfigPath)
+		} else if statErr != nil && !os.IsNotExist(statErr) {
+			return "", 0, fmt.Errorf("cannot inspect home Git config %q: %w", gitConfigPath, statErr)
+		}
+		gitConfig, err = canonicalizeForProfile(gitConfigPath)
+		if err != nil {
+			return "", 0, fmt.Errorf("cannot canonicalize home Git config: %w", err)
 		}
 	}
 
@@ -214,6 +225,7 @@ func generateProfile(sensitivePaths []string, hardened bool, writePaths []string
 		for _, p := range readGrants {
 			b.WriteString("    (subpath " + sbplString(p) + ")\n")
 		}
+		b.WriteString("    (literal " + sbplString(gitConfig) + ")\n")
 		b.WriteString(")\n")
 	} else {
 		writeSensitiveDeny()

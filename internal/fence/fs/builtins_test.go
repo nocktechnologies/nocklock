@@ -264,3 +264,23 @@ func TestBuiltinPrefixAliasesStayEnforcedButOutOfPolicy(t *testing.T) {
 		t.Fatal("static deny recorded as a prefix alias")
 	}
 }
+
+func TestBuiltinPrefixAliasesWithTrailingHomeSlash(t *testing.T) {
+	cfg, home := builtinFixture(t)
+	alias := filepath.Join(home, ".env.production")
+	if err := os.WriteFile(alias, []byte("fake-canary"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("HOME", home+string(os.PathSeparator))
+	fc, err := ProcessEffectiveConfig(cfg, "darwin")
+	if err != nil {
+		t.Fatal(err)
+	}
+	resolved, err := resolvePath(alias)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !slices.Contains(fc.PrefixAliasPaths, resolved) {
+		t.Fatalf("trailing HOME slash dropped credential alias %q", resolved)
+	}
+}
