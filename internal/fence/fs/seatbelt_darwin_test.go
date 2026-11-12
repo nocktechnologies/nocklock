@@ -263,14 +263,24 @@ func TestSeatbeltHomeReadBuiltinCacheRemainsReadable(t *testing.T) {
 		t.Fatal(err)
 	}
 	outside := filepath.Join(base, "outside.txt")
-	if err := os.WriteFile(outside, []byte("outside"), 0600); err != nil {
+	const outsideMarker = "READ_BOUNDARY_PROBE_9f72d3"
+	if err := os.WriteFile(outside, []byte(outsideMarker), 0600); err != nil {
 		t.Fatal(err)
 	}
-	cacheBase, err := os.MkdirTemp(cache, ".nocklock-home-read-")
+	goBuild := filepath.Join(cache, "go-build")
+	if err := os.MkdirAll(goBuild, 0700); err != nil {
+		t.Fatal(err)
+	}
+	cacheBase, err := os.MkdirTemp(goBuild, ".nocklock-home-read-")
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer os.RemoveAll(cacheBase)
+	unlistedBase, err := os.MkdirTemp(cache, ".nocklock-unlisted-app-")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer os.RemoveAll(unlistedBase)
 	secret := filepath.Join(cacheBase, "secret")
 	if err := os.Mkdir(secret, 0700); err != nil {
 		t.Fatal(err)
@@ -303,7 +313,14 @@ func TestSeatbeltHomeReadBuiltinCacheRemainsReadable(t *testing.T) {
 	if out, err := run("/bin/sh", "-c", `printf readable > "$1" && /bin/cat "$1"`, "sh", written); err != nil || out != "readable" {
 		t.Fatalf("built-in cache write then read = %q, %v; want readable", out, err)
 	}
-	if out, err := run("/bin/cat", outside); err == nil || strings.Contains(out, "outside") {
+	unlistedFile := filepath.Join(unlistedBase, "cache.txt")
+	if out, err := run("/bin/sh", "-c", `printf UNLISTED_CACHE_PROBE_73c8 > "$1"`, "sh", unlistedFile); err != nil {
+		t.Fatalf("unlisted cache write failed: %q, %v", out, err)
+	}
+	if out, err := run("/bin/cat", unlistedFile); err == nil || strings.Contains(out, "UNLISTED_CACHE_PROBE_73c8") {
+		t.Fatalf("unlisted cache read = %q, %v; want denial", out, err)
+	}
+	if out, err := run("/bin/cat", outside); err == nil || strings.Contains(out, outsideMarker) {
 		t.Fatalf("outside-root read = %q, %v; want denial", out, err)
 	}
 	if out, err := run("/bin/cat", secretFile); err == nil || strings.Contains(out, "sensitive") {

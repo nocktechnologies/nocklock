@@ -5,6 +5,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -146,10 +147,30 @@ func generateProfile(sensitivePaths []string, hardened bool, writePaths []string
 		if err != nil {
 			return "", 0, fmt.Errorf("cannot canonicalize home-read path: %w", err)
 		}
-		readGrants, err = canonicalProfilePaths(append(append([]string{root}, readPaths...), writePaths...), "home-read allow")
+		readGrants, err = canonicalProfilePaths(append([]string{root}, readPaths...), "home-read allow")
 		if err != nil {
 			return "", 0, err
 		}
+		cacheDir, err := os.UserCacheDir()
+		if err != nil {
+			return "", 0, fmt.Errorf("cannot determine user cache directory for home-read allow: %w", err)
+		}
+		cacheDir, err = canonicalizeForProfile(cacheDir)
+		if err != nil {
+			return "", 0, fmt.Errorf("cannot canonicalize user cache directory for home-read allow: %w", err)
+		}
+		for _, name := range []string{"go-build", "pip", "pnpm", "Yarn", "node-gyp", "ms-playwright", "deno", "typescript", "Homebrew"} {
+			path := filepath.Join(cacheDir, name)
+			canonical, err := canonicalizeForProfile(path)
+			if err != nil {
+				return "", 0, fmt.Errorf("cannot canonicalize developer-tool cache %q: %w", path, err)
+			}
+			if canonical == path { // Do not grant a symlink target outside the listed folder.
+				readGrants = append(readGrants, canonical)
+			}
+		}
+		sort.Strings(readGrants)
+		readGrants = slices.Compact(readGrants)
 		gitConfigPath := filepath.Join(home, ".gitconfig")
 		if info, statErr := os.Stat(gitConfigPath); statErr == nil && !info.Mode().IsRegular() {
 			return "", 0, fmt.Errorf("home Git config %q must be a regular file", gitConfigPath)

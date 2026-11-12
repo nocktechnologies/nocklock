@@ -166,8 +166,17 @@ func TestGenerateEffectiveProfileConfinesHomeReadsAfterGrants(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(readBlock, "(subpath "+sbplString(canonicalCache)+")") {
-		t.Fatalf("missing built-in cache read grant for %q in profile:\n%s", canonicalCache, profile)
+	if strings.Contains(readBlock, "(subpath "+sbplString(canonicalCache)+")") {
+		t.Fatalf("whole cache directory is readable in profile:\n%s", profile)
+	}
+	for _, name := range []string{"go-build", "pip", "pnpm", "Yarn", "node-gyp", "ms-playwright", "deno", "typescript", "Homebrew"} {
+		path := filepath.Join(canonicalCache, name)
+		if !strings.Contains(readBlock, "(subpath "+sbplString(path)+")") {
+			t.Fatalf("missing built-in cache read grant for %q in profile:\n%s", path, profile)
+		}
+	}
+	if strings.Contains(readBlock, "(subpath "+sbplString(filepath.Join(canonicalCache, "unlisted-app"))+")") {
+		t.Fatalf("unlisted app cache is readable in profile:\n%s", profile)
 	}
 	canonicalGitConfig, err := canonicalizeForProfile(gitConfig)
 	if err != nil {
