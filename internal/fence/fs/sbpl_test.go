@@ -135,9 +135,12 @@ func TestGenerateEffectiveProfileConfinesHomeReadsAfterGrants(t *testing.T) {
 	}
 	deny := strings.Index(profile, "(deny file-read-data")
 	allow := strings.Index(profile, "(allow file-read-data")
-	sensitive := strings.LastIndex(profile, "(deny file-read* file-write*")
+	sensitive := strings.LastIndex(profile, "(deny file-read* file-write*\n")
 	if deny < 0 || allow < deny || sensitive < allow {
 		t.Fatalf("home-read and sensitive rule order is wrong:\n%s", profile)
+	}
+	if exact := strings.LastIndex(profile, "(deny file-read-data\n"); exact < sensitive {
+		t.Fatalf("exact sensitive data-read deny must follow the root grant and broad deny:\n%s", profile)
 	}
 	for _, path := range []string{home, root, grant} {
 		canonical, err := canonicalizeForProfile(path)

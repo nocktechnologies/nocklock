@@ -193,6 +193,19 @@ func generateProfile(sensitivePaths []string, hardened bool, writePaths []string
 			b.WriteString("   " + msg + "\n")
 		}
 		b.WriteString(")\n")
+		if home != "" {
+			// Seatbelt ranks an exact operation above file-read*. The root's
+			// file-read-data allow would otherwise beat this broader deny even
+			// though the deny is emitted later.
+			b.WriteString("(deny file-read-data\n")
+			for _, c := range canonical {
+				b.WriteString("    (subpath " + sbplString(c) + ")\n")
+			}
+			if msg != "" {
+				b.WriteString("   " + msg + "\n")
+			}
+			b.WriteString(")\n")
+		}
 	}
 	if home != "" {
 		b.WriteString(";; Opt-in home data-read boundary; metadata remains available.\n")
