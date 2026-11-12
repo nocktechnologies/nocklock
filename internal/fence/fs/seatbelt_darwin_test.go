@@ -324,21 +324,23 @@ func TestSeatbeltHomeReadBuiltinCacheRemainsReadable(t *testing.T) {
 		{"rename", "/bin/mv"},
 		{"hard link", "/bin/ln"},
 	} {
-		t.Run(tc.name, func(t *testing.T) {
-			if _, err := os.Stat(tc.command); err != nil {
-				t.Fatalf("cannot run %s control: %v", tc.name, err)
-			}
-			target := filepath.Join(cacheBase, strings.ReplaceAll(tc.name, " ", "-")+".txt")
-			if out, err := run(tc.command, unlistedFile, target); err == nil {
-				t.Fatalf("%s from unlisted cache into go-build succeeded: %q", tc.name, out)
-			}
-			if _, err := os.Stat(target); !os.IsNotExist(err) {
-				t.Fatalf("%s created target in go-build: %v", tc.name, err)
-			}
-			if got, err := os.ReadFile(unlistedFile); err != nil || string(got) != "UNLISTED_CACHE_PROBE_73c8" {
-				t.Fatalf("%s changed unlisted cache source to %q: %v", tc.name, got, err)
-			}
-		})
+		for _, destination := range []struct{ name, path string }{{"go-build", cacheBase}, {"root", root}} {
+			t.Run(tc.name+"/"+destination.name, func(t *testing.T) {
+				if _, err := os.Stat(tc.command); err != nil {
+					t.Fatalf("cannot run %s control: %v", tc.name, err)
+				}
+				target := filepath.Join(destination.path, strings.ReplaceAll(tc.name, " ", "-")+".txt")
+				if out, err := run(tc.command, unlistedFile, target); err == nil {
+					t.Fatalf("%s from unlisted cache into %s succeeded: %q", tc.name, destination.name, out)
+				}
+				if _, err := os.Stat(target); !os.IsNotExist(err) {
+					t.Fatalf("%s created target in %s: %v", tc.name, destination.name, err)
+				}
+				if got, err := os.ReadFile(unlistedFile); err != nil || string(got) != "UNLISTED_CACHE_PROBE_73c8" {
+					t.Fatalf("%s changed unlisted cache source to %q: %v", tc.name, got, err)
+				}
+			})
+		}
 	}
 	if out, err := run("/bin/cat", outside); err == nil || strings.Contains(out, outsideMarker) {
 		t.Fatalf("outside-root read = %q, %v; want denial", out, err)

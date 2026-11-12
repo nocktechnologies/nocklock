@@ -106,10 +106,10 @@ func GenerateWriteConfinementProfile(sensitivePaths []string, root, mode string,
 // on the proxy's port at ::1 is also reachable; the caller must hold that port
 // (wrap does, see reserveSeatbeltProxyListeners).
 func GenerateTaggedWriteConfinementProfile(sensitivePaths []string, root, mode string, hardened bool, tag string, proxyPort int) (string, int, error) {
-	return generateTaggedWriteConfinementProfile(sensitivePaths, root, mode, hardened, tag, proxyPort, "", nil)
+	return generateTaggedWriteConfinementProfile(sensitivePaths, root, mode, hardened, tag, proxyPort, "", nil, nil)
 }
 
-func generateTaggedWriteConfinementProfile(sensitivePaths []string, root, mode string, hardened bool, tag string, proxyPort int, homeReadRoot string, readPaths []string) (string, int, error) {
+func generateTaggedWriteConfinementProfile(sensitivePaths []string, root, mode string, hardened bool, tag string, proxyPort int, homeReadRoot string, readPaths, cacheWritePaths []string) (string, int, error) {
 	if strings.TrimSpace(root) == "" {
 		return "", 0, fmt.Errorf("refusing to generate write-confinement profile with an empty root")
 	}
@@ -117,7 +117,7 @@ func generateTaggedWriteConfinementProfile(sensitivePaths []string, root, mode s
 		return "", 0, fmt.Errorf("invalid filesystem mode %q: must be \"read-write\" or \"read-only\"", mode)
 	}
 
-	writePaths, cachePaths, err := writeConfinementPaths(root, mode, homeReadRoot, readPaths)
+	writePaths, cachePaths, err := writeConfinementPaths(root, mode, homeReadRoot, cacheWritePaths)
 	if err != nil {
 		return "", 0, err
 	}
@@ -315,7 +315,7 @@ func generateProfile(sensitivePaths []string, hardened bool, writePaths []string
 // cache directory; home-read confinement uses the passwd home's cache. On macOS,
 // reject an arbitrary TMPDIR outside the system's per-user temp locations so a
 // caller cannot silently widen the boundary through its environment.
-func writeConfinementPaths(root, mode, homeReadRoot string, readPaths []string) ([]string, []string, error) {
+func writeConfinementPaths(root, mode, homeReadRoot string, cacheWritePaths []string) ([]string, []string, error) {
 	tempDir, err := canonicalizeForProfile(os.TempDir())
 	if err != nil {
 		return nil, nil, fmt.Errorf("cannot canonicalize user temporary directory: %w", err)
@@ -336,7 +336,7 @@ func writeConfinementPaths(root, mode, homeReadRoot string, readPaths []string) 
 			return nil, nil, err
 		}
 		paths = append(paths, cachePaths...)
-		for _, path := range readPaths {
+		for _, path := range cacheWritePaths {
 			canonical, err := canonicalizeForProfile(path)
 			if err != nil {
 				return nil, nil, fmt.Errorf("cannot canonicalize explicit cache grant %q: %w", path, err)

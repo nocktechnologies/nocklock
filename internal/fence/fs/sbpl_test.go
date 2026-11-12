@@ -172,9 +172,20 @@ func TestGenerateEffectiveProfileConfinesHomeReadsAfterGrants(t *testing.T) {
 	if strings.Contains(writeBlock, "(subpath "+sbplString(canonicalCache)+")") {
 		t.Fatalf("whole cache directory is writable in profile:\n%s", profile)
 	}
-	for _, path := range []string{grant, allowPath, allowRWPath} {
-		if !strings.Contains(writeBlock, "(subpath "+sbplString(path)+")") {
-			t.Fatalf("missing explicit cache write grant for %q in profile:\n%s", path, profile)
+	canonicalAllowRW, err := canonicalizeForProfile(allowRWPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(writeBlock, "(subpath "+sbplString(canonicalAllowRW)+")") {
+		t.Fatalf("missing allow_rw cache write grant for %q in profile:\n%s", canonicalAllowRW, profile)
+	}
+	for _, path := range []string{grant, allowPath} {
+		canonical, err := canonicalizeForProfile(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if strings.Contains(writeBlock, "(subpath "+sbplString(canonical)+")") {
+			t.Fatalf("read-only cache path %q is writable in profile:\n%s", canonical, profile)
 		}
 	}
 	for _, name := range []string{"go-build", "pip", "pnpm", "Yarn", "node-gyp", "ms-playwright", "deno", "typescript", "Homebrew"} {

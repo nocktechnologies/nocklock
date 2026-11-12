@@ -12,7 +12,7 @@ import (
 // resolved policy. Prefix rules also protect names created after wrap starts.
 func GenerateEffectiveProfile(fc *FenceConfig, hardened bool, tag string, proxyPort int) (string, int, error) {
 	readPaths := slices.Concat(fc.ReadAllowPaths, fc.AllowPaths, fc.AllowRWPaths)
-	profile, count, err := generateTaggedWriteConfinementProfile(fc.DenyPaths, fc.Root, fc.Mode, hardened, tag, proxyPort, fc.HomeReadRoot, readPaths)
+	profile, count, err := generateTaggedWriteConfinementProfile(fc.DenyPaths, fc.Root, fc.Mode, hardened, tag, proxyPort, fc.HomeReadRoot, readPaths, fc.AllowRWPaths)
 	if err != nil {
 		return "", 0, err
 	}
