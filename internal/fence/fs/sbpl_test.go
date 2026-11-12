@@ -140,8 +140,12 @@ func TestGenerateEffectiveProfileConfinesHomeReadsAfterGrants(t *testing.T) {
 		t.Fatalf("home-read and sensitive rule order is wrong:\n%s", profile)
 	}
 	for _, path := range []string{home, root, grant} {
-		if !strings.Contains(profile, "(subpath "+sbplString(path)+")") {
-			t.Fatalf("missing %q in profile:\n%s", path, profile)
+		canonical, err := canonicalizeForProfile(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !strings.Contains(profile, "(subpath "+sbplString(canonical)+")") {
+			t.Fatalf("missing canonical %q in profile:\n%s", canonical, profile)
 		}
 	}
 	fc.HomeReadRoot = ""
