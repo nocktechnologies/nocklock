@@ -6,6 +6,7 @@ All notable changes to NockLock will be documented in this file.
 
 ### Fixed
 
+- On macOS with `filesystem.confine_home_reads` enabled, the documented developer-tool cache folders beneath the passwd home's `Library/Caches` directory remain readable after writes; other app caches are neither readable nor writable unless explicitly allowed, and sensitive paths stay denied.
 - On macOS with `filesystem.confine_home_reads` enabled, explicit `filesystem.allow` and `allow_rw` paths beneath the passwd home remain readable; sensitive paths inside them stay denied.
 
 ### Added

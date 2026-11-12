@@ -213,7 +213,20 @@ func TestSeatbeltHomeReadAllowPathsRemainReadable(t *testing.T) {
 				return string(out), err
 			}
 			written := filepath.Join(allowed, "cache.txt")
-			if out, err := run("/bin/sh", "-c", `printf readable > "$1" && /bin/cat "$1"`, "sh", written); err != nil || out != "readable" {
+			if grantType == "allow" {
+				if err := os.WriteFile(written, []byte("readable"), 0600); err != nil {
+					t.Fatal(err)
+				}
+				if out, err := run("/bin/cat", written); err != nil || out != "readable" {
+					t.Fatalf("allowed read = %q, %v; want readable", out, err)
+				}
+				if out, err := run("/bin/sh", "-c", `printf changed > "$1"`, "sh", written); err == nil {
+					t.Fatalf("read-only allow write succeeded: %q", out)
+				}
+				if got, err := os.ReadFile(written); err != nil || string(got) != "readable" {
+					t.Fatalf("read-only allow file changed to %q: %v", got, err)
+				}
+			} else if out, err := run("/bin/sh", "-c", `printf readable > "$1" && /bin/cat "$1"`, "sh", written); err != nil || out != "readable" {
 				t.Fatalf("allowed write then read = %q, %v; want readable", out, err)
 			}
 			if out, err := run("/bin/cat", secretFile); err == nil || strings.Contains(out, "sensitive") {
@@ -226,6 +239,127 @@ func TestSeatbeltHomeReadAllowPathsRemainReadable(t *testing.T) {
 				t.Fatalf("sensitive file changed to %q: %v", got, err)
 			}
 		})
+	}
+}
+
+func TestSeatbeltHomeReadBuiltinCacheRemainsReadable(t *testing.T) {
+	requireSandboxExec(t)
+	home, err := os.UserHomeDir()
+	if err != nil {
+		t.Fatal(err)
+	}
+	cache := filepath.Join(home, "Library", "Caches")
+	if err := os.MkdirAll(cache, 0700); err != nil {
+		t.Fatal(err)
+	}
+	canonicalHome, err := canonicalizeForProfile(home)
+	if err != nil {
+		t.Fatal(err)
+	}
+	canonicalCache, err := canonicalizeForProfile(cache)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !pathContains(canonicalHome, canonicalCache) {
+		t.Fatalf("cache %q is outside home %q; cannot prove the home-read grant", canonicalCache, canonicalHome)
+	}
+	base, err := os.MkdirTemp(home, ".nocklock-home-read-")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer os.RemoveAll(base)
+	root := filepath.Join(base, "project")
+	if err := os.Mkdir(root, 0700); err != nil {
+		t.Fatal(err)
+	}
+	outside := filepath.Join(base, "outside.txt")
+	const outsideMarker = "READ_BOUNDARY_PROBE_9f72d3"
+	if err := os.WriteFile(outside, []byte(outsideMarker), 0600); err != nil {
+		t.Fatal(err)
+	}
+	goBuild := filepath.Join(cache, "go-build")
+	if err := os.MkdirAll(goBuild, 0700); err != nil {
+		t.Fatal(err)
+	}
+	cacheBase, err := os.MkdirTemp(goBuild, ".nocklock-home-read-")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer os.RemoveAll(cacheBase)
+	unlistedBase, err := os.MkdirTemp(cache, ".nocklock-unlisted-app-")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer os.RemoveAll(unlistedBase)
+	secret := filepath.Join(cacheBase, "secret")
+	if err := os.Mkdir(secret, 0700); err != nil {
+		t.Fatal(err)
+	}
+	secretFile := filepath.Join(secret, "credential")
+	if err := os.WriteFile(secretFile, []byte("sensitive"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	profile, _, err := GenerateEffectiveProfile(&FenceConfig{
+		Root: root, Mode: "read-write", DenyPaths: []string{secret}, HomeReadRoot: home,
+	}, false, "", 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	pf, err := WriteProfile(profile)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer os.Remove(pf)
+	run := func(command ...string) (string, error) {
+		t.Helper()
+		argv, err := WrapArgv(pf, command)
+		if err != nil {
+			t.Fatal(err)
+		}
+		out, err := exec.Command(argv[0], argv[1:]...).CombinedOutput()
+		return string(out), err
+	}
+	written := filepath.Join(cacheBase, "cache.txt")
+	if out, err := run("/bin/sh", "-c", `printf readable > "$1" && /bin/cat "$1"`, "sh", written); err != nil || out != "readable" {
+		t.Fatalf("built-in cache write then read = %q, %v; want readable", out, err)
+	}
+	unlistedFile := filepath.Join(unlistedBase, "cache.txt")
+	if err := os.WriteFile(unlistedFile, []byte("UNLISTED_CACHE_PROBE_73c8"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if out, err := run("/bin/sh", "-c", `printf changed > "$1"`, "sh", unlistedFile); err == nil {
+		t.Fatalf("unlisted cache write succeeded: %q", out)
+	}
+	if out, err := run("/bin/cat", unlistedFile); err == nil || strings.Contains(out, "UNLISTED_CACHE_PROBE_73c8") {
+		t.Fatalf("unlisted cache read = %q, %v; want denial", out, err)
+	}
+	for _, tc := range []struct{ name, command string }{
+		{"rename", "/bin/mv"},
+		{"hard link", "/bin/ln"},
+	} {
+		for _, destination := range []struct{ name, path string }{{"go-build", cacheBase}, {"root", root}} {
+			t.Run(tc.name+"/"+destination.name, func(t *testing.T) {
+				if _, err := os.Stat(tc.command); err != nil {
+					t.Fatalf("cannot run %s control: %v", tc.name, err)
+				}
+				target := filepath.Join(destination.path, strings.ReplaceAll(tc.name, " ", "-")+".txt")
+				if out, err := run(tc.command, unlistedFile, target); err == nil {
+					t.Fatalf("%s from unlisted cache into %s succeeded: %q", tc.name, destination.name, out)
+				}
+				if _, err := os.Stat(target); !os.IsNotExist(err) {
+					t.Fatalf("%s created target in %s: %v", tc.name, destination.name, err)
+				}
+				if got, err := os.ReadFile(unlistedFile); err != nil || string(got) != "UNLISTED_CACHE_PROBE_73c8" {
+					t.Fatalf("%s changed unlisted cache source to %q: %v", tc.name, got, err)
+				}
+			})
+		}
+	}
+	if out, err := run("/bin/cat", outside); err == nil || strings.Contains(out, outsideMarker) {
+		t.Fatalf("outside-root read = %q, %v; want denial", out, err)
+	}
+	if out, err := run("/bin/cat", secretFile); err == nil || strings.Contains(out, "sensitive") {
+		t.Fatalf("sensitive cache read = %q, %v; want denial", out, err)
 	}
 }
 

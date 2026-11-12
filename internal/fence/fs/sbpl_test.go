@@ -121,12 +121,13 @@ func TestGenerateProfileAndCountReportsDistinctCanonicalPaths(t *testing.T) {
 func TestGenerateEffectiveProfileConfinesHomeReadsAfterGrants(t *testing.T) {
 	home := t.TempDir()
 	root := filepath.Join(home, "project")
-	grant := filepath.Join(home, "shared")
-	allowPath := filepath.Join(home, "cache")
-	allowRWPath := filepath.Join(home, "agent")
+	cacheDir := filepath.Join(home, "Library", "Caches")
+	grant := filepath.Join(cacheDir, "shared")
+	allowPath := filepath.Join(cacheDir, "cache")
+	allowRWPath := filepath.Join(cacheDir, "agent")
 	secret := filepath.Join(root, "secret")
 	for _, path := range []string{root, grant, allowPath, allowRWPath, secret} {
-		if err := os.Mkdir(path, 0700); err != nil {
+		if err := os.MkdirAll(path, 0700); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -157,6 +158,50 @@ func TestGenerateEffectiveProfileConfinesHomeReadsAfterGrants(t *testing.T) {
 		if !strings.Contains(readBlock, "(subpath "+sbplString(canonical)+")") {
 			t.Fatalf("missing home-read grant for %q in profile:\n%s", canonical, profile)
 		}
+	}
+	canonicalCache, err := canonicalizeForProfile(cacheDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(readBlock, "(subpath "+sbplString(canonicalCache)+")") {
+		t.Fatalf("whole cache directory is readable in profile:\n%s", profile)
+	}
+	writeStart := strings.Index(profile, "(allow file-write*\n")
+	writeEnd := strings.Index(profile[writeStart:], "    (literal \"/dev/null\")") + writeStart
+	writeBlock := profile[writeStart:writeEnd]
+	if strings.Contains(writeBlock, "(subpath "+sbplString(canonicalCache)+")") {
+		t.Fatalf("whole cache directory is writable in profile:\n%s", profile)
+	}
+	canonicalAllowRW, err := canonicalizeForProfile(allowRWPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(writeBlock, "(subpath "+sbplString(canonicalAllowRW)+")") {
+		t.Fatalf("missing allow_rw cache write grant for %q in profile:\n%s", canonicalAllowRW, profile)
+	}
+	for _, path := range []string{grant, allowPath} {
+		canonical, err := canonicalizeForProfile(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if strings.Contains(writeBlock, "(subpath "+sbplString(canonical)+")") {
+			t.Fatalf("read-only cache path %q is writable in profile:\n%s", canonical, profile)
+		}
+	}
+	for _, name := range []string{"go-build", "pip", "pnpm", "Yarn", "node-gyp", "ms-playwright", "deno", "typescript", "Homebrew"} {
+		path := filepath.Join(canonicalCache, name)
+		if !strings.Contains(readBlock, "(subpath "+sbplString(path)+")") {
+			t.Fatalf("missing built-in cache read grant for %q in profile:\n%s", path, profile)
+		}
+		if !strings.Contains(writeBlock, "(subpath "+sbplString(path)+")") {
+			t.Fatalf("missing built-in cache write grant for %q in profile:\n%s", path, profile)
+		}
+	}
+	if strings.Contains(readBlock, "(subpath "+sbplString(filepath.Join(canonicalCache, "unlisted-app"))+")") {
+		t.Fatalf("unlisted app cache is readable in profile:\n%s", profile)
+	}
+	if strings.Contains(writeBlock, "(subpath "+sbplString(filepath.Join(canonicalCache, "unlisted-app"))+")") {
+		t.Fatalf("unlisted app cache is writable in profile:\n%s", profile)
 	}
 	canonicalGitConfig, err := canonicalizeForProfile(gitConfig)
 	if err != nil {
@@ -203,6 +248,26 @@ func TestGenerateEffectiveProfileRejectsDirectoryGitConfig(t *testing.T) {
 	}
 	if _, _, err := GenerateEffectiveProfile(fc, false, "", 0); err != nil {
 		t.Fatalf("missing Git config must remain optional: %v", err)
+	}
+}
+
+func TestGenerateEffectiveProfileRejectsDanglingCacheSymlink(t *testing.T) {
+	home := t.TempDir()
+	root := filepath.Join(home, "project")
+	if err := os.Mkdir(root, 0700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Mkdir(filepath.Join(home, "Library"), 0700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(filepath.Join(home, "missing"), filepath.Join(home, "Library", "Caches")); err != nil {
+		t.Fatal(err)
+	}
+	_, _, err := GenerateEffectiveProfile(&FenceConfig{
+		Root: root, Mode: "read-write", DenyPaths: []string{filepath.Join(home, "secret")}, HomeReadRoot: home,
+	}, false, "", 0)
+	if err == nil {
+		t.Fatal("dangling user cache symlink did not refuse the home-read profile")
 	}
 }
 
