@@ -106,7 +106,7 @@ func GenerateTaggedWriteConfinementProfile(sensitivePaths []string, root, mode s
 	return generateTaggedWriteConfinementProfile(sensitivePaths, root, mode, hardened, tag, proxyPort, "", nil)
 }
 
-func generateTaggedWriteConfinementProfile(sensitivePaths []string, root, mode string, hardened bool, tag string, proxyPort int, homeReadRoot string, readAllow []string) (string, int, error) {
+func generateTaggedWriteConfinementProfile(sensitivePaths []string, root, mode string, hardened bool, tag string, proxyPort int, homeReadRoot string, readPaths []string) (string, int, error) {
 	if strings.TrimSpace(root) == "" {
 		return "", 0, fmt.Errorf("refusing to generate write-confinement profile with an empty root")
 	}
@@ -118,10 +118,10 @@ func generateTaggedWriteConfinementProfile(sensitivePaths []string, root, mode s
 	if err != nil {
 		return "", 0, err
 	}
-	return generateProfile(sensitivePaths, hardened, writePaths, tag, proxyPort, homeReadRoot, root, readAllow)
+	return generateProfile(sensitivePaths, hardened, writePaths, tag, proxyPort, homeReadRoot, root, readPaths)
 }
 
-func generateProfile(sensitivePaths []string, hardened bool, writePaths []string, tag string, proxyPort int, homeReadRoot, root string, readAllow []string) (string, int, error) {
+func generateProfile(sensitivePaths []string, hardened bool, writePaths []string, tag string, proxyPort int, homeReadRoot, root string, readPaths []string) (string, int, error) {
 	if proxyPort < 0 || proxyPort > 65535 {
 		return "", 0, fmt.Errorf("invalid proxy port %d for the network floor", proxyPort)
 	}
@@ -146,7 +146,7 @@ func generateProfile(sensitivePaths []string, hardened bool, writePaths []string
 		if err != nil {
 			return "", 0, fmt.Errorf("cannot canonicalize home-read path: %w", err)
 		}
-		readGrants, err = canonicalProfilePaths(append([]string{root}, readAllow...), "home-read allow")
+		readGrants, err = canonicalProfilePaths(append([]string{root}, readPaths...), "home-read allow")
 		if err != nil {
 			return "", 0, err
 		}

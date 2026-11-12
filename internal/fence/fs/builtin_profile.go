@@ -4,13 +4,15 @@ import (
 	"fmt"
 	"path/filepath"
 	"regexp"
+	"slices"
 	"strings"
 )
 
 // GenerateEffectiveProfile includes the mandatory home filename prefixes in the
 // resolved policy. Prefix rules also protect names created after wrap starts.
 func GenerateEffectiveProfile(fc *FenceConfig, hardened bool, tag string, proxyPort int) (string, int, error) {
-	profile, count, err := generateTaggedWriteConfinementProfile(fc.DenyPaths, fc.Root, fc.Mode, hardened, tag, proxyPort, fc.HomeReadRoot, fc.ReadAllowPaths)
+	readPaths := slices.Concat(fc.ReadAllowPaths, fc.AllowPaths, fc.AllowRWPaths)
+	profile, count, err := generateTaggedWriteConfinementProfile(fc.DenyPaths, fc.Root, fc.Mode, hardened, tag, proxyPort, fc.HomeReadRoot, readPaths)
 	if err != nil {
 		return "", 0, err
 	}

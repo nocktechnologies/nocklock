@@ -146,6 +146,89 @@ func TestSeatbeltHomeReadWildcardRejectsMetadata(t *testing.T) {
 	}
 }
 
+func TestSeatbeltHomeReadAllowPathsRemainReadable(t *testing.T) {
+	requireSandboxExec(t)
+	home, err := os.UserHomeDir()
+	if err != nil {
+		t.Fatal(err)
+	}
+	cache, err := os.UserCacheDir()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(cache, 0700); err != nil {
+		t.Fatal(err)
+	}
+	canonicalHome, err := canonicalizeForProfile(home)
+	if err != nil {
+		t.Fatal(err)
+	}
+	canonicalCache, err := canonicalizeForProfile(cache)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !pathContains(canonicalHome, canonicalCache) {
+		t.Fatalf("cache %q is outside passwd home %q; cannot prove the home-read grant", canonicalCache, canonicalHome)
+	}
+	for _, grantType := range []string{"allow", "allow_rw"} {
+		t.Run(grantType, func(t *testing.T) {
+			base, err := os.MkdirTemp(cache, ".nocklock-home-allow-")
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer os.RemoveAll(base)
+			root := filepath.Join(base, "project")
+			allowed := filepath.Join(base, "allowed")
+			secret := filepath.Join(allowed, "secret")
+			for _, path := range []string{root, secret} {
+				if err := os.MkdirAll(path, 0700); err != nil {
+					t.Fatal(err)
+				}
+			}
+			secretFile := filepath.Join(secret, "credential")
+			if err := os.WriteFile(secretFile, []byte("sensitive"), 0600); err != nil {
+				t.Fatal(err)
+			}
+			fc := &FenceConfig{Root: root, Mode: "read-write", DenyPaths: []string{secret}, HomeReadRoot: home}
+			if grantType == "allow" {
+				fc.AllowPaths = []string{allowed}
+			} else {
+				fc.AllowRWPaths = []string{allowed}
+			}
+			profile, _, err := GenerateEffectiveProfile(fc, false, "", 0)
+			if err != nil {
+				t.Fatal(err)
+			}
+			pf, err := WriteProfile(profile)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer os.Remove(pf)
+			run := func(command ...string) (string, error) {
+				argv, err := WrapArgv(pf, command)
+				if err != nil {
+					t.Fatal(err)
+				}
+				out, err := exec.Command(argv[0], argv[1:]...).CombinedOutput()
+				return string(out), err
+			}
+			written := filepath.Join(allowed, "cache.txt")
+			if out, err := run("/bin/sh", "-c", `printf readable > "$1" && /bin/cat "$1"`, "sh", written); err != nil || out != "readable" {
+				t.Fatalf("allowed write then read = %q, %v; want readable", out, err)
+			}
+			if out, err := run("/bin/cat", secretFile); err == nil || strings.Contains(out, "sensitive") {
+				t.Fatalf("sensitive read = %q, %v; want denial", out, err)
+			}
+			if out, err := run("/bin/sh", "-c", `printf changed > "$1"`, "sh", secretFile); err == nil {
+				t.Fatalf("sensitive write succeeded: %q", out)
+			}
+			if got, err := os.ReadFile(secretFile); err != nil || string(got) != "sensitive" {
+				t.Fatalf("sensitive file changed to %q: %v", got, err)
+			}
+		})
+	}
+}
+
 // TestSeatbeltWriteConfinement_RealSandboxExec is the negative control for
 // Phase 2: a write inside filesystem.root succeeds while a sibling directory
 // in the invoking user's home is denied. The test deliberately avoids t.TempDir
