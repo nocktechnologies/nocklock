@@ -4,6 +4,7 @@ import (
 	"os"
 	"os/user"
 	"path/filepath"
+	"slices"
 	"strconv"
 	"strings"
 	"testing"
@@ -23,9 +24,15 @@ func TestClaudeCodePresetConfinedHomeCacheProfile(t *testing.T) {
 	}
 	cfg.Filesystem.Root = t.TempDir()
 	cfg.Filesystem.ConfineHomeReads = true
+	if len(cfg.Filesystem.AllowRW) != 0 {
+		t.Fatalf("cross-platform preset must not grant a macOS cache path: %v", cfg.Filesystem.AllowRW)
+	}
 	fc, err := ProcessEffectiveConfig(cfg, "darwin")
 	if err != nil {
 		t.Fatal(err)
+	}
+	if !fc.ClaudeCodeCache {
+		t.Fatal("macOS confined Claude Code preset did not enable its cache")
 	}
 	profile, _, err := GenerateEffectiveProfile(fc, false, "", 0)
 	if err != nil {
@@ -55,6 +62,54 @@ func TestClaudeCodePresetConfinedHomeCacheProfile(t *testing.T) {
 				t.Fatalf("unlisted cache path %q was granted:\n%s", path, profile)
 			}
 		}
+	}
+	linux, err := ProcessEffectiveConfig(cfg, "linux")
+	if err != nil || linux.ClaudeCodeCache {
+		t.Fatalf("Linux preset cache grant = %v, %v; want disabled", linux, err)
+	}
+	cfg.Filesystem.ConfineHomeReads = false
+	unconfined, err := ProcessEffectiveConfig(cfg, "darwin")
+	if err != nil || unconfined.ClaudeCodeCache {
+		t.Fatalf("unconfined macOS preset cache grant = %v, %v; want disabled", unconfined, err)
+	}
+	cfg.Filesystem.ConfineHomeReads = true
+	cfg.ProfileName = "codex"
+	cfg.Filesystem.Allow = nil // Claude Code's own login store is not available to another preset.
+	otherRoot, err := os.MkdirTemp("/tmp", "nocklock-other-preset-")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer os.RemoveAll(otherRoot)
+	cfg.Filesystem.Root = otherRoot
+	otherPreset, err := ProcessEffectiveConfig(cfg, "darwin")
+	if err != nil || otherPreset.ClaudeCodeCache {
+		t.Fatalf("other macOS preset cache grant = %v, %v; want disabled", otherPreset, err)
+	}
+}
+
+func TestClaudeCodeCacheGrantBeforeDirectoryExists(t *testing.T) {
+	home := t.TempDir()
+	cache := filepath.Join(home, "Library", "Caches")
+	if err := os.MkdirAll(cache, 0700); err != nil {
+		t.Fatal(err)
+	}
+	target := filepath.Join(cache, "claude-cli-nodejs")
+	if _, err := os.Lstat(target); !os.IsNotExist(err) {
+		t.Fatalf("cache folder must start absent: %v", err)
+	}
+	_, paths, err := developerToolCachePaths(home, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !slices.Contains(paths, target) {
+		t.Fatalf("missing first-run cache grant %q in %v", target, paths)
+	}
+	_, paths, err = developerToolCachePaths(home, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if slices.Contains(paths, target) {
+		t.Fatalf("Claude Code cache granted without the preset: %v", paths)
 	}
 }
 

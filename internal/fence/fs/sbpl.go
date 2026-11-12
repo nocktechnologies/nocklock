@@ -106,10 +106,10 @@ func GenerateWriteConfinementProfile(sensitivePaths []string, root, mode string,
 // on the proxy's port at ::1 is also reachable; the caller must hold that port
 // (wrap does, see reserveSeatbeltProxyListeners).
 func GenerateTaggedWriteConfinementProfile(sensitivePaths []string, root, mode string, hardened bool, tag string, proxyPort int) (string, int, error) {
-	return generateTaggedWriteConfinementProfile(sensitivePaths, root, mode, hardened, tag, proxyPort, "", nil, nil)
+	return generateTaggedWriteConfinementProfile(sensitivePaths, root, mode, hardened, tag, proxyPort, "", nil, nil, false)
 }
 
-func generateTaggedWriteConfinementProfile(sensitivePaths []string, root, mode string, hardened bool, tag string, proxyPort int, homeReadRoot string, readPaths, cacheWritePaths []string) (string, int, error) {
+func generateTaggedWriteConfinementProfile(sensitivePaths []string, root, mode string, hardened bool, tag string, proxyPort int, homeReadRoot string, readPaths, cacheWritePaths []string, claudeCodeCache bool) (string, int, error) {
 	if strings.TrimSpace(root) == "" {
 		return "", 0, fmt.Errorf("refusing to generate write-confinement profile with an empty root")
 	}
@@ -117,7 +117,7 @@ func generateTaggedWriteConfinementProfile(sensitivePaths []string, root, mode s
 		return "", 0, fmt.Errorf("invalid filesystem mode %q: must be \"read-write\" or \"read-only\"", mode)
 	}
 
-	writePaths, cachePaths, err := writeConfinementPaths(root, mode, homeReadRoot, cacheWritePaths)
+	writePaths, cachePaths, err := writeConfinementPaths(root, mode, homeReadRoot, cacheWritePaths, claudeCodeCache)
 	if err != nil {
 		return "", 0, err
 	}
@@ -315,7 +315,7 @@ func generateProfile(sensitivePaths []string, hardened bool, writePaths []string
 // cache directory; home-read confinement uses the passwd home's cache. On macOS,
 // reject an arbitrary TMPDIR outside the system's per-user temp locations so a
 // caller cannot silently widen the boundary through its environment.
-func writeConfinementPaths(root, mode, homeReadRoot string, cacheWritePaths []string) ([]string, []string, error) {
+func writeConfinementPaths(root, mode, homeReadRoot string, cacheWritePaths []string, claudeCodeCache bool) ([]string, []string, error) {
 	tempDir, err := canonicalizeForProfile(os.TempDir())
 	if err != nil {
 		return nil, nil, fmt.Errorf("cannot canonicalize user temporary directory: %w", err)
@@ -331,7 +331,7 @@ func writeConfinementPaths(root, mode, homeReadRoot string, cacheWritePaths []st
 	var cachePaths []string
 	if homeReadRoot != "" {
 		var cacheDir string
-		cacheDir, cachePaths, err = developerToolCachePaths(homeReadRoot)
+		cacheDir, cachePaths, err = developerToolCachePaths(homeReadRoot, claudeCodeCache)
 		if err != nil {
 			return nil, nil, err
 		}
@@ -372,7 +372,7 @@ func writeConfinementPaths(root, mode, homeReadRoot string, cacheWritePaths []st
 	return canonical, cachePaths, nil
 }
 
-func developerToolCachePaths(homeReadRoot string) (string, []string, error) {
+func developerToolCachePaths(homeReadRoot string, claudeCodeCache bool) (string, []string, error) {
 	cacheDir := filepath.Join(homeReadRoot, "Library", "Caches")
 	if info, err := os.Lstat(cacheDir); err == nil && info.Mode()&os.ModeSymlink != 0 {
 		if _, err := filepath.EvalSymlinks(cacheDir); err != nil {
@@ -385,8 +385,12 @@ func developerToolCachePaths(homeReadRoot string) (string, []string, error) {
 	if err != nil {
 		return "", nil, fmt.Errorf("cannot canonicalize user cache directory: %w", err)
 	}
-	paths := make([]string, 0, len(developerToolCacheNames))
-	for _, name := range developerToolCacheNames {
+	names := developerToolCacheNames
+	if claudeCodeCache {
+		names = append(slices.Clone(names), "claude-cli-nodejs")
+	}
+	paths := make([]string, 0, len(names))
+	for _, name := range names {
 		path := filepath.Join(cacheDir, name)
 		canonical, err := canonicalizeForProfile(path)
 		if err != nil {

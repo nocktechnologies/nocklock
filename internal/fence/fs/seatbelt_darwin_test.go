@@ -363,6 +363,69 @@ func TestSeatbeltHomeReadBuiltinCacheRemainsReadable(t *testing.T) {
 	}
 }
 
+func TestSeatbeltClaudeCodeCacheFirstRun(t *testing.T) {
+	requireSandboxExec(t)
+	home, err := os.UserHomeDir()
+	if err != nil {
+		t.Fatal(err)
+	}
+	base, err := os.MkdirTemp(home, ".nocklock-claude-cache-")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer os.RemoveAll(base)
+	cache := filepath.Join(base, "Library", "Caches")
+	project := filepath.Join(base, "project")
+	unlisted := filepath.Join(cache, "unlisted-app")
+	for _, path := range []string{cache, project, unlisted} {
+		if err := os.MkdirAll(path, 0700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	cachePath := filepath.Join(cache, "claude-cli-nodejs")
+	if _, err := os.Lstat(cachePath); !os.IsNotExist(err) {
+		t.Fatalf("Claude Code cache must be absent before profile generation: %v", err)
+	}
+	unlistedFile := filepath.Join(unlisted, "cache.txt")
+	if err := os.WriteFile(unlistedFile, []byte("unlisted"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	profile, _, err := GenerateEffectiveProfile(&FenceConfig{
+		Root: project, Mode: "read-write", DenyPaths: []string{filepath.Join(base, "secret")},
+		HomeReadRoot: base, ClaudeCodeCache: true,
+	}, false, "", 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	pf, err := WriteProfile(profile)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer os.Remove(pf)
+	run := func(command ...string) (string, error) {
+		t.Helper()
+		argv, err := WrapArgv(pf, command)
+		if err != nil {
+			t.Fatal(err)
+		}
+		out, err := exec.Command(argv[0], argv[1:]...).CombinedOutput()
+		return string(out), err
+	}
+	if out, err := run("/bin/mkdir", cachePath); err != nil {
+		t.Fatalf("first-run cache mkdir failed: %v, %q", err, out)
+	}
+	cacheFile := filepath.Join(cachePath, "cache.txt")
+	if out, err := run("/bin/sh", "-c", `printf readable > "$1" && /bin/cat "$1"`, "sh", cacheFile); err != nil || out != "readable" {
+		t.Fatalf("Claude Code cache write and read = %q, %v; want readable", out, err)
+	}
+	if out, err := run("/bin/sh", "-c", `printf changed > "$1"`, "sh", unlistedFile); err == nil {
+		t.Fatalf("unlisted cache write succeeded: %q", out)
+	}
+	if out, err := run("/bin/cat", unlistedFile); err == nil || strings.Contains(out, "unlisted") {
+		t.Fatalf("unlisted cache read = %q, %v; want denial", out, err)
+	}
+}
+
 // TestSeatbeltWriteConfinement_RealSandboxExec is the negative control for
 // Phase 2: a write inside filesystem.root succeeds while a sibling directory
 // in the invoking user's home is denied. The test deliberately avoids t.TempDir
