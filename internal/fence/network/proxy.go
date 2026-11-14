@@ -281,7 +281,7 @@ func (p *ProxyServer) Start() (string, error) {
 		p.MarkDegraded("bind failure")
 		return "", fmt.Errorf("network fence: failed to bind proxy: %w", err)
 	}
-	return p.serveLocked(ln)
+	return p.serveLocked(ln, "", "")
 }
 
 // StartOn begins serving on an already-bound listener and returns its address.
@@ -294,35 +294,42 @@ func (p *ProxyServer) StartOn(ln net.Listener) (string, error) {
 	if p.listener != nil {
 		return "", fmt.Errorf("proxy already started at %s", p.listener.Addr())
 	}
-	return p.serveLocked(ln)
+	return p.serveLocked(ln, "", "")
 }
 
 // serveLocked installs ln and starts the Serve goroutine. Caller holds stopMu.
-func (p *ProxyServer) serveLocked(ln net.Listener) (string, error) {
+func (p *ProxyServer) serveLocked(ln net.Listener, advertisedAddr, unixSocketPath string) (string, error) {
 	p.connectMu.Lock()
 	p.connectClosing = false
 	p.connectCtx, p.connectCancel = context.WithCancel(context.Background())
 	p.connectMu.Unlock()
 	p.listener = ln
-	p.advertisedAddr = ln.Addr().String()
+	if advertisedAddr == "" {
+		advertisedAddr = ln.Addr().String()
+	}
+	p.advertisedAddr = advertisedAddr
+	p.unixSocketPath = unixSocketPath
 	p.degraded.Store(false)
 
 	p.server = p.newHTTPServer()
 
 	go p.server.Serve(ln) //nolint:errcheck // Serve returns ErrServerClosed on Stop()
 
-	addr := p.advertisedAddr
+	detail := fmt.Sprintf("addr=%s", advertisedAddr)
+	if unixSocketPath != "" {
+		detail += fmt.Sprintf(" unix_socket=%s", unixSocketPath)
+	}
 	if p.logger != nil {
 		_ = p.logger.Log(logging.Event{
 			Timestamp: time.Now(),
 			EventType: logging.EventProxyStart,
 			Category:  "network",
-			Detail:    fmt.Sprintf("addr=%s", addr),
+			Detail:    detail,
 			Blocked:   false,
 			SessionID: p.sessionID,
 		})
 	}
-	return addr, nil
+	return advertisedAddr, nil
 }
 
 // newHTTPServer builds the server for either listener. ConnContext exposes
@@ -375,29 +382,7 @@ func (p *ProxyServer) StartUnix(unixSocketPath, advertisedAddr string) (string, 
 		p.MarkDegraded("unix socket chmod failure")
 		return "", fmt.Errorf("network fence: failed to restrict unix proxy socket permissions: %w", err)
 	}
-	p.listener = ln
-	p.connectMu.Lock()
-	p.connectClosing = false
-	p.connectMu.Unlock()
-	p.unixSocketPath = unixSocketPath
-	p.advertisedAddr = advertisedAddr
-	p.degraded.Store(false)
-
-	p.server = p.newHTTPServer()
-
-	go p.server.Serve(ln) //nolint:errcheck // Serve returns ErrServerClosed on Stop()
-
-	if p.logger != nil {
-		_ = p.logger.Log(logging.Event{
-			Timestamp: time.Now(),
-			EventType: logging.EventProxyStart,
-			Category:  "network",
-			Detail:    fmt.Sprintf("addr=%s unix_socket=%s", advertisedAddr, unixSocketPath),
-			Blocked:   false,
-			SessionID: p.sessionID,
-		})
-	}
-	return advertisedAddr, nil
+	return p.serveLocked(ln, advertisedAddr, unixSocketPath)
 }
 
 // Stop shuts down the proxy server gracefully.

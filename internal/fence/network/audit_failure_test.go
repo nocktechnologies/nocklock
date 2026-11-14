@@ -23,14 +23,16 @@ import (
 // failureSink captures what the proxy reports through its blocked-row write
 // failure hook.
 type failureSink struct {
-	mu   sync.Mutex
-	errs []error
+	mu    sync.Mutex
+	errs  []error
+	types []logging.EventType
 }
 
-func (s *failureSink) record(_ logging.EventType, err error) {
+func (s *failureSink) record(eventType logging.EventType, err error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.errs = append(s.errs, err)
+	s.types = append(s.types, eventType)
 }
 
 func (s *failureSink) count() int {
@@ -317,13 +319,20 @@ func TestDurableAuditBeforeEgress(t *testing.T) {
 					} else {
 						resp.Body.Close()
 					}
+					conn.Close()
+					p.connectWG.Wait()
 				}
+				p.transport.CloseIdleConnections()
 				allowed := mode == "signed" || mode == "default-off"
 				if allowed {
-					// With durable intent disabled, a closed logger still permits
-					// egress. The completed CONNECT can separately report its
-					// failed bytes-out audit; that failure has its own test.
-					unexpectedAuditFailure := mode == "signed" && sink.count() != 0
+					// A closed logger with durable intent disabled permits egress,
+					// then reports exactly one failed bytes-out row at connection
+					// close. No intent or blocked-row failure may be reported.
+					sink.mu.Lock()
+					failureTypes := append([]logging.EventType(nil), sink.types...)
+					sink.mu.Unlock()
+					unexpectedAuditFailure := mode == "signed" && len(failureTypes) != 0 ||
+						mode == "default-off" && (len(failureTypes) != 1 || failureTypes[0] != logging.EventNetworkBytesOut)
 					if status != http.StatusOK || string(payload) != "allowed control" || dialed.Load() != 1 || accepted.Load() != 1 || unexpectedAuditFailure {
 						t.Fatalf("status=%d body=%q dials=%d accepts=%d failures=%d", status, payload, dialed.Load(), accepted.Load(), sink.count())
 					}
