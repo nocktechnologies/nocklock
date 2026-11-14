@@ -39,9 +39,10 @@ type decisionRecord struct {
 
 // decisionEventSink is the minimal audit-write surface the reader needs.
 // *logging.Logger already satisfies it, so wrap passes the live signed logger;
-// tests pass a fake that records each Log call.
+// tests pass fakes that record both audit-write entry points.
 type decisionEventSink interface {
 	Log(logging.Event) error
+	LogImmediate(logging.Event) error
 }
 
 // parseDecisionRecord parses one decision line (WITHOUT the trailing newline).

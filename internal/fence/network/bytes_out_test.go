@@ -3,6 +3,7 @@ package network
 import (
 	"bytes"
 	"context"
+	"errors"
 	"io"
 	"net"
 	"net/http"
@@ -17,6 +18,53 @@ import (
 	"github.com/nocktechnologies/nocklock/internal/config"
 	"github.com/nocktechnologies/nocklock/internal/logging"
 )
+
+type busyDeferredBytesSink struct {
+	events   []logging.Event
+	logCalls int
+}
+
+func (s *busyDeferredBytesSink) Log(logging.Event) error {
+	s.logCalls++
+	return errors.New("database is locked (SQLITE_BUSY)")
+}
+
+func (s *busyDeferredBytesSink) LogImmediate(e logging.Event) error {
+	s.events = append(s.events, e)
+	return nil
+}
+
+func TestCountingConnBytesOutUsesImmediateAuditWrite(t *testing.T) {
+	sink := &busyDeferredBytesSink{}
+	recorder := NewBytesOutRecorder(sink, "session")
+	left, right := net.Pipe()
+	defer right.Close()
+	var writeErrors int
+	c := &countingConn{Conn: left, host: "allowed.example:443", recorder: recorder, onError: func(error) { writeErrors++ }}
+	readDone := make(chan struct{})
+	go func() {
+		_, _ = io.CopyN(io.Discard, right, 5)
+		close(readDone)
+	}()
+	if _, err := c.Write([]byte("hello")); err != nil {
+		t.Fatal(err)
+	}
+	<-readDone
+	if err := c.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if err := recorder.Record("allowed.example:443", bytesOutThreshold+1); err != nil {
+		t.Fatal(err)
+	}
+	if writeErrors != 0 || sink.logCalls != 0 || len(sink.events) != 3 {
+		t.Fatalf("onError calls=%d Log calls=%d events=%+v", writeErrors, sink.logCalls, sink.events)
+	}
+	if sink.events[0].EventType != logging.EventNetworkBytesOut ||
+		sink.events[1].EventType != logging.EventNetworkBytesOut ||
+		sink.events[2].EventType != logging.EventNetworkOutlier {
+		t.Fatalf("wrong immediate rows: %+v", sink.events)
+	}
+}
 
 func TestProxyRecordsAllowedHTTPWireBytes(t *testing.T) {
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

@@ -17,7 +17,7 @@ import (
 const bytesOutThreshold int64 = 100 << 20
 
 type bytesOutSink interface {
-	Log(logging.Event) error
+	LogImmediate(logging.Event) error
 }
 
 // BytesOutRecorder writes cumulative, signed bytes-out totals per host and
@@ -54,7 +54,7 @@ func (r *BytesOutRecorder) Record(host string, n int64) error {
 	}
 	event := logging.Event{Timestamp: time.Now(), EventType: logging.EventNetworkBytesOut, Category: "network",
 		Detail: fmt.Sprintf("host=%s bytes_out=%d session_bytes_out=%d", host, n, total), SessionID: r.sessionID}
-	if err := r.sink.Log(event); err != nil {
+	if err := r.sink.LogImmediate(event); err != nil {
 		return fmt.Errorf("sign network bytes-out row: %w", err)
 	}
 	r.totals[host] = total
@@ -62,7 +62,7 @@ func (r *BytesOutRecorder) Record(host string, n int64) error {
 		flag := logging.Event{Timestamp: time.Now(), EventType: logging.EventNetworkOutlier, Category: "network",
 			Detail:  fmt.Sprintf("host=%s session_bytes_out=%d threshold=%d action=alert_only", host, total, bytesOutThreshold),
 			Blocked: true, SessionID: r.sessionID}
-		if err := r.sink.Log(flag); err != nil {
+		if err := r.sink.LogImmediate(flag); err != nil {
 			return fmt.Errorf("sign network outlier row: %w", err)
 		}
 		r.flagged[host] = true

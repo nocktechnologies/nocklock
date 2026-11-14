@@ -22,6 +22,8 @@ func (f *fakeDecisionSink) Log(e logging.Event) error {
 	return nil
 }
 
+func (f *fakeDecisionSink) LogImmediate(e logging.Event) error { return f.Log(e) }
+
 func TestDecisionLogScannerBytesOutAndOutlier(t *testing.T) {
 	sink := &fakeDecisionSink{}
 	scanner := newDecisionLogScanner(sink, "session")
@@ -188,6 +190,8 @@ func (s *erroringSink) Log(logging.Event) error {
 	}
 	return nil
 }
+
+func (s *erroringSink) LogImmediate(e logging.Event) error { return s.Log(e) }
 
 var errTestSinkFailed = testError("simulated audit-log write failure")
 
