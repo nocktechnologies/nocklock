@@ -57,6 +57,33 @@ func TestShutdownDuringTLSHelloDoesNotRecordDeny(t *testing.T) {
 	}
 }
 
+func TestDisallowedTLSHelloDuringShutdownRecordsDeny(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "decisions.log")
+	f, err := os.OpenFile(path, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o600)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer f.Close()
+	client, peer := net.Pipe()
+	defer client.Close()
+	defer peer.Close()
+	p := &transparentProxy{decisionLog: f, closing: true}
+	done := make(chan struct{})
+	go func() { p.handleTLS(client); close(done) }()
+	if _, err := peer.Write(testClientHello("blocked.test")); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case <-done:
+	case <-time.After(time.Second):
+		t.Fatal("disallowed TLS handler did not return")
+	}
+	rows, err := os.ReadFile(path)
+	if err != nil || string(rows) != "deny\ttls\tblocked.test\t443\tdisallowed_sni\n" {
+		t.Fatalf("disallowed TLS decision rows = %q, %v", rows, err)
+	}
+}
+
 func TestMalformedTLSHelloStillRecordsDeny(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "decisions.log")
 	f, err := os.OpenFile(path, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o600)
