@@ -320,7 +320,11 @@ func TestDurableAuditBeforeEgress(t *testing.T) {
 				}
 				allowed := mode == "signed" || mode == "default-off"
 				if allowed {
-					if status != http.StatusOK || string(payload) != "allowed control" || dialed.Load() != 1 || accepted.Load() != 1 || sink.count() != 0 {
+					// With durable intent disabled, a closed logger still permits
+					// egress. The completed CONNECT can separately report its
+					// failed bytes-out audit; that failure has its own test.
+					unexpectedAuditFailure := mode == "signed" && sink.count() != 0
+					if status != http.StatusOK || string(payload) != "allowed control" || dialed.Load() != 1 || accepted.Load() != 1 || unexpectedAuditFailure {
 						t.Fatalf("status=%d body=%q dials=%d accepts=%d failures=%d", status, payload, dialed.Load(), accepted.Load(), sink.count())
 					}
 				} else {
