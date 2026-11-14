@@ -151,6 +151,7 @@ type ProxyServer struct {
 	stopMu              sync.Mutex
 	connectMu           sync.Mutex
 	connects            map[net.Conn]net.Conn
+	upstreams           map[*countingConn]struct{}
 	connectClosing      bool
 	connectWG           sync.WaitGroup
 	connectCtx          context.Context
@@ -169,6 +170,7 @@ type ProxyServer struct {
 	sessionID           string
 	server              *http.Server
 	transport           *http.Transport
+	shutdownTimeout     time.Duration // test seam; defaults to five seconds
 	// dialFunc is used by handleConnect to establish upstream connections.
 	// Defaults to cachedSafeDial which uses the session DNS cache. Overridable in tests.
 	dialFunc DialFunc
@@ -217,6 +219,8 @@ func NewProxyServer(cfg config.NetworkConfig, logger *logging.Logger, sessionID 
 		logger:              logger,
 		sessionID:           sessionID,
 		connects:            make(map[net.Conn]net.Conn),
+		upstreams:           make(map[*countingConn]struct{}),
+		shutdownTimeout:     5 * time.Second,
 	}
 	p.dialFunc = p.cachedSafeDial
 	if logger != nil {
@@ -404,7 +408,7 @@ func (p *ProxyServer) Stop() error {
 		p.connectCancel()
 	}
 	p.connectMu.Unlock()
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), p.shutdownTimeout)
 	defer cancel()
 	err := p.server.Shutdown(ctx)
 	p.connectMu.Lock()
@@ -412,10 +416,17 @@ func (p *ProxyServer) Stop() error {
 	for client, upstream := range p.connects {
 		tunnels = append(tunnels, struct{ client, upstream net.Conn }{client, upstream})
 	}
+	var upstreams []*countingConn
+	for upstream := range p.upstreams {
+		upstreams = append(upstreams, upstream)
+	}
 	p.connectMu.Unlock()
 	for _, tunnel := range tunnels {
 		_ = tunnel.client.Close()
 		_ = tunnel.upstream.Close()
+	}
+	for _, upstream := range upstreams {
+		_ = upstream.Close()
 	}
 	p.connectWG.Wait()
 
@@ -458,14 +469,34 @@ func (p *ProxyServer) dial(ctx context.Context, network, addr string) (net.Conn,
 	} else {
 		conn, err = safeDial(ctx, network, addr)
 	}
-	if err != nil || p.bytesOut == nil {
+	if err != nil {
 		return conn, err
 	}
-	return &countingConn{Conn: conn, host: addr, recorder: p.bytesOut, onError: func(err error) {
+	p.connectMu.Lock()
+	if p.connectClosing {
+		p.connectMu.Unlock()
+		_ = conn.Close()
+		return nil, fmt.Errorf("NockLock: network proxy is stopping; refusing connection to %s", addr)
+	}
+	if p.bytesOut == nil {
+		p.connectMu.Unlock()
+		return conn, nil
+	}
+	counted := &countingConn{Conn: conn, host: addr, recorder: p.bytesOut, onError: func(err error) {
 		if p.onBlockedWriteFailure != nil {
 			p.onBlockedWriteFailure(logging.EventNetworkBytesOut, err)
 		}
-	}}, nil
+	}}
+	p.connectWG.Add(1)
+	counted.onClose = func() {
+		p.connectMu.Lock()
+		delete(p.upstreams, counted)
+		p.connectMu.Unlock()
+		p.connectWG.Done()
+	}
+	p.upstreams[counted] = struct{}{}
+	p.connectMu.Unlock()
+	return counted, nil
 }
 
 // MarkDegraded marks the proxy as unsafe to use after a startup or watchdog

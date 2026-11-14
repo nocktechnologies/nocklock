@@ -382,6 +382,12 @@ func (p *transparentProxy) handleTCP(conn net.Conn) {
 func (p *transparentProxy) handleTLS(client net.Conn) {
 	hello, host, err := readTLSClientHello(client)
 	if err != nil || !network.IsAllowedHost(p.cfg.Allow, false, host) {
+		p.activeMu.Lock()
+		closing := p.closing
+		p.activeMu.Unlock()
+		if closing {
+			return
+		}
 		recordTransparentDeny("tls", host, "disallowed_sni")
 		// Best-effort: the connection is refused regardless, so a lost deny record
 		// leaks no traffic (unlike the allow path below, which must fail closed).

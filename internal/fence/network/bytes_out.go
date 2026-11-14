@@ -77,6 +77,7 @@ type countingConn struct {
 	host      string
 	recorder  *BytesOutRecorder
 	onError   func(error)
+	onClose   func()
 	bytes     atomic.Int64
 	mu        sync.Mutex
 	writes    sync.WaitGroup
@@ -102,6 +103,9 @@ func (c *countingConn) Write(b []byte) (int, error) {
 
 func (c *countingConn) Close() error {
 	c.once.Do(func() {
+		if c.onClose != nil {
+			defer c.onClose()
+		}
 		c.mu.Lock()
 		c.closed = true
 		c.mu.Unlock()

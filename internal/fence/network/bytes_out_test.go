@@ -187,6 +187,85 @@ func TestProxyStopDrainsActiveConnectBytes(t *testing.T) {
 	}
 }
 
+func TestProxyStopDrainsActiveHTTPBytesAfterDeadline(t *testing.T) {
+	upstreamRead := make(chan struct{})
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		buf := make([]byte, 5)
+		if _, err := io.ReadFull(r.Body, buf); err == nil && string(buf) == "hello" {
+			close(upstreamRead)
+		}
+		_, _ = io.Copy(io.Discard, r.Body)
+	}))
+	defer upstream.Close()
+	l, err := logging.NewLogger(filepath.Join(t.TempDir(), "events.db"), "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer l.Close()
+	p := NewProxyServer(config.NetworkConfig{Allow: []string{"allowed.example"}}, l, "session")
+	p.shutdownTimeout = 50 * time.Millisecond
+	p.dialFunc = func(ctx context.Context, network, addr string) (net.Conn, error) {
+		return (&net.Dialer{}).DialContext(ctx, network, upstream.Listener.Addr().String())
+	}
+	addr, err := p.Start()
+	if err != nil {
+		t.Fatal(err)
+	}
+	proxyURL, _ := url.Parse("http://" + addr)
+	transport := &http.Transport{Proxy: http.ProxyURL(proxyURL)}
+	defer transport.CloseIdleConnections()
+	bodyReader, bodyWriter := io.Pipe()
+	defer bodyWriter.Close()
+	requestDone := make(chan struct{})
+	go func() {
+		defer close(requestDone)
+		resp, err := (&http.Client{Transport: transport}).Post("http://allowed.example/upload", "application/octet-stream", bodyReader)
+		if err == nil {
+			_ = resp.Body.Close()
+		}
+	}()
+	if _, err := bodyWriter.Write([]byte("hello")); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case <-upstreamRead:
+	case <-time.After(2 * time.Second):
+		t.Fatal("HTTP upload did not reach upstream")
+	}
+	session := "session"
+	before, err := l.Query(logging.QueryOptions{SessionID: &session, Limit: 20})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, e := range before {
+		if e.EventType == logging.EventNetworkBytesOut {
+			t.Fatalf("HTTP upstream closed before Stop: %+v", before)
+		}
+	}
+	if err := p.Stop(); !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("Stop error = %v, want deadline exceeded", err)
+	}
+	events, err := l.Query(logging.QueryOptions{SessionID: &session, Limit: 20})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var found bool
+	for _, e := range events {
+		if e.EventType == logging.EventNetworkBytesOut && strings.Contains(e.Detail, "host=allowed.example bytes_out=") && !strings.Contains(e.Detail, "bytes_out=0 ") {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("HTTP bytes missing when Stop returned: %+v", events)
+	}
+	_ = bodyWriter.Close()
+	select {
+	case <-requestDone:
+	case <-time.After(2 * time.Second):
+		t.Fatal("HTTP upload did not stop")
+	}
+}
+
 func TestProxyStopCancelsConnectBeforeHijack(t *testing.T) {
 	for _, networkName := range []string{"tcp", "unix"} {
 		t.Run(networkName, func(t *testing.T) {
