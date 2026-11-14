@@ -3,6 +3,7 @@ package cli
 import (
 	"errors"
 	"io"
+	"os"
 	"path/filepath"
 	"testing"
 
@@ -19,6 +20,64 @@ type fakeDecisionSink struct {
 func (f *fakeDecisionSink) Log(e logging.Event) error {
 	f.events = append(f.events, e)
 	return nil
+}
+
+func (f *fakeDecisionSink) LogImmediate(e logging.Event) error { return f.Log(e) }
+
+func TestDecisionLogScannerBytesOutAndOutlier(t *testing.T) {
+	sink := &fakeDecisionSink{}
+	scanner := newDecisionLogScanner(sink, "session")
+	if err := scanner.Feed([]byte("allow\ttls\tapi.example\t443\tallowlisted\n" +
+		"bytes\ttls\tapi.example\t443\t104857600\n" +
+		"allow\ttls\tAPI.EXAMPLE\t443\tallowlisted\n" +
+		"bytes\ttls\tAPI.EXAMPLE\t443\t1\n" +
+		"allow\ttls\tother.example\t443\tallowlisted\n" +
+		"bytes\ttls\tother.example\t443\t10\n")); err != nil {
+		t.Fatal(err)
+	}
+	if len(sink.events) != 7 {
+		t.Fatalf("events = %+v; want three allows, three totals, one flag", sink.events)
+	}
+	if sink.events[3].EventType != logging.EventNetworkBytesOut ||
+		sink.events[4].EventType != logging.EventNetworkOutlier || !sink.events[4].Blocked {
+		t.Fatalf("outlier not surfaced: %+v", sink.events)
+	}
+	if scanner.PendingBytes() {
+		t.Fatal("all allowed transfers have byte records")
+	}
+	if err := scanner.Feed([]byte("allow\ttls\tmissing.example\t443\tallowlisted\n")); err != nil || !scanner.PendingBytes() {
+		t.Fatalf("missing transfer not detected: err=%v pending=%t", err, scanner.PendingBytes())
+	}
+	if err := scanner.Feed([]byte("bytes\ttls\tapi.example\t443\tnot-a-number\n")); err == nil {
+		t.Fatal("malformed bytes record was silently skipped")
+	}
+	if err := newDecisionLogScanner(&fakeDecisionSink{}, "s").Feed([]byte("bytes\ttls\tunmatched.example\t443\t10\n")); err == nil {
+		t.Fatal("unmatched bytes record was accepted")
+	}
+}
+
+func TestDecisionLogScannerBytesOutKeepsSignedChain(t *testing.T) {
+	dir := t.TempDir()
+	keyDir := filepath.Join(dir, "keys")
+	if err := os.Mkdir(keyDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	l, err := logging.NewLogger(filepath.Join(dir, "events.db"), "", logging.WithSigning(filepath.Join(keyDir, "audit.key")))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer l.Close()
+	scanner := newDecisionLogScanner(l, "session")
+	if err := scanner.Feed([]byte("allow\ttls\tapi.example\t443\tallowlisted\nbytes\ttls\tapi.example\t443\t104857601\n")); err != nil {
+		t.Fatal(err)
+	}
+	if scanner.PendingBytes() {
+		t.Fatal("completed transfer remains pending")
+	}
+	result, err := l.VerifyChainSigned(l.SigningPublicKey(), true)
+	if err != nil || !result.Intact || result.SigState != "authentic" {
+		t.Fatalf("signed chain: %+v, %v", result, err)
+	}
 }
 
 // TestDecisionLogScanner exercises wrap's decision-log READER in isolation: it
@@ -131,6 +190,8 @@ func (s *erroringSink) Log(logging.Event) error {
 	}
 	return nil
 }
+
+func (s *erroringSink) LogImmediate(e logging.Event) error { return s.Log(e) }
 
 var errTestSinkFailed = testError("simulated audit-log write failure")
 

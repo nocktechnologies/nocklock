@@ -84,6 +84,8 @@ On Linux you can instead pass `--net-fence=netns`. The child then runs in its ow
 
 `wrap` prints and signs the effective egress level for each session. The proxy checks hostnames only for clients that use it; it does not decrypt HTTPS.
 
+For allowed hosts, the signed log records bytes written upstream per host and session. A host exceeding 100 MiB in one session gets an alert-only `network_outlier` row visible in `log --blocked`; the transfer continues. The count covers proxy traffic, not bypasses or proof that the destination received the data. See [Allowed-host bytes out](docs/how-it-works/network-fence.md#allowed-host-bytes-out).
+
 | Level | Boundary |
 |---|---|
 | `KERNEL` | Linux netns with a kernel default-drop floor and the configured HTTP(S)/DNS allowlist. |

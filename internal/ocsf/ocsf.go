@@ -225,6 +225,15 @@ func FromRow(r logging.ChainRow, productVersion string) (Event, error) {
 		e.setClass(ClassNetworkActivity, 5, "Refuse")
 		e.DstEndpoint = endpoint(detail)
 		e.setDecision(true)
+	case logging.EventNetworkOutlier:
+		e.setClass(ClassDetectionFinding, 1, "Create")
+		e.FindingInfo = &FindingInfo{UID: r.EntryHash, Title: "Allowed-host bytes-out exceeded session ceiling"}
+		e.Resources = []Resource{{Name: token(detail, "host"), Type: "Allowed host"}}
+		e.StatusDetail = "Alert only; upstream traffic was not blocked"
+	case logging.EventNetworkBytesOut:
+		e.setClass(ClassNetworkActivity, activityOther, "Other")
+		e.DstEndpoint = endpoint(detail)
+		e.StatusDetail = "Cumulative bytes sent upstream to this host in the session"
 	case logging.EventNetworkIntent:
 		e.setClass(ClassNetworkActivity, activityOther, "Other")
 		e.DstEndpoint = endpoint(detail)

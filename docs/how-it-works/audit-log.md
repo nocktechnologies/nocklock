@@ -5,6 +5,8 @@ Citations name source files at the `v0.9.0` baseline (`f2b0d04`) and later chang
 ## What is recorded
 Most fence decisions are a row in a SQLite `events` table (`internal/logging/logger.go`): secret, file, network, proxy, session, config and filesystem-fence-state events (`logger.go`). Each row carries a SHA-256 hash linked to the previous row (v1). Query with `nocklock log`, `log --blocked`, `log --stats`, `status`. `log --prune <age>` compacts and re-anchors the chain (`internal/cli/log.go`, `logger.go`).
 
+Allowed-host `network_bytes_out` rows record upstream wire bytes and cumulative bytes per host in a session. A `network_outlier` row is marked for the `log --blocked` alert surface but has `action=alert_only`: it does not mean traffic was denied. See [network fence](network-fence.md) for coverage and the fixed ceiling.
+
 Not every crossing is logged. No row is written for: allowed file access; file denials that bypass the interposer (static binaries, raw syscalls, cleared `LD_PRELOAD`), so file denials are logged only some of the time; packets dropped by the kernel floor; `ADVISORY` proxy bypass; Linux `CONFINED` AF_UNIX connects.
 
 Audit and local/remote anchor verification append one shared notice after the

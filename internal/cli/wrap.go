@@ -1211,6 +1211,9 @@ var wrapCmd = &cobra.Command{
 						if scanner.Pending() {
 							failDecision(errors.New("incomplete egress decision record at end of decision log"))
 						}
+						if scanner.PendingBytes() {
+							failDecision(errors.New("missing egress bytes-out record at end of decision log"))
+						}
 						return
 					default:
 						time.Sleep(50 * time.Millisecond)

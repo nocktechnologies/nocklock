@@ -149,6 +149,13 @@ type ProxyServer struct {
 	// the lock-free helper behind the Start variants. The Serve goroutine runs
 	// outside the lock.
 	stopMu              sync.Mutex
+	connectMu           sync.Mutex
+	connects            map[net.Conn]net.Conn
+	upstreams           map[*countingConn]struct{}
+	connectClosing      bool
+	connectWG           sync.WaitGroup
+	connectCtx          context.Context
+	connectCancel       context.CancelFunc
 	listener            net.Listener
 	listenAddr          string
 	advertisedAddr      string
@@ -159,9 +166,11 @@ type ProxyServer struct {
 	requireDurableAudit bool
 	dnsCache            *DNSCache
 	logger              *logging.Logger
+	bytesOut            *BytesOutRecorder
 	sessionID           string
 	server              *http.Server
 	transport           *http.Transport
+	shutdownTimeout     time.Duration // test seam; defaults to five seconds
 	// dialFunc is used by handleConnect to establish upstream connections.
 	// Defaults to cachedSafeDial which uses the session DNS cache. Overridable in tests.
 	dialFunc DialFunc
@@ -171,13 +180,14 @@ type ProxyServer struct {
 	// lookbackPause is a test seam called at named points on the request path.
 	lookbackPause func(stage string)
 	// onBlockedWriteFailure, when set, receives the event type and error of
-	// every blocked row or required intent the proxy could not write. Set once before Start.
+	// every blocked row, required intent, or bytes-out row the proxy could not write.
+	// Set once before Start.
 	onBlockedWriteFailure func(logging.EventType, error)
 }
 
 // SetBlockedWriteFailureHandler installs fn to receive the event type and
 // error of every blocked audit row (a denied request, a look-back denial, a DNS rebind, a
-// degrade) that the proxy could not write. wrap passes its run-level audit
+// degrade) or bytes-out row that the proxy could not write. wrap passes its run-level audit
 // recorder here, so a lost blocked row fails the run with exit 2. fn runs
 // inline on the request path and must not block. It also reports failed
 // durable intents when RequireDurableAudit is enabled. Call it before Start.
@@ -208,8 +218,14 @@ func NewProxyServer(cfg config.NetworkConfig, logger *logging.Logger, sessionID 
 		dnsCache:            NewDNSCache(),
 		logger:              logger,
 		sessionID:           sessionID,
+		connects:            make(map[net.Conn]net.Conn),
+		upstreams:           make(map[*countingConn]struct{}),
+		shutdownTimeout:     5 * time.Second,
 	}
 	p.dialFunc = p.cachedSafeDial
+	if logger != nil {
+		p.bytesOut = NewBytesOutRecorder(logger, sessionID)
+	}
 	// Shared transport with:
 	//   - No proxy chaining (Proxy: nil) — prevents ambient HTTP_PROXY from re-routing traffic.
 	//   - Safe dial via closure so tests can override p.dialFunc.
@@ -269,7 +285,7 @@ func (p *ProxyServer) Start() (string, error) {
 		p.MarkDegraded("bind failure")
 		return "", fmt.Errorf("network fence: failed to bind proxy: %w", err)
 	}
-	return p.serveLocked(ln)
+	return p.serveLocked(ln, "", "")
 }
 
 // StartOn begins serving on an already-bound listener and returns its address.
@@ -282,31 +298,42 @@ func (p *ProxyServer) StartOn(ln net.Listener) (string, error) {
 	if p.listener != nil {
 		return "", fmt.Errorf("proxy already started at %s", p.listener.Addr())
 	}
-	return p.serveLocked(ln)
+	return p.serveLocked(ln, "", "")
 }
 
 // serveLocked installs ln and starts the Serve goroutine. Caller holds stopMu.
-func (p *ProxyServer) serveLocked(ln net.Listener) (string, error) {
+func (p *ProxyServer) serveLocked(ln net.Listener, advertisedAddr, unixSocketPath string) (string, error) {
+	p.connectMu.Lock()
+	p.connectClosing = false
+	p.connectCtx, p.connectCancel = context.WithCancel(context.Background())
+	p.connectMu.Unlock()
 	p.listener = ln
-	p.advertisedAddr = ln.Addr().String()
+	if advertisedAddr == "" {
+		advertisedAddr = ln.Addr().String()
+	}
+	p.advertisedAddr = advertisedAddr
+	p.unixSocketPath = unixSocketPath
 	p.degraded.Store(false)
 
 	p.server = p.newHTTPServer()
 
 	go p.server.Serve(ln) //nolint:errcheck // Serve returns ErrServerClosed on Stop()
 
-	addr := p.advertisedAddr
+	detail := fmt.Sprintf("addr=%s", advertisedAddr)
+	if unixSocketPath != "" {
+		detail += fmt.Sprintf(" unix_socket=%s", unixSocketPath)
+	}
 	if p.logger != nil {
 		_ = p.logger.Log(logging.Event{
 			Timestamp: time.Now(),
 			EventType: logging.EventProxyStart,
 			Category:  "network",
-			Detail:    fmt.Sprintf("addr=%s", addr),
+			Detail:    detail,
 			Blocked:   false,
 			SessionID: p.sessionID,
 		})
 	}
-	return addr, nil
+	return advertisedAddr, nil
 }
 
 // newHTTPServer builds the server for either listener. ConnContext exposes
@@ -359,26 +386,7 @@ func (p *ProxyServer) StartUnix(unixSocketPath, advertisedAddr string) (string, 
 		p.MarkDegraded("unix socket chmod failure")
 		return "", fmt.Errorf("network fence: failed to restrict unix proxy socket permissions: %w", err)
 	}
-	p.listener = ln
-	p.unixSocketPath = unixSocketPath
-	p.advertisedAddr = advertisedAddr
-	p.degraded.Store(false)
-
-	p.server = p.newHTTPServer()
-
-	go p.server.Serve(ln) //nolint:errcheck // Serve returns ErrServerClosed on Stop()
-
-	if p.logger != nil {
-		_ = p.logger.Log(logging.Event{
-			Timestamp: time.Now(),
-			EventType: logging.EventProxyStart,
-			Category:  "network",
-			Detail:    fmt.Sprintf("addr=%s unix_socket=%s", advertisedAddr, unixSocketPath),
-			Blocked:   false,
-			SessionID: p.sessionID,
-		})
-	}
-	return advertisedAddr, nil
+	return p.serveLocked(ln, advertisedAddr, unixSocketPath)
 }
 
 // Stop shuts down the proxy server gracefully.
@@ -394,9 +402,33 @@ func (p *ProxyServer) Stop() error {
 		}
 		return nil
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	p.connectMu.Lock()
+	p.connectClosing = true
+	if p.connectCancel != nil {
+		p.connectCancel()
+	}
+	p.connectMu.Unlock()
+	ctx, cancel := context.WithTimeout(context.Background(), p.shutdownTimeout)
 	defer cancel()
 	err := p.server.Shutdown(ctx)
+	p.connectMu.Lock()
+	var tunnels []struct{ client, upstream net.Conn }
+	for client, upstream := range p.connects {
+		tunnels = append(tunnels, struct{ client, upstream net.Conn }{client, upstream})
+	}
+	var upstreams []*countingConn
+	for upstream := range p.upstreams {
+		upstreams = append(upstreams, upstream)
+	}
+	p.connectMu.Unlock()
+	for _, tunnel := range tunnels {
+		_ = tunnel.client.Close()
+		_ = tunnel.upstream.Close()
+	}
+	for _, upstream := range upstreams {
+		_ = upstream.Close()
+	}
+	p.connectWG.Wait()
 
 	if p.transport != nil {
 		p.transport.CloseIdleConnections()
@@ -430,10 +462,41 @@ func (p *ProxyServer) dial(ctx context.Context, network, addr string) (net.Conn,
 	if p.degraded.Load() {
 		return nil, fmt.Errorf("NockLock: network proxy is degraded; refusing connection to %s", addr)
 	}
+	var conn net.Conn
+	var err error
 	if p.dialFunc != nil {
-		return p.dialFunc(ctx, network, addr)
+		conn, err = p.dialFunc(ctx, network, addr)
+	} else {
+		conn, err = safeDial(ctx, network, addr)
 	}
-	return safeDial(ctx, network, addr)
+	if err != nil {
+		return conn, err
+	}
+	p.connectMu.Lock()
+	if p.connectClosing {
+		p.connectMu.Unlock()
+		_ = conn.Close()
+		return nil, fmt.Errorf("NockLock: network proxy is stopping; refusing connection to %s", addr)
+	}
+	if p.bytesOut == nil {
+		p.connectMu.Unlock()
+		return conn, nil
+	}
+	counted := &countingConn{Conn: conn, host: addr, recorder: p.bytesOut, onError: func(err error) {
+		if p.onBlockedWriteFailure != nil {
+			p.onBlockedWriteFailure(logging.EventNetworkBytesOut, err)
+		}
+	}}
+	p.connectWG.Add(1)
+	counted.onClose = func() {
+		p.connectMu.Lock()
+		delete(p.upstreams, counted)
+		p.connectMu.Unlock()
+		p.connectWG.Done()
+	}
+	p.upstreams[counted] = struct{}{}
+	p.connectMu.Unlock()
+	return counted, nil
 }
 
 // MarkDegraded marks the proxy as unsafe to use after a startup or watchdog

@@ -6,6 +6,8 @@ No internal host names, personal names or absolute home paths: `scripts/check-pu
 
 ## What changed
 
+- 2026-11-14: The explicit proxy and Linux netns path now sign cumulative bytes-out rows per allowed host and session and emit one alert-only row above a fixed 100 MiB ceiling. The netns parent checks that every allowed decision has a matching byte count before closing the run; both proxy paths close and join active tunnels before stopping, including a CONNECT dial still in progress. Focused signed-chain, allowed/denied, malformed-record and concurrent-close tests pass locally. Native netns and macOS enforcement remain CI-only proofs.
+
 - 2026-11-12: The macOS Claude Code cache grant under `confine_home_reads` now follows the same login-store exemption as `.claude`: an explicit profile or a matching `project.runtime` with a direct `wrap -- claude` launch. A non-Claude command under that project config gets no cache grant. Generated-profile tests check both read and write rules; native Seatbelt enforcement still needs a macOS run.
 
 - 2026-11-12: The Claude Code cache grant now runs through the macOS confined-home cache profile, where a missing cache folder still receives read and write rules for first-run creation. Generated-profile tests cover platform and mode boundaries; a native Seatbelt test covers first-run mkdir, write, read and unlisted-cache denial. Native enforcement still needs the macOS CI runner.
@@ -93,6 +95,9 @@ No internal host names, personal names or absolute home paths: `scripts/check-pu
 - 2026-10-19: `.github/workflows/landlock-abi9-receipt.yml` runs `bench/redteam/kernel_cases.py --require-abi 9` in a throwaway Ubuntu 26.10 KVM guest (kernel 7.3) on a GitHub-hosted runner and signs the receipt (ROADMAP bar 1: receipt produced in CI, not yet released). Landlock ABI 9 first shipped in Linux 7.1 (7.0 reports 8), so the hosted runner kernel cannot prove it itself. `packaging/linux/sign-manifest.sh` is now shared with the candidate workflow. The guest image is pinned by URL and digest; when Ubuntu prunes that release directory, bump both together.
 
 ## What bit us
+
+- 2026-11-14: Go's HTTP server shutdown does not wait for hijacked CONNECT connections. A session-end audit that depends on tunnel byte counts must close and join those tunnels explicitly before writing the close row.
+- 2026-11-14: Draining byte reports on sidecar shutdown also requires closing idle tunnels and canceling in-flight dials before waiting for handlers; otherwise the supervisor can kill the sidecar before the reports reach the signed chain. A durable-audit-off control that deliberately closes its logger may now report a byte-row write failure after allowing egress.
 
 - 2026-10-26: config-digest tests use the checkout directory in filesystem grants. On macOS, a checkout under the protected home .codex directory correctly triggers credential-overlap refusal. A checkout under /tmp also puts the preset fixtures' fake homes beneath a default allow and triggers the same protection. Run those tests from a disposable source copy in an ordinary development directory; do not relax the policy to accommodate the checkout.
 

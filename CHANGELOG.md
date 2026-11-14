@@ -14,6 +14,8 @@ All notable changes to NockLock will be documented in this file.
 
 - Add default-off `filesystem.confine_home_reads` on macOS. It confines file data reads under the invoking UID's home to `filesystem.root`, explicit `filesystem.allow`, `filesystem.allow_rw` and `filesystem.read_allow` paths, and `.gitconfig`; metadata queries remain available, while sensitive paths still deny reads and writes. The signed fence-state row and `doctor` show the mode. Other volumes and shared/temp directories remain outside this read boundary.
 
+- Record bytes written upstream per allowed host and session in signed `network_bytes_out` rows. A host exceeding 100 MiB in one session emits one alert-only `network_outlier` row, visible with `log --blocked`; traffic is not blocked. The proxy and Linux netns modes both report wire bytes without inspecting TLS or request bodies.
+
 ## [1.0.0] - 2026-11-12
 
 NockLock 1.0.0 is the first stable release. `docs/reference/cli.md` is the compatibility promise for the public CLI, config and exit codes.
