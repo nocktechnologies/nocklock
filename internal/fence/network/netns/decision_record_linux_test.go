@@ -7,9 +7,46 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 )
+
+func TestShutdownDrainsIdleTunnelAndRecordsBytes(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "decisions.log")
+	f, err := os.OpenFile(path, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o600)
+	if err != nil {
+		t.Fatal(err)
+	}
+	client, peer := net.Pipe()
+	upstream, upstreamPeer := net.Pipe()
+	defer peer.Close()
+	defer upstreamPeer.Close()
+	p := &transparentProxy{decisionLog: f, active: map[net.Conn]net.Conn{client: upstream}}
+	p.connWG.Add(1)
+	go func() {
+		defer p.connWG.Done()
+		var sent int64
+		defer p.recordBytesOut("tls", "allowed.test", "443", &sent)
+		sent = pipeConnections(client, upstream)
+	}()
+	go func() { _, _ = peer.Write([]byte("hello")) }()
+	buf := make([]byte, 5)
+	if _, err := io.ReadFull(upstreamPeer, buf); err != nil || string(buf) != "hello" {
+		t.Fatalf("upstream read = %q, %v", buf, err)
+	}
+	done := make(chan struct{})
+	go func() { p.shutdown(); close(done) }()
+	select {
+	case <-done:
+	case <-time.After(time.Second):
+		t.Fatal("idle tunnel held sidecar shutdown open")
+	}
+	rows, err := os.ReadFile(path)
+	if err != nil || !strings.Contains(string(rows), "bytes\ttls\tallowed.test\t443\t5\n") {
+		t.Fatalf("byte report = %q, %v", rows, err)
+	}
+}
 
 func TestPipeConnectionsCountsOnlyUpstreamDirection(t *testing.T) {
 	client, clientPeer := net.Pipe()

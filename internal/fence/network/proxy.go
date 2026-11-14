@@ -153,6 +153,8 @@ type ProxyServer struct {
 	connects            map[net.Conn]net.Conn
 	connectClosing      bool
 	connectWG           sync.WaitGroup
+	connectCtx          context.Context
+	connectCancel       context.CancelFunc
 	listener            net.Listener
 	listenAddr          string
 	advertisedAddr      string
@@ -299,6 +301,7 @@ func (p *ProxyServer) StartOn(ln net.Listener) (string, error) {
 func (p *ProxyServer) serveLocked(ln net.Listener) (string, error) {
 	p.connectMu.Lock()
 	p.connectClosing = false
+	p.connectCtx, p.connectCancel = context.WithCancel(context.Background())
 	p.connectMu.Unlock()
 	p.listener = ln
 	p.advertisedAddr = ln.Addr().String()
@@ -410,11 +413,16 @@ func (p *ProxyServer) Stop() error {
 		}
 		return nil
 	}
+	p.connectMu.Lock()
+	p.connectClosing = true
+	if p.connectCancel != nil {
+		p.connectCancel()
+	}
+	p.connectMu.Unlock()
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 	err := p.server.Shutdown(ctx)
 	p.connectMu.Lock()
-	p.connectClosing = true
 	var tunnels []struct{ client, upstream net.Conn }
 	for client, upstream := range p.connects {
 		tunnels = append(tunnels, struct{ client, upstream net.Conn }{client, upstream})

@@ -1,6 +1,7 @@
 package network
 
 import (
+	"context"
 	"fmt"
 	"io"
 	"net"
@@ -28,6 +29,7 @@ func (p *ProxyServer) handleConnect(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	p.connectWG.Add(1)
+	stopCtx := p.connectCtx
 	p.connectMu.Unlock()
 	defer p.connectWG.Done()
 
@@ -48,7 +50,15 @@ func (p *ProxyServer) handleConnect(w http.ResponseWriter, r *http.Request) {
 
 	// Dial the destination before hijacking so we can respond with 502 cleanly on failure.
 	// p.dial defaults to safeDial, which validates the resolved IP is not loopback/private.
-	upstream, err := p.dial(r.Context(), "tcp", r.Host)
+	dialCtx := r.Context()
+	if stopCtx != nil {
+		ctx, cancel := context.WithCancel(dialCtx)
+		stopCancel := context.AfterFunc(stopCtx, cancel)
+		defer stopCancel()
+		defer cancel()
+		dialCtx = ctx
+	}
+	upstream, err := p.dial(dialCtx, "tcp", r.Host)
 	if err != nil {
 		p.logEvent(logging.EventNetworkError, r.Method, host, false)
 		// Return a generic error — do not leak the resolved IP or internal details.

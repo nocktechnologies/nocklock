@@ -139,6 +139,48 @@ func TestProxyStopDrainsActiveConnectBytes(t *testing.T) {
 	}
 }
 
+func TestProxyStopCancelsConnectBeforeHijack(t *testing.T) {
+	l, err := logging.NewLogger(filepath.Join(t.TempDir(), "events.db"), "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer l.Close()
+	p := NewProxyServer(config.NetworkConfig{Allow: []string{"allowed.example"}}, l, "session")
+	entered := make(chan struct{})
+	p.dialFunc = func(ctx context.Context, _, _ string) (net.Conn, error) {
+		close(entered)
+		<-ctx.Done()
+		return nil, ctx.Err()
+	}
+	addr, err := p.Start()
+	if err != nil {
+		t.Fatal(err)
+	}
+	conn, err := net.Dial("tcp", addr)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer conn.Close()
+	if _, err := io.WriteString(conn, "CONNECT allowed.example:443 HTTP/1.1\r\nHost: allowed.example:443\r\n\r\n"); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case <-entered:
+	case <-time.After(time.Second):
+		t.Fatal("CONNECT did not reach upstream dial")
+	}
+	done := make(chan error, 1)
+	go func() { done <- p.Stop() }()
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatal(err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("Stop waited for a pre-hijack CONNECT dial")
+	}
+}
+
 func TestBytesOutRecorderSignsTotalsAndFlagsOnlyOutlier(t *testing.T) {
 	dir := t.TempDir()
 	keyDir := filepath.Join(dir, "keys")

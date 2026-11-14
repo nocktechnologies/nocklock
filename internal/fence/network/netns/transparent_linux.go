@@ -46,6 +46,11 @@ type transparentProxy struct {
 	decisionMu sync.Mutex
 	acceptWG   sync.WaitGroup
 	connWG     sync.WaitGroup
+	activeMu   sync.Mutex
+	active     map[net.Conn]net.Conn
+	closing    bool
+	ctx        context.Context
+	cancel     context.CancelFunc
 }
 
 // RunTransparentProxy starts the namespace-local DNS stub and transparent TCP
@@ -82,12 +87,7 @@ func RunTransparentProxy(cfg EgressConfig) error {
 	signal.Notify(signals, syscall.SIGTERM, syscall.SIGINT)
 	defer signal.Stop(signals)
 	<-signals
-	for _, ln := range p.tcp {
-		_ = ln.Close()
-	}
-	p.acceptWG.Wait()
-	p.connWG.Wait()
-	p.close()
+	p.shutdown()
 	return nil
 }
 
@@ -95,7 +95,8 @@ func startTransparentProxy(cfg EgressConfig) (*transparentProxy, error) {
 	if err := validateEgressConfig(&cfg, 1000); err != nil {
 		return nil, err
 	}
-	p := &transparentProxy{cfg: cfg}
+	ctx, cancel := context.WithCancel(context.Background())
+	p := &transparentProxy{cfg: cfg, active: make(map[net.Conn]net.Conn), ctx: ctx, cancel: cancel}
 	closeOnError := func(err error) (*transparentProxy, error) {
 		p.close()
 		return nil, err
@@ -175,6 +176,9 @@ func (p *transparentProxy) serve() {
 }
 
 func (p *transparentProxy) close() {
+	if p.cancel != nil {
+		p.cancel()
+	}
 	for _, ln := range p.tcp {
 		_ = ln.Close()
 	}
@@ -193,6 +197,35 @@ func (p *transparentProxy) close() {
 	if p.decisionLog != nil {
 		_ = p.decisionLog.Close()
 	}
+}
+
+// shutdown closes active tunnels before waiting for their byte reports. The
+// supervisor gives the sidecar two seconds after SIGTERM before killing it.
+func (p *transparentProxy) shutdown() {
+	p.activeMu.Lock()
+	p.closing = true
+	p.activeMu.Unlock()
+	if p.cancel != nil {
+		p.cancel()
+	}
+	for _, ln := range p.tcp {
+		_ = ln.Close()
+	}
+	p.acceptWG.Wait()
+	p.activeMu.Lock()
+	var connections []net.Conn
+	for client, upstream := range p.active {
+		connections = append(connections, client)
+		if upstream != nil {
+			connections = append(connections, upstream)
+		}
+	}
+	p.activeMu.Unlock()
+	for _, conn := range connections {
+		_ = conn.Close()
+	}
+	p.connWG.Wait()
+	p.close()
 }
 
 // recordDecision appends one complete, newline-terminated egress decision record
@@ -303,9 +336,25 @@ func (p *transparentProxy) serveTCP(ln net.Listener) {
 		if err != nil {
 			return
 		}
+		p.activeMu.Lock()
+		if p.closing {
+			p.activeMu.Unlock()
+			_ = conn.Close()
+			continue
+		}
+		if p.active == nil {
+			p.active = make(map[net.Conn]net.Conn)
+		}
+		p.active[conn] = nil
 		p.connWG.Add(1)
+		p.activeMu.Unlock()
 		go func() {
-			defer p.connWG.Done()
+			defer func() {
+				p.activeMu.Lock()
+				delete(p.active, conn)
+				p.activeMu.Unlock()
+				p.connWG.Done()
+			}()
 			p.handleTCP(conn)
 		}()
 	}
@@ -352,7 +401,7 @@ func (p *transparentProxy) handleTLS(client net.Conn) {
 	}
 	var sent int64
 	defer p.recordBytesOut("tls", host, "443", &sent)
-	upstream, err := openHostTunnel(client, p.cfg.Bridge.hostProxyAddr(), host, "443")
+	upstream, err := p.openHostTunnel(client, p.cfg.Bridge.hostProxyAddr(), host, "443")
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "NockLock: transparent TLS upstream tunnel failed")
 		return
@@ -394,7 +443,7 @@ func (p *transparentProxy) handleHTTP(client net.Conn) {
 	}
 	var sent int64
 	defer p.recordBytesOut("http", host, "80", &sent)
-	upstream, err := openHostTunnel(client, p.cfg.Bridge.hostProxyAddr(), host, "80")
+	upstream, err := p.openHostTunnel(client, p.cfg.Bridge.hostProxyAddr(), host, "80")
 	if err != nil {
 		_, _ = io.WriteString(client, "HTTP/1.1 502 Bad Gateway\r\nConnection: close\r\n\r\n")
 		return
@@ -595,11 +644,25 @@ func parseServerNameExtension(b []byte) (string, bool, error) {
 	return "", true, fmt.Errorf("TLS ClientHello has no DNS SNI")
 }
 
-func openHostTunnel(_ net.Conn, proxyAddr, host, port string) (net.Conn, error) {
-	upstream, err := (&net.Dialer{Timeout: 10 * time.Second}).DialContext(context.Background(), "tcp", proxyAddr)
+func (p *transparentProxy) openHostTunnel(client net.Conn, proxyAddr, host, port string) (net.Conn, error) {
+	ctx := p.ctx
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	upstream, err := (&net.Dialer{Timeout: 10 * time.Second}).DialContext(ctx, "tcp", proxyAddr)
 	if err != nil {
 		return nil, err
 	}
+	p.activeMu.Lock()
+	if p.closing {
+		p.activeMu.Unlock()
+		_ = upstream.Close()
+		return nil, net.ErrClosed
+	}
+	if p.active != nil {
+		p.active[client] = upstream
+	}
+	p.activeMu.Unlock()
 	target := net.JoinHostPort(host, port)
 	if _, err := fmt.Fprintf(upstream, "CONNECT %s HTTP/1.1\r\nHost: %s\r\n\r\n", target, target); err != nil {
 		_ = upstream.Close()

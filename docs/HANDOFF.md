@@ -6,7 +6,7 @@ No internal host names, personal names or absolute home paths: `scripts/check-pu
 
 ## What changed
 
-- 2026-11-14: The explicit proxy and Linux netns path now sign cumulative bytes-out rows per allowed host and session and emit one alert-only row above a fixed 100 MiB ceiling. The netns parent checks that every allowed decision has a matching byte count before closing the run; the explicit proxy drains hijacked CONNECT tunnels before its stop returns. Focused signed-chain, allowed/denied, malformed-record and concurrent-close tests pass locally. Native netns and macOS enforcement remain CI-only proofs.
+- 2026-11-14: The explicit proxy and Linux netns path now sign cumulative bytes-out rows per allowed host and session and emit one alert-only row above a fixed 100 MiB ceiling. The netns parent checks that every allowed decision has a matching byte count before closing the run; both proxy paths close and join active tunnels before stopping, including a CONNECT dial still in progress. Focused signed-chain, allowed/denied, malformed-record and concurrent-close tests pass locally. Native netns and macOS enforcement remain CI-only proofs.
 
 - 2026-11-12: The macOS Claude Code cache grant under `confine_home_reads` now follows the same login-store exemption as `.claude`: an explicit profile or a matching `project.runtime` with a direct `wrap -- claude` launch. A non-Claude command under that project config gets no cache grant. Generated-profile tests check both read and write rules; native Seatbelt enforcement still needs a macOS run.
 
@@ -97,6 +97,7 @@ No internal host names, personal names or absolute home paths: `scripts/check-pu
 ## What bit us
 
 - 2026-11-14: Go's HTTP server shutdown does not wait for hijacked CONNECT connections. A session-end audit that depends on tunnel byte counts must close and join those tunnels explicitly before writing the close row.
+- 2026-11-14: Draining byte reports on sidecar shutdown also requires closing idle tunnels and canceling in-flight dials before waiting for handlers; otherwise the supervisor can kill the sidecar before the reports reach the signed chain. A durable-audit-off control that deliberately closes its logger may now report a byte-row write failure after allowing egress.
 
 - 2026-10-26: config-digest tests use the checkout directory in filesystem grants. On macOS, a checkout under the protected home .codex directory correctly triggers credential-overlap refusal. A checkout under /tmp also puts the preset fixtures' fake homes beneath a default allow and triggers the same protection. Run those tests from a disposable source copy in an ordinary development directory; do not relax the policy to accommodate the checkout.
 
