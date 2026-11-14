@@ -32,6 +32,8 @@ Registered in `internal/cli/` (one file per command). `README.md` "Commands" has
 
 There are no global flags beyond cobra's `-h`/`--help`.
 
+`log --blocked` includes alert-only `network_outlier` rows. Their `action=alert_only` detail means the allowed transfer continued; `log --session <id>` shows cumulative `network_bytes_out` rows by host.
+
 `log --prune` passes the project root resolved from its configuration. Library
 callers must also supply an explicit project root; rootless prune is refused,
 even for a legacy database.

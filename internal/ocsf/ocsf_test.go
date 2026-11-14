@@ -147,6 +147,9 @@ func TestFromRowNetworkAndOutcome(t *testing.T) {
 	if e := mustMap(t, row(logging.EventNetworkBlocked, "rule=lookback:x trigger=y", true)); e.ClassUID != ClassNetworkActivity || e.Action != "Denied" {
 		t.Fatalf("every network_blocked row is a denied network event, got class %d %q", e.ClassUID, e.Action)
 	}
+	if e := mustMap(t, row(logging.EventNetworkOutlier, "host=api.example.com session_bytes_out=104857601 threshold=104857600 action=alert_only", true)); e.ClassUID != ClassDetectionFinding || e.StatusDetail != "Alert only; upstream traffic was not blocked" {
+		t.Fatalf("outlier must export as an alert, not a denial: %+v", e)
+	}
 
 	if e := mustMap(t, row(logging.EventSessionEnd, "exit_code=1 secret_preflight=refused", true)); e.Status != "Failure" {
 		t.Fatalf("a blocked session_end must report Failure, got %q", e.Status)

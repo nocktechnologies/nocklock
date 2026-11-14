@@ -21,6 +21,16 @@ import (
 //   - Both copy goroutines are joined before returning; connections are closed when
 //     either direction finishes so the other goroutine is not left blocked.
 func (p *ProxyServer) handleConnect(w http.ResponseWriter, r *http.Request) {
+	p.connectMu.Lock()
+	if p.connectClosing {
+		p.connectMu.Unlock()
+		http.Error(w, "NockLock: proxy is stopping", http.StatusServiceUnavailable)
+		return
+	}
+	p.connectWG.Add(1)
+	p.connectMu.Unlock()
+	defer p.connectWG.Done()
+
 	host := r.Host
 	if h, _, err := net.SplitHostPort(r.Host); err == nil {
 		host = h
@@ -58,6 +68,18 @@ func (p *ProxyServer) handleConnect(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	defer clientConn.Close()
+	p.connectMu.Lock()
+	if p.connectClosing {
+		p.connectMu.Unlock()
+		return
+	}
+	p.connects[clientConn] = upstream
+	p.connectMu.Unlock()
+	defer func() {
+		p.connectMu.Lock()
+		delete(p.connects, clientConn)
+		p.connectMu.Unlock()
+	}()
 
 	// Evaluation runs after Hijack, under the look-back mutex: the connection
 	// is either refused here or registered before the 200 line is written, so a

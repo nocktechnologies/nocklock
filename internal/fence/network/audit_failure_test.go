@@ -56,6 +56,23 @@ func newFailingAuditProxy(t *testing.T, cfg config.NetworkConfig) (*ProxyServer,
 	return p, sink
 }
 
+func TestProxyBytesOutWriteFailureIsReported(t *testing.T) {
+	p, sink := newFailingAuditProxy(t, config.NetworkConfig{Allow: []string{"allowed.example"}})
+	upstream, peer := net.Pipe()
+	defer peer.Close()
+	p.dialFunc = func(context.Context, string, string) (net.Conn, error) { return upstream, nil }
+	conn, err := p.dial(context.Background(), "tcp", "allowed.example:443")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := conn.Close(); err == nil {
+		t.Fatal("lost bytes-out row did not fail connection close")
+	}
+	if sink.count() != 1 {
+		t.Fatalf("reported failures = %d, want 1 for the lost bytes-out row", sink.count())
+	}
+}
+
 func TestProxyBlockedRowWriteFailureIsReported(t *testing.T) {
 	cfg := config.NetworkConfig{Allow: []string{"allowed.example"}}
 

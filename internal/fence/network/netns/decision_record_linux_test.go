@@ -3,10 +3,38 @@
 package netns
 
 import (
+	"io"
+	"net"
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
 )
+
+func TestPipeConnectionsCountsOnlyUpstreamDirection(t *testing.T) {
+	client, clientPeer := net.Pipe()
+	upstream, upstreamPeer := net.Pipe()
+	defer clientPeer.Close()
+	defer upstreamPeer.Close()
+	_ = client.SetDeadline(time.Now().Add(time.Second))
+	_ = upstream.SetDeadline(time.Now().Add(time.Second))
+	done := make(chan int64, 1)
+	go func() { done <- pipeConnections(client, upstream) }()
+	go func() { _, _ = clientPeer.Write([]byte("hello")) }()
+	buf := make([]byte, 5)
+	if _, err := io.ReadFull(upstreamPeer, buf); err != nil || string(buf) != "hello" {
+		t.Fatalf("upstream read = %q, %v", buf, err)
+	}
+	go func() { _, _ = upstreamPeer.Write([]byte("reply")) }()
+	if _, err := io.ReadFull(clientPeer, buf); err != nil || string(buf) != "reply" {
+		t.Fatalf("client read = %q, %v", buf, err)
+	}
+	_ = clientPeer.Close()
+	_ = upstreamPeer.Close()
+	if n := <-done; n != 5 {
+		t.Fatalf("upstream bytes = %d, want 5", n)
+	}
+}
 
 // These tests exercise the transparent proxy's recordDecision in isolation with
 // plain file I/O — no root, no netns, no proxy sockets. They assert the
