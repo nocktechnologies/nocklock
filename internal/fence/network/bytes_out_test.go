@@ -156,7 +156,12 @@ func TestProxyStopCancelsConnectBeforeHijack(t *testing.T) {
 			}
 			var addr string
 			if networkName == "unix" {
-				addr = filepath.Join(t.TempDir(), "proxy.sock")
+				dir, err := os.MkdirTemp("/tmp", "nlproxy-*")
+				if err != nil {
+					t.Fatal(err)
+				}
+				t.Cleanup(func() { _ = os.RemoveAll(dir) })
+				addr = filepath.Join(dir, "proxy.sock")
 				_, err = p.StartUnix(addr, "127.0.0.1:43210")
 			} else {
 				addr, err = p.Start()
