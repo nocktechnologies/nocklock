@@ -12,11 +12,15 @@ All notable changes to NockLock will be documented in this file.
 - On macOS with `filesystem.confine_home_reads` enabled, the documented developer-tool cache folders beneath the passwd home's `Library/Caches` directory remain readable after writes; other app caches are neither readable nor writable unless explicitly allowed, and sensitive paths stay denied.
 - On macOS with `filesystem.confine_home_reads` enabled, explicit `filesystem.allow` and `allow_rw` paths beneath the passwd home remain readable; sensitive paths inside them stay denied.
 
+### Changed
+
+- Exit code 2 has a new cause. 1.0 documented rows for allowed network requests as best effort. In 1.1 the `network_bytes_out` row written when an allowed connection closes, and the `network_outlier` row, are required: if NockLock cannot write either to the audit log, `wrap` exits 2 and stops the child, as it already does for blocked rows. Upgrade: a run whose audit log cannot be written now fails where 1.0 passed; fix the audit log path or storage.
+
 ### Added
 
 - Add default-off `filesystem.confine_home_reads` on macOS. It confines file data reads under the invoking UID's home to `filesystem.root`, explicit `filesystem.allow`, `filesystem.allow_rw` and `filesystem.read_allow` paths, and `.gitconfig`; metadata queries remain available, while sensitive paths still deny reads and writes. With the option on, the passwd home's developer-tool `Library/Caches` folders (non-symlink) are readable, and the user cache write grant narrows to those folders plus each `filesystem.allow_rw` entry inside that `Library/Caches` directory. The signed fence-state row and `doctor` show the mode. Other volumes and shared/temp directories remain outside this read boundary.
 
-- Record bytes written upstream per allowed host and session in signed `network_bytes_out` rows. A host exceeding 100 MiB in one session emits one alert-only `network_outlier` row, visible with `log --blocked`; traffic is not blocked. The proxy and Linux netns modes both report wire bytes without inspecting TLS or request bodies. In both modes, a failed `network_bytes_out` or `network_outlier` audit write fails the wrapped run with exit 2 and stops the child, like other required rows.
+- Record bytes written upstream per allowed host and session in signed `network_bytes_out` rows. A host exceeding 100 MiB in one session emits one alert-only `network_outlier` row, visible with `log --blocked`; traffic is not blocked. The proxy and Linux netns modes both report wire bytes without inspecting TLS or request bodies. Both rows are required audit rows; see Changed for their exit 2 behavior.
 
 ### Tests
 
