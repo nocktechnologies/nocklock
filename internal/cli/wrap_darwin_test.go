@@ -63,7 +63,8 @@ func TestWrapMacOSFilesystemFenceRecordsOneEngagedState(t *testing.T) {
 }
 
 // TestWrapMacOSConfineHomeReads proves the opt-in profile through wrap, including
-// metadata, Git, explicit grants, sensitive denies, and the default-off control.
+// metadata, Git, explicit grants, sensitive denies, an alternate-case home
+// spelling, and the default-off control.
 func TestWrapMacOSConfineHomeReads(t *testing.T) {
 	requireSandboxExecForWrap(t)
 	home, err := os.UserHomeDir()
@@ -88,10 +89,22 @@ func TestWrapMacOSConfineHomeReads(t *testing.T) {
 	outsideFile := filepath.Join(outside, "outside.txt")
 	sharedFile := filepath.Join(shared, "shared.txt")
 	secretFile := filepath.Join(secret, "secret.txt")
+	// Stdout is checked for this marker; it appears in no fixture pathname.
+	const marker = "confined-content-q7z"
 	for _, path := range []string{insideFile, outsideFile, sharedFile, secretFile} {
-		if err := os.WriteFile(path, []byte("fixture"), 0600); err != nil {
+		if err := os.WriteFile(path, []byte(marker), 0600); err != nil {
 			t.Fatal(err)
 		}
+	}
+	// The profile names the canonical home; APFS also resolves the same file
+	// through other letter cases (/uSERS/<USER>/... for /Users/<user>/...).
+	canonicalOutside, err := filepath.EvalSymlinks(outsideFile)
+	if err != nil {
+		t.Fatal(err)
+	}
+	altOutsideFile := swapASCIICase(canonicalOutside)
+	if got, err := os.ReadFile(altOutsideFile); err != nil || string(got) != marker {
+		t.Fatalf("alternate-case spelling %q does not reach the fixture unsandboxed (case-sensitive volume?): err=%v, content=%q", altOutsideFile, err, got)
 	}
 	if out, err := exec.Command("git", "-C", project, "init", "-q").CombinedOutput(); err != nil {
 		t.Fatalf("git init: %v: %s", err, out)
@@ -114,15 +127,23 @@ func TestWrapMacOSConfineHomeReads(t *testing.T) {
 	read := func(path string) error {
 		return run("/bin/cat", path)
 	}
-	if err := read(outsideFile); err == nil {
-		t.Fatal("FENCE FAILED OPEN: outside-home-root data read succeeded")
+	readOutput := func(path string) (string, error) {
+		var err error
+		out := captureStdout(t, func() { err = read(path) })
+		return out, err
+	}
+	for _, path := range []string{outsideFile, altOutsideFile} {
+		if out, err := readOutput(path); err == nil || strings.Contains(out, marker) {
+			t.Fatalf("FENCE FAILED OPEN: outside-home-root data read of %q succeeded (err=%v, stdout=%q)", path, err, out)
+		}
 	}
 	if err := run("/usr/bin/stat", "-f", "%N", outsideFile); err != nil {
 		t.Fatalf("outside-root metadata failed: %v", err)
 	}
+	// The root and the grant still read under their canonical spellings.
 	for _, path := range []string{insideFile, sharedFile} {
-		if err := read(path); err != nil {
-			t.Fatalf("allowed read %q failed: %v", path, err)
+		if out, err := readOutput(path); err != nil || !strings.Contains(out, marker) {
+			t.Fatalf("allowed read %q failed: err=%v, stdout=%q", path, err, out)
 		}
 	}
 	t.Setenv("HOME", home) // Exercise Git's ordinary per-user config lookup.
@@ -142,8 +163,8 @@ func TestWrapMacOSConfineHomeReads(t *testing.T) {
 	}
 	defer db.Close()
 	states := macOSFilesystemFenceStates(t, db)
-	if len(states) != 7 {
-		t.Fatalf("fence states = %d, want 7: %q", len(states), states)
+	if len(states) != 8 {
+		t.Fatalf("fence states = %d, want 8: %q", len(states), states)
 	}
 	for _, state := range states {
 		if !strings.Contains(state, "ENGAGED") || !strings.Contains(state, "home_read=file-read-data") || !strings.Contains(state, "read_allow=1") {
@@ -160,9 +181,22 @@ func TestWrapMacOSConfineHomeReads(t *testing.T) {
 
 	// Existing configs retain the pre-opt-in read behavior.
 	writeTestConfig(t, project, strings.Replace(policy, "confine_home_reads = true", "confine_home_reads = false", 1))
-	if err := read(outsideFile); err != nil {
-		t.Fatalf("default-off outside read failed: %v", err)
+	for _, path := range []string{outsideFile, altOutsideFile} {
+		if out, err := readOutput(path); err != nil || !strings.Contains(out, marker) {
+			t.Fatalf("default-off outside read %q failed: err=%v, stdout=%q", path, err, out)
+		}
 	}
+}
+
+// swapASCIICase returns path with the case of every ASCII letter inverted.
+func swapASCIICase(path string) string {
+	b := []byte(path)
+	for i, c := range b {
+		if c >= 'a' && c <= 'z' || c >= 'A' && c <= 'Z' {
+			b[i] = c ^ 0x20
+		}
+	}
+	return string(b)
 }
 
 // TestWrapMacOSFilesystemFenceConfinesWritesToRoot proves nocklock wrap wires
