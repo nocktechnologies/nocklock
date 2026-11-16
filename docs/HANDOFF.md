@@ -6,6 +6,8 @@ No internal host names, personal names or absolute home paths: `scripts/check-pu
 
 ## What changed
 
+- 2026-11-16: The macOS `confine_home_reads` wrap test now reads an ungranted home file through an alternate-case spelling of its canonical path (every ASCII letter swapped, so `/Users/<user>/...` becomes `/uSERS/<USER>/...`) and checks stdout for a content marker absent from every fixture path. It first confirms the spelling resolves unsandboxed, so a case-sensitive volume fails loudly. The profile's home boundary is a case-sensitive `subpath`, while credential denies use `caseFoldPattern`; the macOS CI job decides whether the boundary needs a case-folded deny too. Darwin cross-vet passed; native Seatbelt enforcement is CI-only.
+
 - 2026-11-16: Cut v1.1.0 on next: `[Unreleased]` became `[1.1.0] - 2026-11-16` with its wording unchanged, and the roadmap baseline is `v1.1.0`. Contents are in `CHANGELOG.md`. The contract goldens since v1.0.0 only add the `filesystem.read_allow` and `filesystem.confine_home_reads` config keys; no command, flag, default, egress level, run state or exit code changed. Still open: promotion to main, tagging and publication.
 
 - 2026-11-14: The explicit proxy and Linux netns path now sign cumulative bytes-out rows per allowed host and session and emit one alert-only row above a fixed 100 MiB ceiling. The netns parent checks that every allowed decision has a matching byte count before closing the run; both proxy paths close and join active tunnels before stopping, including a CONNECT dial still in progress. Focused signed-chain, allowed/denied, malformed-record and concurrent-close tests pass locally. Native netns and macOS enforcement remain CI-only proofs.

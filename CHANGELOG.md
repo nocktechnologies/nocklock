@@ -18,6 +18,10 @@ All notable changes to NockLock will be documented in this file.
 
 - Record bytes written upstream per allowed host and session in signed `network_bytes_out` rows. A host exceeding 100 MiB in one session emits one alert-only `network_outlier` row, visible with `log --blocked`; traffic is not blocked. The proxy and Linux netns modes both report wire bytes without inspecting TLS or request bodies. In both modes, a failed `network_bytes_out` or `network_outlier` audit write fails the wrapped run with exit 2 and stops the child, like other required rows.
 
+### Tests
+
+- The macOS `filesystem.confine_home_reads` wrap test reads an ungranted home file through an alternate-case spelling of the passwd home and asserts the file's content stays out of the child's output.
+
 ## [1.0.0] - 2026-11-12
 
 NockLock 1.0.0 is the first stable release. `docs/reference/cli.md` is the compatibility promise for the public CLI, config and exit codes.
