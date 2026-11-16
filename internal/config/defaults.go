@@ -121,8 +121,9 @@ allow = [
 allow_rw = []
 # macOS only: explicit home read grants when confine_home_reads is true.
 read_allow = []
-# macOS only: deny data reads under the invoking UID's home outside root and
-# read_allow. Metadata queries remain available. Default off.
+# macOS only: deny data reads under the invoking UID's home outside root, allow,
+# allow_rw, read_allow and the developer-tool cache folders. Metadata queries
+# remain available. Default off.
 confine_home_reads = false
 deny = [
     "~/.ssh/",
