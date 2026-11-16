@@ -44,6 +44,13 @@ type transparentProxy struct {
 	// decisionMu serializes the single full-line append per decision so concurrent
 	// connection goroutines never interleave a torn record for the parent's reader.
 	decisionMu sync.Mutex
+	acceptWG   sync.WaitGroup
+	connWG     sync.WaitGroup
+	activeMu   sync.Mutex
+	active     map[net.Conn]net.Conn
+	closing    bool
+	ctx        context.Context
+	cancel     context.CancelFunc
 }
 
 // RunTransparentProxy starts the namespace-local DNS stub and transparent TCP
@@ -80,7 +87,7 @@ func RunTransparentProxy(cfg EgressConfig) error {
 	signal.Notify(signals, syscall.SIGTERM, syscall.SIGINT)
 	defer signal.Stop(signals)
 	<-signals
-	p.close()
+	p.shutdown()
 	return nil
 }
 
@@ -88,7 +95,8 @@ func startTransparentProxy(cfg EgressConfig) (*transparentProxy, error) {
 	if err := validateEgressConfig(&cfg, 1000); err != nil {
 		return nil, err
 	}
-	p := &transparentProxy{cfg: cfg}
+	ctx, cancel := context.WithCancel(context.Background())
+	p := &transparentProxy{cfg: cfg, active: make(map[net.Conn]net.Conn), ctx: ctx, cancel: cancel}
 	closeOnError := func(err error) (*transparentProxy, error) {
 		p.close()
 		return nil, err
@@ -152,7 +160,11 @@ func startTransparentProxy(cfg EgressConfig) (*transparentProxy, error) {
 
 func (p *transparentProxy) serve() {
 	for _, ln := range p.tcp {
-		go p.serveTCP(ln)
+		p.acceptWG.Add(1)
+		go func(ln net.Listener) {
+			defer p.acceptWG.Done()
+			p.serveTCP(ln)
+		}(ln)
 	}
 	for _, ln := range p.dnsTCP {
 		go p.serveDNSTCP(ln)
@@ -164,6 +176,9 @@ func (p *transparentProxy) serve() {
 }
 
 func (p *transparentProxy) close() {
+	if p.cancel != nil {
+		p.cancel()
+	}
 	for _, ln := range p.tcp {
 		_ = ln.Close()
 	}
@@ -184,11 +199,41 @@ func (p *transparentProxy) close() {
 	}
 }
 
+// shutdown closes active tunnels before waiting for their byte reports. The
+// supervisor gives the sidecar two seconds after SIGTERM before killing it.
+func (p *transparentProxy) shutdown() {
+	p.activeMu.Lock()
+	p.closing = true
+	p.activeMu.Unlock()
+	if p.cancel != nil {
+		p.cancel()
+	}
+	for _, ln := range p.tcp {
+		_ = ln.Close()
+	}
+	p.acceptWG.Wait()
+	p.activeMu.Lock()
+	var connections []net.Conn
+	for client, upstream := range p.active {
+		connections = append(connections, client)
+		if upstream != nil {
+			connections = append(connections, upstream)
+		}
+	}
+	p.activeMu.Unlock()
+	for _, conn := range connections {
+		_ = conn.Close()
+	}
+	p.connWG.Wait()
+	p.close()
+}
+
 // recordDecision appends one complete, newline-terminated egress decision record
 // to the operator decision-log opened before the privilege drop. The transparent
 // proxy is the SOLE egress decision point, so every allow/deny is recorded here
 // exactly once (the host-side proxy sees only already-allowed hosts and must stay
-// nil-logger, or every allow would double-count). The record is one Write of a
+// nil-logger, or every allow would double-count). A matching bytes record follows
+// each allow when its connection finishes. The record is one Write of a
 // full TSV line — verdict, protocol, host, port, reason — so the parent's line
 // reader never observes a torn record; decisionMu serializes concurrent
 // connection goroutines.
@@ -291,7 +336,27 @@ func (p *transparentProxy) serveTCP(ln net.Listener) {
 		if err != nil {
 			return
 		}
-		go p.handleTCP(conn)
+		p.activeMu.Lock()
+		if p.closing {
+			p.activeMu.Unlock()
+			_ = conn.Close()
+			continue
+		}
+		if p.active == nil {
+			p.active = make(map[net.Conn]net.Conn)
+		}
+		p.active[conn] = nil
+		p.connWG.Add(1)
+		p.activeMu.Unlock()
+		go func() {
+			defer func() {
+				p.activeMu.Lock()
+				delete(p.active, conn)
+				p.activeMu.Unlock()
+				p.connWG.Done()
+			}()
+			p.handleTCP(conn)
+		}()
 	}
 }
 
@@ -317,6 +382,14 @@ func (p *transparentProxy) handleTCP(conn net.Conn) {
 func (p *transparentProxy) handleTLS(client net.Conn) {
 	hello, host, err := readTLSClientHello(client)
 	if err != nil || !network.IsAllowedHost(p.cfg.Allow, false, host) {
+		if err != nil {
+			p.activeMu.Lock()
+			closing := p.closing
+			p.activeMu.Unlock()
+			if closing {
+				return
+			}
+		}
 		recordTransparentDeny("tls", host, "disallowed_sni")
 		// Best-effort: the connection is refused regardless, so a lost deny record
 		// leaks no traffic (unlike the allow path below, which must fail closed).
@@ -334,7 +407,9 @@ func (p *transparentProxy) handleTLS(client net.Conn) {
 		fmt.Fprintln(os.Stderr, "NockLock: transparent TLS connection refused (decision record could not be written)")
 		return
 	}
-	upstream, err := openHostTunnel(client, p.cfg.Bridge.hostProxyAddr(), host, "443")
+	var sent int64
+	defer p.recordBytesOut("tls", host, "443", &sent)
+	upstream, err := p.openHostTunnel(client, p.cfg.Bridge.hostProxyAddr(), host, "443")
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "NockLock: transparent TLS upstream tunnel failed")
 		return
@@ -343,10 +418,12 @@ func (p *transparentProxy) handleTLS(client net.Conn) {
 	if err := client.SetDeadline(time.Time{}); err != nil {
 		return
 	}
-	if _, err := upstream.Write(hello); err != nil {
+	n, err := upstream.Write(hello)
+	sent += int64(n)
+	if err != nil {
 		return
 	}
-	pipeConnections(client, upstream)
+	sent += pipeConnections(client, upstream)
 }
 
 func (p *transparentProxy) handleHTTP(client net.Conn) {
@@ -372,7 +449,9 @@ func (p *transparentProxy) handleHTTP(client net.Conn) {
 		_, _ = io.WriteString(client, "HTTP/1.1 503 Service Unavailable\r\nConnection: close\r\n\r\n")
 		return
 	}
-	upstream, err := openHostTunnel(client, p.cfg.Bridge.hostProxyAddr(), host, "80")
+	var sent int64
+	defer p.recordBytesOut("http", host, "80", &sent)
+	upstream, err := p.openHostTunnel(client, p.cfg.Bridge.hostProxyAddr(), host, "80")
 	if err != nil {
 		_, _ = io.WriteString(client, "HTTP/1.1 502 Bad Gateway\r\nConnection: close\r\n\r\n")
 		return
@@ -381,10 +460,19 @@ func (p *transparentProxy) handleHTTP(client net.Conn) {
 	if err := client.SetDeadline(time.Time{}); err != nil {
 		return
 	}
-	if _, err := upstream.Write(header); err != nil {
+	n, err := upstream.Write(header)
+	sent += int64(n)
+	if err != nil {
 		return
 	}
-	pipeConnections(client, upstream)
+	sent += pipeConnections(client, upstream)
+}
+
+func (p *transparentProxy) recordBytesOut(protocol, host, port string, sent *int64) {
+	if err := p.recordDecision("bytes", protocol, host, port, strconv.FormatInt(*sent, 10)); err != nil {
+		fmt.Fprintf(os.Stderr, "NockLock: fatal: egress bytes-out audit failed: %v\n", err)
+		os.Exit(2)
+	}
 }
 
 func recordTransparentDeny(protocol, host, reason string) {
@@ -564,11 +652,25 @@ func parseServerNameExtension(b []byte) (string, bool, error) {
 	return "", true, fmt.Errorf("TLS ClientHello has no DNS SNI")
 }
 
-func openHostTunnel(_ net.Conn, proxyAddr, host, port string) (net.Conn, error) {
-	upstream, err := (&net.Dialer{Timeout: 10 * time.Second}).DialContext(context.Background(), "tcp", proxyAddr)
+func (p *transparentProxy) openHostTunnel(client net.Conn, proxyAddr, host, port string) (net.Conn, error) {
+	ctx := p.ctx
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	upstream, err := (&net.Dialer{Timeout: 10 * time.Second}).DialContext(ctx, "tcp", proxyAddr)
 	if err != nil {
 		return nil, err
 	}
+	p.activeMu.Lock()
+	if p.closing {
+		p.activeMu.Unlock()
+		_ = upstream.Close()
+		return nil, net.ErrClosed
+	}
+	if p.active != nil {
+		p.active[client] = upstream
+	}
+	p.activeMu.Unlock()
 	target := net.JoinHostPort(host, port)
 	if _, err := fmt.Fprintf(upstream, "CONNECT %s HTTP/1.1\r\nHost: %s\r\n\r\n", target, target); err != nil {
 		_ = upstream.Close()
@@ -605,20 +707,19 @@ func closeWrite(conn net.Conn) {
 	}
 }
 
-func pipeConnections(a, b net.Conn) {
-	done := make(chan struct{}, 2)
+func pipeConnections(a, b net.Conn) int64 {
+	done := make(chan int64, 2)
 	go func() {
-		_, _ = io.Copy(b, a)
+		n, _ := io.Copy(b, a)
 		closeWrite(b)
-		done <- struct{}{}
+		done <- n
 	}()
 	go func() {
 		_, _ = io.Copy(a, b)
 		closeWrite(a)
-		done <- struct{}{}
+		done <- 0
 	}()
-	<-done
-	<-done
+	return <-done + <-done
 }
 
 func (p *transparentProxy) serveDNSUDP(conn net.PacketConn) {

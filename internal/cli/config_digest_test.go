@@ -181,6 +181,8 @@ var configDigestPolicyFields = map[string]string{
 	"Filesystem.Mode":                    "filesystem.mode",
 	"Filesystem.LinuxEnforcement":        "filesystem.linux_enforcement",
 	"Filesystem.Allow":                   "filesystem.allow",
+	"Filesystem.ReadAllow":               "filesystem.read_allow",
+	"Filesystem.ConfineHomeReads":        "filesystem.confine_home_reads",
 	"Filesystem.AllowRW":                 "filesystem.allow_rw",
 	"Filesystem.Deny":                    "filesystem.deny",
 	"Filesystem.MacOSAllowUnfenced":      "filesystem.macos_allow_unfenced",
@@ -221,6 +223,8 @@ var configDigestNotSecurityRelevantFields = map[string]struct{}{
 
 func TestConfigDigestCoversTopLevelConfigFields(t *testing.T) {
 	cfg := config.DefaultConfig()
+	cfg.Filesystem.ConfineHomeReads = true
+	cfg.Filesystem.ReadAllow = []string{filepath.Join(t.TempDir(), "shared")}
 	cfg.Network.RequireDurableAudit = true
 	// network.lookback is omitted from the policy when empty, so seed a rule.
 	cfg.Network.Lookback = []config.LookbackRule{{Name: "r", On: "file_blocked", Within: "10m", Then: "deny_egress"}}
@@ -1321,5 +1325,32 @@ func TestConfigDigestCoversDurableAudit(t *testing.T) {
 	after := record()
 	if before.Digest == after.Digest || !jsonPathPresent(after.Policy, "network.require_durable_audit") {
 		t.Fatal("enabled gate missing from signed policy")
+	}
+}
+
+func TestConfigDigestHomeReadSettingsPreserveDefaultDigest(t *testing.T) {
+	project := t.TempDir()
+	cfg := config.DefaultConfig()
+	cfg.Filesystem.Root = project
+	record := func() configDigestRecord {
+		r, err := newConfigDigestRecord(&cfg, filepath.Join(project, config.Dir, config.File), filepath.Join(project, "events.db"), "proxy")
+		if err != nil {
+			t.Fatal(err)
+		}
+		return r
+	}
+	before := record()
+	if jsonPathPresent(before.Policy, "filesystem.confine_home_reads") || jsonPathPresent(before.Policy, "filesystem.read_allow") {
+		t.Fatal("default-off home read settings changed the historical digest")
+	}
+	cfg.Filesystem.ConfineHomeReads = true
+	withMode := record()
+	if before.Digest == withMode.Digest || !jsonPathPresent(withMode.Policy, "filesystem.confine_home_reads") {
+		t.Fatal("enabled home read mode missing from signed policy")
+	}
+	cfg.Filesystem.ReadAllow = []string{filepath.Join(project, "shared")}
+	withGrant := record()
+	if withMode.Digest == withGrant.Digest || !jsonPathPresent(withGrant.Policy, "filesystem.read_allow") {
+		t.Fatal("home read grant missing from signed policy")
 	}
 }

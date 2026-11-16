@@ -29,7 +29,8 @@ func DefaultConfig() Config {
 				"/etc/pki/tls/certs/",
 				"/etc/pki/ca-trust/extracted/",
 			},
-			AllowRW: []string{},
+			AllowRW:   []string{},
+			ReadAllow: []string{},
 			Deny: []string{
 				"~/.ssh/",
 				"~/.aws/",
@@ -116,8 +117,16 @@ allow = [
     "/etc/pki/tls/certs/",
     "/etc/pki/ca-trust/extracted/",
 ]
-# Linux only: paths explicitly granted read-write access. allow stays read-only.
+# Linux: these paths are read-write; allow stays read-only. macOS: with confine_home_reads
+# on, they are read grants, and write grants only inside the home's Library/Caches.
+# With it off, they add no grant.
 allow_rw = []
+# macOS only: explicit home read grants when confine_home_reads is true.
+read_allow = []
+# macOS only: deny data reads under the invoking UID's home outside root, allow,
+# allow_rw, read_allow and the developer-tool cache folders. Metadata queries
+# remain available. Default off.
+confine_home_reads = false
 deny = [
     "~/.ssh/",
     "~/.aws/",

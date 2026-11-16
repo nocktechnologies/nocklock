@@ -1,6 +1,6 @@
 # NockLock 1.0 roadmap
 
-Updated 2026-11-12. Released baseline: `v1.0.0`. Release history is in `CHANGELOG.md`. The planned 0.7.1 step was split across 0.8.0 and 0.9.0; there is no `v0.7.1` tag. A gap is closed only when its fix is released from `main`, the red-team case runs in CI with an allowed-action negative control, and the docs describe the tested boundary.
+Updated 2026-11-16. Current release line: v1.1.0 (cut 2026-11-16 from v1.0.0). Release history is in `CHANGELOG.md`. The planned 0.7.1 step was split across 0.8.0 and 0.9.0; there is no `v0.7.1` tag. A gap is closed only when its fix is released from `main`, the red-team case runs in CI with an allowed-action negative control, and the docs describe the tested boundary.
 
 1.0 released 2026-11-12 with the signed release-evidence gate for Landlock ABI 9 and the CLI compatibility promise in effect. Signed Linux installer assets for earlier releases have fresh-host, cross-version and broader-network evidence. Ubuntu 24.04 amd64 with glibc 2.39 is the supported Linux installation target; other distributions, Linux arm64 and musl remain outside that support matrix.
 
@@ -19,7 +19,7 @@ All four bars are complete. The public CLI, config and exit-code promise in `doc
 
 ## Later: outside the 1.0 bar
 
-- macOS read confinement outside `filesystem.root` (`ARCHITECTURE.md`)
+- macOS home read fence shipped opt-in; Endpoint Security still later (`ARCHITECTURE.md`)
 - A Windows fence (`docs/design/windows-feasibility.md`)
 - Look-back rules beyond slice 1 (`docs/design/look-back-rules.md`)
 - Default off-box audit anchoring (`docs/how-it-works/audit-log.md`); per-chain v2 anchors shipped in v0.10.0 and in-run checkpoints in v0.12.0, both opt-in

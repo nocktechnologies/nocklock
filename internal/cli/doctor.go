@@ -463,6 +463,9 @@ func filesystemBackendErr(caps doctorCapabilities) error {
 }
 
 func filesystemDoctorCheck(cfg *config.Config, caps doctorCapabilities) doctorCheck {
+	if caps.goos == "darwin" && cfg.Filesystem.ConfineHomeReads && cfg.Filesystem.Root == "" {
+		return doctorCriticalCheck("Fences", "filesystem", "will-refuse", "filesystem.confine_home_reads requires filesystem.root on macOS", "set filesystem.root to confine home reads")
+	}
 	if cfg.Filesystem.Root == "" {
 		return doctorCheck{
 			Group:    "Fences",
@@ -484,7 +487,10 @@ func filesystemDoctorCheck(cfg *config.Config, caps doctorCapabilities) doctorCh
 				fmt.Sprintf("Filesystem fence configured, but macOS Seatbelt is unavailable: %v", err),
 				"install or restore sandbox-exec; wrap will otherwise refuse to start")
 		}
-		return doctorOKCheck("Fences", "filesystem", "enforceable", "Filesystem fence enforceable with macOS Seatbelt root-write confinement and sensitive-path denies.")
+		if cfg.Filesystem.ConfineHomeReads {
+			return doctorOKCheck("Fences", "filesystem", "enforceable", "Filesystem fence enforceable with macOS Seatbelt root-write confinement, opt-in home data-read confinement, and sensitive-path denies.")
+		}
+		return doctorOKCheck("Fences", "filesystem", "enforceable", "Filesystem fence enforceable with macOS Seatbelt root-write confinement and sensitive-path denies; home data-read confinement is off.")
 	case "linux":
 		if err := filesystemBackendErr(caps); err != nil {
 			return doctorCriticalCheck("Fences", "filesystem", "configured-but-backend-missing",

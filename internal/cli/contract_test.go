@@ -843,6 +843,9 @@ func derefType(t reflect.Type) reflect.Type {
 }
 
 func TestCLIContractConfigSchema(t *testing.T) {
+	if config.DefaultConfig().Filesystem.ConfineHomeReads {
+		t.Fatal("filesystem.confine_home_reads must remain opt-in")
+	}
 	keys := configKeys("", reflect.TypeOf(config.Config{}))
 	checkContractGolden(t, "config-schema.golden", strings.Join(keys, "\n")+"\n")
 

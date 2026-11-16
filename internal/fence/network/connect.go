@@ -1,6 +1,7 @@
 package network
 
 import (
+	"context"
 	"fmt"
 	"io"
 	"net"
@@ -21,6 +22,17 @@ import (
 //   - Both copy goroutines are joined before returning; connections are closed when
 //     either direction finishes so the other goroutine is not left blocked.
 func (p *ProxyServer) handleConnect(w http.ResponseWriter, r *http.Request) {
+	p.connectMu.Lock()
+	if p.connectClosing {
+		p.connectMu.Unlock()
+		http.Error(w, "NockLock: proxy is stopping", http.StatusServiceUnavailable)
+		return
+	}
+	p.connectWG.Add(1)
+	stopCtx := p.connectCtx
+	p.connectMu.Unlock()
+	defer p.connectWG.Done()
+
 	host := r.Host
 	if h, _, err := net.SplitHostPort(r.Host); err == nil {
 		host = h
@@ -38,7 +50,15 @@ func (p *ProxyServer) handleConnect(w http.ResponseWriter, r *http.Request) {
 
 	// Dial the destination before hijacking so we can respond with 502 cleanly on failure.
 	// p.dial defaults to safeDial, which validates the resolved IP is not loopback/private.
-	upstream, err := p.dial(r.Context(), "tcp", r.Host)
+	dialCtx := r.Context()
+	if stopCtx != nil {
+		ctx, cancel := context.WithCancel(dialCtx)
+		stopCancel := context.AfterFunc(stopCtx, cancel)
+		defer stopCancel()
+		defer cancel()
+		dialCtx = ctx
+	}
+	upstream, err := p.dial(dialCtx, "tcp", r.Host)
 	if err != nil {
 		p.logEvent(logging.EventNetworkError, r.Method, host, false)
 		// Return a generic error — do not leak the resolved IP or internal details.
@@ -58,6 +78,18 @@ func (p *ProxyServer) handleConnect(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	defer clientConn.Close()
+	p.connectMu.Lock()
+	if p.connectClosing {
+		p.connectMu.Unlock()
+		return
+	}
+	p.connects[clientConn] = upstream
+	p.connectMu.Unlock()
+	defer func() {
+		p.connectMu.Lock()
+		delete(p.connects, clientConn)
+		p.connectMu.Unlock()
+	}()
 
 	// Evaluation runs after Hijack, under the look-back mutex: the connection
 	// is either refused here or registered before the 200 line is written, so a

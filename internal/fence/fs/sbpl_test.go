@@ -2,10 +2,169 @@ package fs
 
 import (
 	"os"
+	"os/user"
 	"path/filepath"
+	"slices"
+	"strconv"
 	"strings"
 	"testing"
+
+	"github.com/nocktechnologies/nocklock/internal/config"
 )
+
+func TestClaudeCodePresetConfinedHomeCacheProfile(t *testing.T) {
+	account, err := user.LookupId(strconv.Itoa(os.Getuid()))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("HOME", account.HomeDir)
+	cfg, err := config.LoadProfile("claude-code")
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg.Filesystem.Root = t.TempDir()
+	cfg.Filesystem.ConfineHomeReads = true
+	if len(cfg.Filesystem.AllowRW) != 0 {
+		t.Fatalf("cross-platform preset must not grant a macOS cache path: %v", cfg.Filesystem.AllowRW)
+	}
+	fc, err := ProcessEffectiveConfig(cfg, "darwin")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !fc.ClaudeCodeCache {
+		t.Fatal("macOS confined Claude Code preset did not enable its cache")
+	}
+	profile, _, err := GenerateEffectiveProfile(fc, false, "", 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cache, err := canonicalizeForProfile(filepath.Join(account.HomeDir, "Library", "Caches"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	readStart := strings.Index(profile, "(allow file-read-data\n")
+	writeStart := strings.Index(profile, "(allow file-write*\n")
+	if readStart < 0 || writeStart < 0 || !strings.Contains(profile, "(deny file-read-data (subpath "+sbplString(fc.HomeReadRoot)+")") || !strings.Contains(profile, "(deny file-write*") {
+		t.Fatalf("missing home read or write grant in profile:\n%s", profile)
+	}
+	readEnd := strings.Index(profile[readStart:], "\n)\n") + readStart
+	writeEnd := strings.Index(profile[writeStart:], "    (literal \"/dev/null\")") + writeStart
+	if readEnd < readStart || writeEnd < writeStart {
+		t.Fatalf("missing home read or write grant in profile:\n%s", profile)
+	}
+	readGrants, writeGrants := profile[readStart:readEnd], profile[writeStart:writeEnd]
+	for _, grants := range []string{readGrants, writeGrants} {
+		if !strings.Contains(grants, "(subpath "+sbplString(filepath.Join(cache, "claude-cli-nodejs"))+")") {
+			t.Fatalf("Claude Code cache is not granted for both read and write:\n%s", profile)
+		}
+		for _, path := range []string{fc.HomeReadRoot, filepath.Join(fc.HomeReadRoot, "Library"), cache, filepath.Join(cache, "unlisted-app")} {
+			if strings.Contains(grants, "(subpath "+sbplString(path)+")") {
+				t.Fatalf("unlisted cache path %q was granted:\n%s", path, profile)
+			}
+		}
+	}
+	linux, err := ProcessEffectiveConfig(cfg, "linux")
+	if err != nil || linux.ClaudeCodeCache {
+		t.Fatalf("Linux preset cache grant = %v, %v; want disabled", linux, err)
+	}
+	cfg.Filesystem.ConfineHomeReads = false
+	unconfined, err := ProcessEffectiveConfig(cfg, "darwin")
+	if err != nil || unconfined.ClaudeCodeCache {
+		t.Fatalf("unconfined macOS preset cache grant = %v, %v; want disabled", unconfined, err)
+	}
+	cfg.Filesystem.ConfineHomeReads = true
+	cfg.ProfileName = "codex"
+	cfg.Filesystem.Allow = nil // Claude Code's own login store is not available to another preset.
+	otherRoot, err := os.MkdirTemp("/tmp", "nocklock-other-preset-")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer os.RemoveAll(otherRoot)
+	cfg.Filesystem.Root = otherRoot
+	otherPreset, err := ProcessEffectiveConfig(cfg, "darwin")
+	if err != nil || otherPreset.ClaudeCodeCache {
+		t.Fatalf("other macOS preset cache grant = %v, %v; want disabled", otherPreset, err)
+	}
+}
+
+func TestClaudeCodeRuntimeConfinedHomeCacheProfile(t *testing.T) {
+	account, err := user.LookupId(strconv.Itoa(os.Getuid()))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("HOME", account.HomeDir)
+	cache, err := canonicalizeForProfile(filepath.Join(account.HomeDir, "Library", "Caches", "claude-cli-nodejs"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	grant := "(subpath " + sbplString(cache) + ")"
+	for _, tc := range []struct {
+		name, profile, command string
+		wantGrants             int
+	}{
+		{name: "profile route", profile: "claude-code", command: "/bin/sh", wantGrants: 2},
+		{name: "wrapped claude route", command: "/usr/local/bin/claude", wantGrants: 2},
+		{name: "other command", command: "/bin/sh"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			cfg := config.DefaultConfig()
+			cfg.Project.Runtime = "claude-code"
+			cfg.ProfileName = tc.profile
+			cfg.CommandRuntime = config.RuntimeForCommand(tc.command)
+			root, err := os.MkdirTemp("/tmp", "nocklock-claude-cache-")
+			if err != nil {
+				t.Fatal(err)
+			}
+			t.Cleanup(func() { os.RemoveAll(root) })
+			cfg.Filesystem.Root = root
+			cfg.Filesystem.ConfineHomeReads = true
+			fc, err := ProcessEffectiveConfig(&cfg, "darwin")
+			if err != nil {
+				t.Fatal(err)
+			}
+			if fc.ClaudeCodeCache != (tc.wantGrants != 0) {
+				t.Fatalf("Claude Code cache enabled = %v, want %v", fc.ClaudeCodeCache, tc.wantGrants != 0)
+			}
+			profile, _, err := GenerateEffectiveProfile(fc, false, "", 0)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if got := strings.Count(profile, grant); got != tc.wantGrants {
+				t.Fatalf("Claude Code cache read/write grants = %d, want %d", got, tc.wantGrants)
+			}
+		})
+	}
+}
+
+func TestClaudeCodeCacheGrantBeforeDirectoryExists(t *testing.T) {
+	home := t.TempDir()
+	home, err := filepath.EvalSymlinks(home)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cache := filepath.Join(home, "Library", "Caches")
+	if err := os.MkdirAll(cache, 0700); err != nil {
+		t.Fatal(err)
+	}
+	target := filepath.Join(cache, "claude-cli-nodejs")
+	if _, err := os.Lstat(target); !os.IsNotExist(err) {
+		t.Fatalf("cache folder must start absent: %v", err)
+	}
+	_, paths, err := developerToolCachePaths(home, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !slices.Contains(paths, target) {
+		t.Fatalf("missing first-run cache grant %q in %v", target, paths)
+	}
+	_, paths, err = developerToolCachePaths(home, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if slices.Contains(paths, target) {
+		t.Fatalf("Claude Code cache granted without the preset: %v", paths)
+	}
+}
 
 func TestGenerateProfile_EmptyErrors(t *testing.T) {
 	if _, err := GenerateProfile(nil); err == nil {
@@ -115,6 +274,159 @@ func TestGenerateProfileAndCountReportsDistinctCanonicalPaths(t *testing.T) {
 	}
 	if count != 2 {
 		t.Fatalf("sensitive path count = %d, want 2 distinct canonical paths", count)
+	}
+}
+
+func TestGenerateEffectiveProfileConfinesHomeReadsAfterGrants(t *testing.T) {
+	home := t.TempDir()
+	root := filepath.Join(home, "project")
+	cacheDir := filepath.Join(home, "Library", "Caches")
+	grant := filepath.Join(cacheDir, "shared")
+	allowPath := filepath.Join(cacheDir, "cache")
+	allowRWPath := filepath.Join(cacheDir, "agent")
+	secret := filepath.Join(root, "secret")
+	for _, path := range []string{root, grant, allowPath, allowRWPath, secret} {
+		if err := os.MkdirAll(path, 0700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	gitConfig := filepath.Join(home, ".gitconfig")
+	if err := os.WriteFile(gitConfig, []byte("[user]\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	fc := &FenceConfig{Root: root, Mode: "read-write", DenyPaths: []string{secret}, DenyPrefixes: []string{filepath.Join(root, "credential-")}, HomeReadRoot: home, ReadAllowPaths: []string{grant}, AllowPaths: []string{allowPath}, AllowRWPaths: []string{allowRWPath}}
+	profile, _, err := GenerateEffectiveProfile(fc, false, "test-tag", 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	deny := strings.Index(profile, "(deny file-read-data")
+	allow := strings.Index(profile, "(allow file-read-data")
+	sensitive := strings.LastIndex(profile, "(deny file-read* file-write*\n")
+	if deny < 0 || allow < deny || sensitive < allow {
+		t.Fatalf("home-read and sensitive rule order is wrong:\n%s", profile)
+	}
+	if exact := strings.LastIndex(profile, "(deny file-read-data\n"); exact < sensitive {
+		t.Fatalf("exact sensitive data-read deny must follow the root grant and broad deny:\n%s", profile)
+	}
+	readBlock := profile[allow:sensitive]
+	for _, path := range []string{root, grant, allowPath, allowRWPath} {
+		canonical, err := canonicalizeForProfile(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !strings.Contains(readBlock, "(subpath "+sbplString(canonical)+")") {
+			t.Fatalf("missing home-read grant for %q in profile:\n%s", canonical, profile)
+		}
+	}
+	canonicalCache, err := canonicalizeForProfile(cacheDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(readBlock, "(subpath "+sbplString(canonicalCache)+")") {
+		t.Fatalf("whole cache directory is readable in profile:\n%s", profile)
+	}
+	writeStart := strings.Index(profile, "(allow file-write*\n")
+	writeEnd := strings.Index(profile[writeStart:], "    (literal \"/dev/null\")") + writeStart
+	writeBlock := profile[writeStart:writeEnd]
+	if strings.Contains(writeBlock, "(subpath "+sbplString(canonicalCache)+")") {
+		t.Fatalf("whole cache directory is writable in profile:\n%s", profile)
+	}
+	canonicalAllowRW, err := canonicalizeForProfile(allowRWPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(writeBlock, "(subpath "+sbplString(canonicalAllowRW)+")") {
+		t.Fatalf("missing allow_rw cache write grant for %q in profile:\n%s", canonicalAllowRW, profile)
+	}
+	for _, path := range []string{grant, allowPath} {
+		canonical, err := canonicalizeForProfile(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if strings.Contains(writeBlock, "(subpath "+sbplString(canonical)+")") {
+			t.Fatalf("read-only cache path %q is writable in profile:\n%s", canonical, profile)
+		}
+	}
+	for _, name := range []string{"go-build", "pip", "pnpm", "Yarn", "node-gyp", "ms-playwright", "deno", "typescript", "Homebrew"} {
+		path := filepath.Join(canonicalCache, name)
+		if !strings.Contains(readBlock, "(subpath "+sbplString(path)+")") {
+			t.Fatalf("missing built-in cache read grant for %q in profile:\n%s", path, profile)
+		}
+		if !strings.Contains(writeBlock, "(subpath "+sbplString(path)+")") {
+			t.Fatalf("missing built-in cache write grant for %q in profile:\n%s", path, profile)
+		}
+	}
+	if strings.Contains(readBlock, "(subpath "+sbplString(filepath.Join(canonicalCache, "unlisted-app"))+")") {
+		t.Fatalf("unlisted app cache is readable in profile:\n%s", profile)
+	}
+	if strings.Contains(writeBlock, "(subpath "+sbplString(filepath.Join(canonicalCache, "unlisted-app"))+")") {
+		t.Fatalf("unlisted app cache is writable in profile:\n%s", profile)
+	}
+	canonicalGitConfig, err := canonicalizeForProfile(gitConfig)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(profile, "(literal "+sbplString(canonicalGitConfig)+")") || strings.Contains(profile, "(subpath "+sbplString(canonicalGitConfig)+")") {
+		t.Fatalf("home Git config must have only a literal read grant:\n%s", profile)
+	}
+	for _, pattern := range []string{
+		"^" + caseFoldPattern(secret) + "(/|$)",
+		"^" + caseFoldPattern(fc.DenyPrefixes[0]) + ".*",
+	} {
+		if !strings.Contains(profile, "(deny file-read-data (regex #"+sbplString(pattern)+")") {
+			t.Fatalf("missing exact data-read deny for %q:\n%s", pattern, profile)
+		}
+	}
+	fc.HomeReadRoot = ""
+	profile, _, err = GenerateEffectiveProfile(fc, false, "", 0)
+	if err != nil || strings.Contains(profile, "(deny file-read-data") {
+		t.Fatalf("default-off profile unexpectedly confines reads: %v\n%s", err, profile)
+	}
+}
+
+func TestGenerateEffectiveProfileRejectsDirectoryGitConfig(t *testing.T) {
+	home := t.TempDir()
+	root := filepath.Join(home, "project")
+	secret := filepath.Join(root, "secret")
+	for _, path := range []string{root, secret} {
+		if err := os.Mkdir(path, 0700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	fc := &FenceConfig{Root: root, Mode: "read-write", DenyPaths: []string{secret}, HomeReadRoot: home}
+	for _, path := range []string{home, root} {
+		if err := os.Symlink(path, filepath.Join(home, ".gitconfig")); err != nil {
+			t.Fatal(err)
+		}
+		if _, _, err := GenerateEffectiveProfile(fc, false, "", 0); err == nil {
+			t.Fatalf("directory Git config pointing to %q must refuse", path)
+		}
+		if err := os.Remove(filepath.Join(home, ".gitconfig")); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if _, _, err := GenerateEffectiveProfile(fc, false, "", 0); err != nil {
+		t.Fatalf("missing Git config must remain optional: %v", err)
+	}
+}
+
+func TestGenerateEffectiveProfileRejectsDanglingCacheSymlink(t *testing.T) {
+	home := t.TempDir()
+	root := filepath.Join(home, "project")
+	if err := os.Mkdir(root, 0700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Mkdir(filepath.Join(home, "Library"), 0700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(filepath.Join(home, "missing"), filepath.Join(home, "Library", "Caches")); err != nil {
+		t.Fatal(err)
+	}
+	_, _, err := GenerateEffectiveProfile(&FenceConfig{
+		Root: root, Mode: "read-write", DenyPaths: []string{filepath.Join(home, "secret")}, HomeReadRoot: home,
+	}, false, "", 0)
+	if err == nil {
+		t.Fatal("dangling user cache symlink did not refuse the home-read profile")
 	}
 }
 

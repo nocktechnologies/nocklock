@@ -7,11 +7,17 @@ Citations name source files at `v0.9.0` (`f2b0d04`) (no line numbers, so they do
 
 ## Optional durable audit gate
 
-Set `[network] require_durable_audit = true` to require a signed `network_intent` row and signed chain head to commit before the explicit proxy attempts an allowed HTTP request or CONNECT tunnel. It defaults to `false`; ordinary allowed-event telemetry remains best effort. The gate runs before dialing, and before forwarding HTTP over an existing pooled connection. The row records method and destination (including port), not request contents or credentials. It authorizes an attempt, not proof of delivery: DNS, SSRF checks, look-back rules, connection setup or the upstream can still refuse afterward.
+Set `[network] require_durable_audit = true` to require a signed `network_intent` row and signed chain head to commit before the explicit proxy attempts an allowed HTTP request or CONNECT tunnel. It defaults to `false`; ordinary allowed-decision telemetry remains best effort, while bytes-out rows are required at connection close. The gate runs before dialing, and before forwarding HTTP over an existing pooled connection. The row records method and destination (including port), not request contents or credentials. It authorizes an attempt, not proof of delivery: DNS, SSRF checks, look-back rules, connection setup or the upstream can still refuse afterward.
 
 An unavailable logger, missing signer or failed transaction refuses the request with HTTP 503 and makes `wrap` cancel the child and return exit 2. The write uses SQLite WAL with `synchronous=FULL` on the transaction's connection and requests `fullfsync` on macOS. This adds synchronous storage latency; durability depends on the filesystem and device honoring sync. It does not require a remote anchor acknowledgment.
 
 This gate covers the explicit HTTP/CONNECT proxy only. `allow_all = true` and `--net-fence=netns` are refused when it is enabled: the netns decision channel is asynchronous. In `ADVISORY` mode a client can still bypass the proxy; use `require_enforced = true` if that is unacceptable. Existing platform limitations still apply. HTTPS remains opaque: one intent authorizes the CONNECT tunnel, not every encrypted request or byte inside it, and the gate does not continuously reauthorize established tunnels.
+
+## Allowed-host bytes out
+
+For each completed upstream connection, the proxy writes a signed `network_bytes_out` row with `host`, `bytes_out` for that connection, and cumulative `session_bytes_out` for that host. `nocklock log --session <id>` lists the rows; the latest row for each host is its session total. The count is bytes accepted by the upstream socket, including HTTP headers or a TLS ClientHello, without reading request bodies or decrypting TLS. Linux netns mode reports the same count through its decision stream and writes a zero-byte row for an allowed connection whose upstream dial fails. The direct proxy has no bytes-out row when dialing fails.
+
+When one host's session total exceeds 100 MiB, NockLock adds one signed `network_outlier` row with `action=alert_only`. It appears in `log --blocked` and OCSF as a detection finding; the connection continues. The fixed threshold is a triage signal, not a learned baseline or proof of exfiltration. Bytes sent before a connection closes are reported at close. A failed bytes-out audit write makes the run fail, but cannot recall bytes already sent. `allow_all`, proxy bypass in `ADVISORY`, and packets dropped by the kernel are not measured.
 
 ## Egress levels
 The level is computed once by `effectiveEgressLevel` (`internal/cli/egress_level.go`), printed in the `wrap` banner and signed into the audit chain.

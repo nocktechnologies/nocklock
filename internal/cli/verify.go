@@ -708,6 +708,7 @@ func verifySkipReason(fence string, cfg *config.Config, caps doctorCapabilities)
 func cloneVerifyConfig(cfg *config.Config) config.Config {
 	out := *cfg
 	out.Filesystem.Allow = append([]string(nil), cfg.Filesystem.Allow...)
+	out.Filesystem.ReadAllow = append([]string(nil), cfg.Filesystem.ReadAllow...)
 	out.Filesystem.AllowRW = append([]string(nil), cfg.Filesystem.AllowRW...)
 	out.Filesystem.Deny = append([]string(nil), cfg.Filesystem.Deny...)
 	out.Network.Allow = append([]string(nil), cfg.Network.Allow...)

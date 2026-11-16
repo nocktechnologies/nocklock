@@ -4,6 +4,28 @@ All notable changes to NockLock will be documented in this file.
 
 ## [Unreleased]
 
+## [1.1.0] - 2026-11-16
+
+### Fixed
+
+- On macOS, Claude Code grants its `Library/Caches/claude-cli-nodejs` folder read and write access under `filesystem.confine_home_reads` via either `--profile claude-code` or `project.runtime = "claude-code"` with `wrap -- claude`, including before the folder exists. Without that profile, other commands do not gain the grant; unlisted caches and Linux preset startup are unchanged.
+- On macOS with `filesystem.confine_home_reads` enabled, the documented developer-tool cache folders beneath the passwd home's `Library/Caches` directory remain readable after writes; other app caches are neither readable nor writable unless explicitly allowed, and sensitive paths stay denied.
+- On macOS with `filesystem.confine_home_reads` enabled, explicit `filesystem.allow` and `allow_rw` paths beneath the passwd home remain readable; sensitive paths inside them stay denied.
+
+### Changed
+
+- Exit code 2 has a new cause. 1.0 documented rows for allowed network requests as best effort. In 1.1 the `network_bytes_out` row written when an allowed connection closes, and the `network_outlier` row, are required: if NockLock cannot write either to the audit log, `wrap` exits 2 and stops the child, as it already does for blocked rows. Upgrade: a run where a `network_bytes_out` or `network_outlier` write fails while the other required rows succeed, for example under audit write-lock contention, now exits 2 and stops the child, possibly mid-run; 1.0 wrote no such rows, so the same run passed.
+
+### Added
+
+- Add default-off `filesystem.confine_home_reads` on macOS. It confines file data reads under the invoking UID's home to `filesystem.root`, explicit `filesystem.allow`, `filesystem.allow_rw` and `filesystem.read_allow` paths, and `.gitconfig`; metadata queries remain available, while sensitive paths still deny reads and writes. With the option on, the passwd home's developer-tool `Library/Caches` folders (non-symlink) are readable, and the user cache write grant narrows to those folders plus each `filesystem.allow_rw` entry inside that `Library/Caches` directory. The signed fence-state row and `doctor` show the mode. Other volumes and shared/temp directories remain outside this read boundary.
+
+- Record bytes written upstream per allowed host and session in signed `network_bytes_out` rows. A host exceeding 100 MiB in one session emits one alert-only `network_outlier` row, visible with `log --blocked`; traffic is not blocked. The proxy and Linux netns modes both report wire bytes without inspecting TLS or request bodies. Both rows are required audit rows; see Changed for their exit 2 behavior.
+
+### Tests
+
+- The macOS `filesystem.confine_home_reads` wrap test reads an ungranted home file through an alternate-case spelling of the passwd home and asserts the file's content stays out of the child's output.
+
 ## [1.0.0] - 2026-11-12
 
 NockLock 1.0.0 is the first stable release. `docs/reference/cli.md` is the compatibility promise for the public CLI, config and exit codes.

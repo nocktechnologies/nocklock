@@ -163,6 +163,12 @@ func canonicalPolicy(cfg *config.Config, configPath, dbPath, networkFenceMode st
 		"macos_allow_unfenced": cfg.Filesystem.MacOSAllowUnfenced,
 		"hardened":             cfg.Filesystem.Hardened,
 	}
+	if len(cfg.Filesystem.ReadAllow) > 0 {
+		filesystem["read_allow"] = canonicalConfigPaths(projectRoot, cfg.Filesystem.ReadAllow)
+	}
+	if cfg.Filesystem.ConfineHomeReads {
+		filesystem["confine_home_reads"] = true
+	}
 	if cfg.Filesystem.Root != "" {
 		resolved, err := fsfence.ProcessEffectiveConfig(cfg, runtime.GOOS)
 		if err != nil {
@@ -171,6 +177,9 @@ func canonicalPolicy(cfg *config.Config, configPath, dbPath, networkFenceMode st
 		filesystem["root"] = resolved.Root
 		filesystem["mode"] = resolved.Mode
 		filesystem["allow"] = canonicalStrings(resolved.AllowPaths)
+		if len(resolved.ReadAllowPaths) > 0 {
+			filesystem["read_allow"] = canonicalStrings(resolved.ReadAllowPaths)
+		}
 		filesystem["allow_rw"] = canonicalStrings(resolved.AllowRWPaths)
 		// Hash the prefix rules, not the home entries they matched at launch.
 		filesystem["deny"] = canonicalStrings(resolved.PolicyDenyPaths())

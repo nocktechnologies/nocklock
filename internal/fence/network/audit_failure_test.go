@@ -23,14 +23,16 @@ import (
 // failureSink captures what the proxy reports through its blocked-row write
 // failure hook.
 type failureSink struct {
-	mu   sync.Mutex
-	errs []error
+	mu    sync.Mutex
+	errs  []error
+	types []logging.EventType
 }
 
-func (s *failureSink) record(_ logging.EventType, err error) {
+func (s *failureSink) record(eventType logging.EventType, err error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.errs = append(s.errs, err)
+	s.types = append(s.types, eventType)
 }
 
 func (s *failureSink) count() int {
@@ -54,6 +56,23 @@ func newFailingAuditProxy(t *testing.T, cfg config.NetworkConfig) (*ProxyServer,
 	sink := &failureSink{}
 	p.SetBlockedWriteFailureHandler(sink.record)
 	return p, sink
+}
+
+func TestProxyBytesOutWriteFailureIsReported(t *testing.T) {
+	p, sink := newFailingAuditProxy(t, config.NetworkConfig{Allow: []string{"allowed.example"}})
+	upstream, peer := net.Pipe()
+	defer peer.Close()
+	p.dialFunc = func(context.Context, string, string) (net.Conn, error) { return upstream, nil }
+	conn, err := p.dial(context.Background(), "tcp", "allowed.example:443")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := conn.Close(); err == nil {
+		t.Fatal("lost bytes-out row did not fail connection close")
+	}
+	if sink.count() != 1 {
+		t.Fatalf("reported failures = %d, want 1 for the lost bytes-out row", sink.count())
+	}
 }
 
 func TestProxyBlockedRowWriteFailureIsReported(t *testing.T) {
@@ -300,10 +319,21 @@ func TestDurableAuditBeforeEgress(t *testing.T) {
 					} else {
 						resp.Body.Close()
 					}
+					conn.Close()
+					p.connectWG.Wait()
 				}
+				p.transport.CloseIdleConnections()
 				allowed := mode == "signed" || mode == "default-off"
 				if allowed {
-					if status != http.StatusOK || string(payload) != "allowed control" || dialed.Load() != 1 || accepted.Load() != 1 || sink.count() != 0 {
+					// A closed logger with durable intent disabled permits egress,
+					// then reports exactly one failed bytes-out row at connection
+					// close. No intent or blocked-row failure may be reported.
+					sink.mu.Lock()
+					failureTypes := append([]logging.EventType(nil), sink.types...)
+					sink.mu.Unlock()
+					unexpectedAuditFailure := mode == "signed" && len(failureTypes) != 0 ||
+						mode == "default-off" && (len(failureTypes) != 1 || failureTypes[0] != logging.EventNetworkBytesOut)
+					if status != http.StatusOK || string(payload) != "allowed control" || dialed.Load() != 1 || accepted.Load() != 1 || unexpectedAuditFailure {
 						t.Fatalf("status=%d body=%q dials=%d accepts=%d failures=%d", status, payload, dialed.Load(), accepted.Load(), sink.count())
 					}
 				} else {

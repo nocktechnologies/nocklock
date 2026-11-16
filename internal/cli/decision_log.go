@@ -5,8 +5,10 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"strconv"
 	"time"
 
+	"github.com/nocktechnologies/nocklock/internal/fence/network"
 	"github.com/nocktechnologies/nocklock/internal/logging"
 )
 
@@ -19,12 +21,14 @@ import (
 // logging.Logger. Kept out of wrap.go so the reader and the record→Event mapping
 // are unit-testable in isolation, with no root, netns, or real proxy required.
 
-// decisionRecord is one parsed egress decision emitted by the transparent proxy.
+// decisionRecord is one parsed egress decision or bytes-out report emitted by
+// the transparent proxy.
 // The wire format is a single newline-terminated TSV line:
 //
 //	verdict\tprotocol\thost\tport\treason\n
 //
-// verdict is "allow" or "deny".
+// verdict is "allow", "deny", or "bytes". For "bytes", reason is a decimal
+// byte count.
 type decisionRecord struct {
 	verdict  string
 	protocol string
@@ -35,9 +39,10 @@ type decisionRecord struct {
 
 // decisionEventSink is the minimal audit-write surface the reader needs.
 // *logging.Logger already satisfies it, so wrap passes the live signed logger;
-// tests pass a fake that records each Log call.
+// tests pass fakes that record both audit-write entry points.
 type decisionEventSink interface {
 	Log(logging.Event) error
+	LogImmediate(logging.Event) error
 }
 
 // parseDecisionRecord parses one decision line (WITHOUT the trailing newline).
@@ -56,7 +61,7 @@ func parseDecisionRecord(line string) (decisionRecord, bool) {
 		port:     string(fields[3]),
 		reason:   string(fields[4]),
 	}
-	if rec.verdict != "allow" && rec.verdict != "deny" {
+	if rec.verdict != "allow" && rec.verdict != "deny" && rec.verdict != "bytes" {
 		return decisionRecord{}, false
 	}
 	return rec, true
@@ -90,13 +95,15 @@ func decisionRecordToEvent(rec decisionRecord, sessionID string) logging.Event {
 // never acts on a torn record. It is not safe for concurrent Feed calls; wrap
 // drives it from a single reader goroutine.
 type decisionLogScanner struct {
-	sink      decisionEventSink
-	sessionID string
-	buf       []byte
+	sink          decisionEventSink
+	sessionID     string
+	usage         *network.BytesOutRecorder
+	openTransfers map[string]int
+	buf           []byte
 }
 
 func newDecisionLogScanner(sink decisionEventSink, sessionID string) *decisionLogScanner {
-	return &decisionLogScanner{sink: sink, sessionID: sessionID}
+	return &decisionLogScanner{sink: sink, sessionID: sessionID, usage: network.NewBytesOutRecorder(sink, sessionID), openTransfers: make(map[string]int)}
 }
 
 // Pending reports whether the scanner is holding an unterminated (partial)
@@ -106,6 +113,17 @@ func newDecisionLogScanner(sink decisionEventSink, sessionID string) *decisionLo
 // so it signals an incomplete decision log the caller must fail closed on.
 func (s *decisionLogScanner) Pending() bool {
 	return len(s.buf) > 0
+}
+
+// PendingBytes reports whether an allowed netns connection has no completed
+// bytes-out record. The parent checks this only after the sidecar has exited.
+func (s *decisionLogScanner) PendingBytes() bool {
+	for _, count := range s.openTransfers {
+		if count != 0 {
+			return true
+		}
+	}
+	return false
 }
 
 // drainDecisionReader reads r until it is exhausted, feeding every chunk to the
@@ -153,9 +171,32 @@ func (s *decisionLogScanner) Feed(chunk []byte) error {
 		line := string(s.buf[:i])
 		s.buf = s.buf[i+1:]
 		if rec, ok := parseDecisionRecord(line); ok {
+			key := rec.protocol + "\t" + rec.host + "\t" + rec.port
+			if rec.verdict == "bytes" {
+				n, err := strconv.ParseInt(rec.reason, 10, 64)
+				if err != nil || n < 0 || rec.host == "" {
+					return fmt.Errorf("invalid egress bytes-out record")
+				}
+				if s.openTransfers[key] == 0 {
+					return fmt.Errorf("egress bytes-out record has no matching allow decision")
+				}
+				if err := s.usage.Record(rec.host, n); err != nil {
+					return fmt.Errorf("sign egress bytes-out into audit log: %w", err)
+				}
+				s.openTransfers[key]--
+				if s.openTransfers[key] == 0 {
+					delete(s.openTransfers, key)
+				}
+				continue
+			}
 			if err := s.sink.Log(decisionRecordToEvent(rec, s.sessionID)); err != nil {
 				return fmt.Errorf("sign egress decision into audit log: %w", err)
 			}
+			if rec.verdict == "allow" {
+				s.openTransfers[key]++
+			}
+		} else if bytes.HasPrefix([]byte(line), []byte("bytes\t")) {
+			return fmt.Errorf("invalid egress bytes-out record")
 		}
 	}
 }

@@ -39,7 +39,7 @@ On Linux below Landlock ABI 9, `doctor` returns `PARTIAL` (exit 3) because other
 
 The [1.0 roadmap](docs/ROADMAP.md) records the completed release bars. Open work is in its Later section:
 
-- macOS read confinement outside `filesystem.root`
+- macOS Endpoint Security after the opt-in home read fence
 - A Windows fence
 - Look-back rules beyond slice 1
 - Default off-box audit anchoring; per-chain v2 anchors shipped in v0.10.0 and in-run checkpoints in v0.12.0, both opt-in

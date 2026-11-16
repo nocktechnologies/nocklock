@@ -15,7 +15,8 @@ Recorded fence decisions are stored in a tamper-evident SQLite audit log: a SHA-
 hash chain (v1), Ed25519 signatures over the rows and the chain head (v1.1),
 and an external chain-head anchor that can be pushed off-box (v1.2). macOS
 has a kernel-enforced Seatbelt write-confinement profile plus sensitive-path
-read and write denies (reads outside `filesystem.root` are not confined) and
+read and write denies (reads outside `filesystem.root` are not confined unless
+`confine_home_reads` is opted in, for the user's home only) and
 records its filesystem-fence state in SQLite. Per-file deny events on macOS
 are best-effort, read from the unified log. An Endpoint Security backend is
 being considered for richer event coverage; it is not implemented.

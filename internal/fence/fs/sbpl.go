@@ -5,6 +5,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -13,6 +14,8 @@ import (
 // keychainMachService mediates the private file-keychain reads reproduced by
 // the native fixture. Other Keychain backends are not claimed isolated.
 const keychainMachService = "com.apple.SecurityServer"
+
+var developerToolCacheNames = []string{"go-build", "pip", "pnpm", "Yarn", "node-gyp", "ms-playwright", "deno", "typescript", "Homebrew"}
 
 // SBPL (Sandbox Profile Language) generation for the macOS filesystem fence.
 //
@@ -73,7 +76,7 @@ func GenerateHardenedProfile(sensitivePaths []string) (string, error) {
 // lets callers audit the exact applied policy without over-reporting duplicate
 // configuration entries.
 func GenerateProfileAndCount(sensitivePaths []string, hardened bool) (string, int, error) {
-	return generateProfile(sensitivePaths, hardened, nil, "", 0)
+	return generateProfile(sensitivePaths, hardened, nil, "", 0, "", "", nil, nil)
 }
 
 // GenerateWriteConfinementProfile builds the macOS Seatbelt profile used when
@@ -103,6 +106,10 @@ func GenerateWriteConfinementProfile(sensitivePaths []string, root, mode string,
 // on the proxy's port at ::1 is also reachable; the caller must hold that port
 // (wrap does, see reserveSeatbeltProxyListeners).
 func GenerateTaggedWriteConfinementProfile(sensitivePaths []string, root, mode string, hardened bool, tag string, proxyPort int) (string, int, error) {
+	return generateTaggedWriteConfinementProfile(sensitivePaths, root, mode, hardened, tag, proxyPort, "", nil, nil, false)
+}
+
+func generateTaggedWriteConfinementProfile(sensitivePaths []string, root, mode string, hardened bool, tag string, proxyPort int, homeReadRoot string, readPaths, cacheWritePaths []string, claudeCodeCache bool) (string, int, error) {
 	if strings.TrimSpace(root) == "" {
 		return "", 0, fmt.Errorf("refusing to generate write-confinement profile with an empty root")
 	}
@@ -110,14 +117,14 @@ func GenerateTaggedWriteConfinementProfile(sensitivePaths []string, root, mode s
 		return "", 0, fmt.Errorf("invalid filesystem mode %q: must be \"read-write\" or \"read-only\"", mode)
 	}
 
-	writePaths, err := writeConfinementPaths(root, mode)
+	writePaths, cachePaths, err := writeConfinementPaths(root, mode, homeReadRoot, cacheWritePaths, claudeCodeCache)
 	if err != nil {
 		return "", 0, err
 	}
-	return generateProfile(sensitivePaths, hardened, writePaths, tag, proxyPort)
+	return generateProfile(sensitivePaths, hardened, writePaths, tag, proxyPort, homeReadRoot, root, readPaths, cachePaths)
 }
 
-func generateProfile(sensitivePaths []string, hardened bool, writePaths []string, tag string, proxyPort int) (string, int, error) {
+func generateProfile(sensitivePaths []string, hardened bool, writePaths []string, tag string, proxyPort int, homeReadRoot, root string, readPaths, cachePaths []string) (string, int, error) {
 	if proxyPort < 0 || proxyPort > 65535 {
 		return "", 0, fmt.Errorf("invalid proxy port %d for the network floor", proxyPort)
 	}
@@ -133,6 +140,32 @@ func generateProfile(sensitivePaths []string, hardened bool, writePaths []string
 	}
 	if len(canonical) == 0 {
 		return "", 0, fmt.Errorf("refusing to generate a fence profile with no resolvable sensitive paths")
+	}
+	var home string
+	var readGrants []string
+	var gitConfig string
+	if homeReadRoot != "" {
+		home, err = canonicalizeForProfile(homeReadRoot)
+		if err != nil {
+			return "", 0, fmt.Errorf("cannot canonicalize home-read path: %w", err)
+		}
+		readGrants, err = canonicalProfilePaths(append([]string{root}, readPaths...), "home-read allow")
+		if err != nil {
+			return "", 0, err
+		}
+		readGrants = append(readGrants, cachePaths...)
+		sort.Strings(readGrants)
+		readGrants = slices.Compact(readGrants)
+		gitConfigPath := filepath.Join(home, ".gitconfig")
+		if info, statErr := os.Stat(gitConfigPath); statErr == nil && !info.Mode().IsRegular() {
+			return "", 0, fmt.Errorf("home Git config %q must be a regular file", gitConfigPath)
+		} else if statErr != nil && !os.IsNotExist(statErr) {
+			return "", 0, fmt.Errorf("cannot inspect home Git config %q: %w", gitConfigPath, statErr)
+		}
+		gitConfig, err = canonicalizeForProfile(gitConfigPath)
+		if err != nil {
+			return "", 0, fmt.Errorf("cannot canonicalize home Git config: %w", err)
+		}
 	}
 
 	var b strings.Builder
@@ -164,18 +197,45 @@ func generateProfile(sensitivePaths []string, hardened bool, writePaths []string
 		b.WriteString("    (literal \"/dev/fd\")\n")
 		b.WriteString("    (regex #\"^/dev/fd/\"))\n")
 	}
-	b.WriteString(";; Sensitive paths remain denied for reads and writes, including\n")
-	b.WriteString(";; when they are nested below a write-allowed root.\n")
-	b.WriteString("(deny file-read* file-write*\n")
-	for _, c := range canonical {
-		b.WriteString("    (subpath ")
-		b.WriteString(sbplString(c))
+	writeSensitiveDeny := func() {
+		b.WriteString(";; Sensitive paths remain denied for reads and writes, including\n")
+		b.WriteString(";; when they are nested below a write-allowed root.\n")
+		b.WriteString("(deny file-read* file-write*\n")
+		for _, c := range canonical {
+			b.WriteString("    (subpath ")
+			b.WriteString(sbplString(c))
+			b.WriteString(")\n")
+		}
+		if msg != "" {
+			b.WriteString("   " + msg + "\n")
+		}
 		b.WriteString(")\n")
+		if home != "" {
+			// Seatbelt ranks an exact operation above file-read*. The root's
+			// file-read-data allow would otherwise beat this broader deny even
+			// though the deny is emitted later.
+			b.WriteString("(deny file-read-data\n")
+			for _, c := range canonical {
+				b.WriteString("    (subpath " + sbplString(c) + ")\n")
+			}
+			if msg != "" {
+				b.WriteString("   " + msg + "\n")
+			}
+			b.WriteString(")\n")
+		}
 	}
-	if msg != "" {
-		b.WriteString("   " + msg + "\n")
+	if home != "" {
+		b.WriteString(";; Opt-in home data-read boundary; metadata remains available.\n")
+		b.WriteString("(deny file-read-data (subpath " + sbplString(home) + ")" + msg + ")\n")
+		b.WriteString("(allow file-read-data\n")
+		for _, p := range readGrants {
+			b.WriteString("    (subpath " + sbplString(p) + ")\n")
+		}
+		b.WriteString("    (literal " + sbplString(gitConfig) + ")\n")
+		b.WriteString(")\n")
+	} else {
+		writeSensitiveDeny()
 	}
-	b.WriteString(")\n")
 	// Seatbelt subpath rules follow path names, not inodes. Renaming a
 	// writable ancestor would move a protected tree outside its deny rule.
 	// Keep those ancestor entries fixed without denying ordinary writes to
@@ -242,36 +302,58 @@ func generateProfile(sensitivePaths []string, hardened bool, writePaths []string
 		b.WriteString("    (global-name \"com.apple.mDNSResponder\")\n")
 		b.WriteString("    (global-name \"com.apple.mDNSResponderHelper\"))\n")
 	}
+	if home != "" {
+		writeSensitiveDeny()
+	}
 
 	return b.String(), len(canonical), nil
 }
 
 // writeConfinementPaths returns the directories that are allowed to receive
 // writes under the macOS root-confinement profile. The Go standard library is
-// the source of the invoking user's temporary and cache locations. On macOS,
+// the source of the invoking user's temporary directory and the default-off
+// cache directory; home-read confinement uses the passwd home's cache. On macOS,
 // reject an arbitrary TMPDIR outside the system's per-user temp locations so a
 // caller cannot silently widen the boundary through its environment.
-func writeConfinementPaths(root, mode string) ([]string, error) {
+func writeConfinementPaths(root, mode, homeReadRoot string, cacheWritePaths []string, claudeCodeCache bool) ([]string, []string, error) {
 	tempDir, err := canonicalizeForProfile(os.TempDir())
 	if err != nil {
-		return nil, fmt.Errorf("cannot canonicalize user temporary directory: %w", err)
+		return nil, nil, fmt.Errorf("cannot canonicalize user temporary directory: %w", err)
 	}
 	if runtime.GOOS == "darwin" && tempDir != "/private/tmp" && !strings.HasPrefix(tempDir, "/private/var/folders/") {
-		return nil, fmt.Errorf("refusing to allow temporary directory outside /private/tmp or /private/var/folders: %s", tempDir)
-	}
-
-	cacheDir, err := os.UserCacheDir()
-	if err != nil {
-		return nil, fmt.Errorf("cannot determine user cache directory: %w", err)
-	}
-	if strings.TrimSpace(cacheDir) == "" {
-		return nil, fmt.Errorf("cannot determine user cache directory: empty result")
+		return nil, nil, fmt.Errorf("refusing to allow temporary directory outside /private/tmp or /private/var/folders: %s", tempDir)
 	}
 
 	paths := []string{
 		"/private/tmp",
 		tempDir,
-		cacheDir,
+	}
+	var cachePaths []string
+	if homeReadRoot != "" {
+		var cacheDir string
+		cacheDir, cachePaths, err = developerToolCachePaths(homeReadRoot, claudeCodeCache)
+		if err != nil {
+			return nil, nil, err
+		}
+		paths = append(paths, cachePaths...)
+		for _, path := range cacheWritePaths {
+			canonical, err := canonicalizeForProfile(path)
+			if err != nil {
+				return nil, nil, fmt.Errorf("cannot canonicalize explicit cache grant %q: %w", path, err)
+			}
+			if pathContains(cacheDir, canonical) {
+				paths = append(paths, canonical)
+			}
+		}
+	} else {
+		cacheDir, err := os.UserCacheDir()
+		if err != nil {
+			return nil, nil, fmt.Errorf("cannot determine user cache directory: %w", err)
+		}
+		if strings.TrimSpace(cacheDir) == "" {
+			return nil, nil, fmt.Errorf("cannot determine user cache directory: empty result")
+		}
+		paths = append(paths, cacheDir)
 	}
 	// macOS gives each invoking user a paired T (temp) and C (cache) directory
 	// under /private/var/folders. os.TempDir identifies the T directory; add its
@@ -285,9 +367,40 @@ func writeConfinementPaths(root, mode string) ([]string, error) {
 
 	canonical, err := canonicalProfilePaths(paths, "write-allowed")
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
-	return canonical, nil
+	return canonical, cachePaths, nil
+}
+
+func developerToolCachePaths(homeReadRoot string, claudeCodeCache bool) (string, []string, error) {
+	cacheDir := filepath.Join(homeReadRoot, "Library", "Caches")
+	if info, err := os.Lstat(cacheDir); err == nil && info.Mode()&os.ModeSymlink != 0 {
+		if _, err := filepath.EvalSymlinks(cacheDir); err != nil {
+			return "", nil, fmt.Errorf("cannot resolve user cache symlink %q: %w", cacheDir, err)
+		}
+	} else if err != nil && !os.IsNotExist(err) {
+		return "", nil, fmt.Errorf("cannot inspect user cache directory %q: %w", cacheDir, err)
+	}
+	cacheDir, err := canonicalizeForProfile(cacheDir)
+	if err != nil {
+		return "", nil, fmt.Errorf("cannot canonicalize user cache directory: %w", err)
+	}
+	names := developerToolCacheNames
+	if claudeCodeCache {
+		names = append(slices.Clone(names), "claude-cli-nodejs")
+	}
+	paths := make([]string, 0, len(names))
+	for _, name := range names {
+		path := filepath.Join(cacheDir, name)
+		canonical, err := canonicalizeForProfile(path)
+		if err != nil {
+			return "", nil, fmt.Errorf("cannot canonicalize developer-tool cache %q: %w", path, err)
+		}
+		if canonical == path { // Do not grant a symlink target outside the listed folder.
+			paths = append(paths, canonical)
+		}
+	}
+	return cacheDir, paths, nil
 }
 
 func canonicalProfilePaths(paths []string, purpose string) ([]string, error) {
