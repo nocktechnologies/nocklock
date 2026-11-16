@@ -53,7 +53,7 @@ configuration, and alternatives directories are not needed by these runtime
 checks; symlinks into the allowed binary/library trees already resolve. Missing
 optional paths are skipped. Add distro-specific runtime files explicitly if needed.
 
-On macOS, `nocklock init` writes the same default `filesystem.root = "."`, and `nocklock wrap` enforces it as a kernel Seatbelt write boundary. Writes outside the root, `.nock`, and essential per-user runtime paths are denied. The built-in credential and sensitive paths (`~/.ssh`, `~/.aws`, `~/.config`, `~/.gnupg`, `~/Library/Keychains`, plus your `filesystem.deny` paths) are denied for reads and writes. Reads outside the root are not confined by default. Set `filesystem.confine_home_reads = true` to confine data reads under the invoking UID's home; `filesystem.read_allow` adds explicit grants. `filesystem.allow` and `filesystem.allow_rw` are not read grants on macOS. `filesystem.mode = "read-only"` is enforced: it drops the write allow for the root. See "Filesystem platform boundary" below.
+On macOS, `nocklock init` writes the same default `filesystem.root = "."`, and `nocklock wrap` enforces it as a kernel Seatbelt write boundary. Writes outside the root, `.nock`, and essential per-user runtime paths are denied. The built-in credential and sensitive paths (`~/.ssh`, `~/.aws`, `~/.config`, `~/.gnupg`, `~/Library/Keychains`, plus your `filesystem.deny` paths) are denied for reads and writes. Reads outside the root are not confined by default. Set `filesystem.confine_home_reads = true` to confine data reads under the invoking UID's home; `filesystem.read_allow` adds explicit grants. On macOS, `filesystem.allow` and `filesystem.allow_rw` are read grants alongside `read_allow` when `confine_home_reads` is on. `filesystem.mode = "read-only"` is enforced: it drops the write allow for the root. See "Filesystem platform boundary" below.
 
 For another runtime, choose one of these commands instead of the Claude Code initialization above. Run only the one you need in a new project; use `--diff` to compare a preset with an existing config:
 
@@ -142,7 +142,9 @@ file-write*)` with narrow write allows for the canonical `filesystem.root`,
 denied for both reads and writes. A root, allow, or active `read_allow` grant covering a built-in credential path is refused. Reads outside the
 root are not confined by default. The optional `confine_home_reads` Seatbelt rule
 denies data reads under the invoking UID's passwd home except beneath the root,
-explicit `read_allow` paths, and `.gitconfig`; metadata remains available.
+`filesystem.allow`, `filesystem.allow_rw`, explicit `read_allow` paths, the
+developer-tool cache folders under `Library/Caches`, and `.gitconfig`; metadata
+remains available.
 Sensitive denies still win. The rule does not cover `/Users/Shared`, `/Volumes`,
 `/tmp`, or any path outside that home, and it is not Endpoint Security. Every
 emitted path is canonicalized, and an unresolvable path or a rejected profile
@@ -382,7 +384,9 @@ allow = [
     "/etc/pki/tls/certs/",
     "/etc/pki/ca-trust/extracted/",
 ]
-# Linux only: these paths are explicitly read-write; allow stays read-only.
+# Linux: these paths are read-write; allow stays read-only. macOS: with confine_home_reads
+# on, they are read grants, and write grants only inside the home's Library/Caches.
+# With it off, they add no grant.
 allow_rw = []
 deny = [
     "~/.ssh/",
