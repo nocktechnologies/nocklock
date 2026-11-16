@@ -386,6 +386,7 @@ allow = [
 ]
 # Linux: these paths are read-write; allow stays read-only. macOS: with confine_home_reads
 # on, they are read grants, and write grants only inside the home's Library/Caches.
+# With it off, they add no grant.
 allow_rw = []
 deny = [
     "~/.ssh/",

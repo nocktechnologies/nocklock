@@ -117,7 +117,9 @@ allow = [
     "/etc/pki/tls/certs/",
     "/etc/pki/ca-trust/extracted/",
 ]
-# Linux only: paths explicitly granted read-write access. allow stays read-only.
+# Linux: these paths are read-write; allow stays read-only. macOS: with confine_home_reads
+# on, they are read grants, and write grants only inside the home's Library/Caches.
+# With it off, they add no grant.
 allow_rw = []
 # macOS only: explicit home read grants when confine_home_reads is true.
 read_allow = []
