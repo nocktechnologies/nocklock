@@ -14,7 +14,7 @@ All notable changes to NockLock will be documented in this file.
 
 ### Changed
 
-- Exit code 2 has a new cause. 1.0 documented rows for allowed network requests as best effort. In 1.1 the `network_bytes_out` row written when an allowed connection closes, and the `network_outlier` row, are required: if NockLock cannot write either to the audit log, `wrap` exits 2 and stops the child, as it already does for blocked rows. Upgrade: a run where a `network_bytes_out` or `network_outlier` write fails while the other required rows succeed, for example under audit write-lock contention, now exits 2 and stops the child, possibly mid-run; 1.0 ignored that failure.
+- Exit code 2 has a new cause. 1.0 documented rows for allowed network requests as best effort. In 1.1 the `network_bytes_out` row written when an allowed connection closes, and the `network_outlier` row, are required: if NockLock cannot write either to the audit log, `wrap` exits 2 and stops the child, as it already does for blocked rows. Upgrade: a run where a `network_bytes_out` or `network_outlier` write fails while the other required rows succeed, for example under audit write-lock contention, now exits 2 and stops the child, possibly mid-run; 1.0 wrote no such rows, so the same run passed.
 
 ### Added
 
