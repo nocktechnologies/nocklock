@@ -4,6 +4,8 @@ All notable changes to NockLock will be documented in this file.
 
 ## [Unreleased]
 
+## [1.1.0] - 2026-11-16
+
 ### Fixed
 
 - On macOS, Claude Code grants its `Library/Caches/claude-cli-nodejs` folder read and write access under `filesystem.confine_home_reads` via either `--profile claude-code` or `project.runtime = "claude-code"` with `wrap -- claude`, including before the folder exists. Without that profile, other commands do not gain the grant; unlisted caches and Linux preset startup are unchanged.
