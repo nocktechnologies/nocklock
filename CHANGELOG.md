@@ -14,7 +14,7 @@ All notable changes to NockLock will be documented in this file.
 
 ### Added
 
-- Add default-off `filesystem.confine_home_reads` on macOS. It confines file data reads under the invoking UID's home to `filesystem.root`, explicit `filesystem.allow`, `filesystem.allow_rw` and `filesystem.read_allow` paths, and `.gitconfig`; metadata queries remain available, while sensitive paths still deny reads and writes. The signed fence-state row and `doctor` show the mode. Other volumes and shared/temp directories remain outside this read boundary.
+- Add default-off `filesystem.confine_home_reads` on macOS. It confines file data reads under the invoking UID's home to `filesystem.root`, explicit `filesystem.allow`, `filesystem.allow_rw` and `filesystem.read_allow` paths, and `.gitconfig`; metadata queries remain available, while sensitive paths still deny reads and writes. With the option on, the passwd home's developer-tool `Library/Caches` folders are readable, and the user cache write grant narrows to those folders plus each `filesystem.allow_rw` entry inside that `Library/Caches` directory. The signed fence-state row and `doctor` show the mode. Other volumes and shared/temp directories remain outside this read boundary.
 
 - Record bytes written upstream per allowed host and session in signed `network_bytes_out` rows. A host exceeding 100 MiB in one session emits one alert-only `network_outlier` row, visible with `log --blocked`; traffic is not blocked. The proxy and Linux netns modes both report wire bytes without inspecting TLS or request bodies. In both modes, a failed `network_bytes_out` audit write fails the wrapped run with exit 2 and stops the child, like other required rows.
 
