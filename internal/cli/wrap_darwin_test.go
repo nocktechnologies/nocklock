@@ -69,7 +69,7 @@ func TestWrapMacOSConfineHomeReads(t *testing.T) {
 	requireSandboxExecForWrap(t)
 	home, err := os.UserHomeDir()
 	if err != nil || home == "" {
-		t.Fatalf("passwd home: %v", err)
+		t.Fatalf("home dir: %v", err)
 	}
 	base, err := os.MkdirTemp(home, ".nocklock-home-read-")
 	if err != nil {
