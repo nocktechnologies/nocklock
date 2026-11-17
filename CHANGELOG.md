@@ -6,7 +6,7 @@ All notable changes to NockLock will be documented in this file.
 
 ### Added
 
-- `examples/protect-a-folder/`: configs that keep an agent from changing `migrations/` by any route under `nocklock wrap`, on macOS (deny under the root) and Linux (`app/` as the root, `migrations/` read-only). The agent cannot change the example's own `.nock/config.toml` during a run on either platform. The project README links the example.
+- `examples/protect-a-folder/`: configs that keep an agent from writing through the `migrations/` path under `nocklock wrap`, by its edit tool or a shell command, on macOS (deny under the root) and Linux (`app/` as the root, `migrations/` read-only). The agent cannot change the example's own `.nock/config.toml` during a run on either platform. The project README links the example.
 
 ## [1.1.0] - 2026-11-16
 
