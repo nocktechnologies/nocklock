@@ -31,8 +31,6 @@ log.
 | `linux/app/notes.txt` | Linux | A sample file the agent may change. |
 | `linux/migrations/0001.sql` | Linux | A sample migration to protect. |
 
-macOS and Linux need different layouts. The Linux section explains why.
-
 ## macOS
 
 1. Install NockLock (see the [project README](../../README.md#quick-start)).
@@ -44,8 +42,8 @@ macOS and Linux need different layouts. The Linux section explains why.
    nocklock wrap -- claude
    ```
 
-4. Any write to `migrations/`, by the edit tool or by a shell command, is
-   refused by the kernel. Your other project files stay writable.
+Any write to `migrations/`, by the edit tool or by a shell command, is now
+refused by the kernel. Your other project files stay writable.
 
 To check what happened, run `nocklock log --blocked` in the same folder. Each
 refused write shows up as a `file_blocked` row. macOS reports these refusals
@@ -72,15 +70,12 @@ Steps:
    [setup guide](../../docs/setup.md)).
 2. Copy the `linux` folder. Put the files the agent may change in `app/` and
    your migrations in `migrations/`.
-3. From the copied `linux` folder (the one that holds `.nock/`), start your
-   agent inside `app/`, for example:
+3. From the copied `linux` folder (the one with `.nock/`; the config's paths
+   are relative to it), start your agent inside `app/`, for example:
 
    ```sh
    nocklock wrap -- sh -c 'cd app && exec claude'
    ```
-
-   Run `nocklock wrap` from this folder: the config's `app/` and `migrations/`
-   are relative to the folder you run it from.
 
 Real output from a Linux run, with a shell append standing in for the agent.
 The project folder is shown as `<project>`, and four other startup lines
@@ -115,15 +110,11 @@ The append was refused and the migration is unchanged. Reading the migration
 and changing `app/notes.txt` both still work.
 
 `nocklock log` shows the refusal as a signed `file_blocked` row in the append's
-session (an excerpt; `...` marks left-out rows and fields):
+session (other rows left out):
 
 ```text
 Session 3843c0d2  started 2026-11-17 22:12:43  ended 2026-11-17 22:12:43  (0s)
-  session_close: close=1 session=3843c0d2-c097-440a-bb30-4727ecdc89c6 first_id=1 last_id=16 rows=16 root=2a7b64059ca04676dceb224083c4233e71ad65bdbe2667e2d84104b019314cee end=child_exit
-  session_end: exit_code=2
-  proxy_stop: proxy stopped
   file_blocked: {"version":1,"report":{"type":"fs","action":"blocked","path":"migrations/0001.sql","operation":"open64","reason":"write denied on allow-list path <project>/migrations","timestamp":"2026-11-17T22:12:43Z"},...}
-  ...
 ```
 
 Run `nocklock verify --audit` to check that the log has not been changed.
