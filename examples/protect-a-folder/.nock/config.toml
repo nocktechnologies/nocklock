@@ -40,6 +40,8 @@ deny = [
     "~/.gnupg/",
     "~/.nock/",
     "migrations/",
+    # The agent cannot change this config during a run.
+    ".nock/",
 ]
 
 [network]

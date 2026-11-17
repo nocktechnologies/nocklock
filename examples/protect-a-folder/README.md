@@ -4,11 +4,12 @@ This example keeps an AI agent from changing anything in a `migrations/`
 folder. The agent can still work everywhere else it is allowed to. On Linux it
 can also read `migrations/`; on macOS the folder is closed to reads too.
 
-The configs here are the generic `nocklock init` default with one change. If
-your agent has a runtime preset (see the
+The configs here are the generic `nocklock init` default with the changes
+described below. If your agent has a runtime preset (see the
 [project README](../../README.md#quick-start)), run
-`nocklock init --runtime <agent>` instead and make the same change in that
-config, so the agent keeps its login and settings.
+`nocklock init --runtime <agent>` instead and make the same changes in that
+config (on macOS, both `deny` entries), so the agent keeps its login and
+settings.
 
 ## Why a hook is not enough
 
@@ -31,7 +32,7 @@ log.
 
 | Path | Used on | What it does |
 |---|---|---|
-| `.nock/config.toml` | macOS | The default config with `migrations/` added to the deny list (no reads or writes). |
+| `.nock/config.toml` | macOS | The default config with `migrations/` and `.nock/` added to the deny list (no reads or writes). |
 | `migrations/0001.sql` | macOS | A sample migration to protect. |
 | `linux/.nock/config.toml` | Linux | The agent may change `app/` only; `migrations/` is read-only. |
 | `linux/app/notes.txt` | Linux | A sample file the agent may change. |
@@ -57,10 +58,12 @@ through `log stream`, which needs an admin account. On a standard account you
 get one warning row in place of the `file_blocked` rows; the kernel refuses
 the write the same way.
 
-On macOS the config file sits inside the folder the agent may change, so the
-agent could edit it and remove `migrations/` from the deny list for the next
-run. `nocklock verify --audit` counts config changes on its
-`Config digest history` line; check it after each session.
+By default, each `nocklock wrap` records the config it runs with as a signed
+`config.digest` row and warns before the agent starts when the config changed
+since the last run from the same folder (see
+[Signed audit log](../../README.md#signed-audit-log-v11-ed25519)). On macOS the
+config file sits inside the folder the agent may change, so this example also
+denies `.nock/`: the agent cannot change its own fence during a run.
 
 ## Linux
 
@@ -71,7 +74,8 @@ So the macOS layout, which grants the whole project and denies `migrations/`
 inside it, is refused at startup on Linux. The Linux config grants a different
 folder instead:
 
-- `app/` is the project root. The agent can read and change files there.
+- `app/` is the filesystem root: the folder the agent may write. The agent can
+  read and change files there.
 - `migrations/` sits next to `app/` and is in the read-only `allow` list. The
   agent can read it but cannot change it.
 
@@ -89,9 +93,9 @@ Steps:
    ```
 
    NockLock reads the config's `app/` and `migrations/` relative to the folder
-   you run `nocklock wrap` from, so run it from the `linux` folder, not from
-   inside `app/`. Here the config file sits outside `app/`, so the agent
-   cannot change it.
+   you run `nocklock wrap` from, so run it from the `linux` folder. Run from
+   inside `app/`, NockLock looks for `app/app` and refuses to start. The
+   config file sits outside `app/`, so the agent cannot change it.
 
 Real output from a Linux run, with a shell append standing in for the agent.
 The project folder is shown as `<project>`, and four other startup lines
