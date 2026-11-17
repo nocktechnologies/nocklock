@@ -6,10 +6,29 @@ can also read `migrations/`; on macOS the folder is closed to reads too.
 
 The configs here are the generic `nocklock init` default with the changes
 described below. If your agent has a runtime preset (see the
-[project README](../../README.md#quick-start)), run
-`nocklock init --runtime <agent>` instead and make the same changes in that
-config (on macOS, both `deny` entries), so the agent keeps its login and
-settings.
+[project README](../../README.md#quick-start)), merge the preset into
+the example config so the agent keeps its login. After you copy the folder
+(step 2 of the macOS or Linux steps below), run this in the copied folder (on
+Linux, the copied `linux` folder):
+
+```sh
+nocklock init --runtime <agent> --diff
+```
+
+It prints the changes the preset would make and writes nothing. A `+` line is
+in the preset only: add it to `.nock/config.toml`. A `-` line is in the example
+config only: remove it. A `-` and `+` line for the same key replace its value.
+Make every change except the ones that remove the protection:
+
+- macOS: keep `"migrations/"` and `".nock/"` in `deny`. Skip these lines:
+  `- filesystem.deny -= "migrations/"` and `- filesystem.deny -= ".nock/"`.
+- Linux: keep `root = "app/"` under `[filesystem]` and `"migrations/"` in
+  `allow`. Skip these lines: `- filesystem.root = "app/"`,
+  `+ filesystem.root = "."` and `- filesystem.allow -= "migrations/"`.
+
+The preset's other changes widen what the agent may read outside this folder,
+for example `/etc/` in place of the narrow `/etc` entries, and set the preset's
+network allow list. `migrations/` stays protected with them.
 
 ## Why a hook is not enough
 
