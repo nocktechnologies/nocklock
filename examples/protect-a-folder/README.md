@@ -65,6 +65,12 @@ since the last run from the same folder (see
 config file sits inside the folder the agent may change, so this example also
 denies `.nock/`: the agent cannot change its own fence during a run.
 
+NockLock uses the nearest `.nock/config.toml`, starting in the folder you run
+`nocklock wrap` from and moving up. The deny covers only this folder's `.nock/`,
+so the agent can create one in a subfolder, and a later run from that
+subfolder uses it. Always run `nocklock wrap` from this folder, and delete any
+`.nock/` folder the agent created in a subfolder.
+
 ## Linux
 
 On Linux, NockLock uses Landlock. Landlock cannot deny a path inside a folder
@@ -96,6 +102,12 @@ Steps:
    you run `nocklock wrap` from, so run it from the `linux` folder. Run from
    inside `app/`, NockLock looks for `app/app` and refuses to start. The
    config file sits outside `app/`, so the agent cannot change it.
+
+   NockLock uses the nearest `.nock/config.toml`, starting in the folder you
+   run `nocklock wrap` from and moving up. The agent can create
+   `app/.nock/config.toml`, and a later run from inside `app/` uses that file
+   in place of this one. Always run `nocklock wrap` from the `linux` folder,
+   and delete any `.nock/` folder the agent created inside `app/`.
 
 Real output from a Linux run, with a shell append standing in for the agent.
 The project folder is shown as `<project>`, and four other startup lines
