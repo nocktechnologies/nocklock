@@ -1,8 +1,14 @@
 # Example: protect a folder
 
 This example keeps an AI agent from changing anything in a `migrations/`
-folder. The agent can still read the files there and can work everywhere else
-it is allowed to.
+folder. The agent can still work everywhere else it is allowed to. On Linux it
+can also read `migrations/`; on macOS the folder is closed to reads too.
+
+The configs here are the generic `nocklock init` default with one change. If
+your agent has a runtime preset (see the
+[project README](../../README.md#quick-start)), run
+`nocklock init --runtime <agent>` instead and make the same change in that
+config, so the agent keeps its login and settings.
 
 ## Why a hook is not enough
 
@@ -25,7 +31,7 @@ log.
 
 | Path | Used on | What it does |
 |---|---|---|
-| `.nock/config.toml` | macOS | The default config with `migrations/` added to the deny list. |
+| `.nock/config.toml` | macOS | The default config with `migrations/` added to the deny list (no reads or writes). |
 | `migrations/0001.sql` | macOS | A sample migration to protect. |
 | `linux/.nock/config.toml` | Linux | The agent may change `app/` only; `migrations/` is read-only. |
 | `linux/app/notes.txt` | Linux | A sample file the agent may change. |
@@ -39,7 +45,7 @@ log.
 3. From that folder, start your agent under NockLock, for example:
 
    ```sh
-   nocklock wrap -- claude
+   nocklock wrap -- <agent>
    ```
 
 Any write to `migrations/`, by the edit tool or by a shell command, is now
@@ -50,6 +56,11 @@ refused write shows up as a `file_blocked` row. macOS reports these refusals
 through `log stream`, which needs an admin account. On a standard account you
 get one warning row in place of the `file_blocked` rows; the kernel refuses
 the write the same way.
+
+On macOS the config file sits inside the folder the agent may change, so the
+agent could edit it and remove `migrations/` from the deny list for the next
+run. `nocklock verify --audit` counts config changes on its
+`Config digest history` line; check it after each session.
 
 ## Linux
 
@@ -70,12 +81,17 @@ Steps:
    [setup guide](../../docs/setup.md)).
 2. Copy the `linux` folder. Put the files the agent may change in `app/` and
    your migrations in `migrations/`.
-3. From the copied `linux` folder (the one with `.nock/`; the config's paths
-   are relative to it), start your agent inside `app/`, for example:
+3. From the copied `linux` folder (the one with `.nock/`), start your agent
+   inside `app/`, for example:
 
    ```sh
-   nocklock wrap -- sh -c 'cd app && exec claude'
+   nocklock wrap -- sh -c 'cd app && exec <agent>'
    ```
+
+   NockLock reads the config's `app/` and `migrations/` relative to the folder
+   you run `nocklock wrap` from, so run it from the `linux` folder, not from
+   inside `app/`. Here the config file sits outside `app/`, so the agent
+   cannot change it.
 
 Real output from a Linux run, with a shell append standing in for the agent.
 The project folder is shown as `<project>`, and four other startup lines
@@ -106,7 +122,9 @@ Notes the agent may edit.
 edited by the agent
 ```
 
-The append was refused and the migration is unchanged. Reading the migration
+The append was refused and the migration is unchanged. `nocklock wrap` exits
+with the agent's own exit code; the 2 here is the shell's code for the failed
+append. Reading the migration
 and changing `app/notes.txt` both still work.
 
 `nocklock log` shows the refusal as a signed `file_blocked` row in the append's
