@@ -68,6 +68,10 @@ home configuration grants overlap mandatory credential denies; see the
 [filesystem platform boundary](#filesystem-platform-boundary) before choosing
 a configuration for either runtime.
 
+Examples:
+
+- [Protect a folder](examples/protect-a-folder/): the agent cannot change `migrations/`, by its edit tool or a shell command, on macOS and Linux.
+
 ## How it works
 
 `nocklock wrap` does three things before it starts your agent.
@@ -195,6 +199,8 @@ session, then one row counting the rest). Only kernel-originated records count: 
 inside the fence logs under the `Sandbox` sender name is ignored. The unified log can drop lines under
 load, so a missing row is not proof that no denial happened, and a tailer that
 cannot start becomes one warning row without affecting the wrapped command.
+`log stream` needs an admin account, so a standard user gets one warning row
+in place of `file_blocked` rows; the kernel refusal is the same.
 Every macOS wrap also records exactly one filesystem-fence state in the event
 log: `ENGAGED`, `REFUSED-TO-START`, or `DEGRADED`.
 

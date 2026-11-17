@@ -21,6 +21,7 @@ Go tests sit beside the code as `*_test.go`. Files ending `_linux_test.go` or `_
 | `.github/workflows/` | CI: `test.yml`, `network-egress.yml`, `gitleaks.yml`, `claude.yml`, `claude-code-review.yml`, `linux-candidate.yml` | n/a |
 | `.githooks/` | Local pre-commit hook (`pre-commit`) | no direct tests |
 | `.nock/` | Example project config (`config.toml.example`) | none |
+| `examples/` | Copyable user examples; `examples/protect-a-folder/` keeps an agent from changing `migrations/` on macOS and Linux | none |
 | `Makefile` | `build`, `build-all`, `install`, `install-egress-helper`, `fmt`, `vet`, `lint`, `test` | n/a |
 | `AGENTS.md` (`CLAUDE.md` imports it) | Canonical contributor and agent index: build, required checks, rules, gotchas, task-to-location table | n/a |
 | `ARCHITECTURE.md`, `CONTRIBUTING.md`, `CHANGELOG.md`, `README.md` | Package tree, contribution rules, release notes, user-facing guide | n/a |
