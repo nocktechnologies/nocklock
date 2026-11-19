@@ -334,6 +334,9 @@ func TestBuiltinOwnConfigDirExemption(t *testing.T) {
 					if err == nil || !strings.Contains(err.Error(), "built-in credential deny") {
 						t.Fatalf("grant %q beside the own config dir: want refusal, got %v", grant, err)
 					}
+					if grant != "~/.config/"+tc.other+"/" && strings.Contains(err.Error(), "--profile") {
+						t.Fatalf("grant %q no profile can exempt must not suggest one: %v", grant, err)
+					}
 				}
 
 				// project.runtime is writable by the fenced child; alone it
@@ -349,20 +352,62 @@ func TestBuiltinOwnConfigDirExemption(t *testing.T) {
 	}
 }
 
-// A user deny of ~/.config is kept even when the profile grants its own
-// directory beneath it, so Landlock refuses the ruleset rather than drop it.
-func TestBuiltinOwnConfigDirKeepsUserDeny(t *testing.T) {
-	cfg, home := builtinFixture(t)
-	cfg.ProfileName = "opencode"
-	cfg.Filesystem.Allow = []string{"~/.config/opencode/"}
-	cfg.Filesystem.Deny = append(cfg.Filesystem.Deny, "~/.config/")
-	fc, err := ProcessEffectiveConfig(cfg, "linux")
-	if err != nil {
-		t.Fatal(err)
+// A user deny covering the own config directory refuses startup on both
+// platforms: the macOS exception follows every deny and would otherwise win.
+// Control: a user deny inside the directory still starts and stays enforced.
+func TestBuiltinOwnConfigDirUserDeny(t *testing.T) {
+	for _, goos := range []string{"linux", "darwin"} {
+		for _, deny := range []string{"~/.config/", "~/"} {
+			t.Run(goos+"/"+deny, func(t *testing.T) {
+				cfg, _ := builtinFixture(t)
+				cfg.ProfileName = "opencode"
+				cfg.Filesystem.Allow = []string{"~/.config/opencode/"}
+				cfg.Filesystem.Deny = append(cfg.Filesystem.Deny, deny)
+				_, err := ProcessEffectiveConfig(cfg, goos)
+				if err == nil || !strings.Contains(err.Error(), "own config directory") {
+					t.Fatalf("user deny %q: want refusal, got %v", deny, err)
+				}
+			})
+		}
+		t.Run(goos+"/inside", func(t *testing.T) {
+			cfg, home := builtinFixture(t)
+			cfg.ProfileName = "opencode"
+			cfg.Filesystem.Allow = []string{"~/.config/opencode/"}
+			cfg.Filesystem.Deny = append(cfg.Filesystem.Deny, "~/.config/opencode/auth.json")
+			fc, err := ProcessEffectiveConfig(cfg, goos)
+			if err != nil {
+				t.Fatal(err)
+			}
+			h, _ := resolvePath(home)
+			if !slices.Contains(fc.DenyPaths, filepath.Join(h, ".config", "opencode", "auth.json")) {
+				t.Fatalf("deny inside the own config dir dropped: %v", fc.DenyPaths)
+			}
+		})
 	}
-	h, _ := resolvePath(home)
-	if !slices.Contains(fc.DenyPaths, filepath.Join(h, ".config")) {
-		t.Fatalf("user deny of ~/.config dropped: %v", fc.DenyPaths)
+}
+
+// Only a read-only allow entry is exempt: the same directory as the root or
+// an allow_rw grant still refuses, so it never becomes writable.
+func TestBuiltinOwnConfigDirOnlyAsAllow(t *testing.T) {
+	for _, goos := range []string{"linux", "darwin"} {
+		for _, field := range []string{"root", "allow_rw"} {
+			t.Run(goos+"/"+field, func(t *testing.T) {
+				cfg, home := builtinFixture(t)
+				own := filepath.Join(home, ".config", "goose")
+				if err := os.MkdirAll(own, 0700); err != nil {
+					t.Fatal(err)
+				}
+				cfg.ProfileName = "goose"
+				if field == "root" {
+					cfg.Filesystem.Root = own
+				} else {
+					cfg.Filesystem.AllowRW = []string{own}
+				}
+				if _, err := ProcessEffectiveConfig(cfg, goos); err == nil || !strings.Contains(err.Error(), "built-in credential deny") {
+					t.Fatalf("own config dir as %s: want refusal, got %v", field, err)
+				}
+			})
+		}
 	}
 }
 

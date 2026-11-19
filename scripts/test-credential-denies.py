@@ -231,7 +231,9 @@ def main():
             print("PASS --profile presets permit only their own agent login store; project.runtime alone permits none", flush=True)
             for agent, own, other in (("opencode", ".config/opencode/canary", ".config/goose/canary"), ("goose", ".config/goose/canary", ".config/opencode/canary")):
                 # Only the profile's own directory beneath ~/.config is readable.
-                configure()
+                # The project config overlays the profile and keeps only allow
+                # entries it repeats, so it repeats the preset's own entry.
+                configure(["~/.config/" + agent + "/"])
                 profiled = [str(binary), "wrap", "--profile", agent, "--"]
                 permitted = run(profiled + read_command(home / own), project, env)
                 assert permitted.returncode == 0 and CANARY in permitted.stdout, (agent, "own config", permitted.returncode, permitted.stdout, permitted.stderr)

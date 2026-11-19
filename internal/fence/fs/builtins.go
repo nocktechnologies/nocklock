@@ -106,6 +106,7 @@ func ProcessEffectiveConfig(cfg *config.Config, goos string) (*FenceConfig, erro
 	if runtime := cfg.LoginStoreRuntime(); slices.Contains(ownConfigRuntimes, runtime) {
 		ownConfig = runtime
 	}
+	userDenies := slices.Clone(fc.DenyPaths)
 	for i, builtin := range append(builtins, aliases...) {
 		denied, err := resolvePath(builtin)
 		if err != nil {
@@ -116,9 +117,11 @@ func ProcessEffectiveConfig(cfg *config.Config, goos string) (*FenceConfig, erro
 			exempt = filepath.Join(denied, ownConfig)
 		}
 		owned := false
-		for _, grant := range grants {
-			// Exactly the directory, never a prefix or a path beneath it.
-			if exempt != "" && (grant == exempt || goos == "darwin" && strings.EqualFold(grant, exempt)) {
+		for g, grant := range grants {
+			// Exactly the directory, never a prefix or a path beneath it, and
+			// only as a read-only allow entry, never the root or allow_rw.
+			isAllow := g >= 1 && g <= len(fc.AllowPaths)
+			if exempt != "" && isAllow && (grant == exempt || goos == "darwin" && strings.EqualFold(grant, exempt)) {
 				fc.OwnConfigDir, owned = exempt, true
 				continue
 			}
@@ -130,10 +133,18 @@ func ProcessEffectiveConfig(cfg *config.Config, goos string) (*FenceConfig, erro
 		// both refuse every ungranted path, and the loop above refused every
 		// other grant beneath this directory. Seatbelt allows by default, so
 		// macOS keeps the deny and GenerateEffectiveProfile adds the exception.
-		// PolicyDenyPaths still records it. A user deny of the same directory
-		// is kept and then refuses startup.
-		if owned && goos != "darwin" {
-			continue
+		// PolicyDenyPaths still records it.
+		if owned {
+			// The macOS exception follows every deny, so a user deny covering
+			// the directory would lose; refuse it on both platforms instead.
+			for _, deny := range userDenies {
+				if pathsIntersect(deny, exempt, goos == "darwin") && !pathContains(exempt, deny) {
+					return nil, fmt.Errorf("filesystem deny %q covers the %s profile's own config directory %q; refusing to start: remove the deny or the profile", deny, ownConfig, exempt)
+				}
+			}
+			if goos != "darwin" {
+				continue
+			}
 		}
 		if !slices.Contains(fc.DenyPaths, denied) {
 			fc.DenyPaths = append(fc.DenyPaths, denied)
@@ -162,7 +173,7 @@ var ownConfigRuntimes = []string{"opencode", "goose"}
 
 func builtinGrantError(grant, deny string) error {
 	err := fmt.Errorf("filesystem grant %q overlaps built-in credential deny %q; refusing to start: narrow filesystem.root, allow, allow_rw, or read_allow", grant, deny)
-	if filepath.Base(deny) == ".config" {
+	if filepath.Base(deny) == ".config" && slices.Contains(ownConfigRuntimes, filepath.Base(grant)) && filepath.Dir(grant) == deny {
 		return fmt.Errorf("%w; only --profile %s exempts that profile's own config directory", err, strings.Join(ownConfigRuntimes, " or --profile "))
 	}
 	if name := filepath.Base(deny); strings.HasPrefix(name, ".claude") || name == ".codex" {
