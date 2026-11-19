@@ -14,7 +14,7 @@ import (
 // TestWrapOwnConfigPresetReadsOnlyItsOwnConfig proves that --profile opencode
 // and --profile goose start on Linux and read their own directory beneath
 // ~/.config, while ~/.config/gh, the other agent's directory, and writes to the
-// own directory stay denied, through the interposer and through Landlock alone
+// own directory and a sibling sharing its name as a prefix stay denied, through the interposer and through Landlock alone
 // (env -u LD_PRELOAD). Controls: without --profile, a project config granting
 // the same directory, or ~/.config itself, refuses startup.
 func TestWrapOwnConfigPresetReadsOnlyItsOwnConfig(t *testing.T) {
@@ -42,9 +42,9 @@ func TestWrapOwnConfigPresetReadsOnlyItsOwnConfig(t *testing.T) {
 					t.Fatalf("mkdir %s: %v", dir, err)
 				}
 			}
-			own, other := tc.own+"/config", tc.other+"/config"
+			own, other, sibling := tc.own+"/config", tc.other+"/config", tc.own+"-extra/config"
 			files := map[string]string{}
-			for _, rel := range []string{own, other, "gh/hosts.yml"} {
+			for _, rel := range []string{own, other, sibling, "gh/hosts.yml"} {
 				p := filepath.Join(home, ".config", rel)
 				if err := os.MkdirAll(filepath.Dir(p), 0o700); err != nil {
 					t.Fatalf("mkdir %s: %v", p, err)
@@ -66,10 +66,12 @@ if cat "$3"; then exit 12; fi
 env -u LD_PRELOAD cat "$1" || exit 13
 if env -u LD_PRELOAD cat "$2"; then exit 14; fi
 if env -u LD_PRELOAD cat "$3"; then exit 15; fi
+if cat "$4"; then exit 17; fi
+if env -u LD_PRELOAD cat "$4"; then exit 18; fi
 if (printf x >> "$1"); then exit 16; fi
 echo OWN_CONFIG_PROOF_OK`
 			cmd := exec.Command(staged, "wrap", "--profile", tc.profile, "--",
-				"/bin/sh", "-c", proof, "own-config-proof", files[own], files[other], files["gh/hosts.yml"])
+				"/bin/sh", "-c", proof, "own-config-proof", files[own], files[other], files["gh/hosts.yml"], files[sibling])
 			cmd.Dir = repo
 			cmd.Env = os.Environ()
 			out, err := cmd.CombinedOutput()
@@ -81,7 +83,7 @@ echo OWN_CONFIG_PROOF_OK`
 					t.Fatalf("wrapped proof output missing %q:\n%s", want, out)
 				}
 			}
-			for _, leak := range []string{"canary-" + tc.other, "canary-gh", "cannot be preloaded"} {
+			for _, leak := range []string{"canary-" + tc.other, "canary-gh", "canary-" + sibling, "cannot be preloaded"} {
 				if strings.Contains(string(out), leak) {
 					t.Fatalf("wrapped proof output contains %q:\n%s", leak, out)
 				}

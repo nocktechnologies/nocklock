@@ -168,7 +168,8 @@ exempts it for any command, so use it when a wrapper such as `npx` or `env`
 launches the agent. `--profile opencode` and `--profile goose` read exactly
 `~/.config/opencode` or `~/.config/goose` beneath the `~/.config` deny, read
 only; every other `~/.config` entry stays denied, and `project.runtime` alone
-exempts neither. Each signed `config.digest` row records the exempt
+exempts neither. The signed digest records these profiles by name on both
+platforms; the exempt-runtime field below is recorded on macOS only. Each signed `config.digest` row records the exempt
 runtime, and a change from the previous wrap prints a warning and writes a
 signed `config.runtime_changed` row. Existing generated
 configs can adopt `project.runtime = "claude-code"` or `"codex"` after reviewing

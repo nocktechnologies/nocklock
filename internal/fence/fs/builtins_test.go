@@ -354,7 +354,7 @@ func TestBuiltinOwnConfigDirExemption(t *testing.T) {
 
 // A user deny covering the own config directory refuses startup on both
 // platforms: the macOS exception follows every deny and would otherwise win.
-// Control: a user deny inside the directory still starts and stays enforced.
+// Control: a user deny inside the directory resolves and is kept in DenyPaths.
 func TestBuiltinOwnConfigDirUserDeny(t *testing.T) {
 	for _, goos := range []string{"linux", "darwin"} {
 		for _, deny := range []string{"~/.config/", "~/"} {
