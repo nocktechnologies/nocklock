@@ -42,8 +42,9 @@ func TestWrapOwnConfigPresetReadsOnlyItsOwnConfig(t *testing.T) {
 					t.Fatalf("mkdir %s: %v", dir, err)
 				}
 			}
+			own, other := tc.own+"/config", tc.other+"/config"
 			files := map[string]string{}
-			for _, rel := range []string{tc.own + "/config", tc.other + "/config", "gh/hosts.yml"} {
+			for _, rel := range []string{own, other, "gh/hosts.yml"} {
 				p := filepath.Join(home, ".config", rel)
 				if err := os.MkdirAll(filepath.Dir(p), 0o700); err != nil {
 					t.Fatalf("mkdir %s: %v", p, err)
@@ -67,9 +68,8 @@ if env -u LD_PRELOAD cat "$2"; then exit 14; fi
 if env -u LD_PRELOAD cat "$3"; then exit 15; fi
 if (printf x >> "$1"); then exit 16; fi
 echo OWN_CONFIG_PROOF_OK`
-			own := tc.own + "/config"
 			cmd := exec.Command(staged, "wrap", "--profile", tc.profile, "--",
-				"/bin/sh", "-c", proof, "own-config-proof", files[own], files[tc.other+"/config"], files["gh/hosts.yml"])
+				"/bin/sh", "-c", proof, "own-config-proof", files[own], files[other], files["gh/hosts.yml"])
 			cmd.Dir = repo
 			cmd.Env = os.Environ()
 			out, err := cmd.CombinedOutput()

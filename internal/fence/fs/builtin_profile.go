@@ -59,8 +59,9 @@ func GenerateEffectiveProfile(fc *FenceConfig, hardened bool, tag string, proxyP
 			b.WriteString("(allow file-read-data (subpath " + sbplString(own) + "))\n")
 		}
 		// Configured denies inside the directory still win.
+		lowerOwn := strings.ToLower(own)
 		for _, path := range fc.DenyPaths {
-			if pathContains(strings.ToLower(own), strings.ToLower(path)) {
+			if pathContains(lowerOwn, strings.ToLower(path)) {
 				denyPath(path)
 			}
 		}

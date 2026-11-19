@@ -102,7 +102,10 @@ func ProcessEffectiveConfig(cfg *config.Config, goos string) (*FenceConfig, erro
 	if goos == "darwin" && cfg.Filesystem.ConfineHomeReads {
 		grants = append(grants, fc.ReadAllowPaths...)
 	}
-	ownConfig := ownConfigDirs[cfg.LoginStoreRuntime()]
+	ownConfig := ""
+	if runtime := cfg.LoginStoreRuntime(); slices.Contains(ownConfigRuntimes, runtime) {
+		ownConfig = runtime
+	}
 	for i, builtin := range append(builtins, aliases...) {
 		denied, err := resolvePath(builtin)
 		if err != nil {
@@ -116,7 +119,7 @@ func ProcessEffectiveConfig(cfg *config.Config, goos string) (*FenceConfig, erro
 		for _, grant := range grants {
 			// Exactly the directory, never a prefix or a path beneath it.
 			if exempt != "" && (grant == exempt || goos == "darwin" && strings.EqualFold(grant, exempt)) {
-				fc.OwnConfigDir, owned = grant, true
+				fc.OwnConfigDir, owned = exempt, true
 				continue
 			}
 			if pathsIntersect(grant, denied, goos == "darwin") {
@@ -127,9 +130,9 @@ func ProcessEffectiveConfig(cfg *config.Config, goos string) (*FenceConfig, erro
 		// both refuse every ungranted path, and the loop above refused every
 		// other grant beneath this directory. Seatbelt allows by default, so
 		// macOS keeps the deny and GenerateEffectiveProfile adds the exception.
-		// A user deny of the same directory is kept and then refuses startup.
-		if owned && goos != "darwin" && !slices.Contains(fc.DenyPaths, denied) {
-			fc.OwnConfigParent = denied
+		// PolicyDenyPaths still records it. A user deny of the same directory
+		// is kept and then refuses startup.
+		if owned && goos != "darwin" {
 			continue
 		}
 		if !slices.Contains(fc.DenyPaths, denied) {
@@ -150,19 +153,17 @@ func ProcessEffectiveConfig(cfg *config.Config, goos string) (*FenceConfig, erro
 	return fc, nil
 }
 
-// ownConfigDirs maps a runtime preset to its own directory directly beneath
-// the built-in home .config deny. When that preset is the login-store runtime
-// (see config.Config.LoginStoreRuntime), a grant of exactly that directory is
-// exempt from the deny; every other grant beneath .config still refuses.
-var ownConfigDirs = map[string]string{
-	"opencode": "opencode",
-	"goose":    "goose",
-}
+// ownConfigRuntimes are the runtime presets whose own directory, named after
+// the preset, sits directly beneath the built-in home .config deny. When one
+// is the login-store runtime (see config.Config.LoginStoreRuntime), a grant of
+// exactly that directory is exempt from the deny; every other grant beneath
+// .config still refuses.
+var ownConfigRuntimes = []string{"opencode", "goose"}
 
 func builtinGrantError(grant, deny string) error {
 	err := fmt.Errorf("filesystem grant %q overlaps built-in credential deny %q; refusing to start: narrow filesystem.root, allow, allow_rw, or read_allow", grant, deny)
 	if filepath.Base(deny) == ".config" {
-		return fmt.Errorf("%w; only the opencode and goose profiles exempt their own config directory, with --profile opencode or --profile goose", err)
+		return fmt.Errorf("%w; only --profile %s exempts that profile's own config directory", err, strings.Join(ownConfigRuntimes, " or --profile "))
 	}
 	if name := filepath.Base(deny); strings.HasPrefix(name, ".claude") || name == ".codex" {
 		return fmt.Errorf("%w; an agent login store is exempt only with --profile <preset> or when wrap runs the agent command directly (claude or codex)", err)

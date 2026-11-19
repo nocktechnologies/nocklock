@@ -6,7 +6,7 @@ All notable changes to NockLock will be documented in this file.
 
 ### Fixed
 
-- `nocklock wrap --profile opencode` and `--profile goose` start again. Each profile can read exactly its own config directory, `~/.config/opencode` or `~/.config/goose`; every other `~/.config` entry stays denied, and a grant of any other path beneath `~/.config` still refuses startup. Without the profile, `project.runtime` alone exempts neither directory. Both presets now grant the standard read-only system paths (`/usr`, `/lib`, `/lib64`, `/bin`, `/sbin`, `/etc`, `/sys`) that Linux needs to run the agent, as the `claude-code` preset does.
+- `nocklock wrap --profile opencode` and `--profile goose` start again. Each profile can read exactly its own config directory, `~/.config/opencode` or `~/.config/goose`; every other `~/.config` entry stays denied, and a grant of any other path beneath `~/.config` still refuses startup. Without the profile, `project.runtime` alone exempts neither directory. Both presets now grant the default config's read-only system paths (`/usr`, `/bin`, `/lib`, `/lib64` and the named loader, identity, name-resolution, timezone and CA files under `/etc`) that Linux needs to run the agent.
 
 ### Added
 

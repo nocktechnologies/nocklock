@@ -13,7 +13,7 @@ is writable by the fenced child, so it cannot pick the exemption on its own
 change from the previous wrap writes a signed `config.runtime_changed` row
 (`internal/cli/config_digest.go`). `--profile opencode` and `--profile goose`
 exempt one exact directory beneath the home `.config` deny, read only
-(`ownConfigDirs` in `internal/fence/fs/builtins.go`); any other grant beneath
+(`ownConfigRuntimes` in `internal/fence/fs/builtins.go`); any other grant beneath
 `.config` still refuses. Linux leaves the `.config` deny out of the enforced
 list, because Landlock and the interposer refuse every ungranted path and
 cannot carve a grant out of a deny; the signed policy still records it. macOS

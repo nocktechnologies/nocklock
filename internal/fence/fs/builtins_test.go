@@ -361,8 +361,8 @@ func TestBuiltinOwnConfigDirKeepsUserDeny(t *testing.T) {
 		t.Fatal(err)
 	}
 	h, _ := resolvePath(home)
-	if !slices.Contains(fc.DenyPaths, filepath.Join(h, ".config")) || fc.OwnConfigParent != "" {
-		t.Fatalf("user deny of ~/.config dropped: %v (parent %q)", fc.DenyPaths, fc.OwnConfigParent)
+	if !slices.Contains(fc.DenyPaths, filepath.Join(h, ".config")) {
+		t.Fatalf("user deny of ~/.config dropped: %v", fc.DenyPaths)
 	}
 }
 
