@@ -19,6 +19,15 @@ allow = [
     "~/.local/share/goose/",
     "~/.local/state/goose/",
     "/tmp/",
+    # Standard system read-only paths, as in the claude-code preset: without
+    # them Linux Landlock and the interposer deny the dynamic loader and /bin/sh.
+    "/usr/",
+    "/lib/",
+    "/lib64/",
+    "/bin/",
+    "/sbin/",
+    "/etc/",
+    "/sys/",
 ]
 deny = [
     "~/.ssh/",

@@ -523,3 +523,75 @@ func TestValidateProfileRejectsMalformedProfile(t *testing.T) {
 		t.Fatal("ValidateProfile accepted malformed SBPL; wrap could falsely report ENGAGED")
 	}
 }
+
+// TestSeatbeltOwnConfigDirProfiles proves under sandbox-exec that --profile
+// opencode and --profile goose read their own directory beneath ~/.config,
+// while ~/.config/gh, the other agent's directory, and writes to the own
+// directory stay denied.
+func TestSeatbeltOwnConfigDirProfiles(t *testing.T) {
+	requireSandboxExec(t)
+	for _, tc := range []struct{ profile, own, other string }{
+		{"opencode", "opencode", "goose"},
+		{"goose", "goose", "opencode"},
+	} {
+		t.Run(tc.profile, func(t *testing.T) {
+			cfg, home := builtinFixture(t)
+			files := map[string]string{}
+			for _, rel := range []string{tc.own + "/config", tc.other + "/config", "gh/hosts.yml"} {
+				p := filepath.Join(home, ".config", rel)
+				if err := os.MkdirAll(filepath.Dir(p), 0700); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.WriteFile(p, []byte("canary-"+rel), 0600); err != nil {
+					t.Fatal(err)
+				}
+				files[rel] = p
+			}
+			cfg.ProfileName = tc.profile
+			cfg.Filesystem.Allow = []string{"~/.config/" + tc.own + "/"}
+			fc, err := ProcessEffectiveConfig(cfg, "darwin")
+			if err != nil {
+				t.Fatal(err)
+			}
+			want, err := canonicalizeForProfile(filepath.Join(home, ".config", tc.own))
+			if err != nil {
+				t.Fatal(err)
+			}
+			if fc.OwnConfigDir != want {
+				t.Fatalf("OwnConfigDir = %q, want %q", fc.OwnConfigDir, want)
+			}
+			profile, _, err := GenerateEffectiveProfile(fc, false, "", 0)
+			if err != nil {
+				t.Fatal(err)
+			}
+			pf, err := WriteProfile(profile)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer os.Remove(pf)
+			run := func(command ...string) (string, error) {
+				argv, err := WrapArgv(pf, command)
+				if err != nil {
+					t.Fatal(err)
+				}
+				out, err := exec.Command(argv[0], argv[1:]...).CombinedOutput()
+				return string(out), err
+			}
+			own := tc.own + "/config"
+			if out, err := run("/bin/cat", files[own]); err != nil || out != "canary-"+own {
+				t.Fatalf("own config read = %q, %v; want readable", out, err)
+			}
+			for _, rel := range []string{tc.other + "/config", "gh/hosts.yml"} {
+				if out, err := run("/bin/cat", files[rel]); err == nil || strings.Contains(out, "canary") {
+					t.Fatalf("%s read = %q, %v; want denial", rel, out, err)
+				}
+			}
+			if out, err := run("/bin/sh", "-c", `printf changed > "$1"`, "sh", files[own]); err == nil {
+				t.Fatalf("own config write succeeded: %q", out)
+			}
+			if got, err := os.ReadFile(files[own]); err != nil || string(got) != "canary-"+own {
+				t.Fatalf("own config changed to %q: %v", got, err)
+			}
+		})
+	}
+}

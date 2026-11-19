@@ -11,7 +11,13 @@ is writable by the fenced child, so it cannot pick the exemption on its own
 (`config.LoginStoreRuntime` in `internal/config/config.go`). Each signed
 `config.digest` row records the exempt runtime outside the hashed policy, and a
 change from the previous wrap writes a signed `config.runtime_changed` row
-(`internal/cli/config_digest.go`). Project `.env*` files stay readable; see the
+(`internal/cli/config_digest.go`). `--profile opencode` and `--profile goose`
+exempt one exact directory beneath the home `.config` deny, read only
+(`ownConfigDirs` in `internal/fence/fs/builtins.go`); any other grant beneath
+`.config` still refuses. Linux leaves the `.config` deny out of the enforced
+list, because Landlock and the interposer refuse every ungranted path and
+cannot carve a grant out of a deny; the signed policy still records it. macOS
+keeps the Seatbelt deny and allows the exact directory after it. Project `.env*` files stay readable; see the
 README for the complete path list and preset migration.
 
 Pre-made hard links into an allowed project tree can remain readable, including

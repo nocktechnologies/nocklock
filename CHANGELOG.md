@@ -4,6 +4,10 @@ All notable changes to NockLock will be documented in this file.
 
 ## [Unreleased]
 
+### Fixed
+
+- `nocklock wrap --profile opencode` and `--profile goose` start again. Each profile can read exactly its own config directory, `~/.config/opencode` or `~/.config/goose`; every other `~/.config` entry stays denied, and a grant of any other path beneath `~/.config` still refuses startup. Without the profile, `project.runtime` alone exempts neither directory. Both presets now grant the standard read-only system paths (`/usr`, `/lib`, `/lib64`, `/bin`, `/sbin`, `/etc`, `/sys`) that Linux needs to run the agent, as the `claude-code` preset does.
+
 ### Added
 
 - `examples/protect-a-folder/`: configs that keep an agent from writing through the `migrations/` path under `nocklock wrap`, by its edit tool or a shell command, on macOS (deny under the root) and Linux (`app/` as the root, `migrations/` read-only). The agent cannot change the example's own `.nock/config.toml` during a run on either platform. The project README links the example.

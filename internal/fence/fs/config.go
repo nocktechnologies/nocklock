@@ -81,6 +81,15 @@ type FenceConfig struct {
 	HomeReadRoot string
 	// ClaudeCodeCache adds the Claude Code cache to macOS confined-home grants.
 	ClaudeCodeCache bool
+	// OwnConfigDir is the profile's own directory beneath the built-in home
+	// .config deny, granted exactly (see ownConfigDirs). Empty means none. On
+	// macOS the Seatbelt profile allows it after the .config deny.
+	OwnConfigDir string
+	// OwnConfigParent is the built-in .config deny left out of DenyPaths on
+	// Linux because OwnConfigDir is granted beneath it: Landlock and the
+	// interposer deny every ungranted path, and neither can carve a grant out
+	// of a deny. PolicyDenyPaths still records it.
+	OwnConfigParent string
 
 	// ProtectedRootSubdir, when set, is a directory INSIDE Root that must not
 	// become writable — in practice a legacy in-project audit directory. It
@@ -113,12 +122,17 @@ type FenceConfig struct {
 	WaitForAck bool
 }
 
-// PolicyDenyPaths returns DenyPaths without PrefixAliasPaths: the denies the
-// signed policy digest records, alongside the DenyPrefixes rules themselves.
+// PolicyDenyPaths returns DenyPaths without PrefixAliasPaths, plus
+// OwnConfigParent: the denies the signed policy digest records, alongside the
+// DenyPrefixes rules themselves.
 func (fc *FenceConfig) PolicyDenyPaths() []string {
-	return slices.DeleteFunc(slices.Clone(fc.DenyPaths), func(p string) bool {
+	paths := slices.DeleteFunc(slices.Clone(fc.DenyPaths), func(p string) bool {
 		return slices.Contains(fc.PrefixAliasPaths, p)
 	})
+	if fc.OwnConfigParent != "" {
+		paths = append(paths, fc.OwnConfigParent)
+	}
+	return paths
 }
 
 // SerializedConfig is the parsed representation of a serialized fence

@@ -284,3 +284,132 @@ func TestBuiltinPrefixAliasesWithTrailingHomeSlash(t *testing.T) {
 		t.Fatalf("trailing HOME slash dropped credential alias %q", resolved)
 	}
 }
+
+// --profile opencode and --profile goose exempt exactly their own directory
+// beneath the built-in ~/.config deny. Controls: the exact grant starts; every
+// other grant beneath ~/.config, the other agent's directory, a sibling sharing
+// the name as a prefix, a path inside the own directory, ~/.config itself, and
+// the same grant without the profile all still refuse.
+func TestBuiltinOwnConfigDirExemption(t *testing.T) {
+	for _, goos := range []string{"linux", "darwin"} {
+		for _, tc := range []struct{ profile, own, other string }{
+			{"opencode", "opencode", "goose"},
+			{"goose", "goose", "opencode"},
+		} {
+			t.Run(goos+"/"+tc.profile, func(t *testing.T) {
+				cfg, home := builtinFixture(t)
+				cfg.ProfileName = tc.profile
+				cfg.Filesystem.Allow = []string{"~/.config/" + tc.own + "/"}
+				fc, err := ProcessEffectiveConfig(cfg, goos)
+				if err != nil {
+					t.Fatalf("own config grant refused: %v", err)
+				}
+				h, _ := resolvePath(home)
+				dotConfig := filepath.Join(h, ".config")
+				if want := filepath.Join(dotConfig, tc.own); fc.OwnConfigDir != want {
+					t.Fatalf("OwnConfigDir = %q, want %q", fc.OwnConfigDir, want)
+				}
+				// Linux leaves the parent to the allow-list default; macOS keeps
+				// the Seatbelt deny. Both record it in the signed policy.
+				if slices.Contains(fc.DenyPaths, dotConfig) != (goos == "darwin") {
+					t.Fatalf("%s enforced deny of %s = %v", goos, dotConfig, fc.DenyPaths)
+				}
+				if !slices.Contains(fc.PolicyDenyPaths(), dotConfig) {
+					t.Fatalf("policy denies dropped %s: %v", dotConfig, fc.PolicyDenyPaths())
+				}
+				if !slices.Contains(fc.DenyPaths, filepath.Join(h, ".ssh")) {
+					t.Fatal("other built-in denies must stay enforced")
+				}
+
+				for _, grant := range []string{
+					"~/.config/gh/",
+					"~/.config/" + tc.other + "/",
+					"~/.config/" + tc.own + "-extra/",
+					"~/.config/" + tc.own + "/sub/",
+					"~/.config/",
+					"~/",
+				} {
+					cfg.Filesystem.Allow = []string{"~/.config/" + tc.own + "/", grant}
+					_, err := ProcessEffectiveConfig(cfg, goos)
+					if err == nil || !strings.Contains(err.Error(), "built-in credential deny") {
+						t.Fatalf("grant %q beside the own config dir: want refusal, got %v", grant, err)
+					}
+				}
+
+				// project.runtime is writable by the fenced child; alone it
+				// exempts nothing, and the refusal names the profile flag.
+				cfg.ProfileName, cfg.Project.Runtime = "", tc.profile
+				cfg.Filesystem.Allow = []string{"~/.config/" + tc.own + "/"}
+				_, err = ProcessEffectiveConfig(cfg, goos)
+				if err == nil || !strings.Contains(err.Error(), "--profile "+tc.profile) {
+					t.Fatalf("own config grant without the profile: want refusal naming --profile, got %v", err)
+				}
+			})
+		}
+	}
+}
+
+// A user deny of ~/.config is kept even when the profile grants its own
+// directory beneath it, so Landlock refuses the ruleset rather than drop it.
+func TestBuiltinOwnConfigDirKeepsUserDeny(t *testing.T) {
+	cfg, home := builtinFixture(t)
+	cfg.ProfileName = "opencode"
+	cfg.Filesystem.Allow = []string{"~/.config/opencode/"}
+	cfg.Filesystem.Deny = append(cfg.Filesystem.Deny, "~/.config/")
+	fc, err := ProcessEffectiveConfig(cfg, "linux")
+	if err != nil {
+		t.Fatal(err)
+	}
+	h, _ := resolvePath(home)
+	if !slices.Contains(fc.DenyPaths, filepath.Join(h, ".config")) || fc.OwnConfigParent != "" {
+		t.Fatalf("user deny of ~/.config dropped: %v (parent %q)", fc.DenyPaths, fc.OwnConfigParent)
+	}
+}
+
+// The Seatbelt exception follows the ~/.config deny (Seatbelt applies the last
+// matching rule), and a configured deny inside the own directory follows it.
+func TestEffectiveProfileOwnConfigDirAllowFollowsDeny(t *testing.T) {
+	cfg, home := builtinFixture(t)
+	cfg.ProfileName = "goose"
+	cfg.Filesystem.Allow = []string{"~/.config/goose/"}
+	cfg.Filesystem.Deny = append(cfg.Filesystem.Deny, "~/.config/goose/secrets.yaml")
+	fc, err := ProcessEffectiveConfig(cfg, "darwin")
+	if err != nil {
+		t.Fatal(err)
+	}
+	profile, _, err := GenerateEffectiveProfile(fc, false, "", 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	own, err := canonicalizeForProfile(filepath.Join(home, ".config", "goose"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	dotConfig, _ := resolvePath(filepath.Join(home, ".config"))
+	allow := strings.Index(profile, "(allow file-read* (subpath "+sbplString(own)+"))")
+	deny := strings.LastIndex(profile, "(regex #"+sbplString("^"+caseFoldPattern(dotConfig)+"(/|$)")+")")
+	secret := strings.LastIndex(profile, "(regex #"+sbplString("^"+caseFoldPattern(filepath.Join(fc.OwnConfigDir, "secrets.yaml"))+"(/|$)")+")")
+	if allow < 0 || deny < 0 || allow < deny {
+		t.Fatalf("own config allow (at %d) must follow the ~/.config deny (at %d):\n%s", allow, deny, profile)
+	}
+	if secret < allow {
+		t.Fatalf("deny inside the own config dir (at %d) must follow its allow (at %d):\n%s", secret, allow, profile)
+	}
+	if strings.Contains(profile, "(allow file-write* (subpath "+sbplString(own)) {
+		t.Fatal("own config exception must not grant writes")
+	}
+
+	// Control: without the profile no exception is emitted.
+	cfg.ProfileName, cfg.Filesystem.Allow = "", nil
+	fc, err = ProcessEffectiveConfig(cfg, "darwin")
+	if err != nil {
+		t.Fatal(err)
+	}
+	profile, _, err = GenerateEffectiveProfile(fc, false, "", 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(profile, sbplString(own)+"))") {
+		t.Fatalf("exception emitted without the profile:\n%s", profile)
+	}
+}
