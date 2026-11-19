@@ -149,6 +149,7 @@ def main():
 
         paths = [".ssh/canary", ".ssh/id_rsa", ".aws/credentials", ".gnupg/private-keys-v1.d/canary", ".config/canary",
                  ".config/gh/hosts.yml", ".config/gcloud/application_default_credentials.json",
+                 ".config/opencode/canary", ".config/goose/canary",
                  ".kube/config", ".docker/config.json", ".nock/canary",
                  "Library/Keychains/canary", ".netrc", ".git-credentials"]
         if system == "Darwin":
@@ -228,6 +229,18 @@ def main():
                 unbound = run([str(binary), "wrap", "--"] + read_command(home / own), project, env)
                 assert unbound.returncode == 73 and "READ_ATTEMPT" in unbound.stdout and CANARY not in unbound.stdout, (agent, "project.runtime alone exempted own login", unbound.returncode, unbound.stdout, unbound.stderr)
             print("PASS --profile presets permit only their own agent login store; project.runtime alone permits none", flush=True)
+            for agent, own, other in (("opencode", ".config/opencode/canary", ".config/goose/canary"), ("goose", ".config/goose/canary", ".config/opencode/canary")):
+                # Only the profile's own directory beneath ~/.config is readable.
+                # The project config overlays the profile and keeps only allow
+                # entries it repeats, so it repeats the preset's own entry.
+                configure(["~/.config/" + agent + "/"])
+                profiled = [str(binary), "wrap", "--profile", agent, "--"]
+                permitted = run(profiled + read_command(home / own), project, env)
+                assert permitted.returncode == 0 and CANARY in permitted.stdout, (agent, "own config", permitted.returncode, permitted.stdout, permitted.stderr)
+                for rel in (other, ".config/gh/hosts.yml", ".config/canary"):
+                    denied = run(profiled + read_command(home / rel), project, env)
+                    assert denied.returncode == 73 and "READ_ATTEMPT" in denied.stdout and CANARY not in denied.stdout, (agent, rel, denied.returncode, denied.stdout, denied.stderr)
+            print("PASS --profile opencode and goose permit only their own ~/.config directory", flush=True)
 
 
 if __name__ == "__main__":

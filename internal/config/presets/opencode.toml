@@ -10,6 +10,22 @@ allow = [
     "~/.config/opencode/",
     "~/.cache/opencode/",
     "/tmp/",
+    # The default config's system read paths: without them Linux Landlock and
+    # the interposer deny the dynamic loader and /bin/sh. Never all of /etc.
+    "/usr/",
+    "/bin/",
+    "/lib/",
+    "/lib64/",
+    "/etc/ld.so.cache",
+    "/etc/passwd",
+    "/etc/group",
+    "/etc/nsswitch.conf",
+    "/etc/hosts",
+    "/etc/resolv.conf",
+    "/etc/localtime",
+    "/etc/ssl/certs/",
+    "/etc/pki/tls/certs/",
+    "/etc/pki/ca-trust/extracted/",
 ]
 deny = [
     "~/.ssh/",
