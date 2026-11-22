@@ -6,9 +6,15 @@ No internal host names, personal names or absolute home paths: `scripts/check-pu
 
 ## What changed
 
+- 2026-11-22: Cut v1.1.1 notes on next: the `[Unreleased]` entries moved under `[1.1.1] - 2026-11-22` unchanged, and the cut added a one-line summary and a `### Dependencies` entry for the pflag bump (#329). Contents are in `CHANGELOG.md`. Still open: promotion to main, tagging and publication.
+
+- 2026-11-19: `--profile opencode` and `--profile goose` start. `internal/fence/fs/builtins.go` exempts a grant of exactly `~/.config/opencode` or `~/.config/goose` from the `.config` built-in deny when that profile is the login-store runtime; every other grant beneath `.config` (including `.config` itself, a path inside the own directory, and a sibling such as `opencode-extra`) still refuses, and only an `allow` entry qualifies (the same directory as the root or `allow_rw` refuses, so it never becomes writable). A user deny covering the directory refuses startup on both platforms, because the macOS exception follows every deny. Linux drops only the enforced `.config` deny (Landlock and the interposer cannot carve a grant out of a deny, and refuse ungranted paths anyway); `PolicyDenyPaths` still records it. macOS keeps the deny and emits a trailing read-only Seatbelt allow, then re-emits configured denies inside the directory. Both presets gained the default config's system read paths (named `/etc` files, never all of `/etc`); without them the Linux child could not exec. If the interposer sits outside a preset grant, ld.so skips the preload and only Landlock enforces, which is why the new Linux wrap proof stages the binary inside a preset-granted directory. The Linux wrap proof passed locally with strict mode; the macOS Seatbelt proofs are CI-only.
+
 - 2026-11-16: The macOS `confine_home_reads` wrap test now reads an ungranted home file through an alternate-case spelling of its canonical path (every ASCII letter swapped, so `/Users/<user>/...` becomes `/uSERS/<USER>/...`) and checks stdout for a content marker absent from every fixture path. It first confirms the spelling resolves unsandboxed, so a case-sensitive volume fails loudly. The profile's home boundary is a case-sensitive `subpath`, while credential denies use `caseFoldPattern`. Result: the native macOS job (`TestWrapMacOSConfineHomeReads`) denies the alternate-case read of the ungranted home file, so no profile change was needed. Darwin cross-vet passed; native Seatbelt enforcement is CI-only.
 
 - 2026-11-16: Cut v1.1.0 on next: `[Unreleased]` became `[1.1.0] - 2026-11-16` with its wording unchanged, and the roadmap baseline is `v1.1.0`. Contents are in `CHANGELOG.md`. The contract goldens since v1.0.0 only add the `filesystem.read_allow` and `filesystem.confine_home_reads` config keys; no command, flag, default, egress level, run state or exit code changed. Still open: promotion to main, tagging and publication.
+
+- 2026-11-16: Released v1.1.0 (tag at main e7403ec5, back-sync to next at 477ca256). The contract goldens are unchanged for exit codes, but `CHANGELOG.md` `### Changed` records a new exit 2 cause: the `network_bytes_out` and `network_outlier` rows are required, so a failed write of either exits 2 and stops the child. The `docs/reference/cli.md` exit 2 row names it too.
 
 - 2026-11-14: The explicit proxy and Linux netns path now sign cumulative bytes-out rows per allowed host and session and emit one alert-only row above a fixed 100 MiB ceiling. The netns parent checks that every allowed decision has a matching byte count before closing the run; both proxy paths close and join active tunnels before stopping, including a CONNECT dial still in progress. Focused signed-chain, allowed/denied, malformed-record and concurrent-close tests pass locally. Native netns and macOS enforcement remain CI-only proofs.
 
@@ -113,5 +119,6 @@ No internal host names, personal names or absolute home paths: `scripts/check-pu
 
 ## Still open
 
-- The existing opencode and goose presets grant paths beneath the mandatory home .config deny and now refuse startup. They need a separately reviewed runtime configuration that relocates required files without broadening credential access.
+- The opencode and goose own config directories are read only, like the claude-code and codex login stores. A missing `allow_rw` path fails Landlock setup while a missing `allow` path is skipped, so moving them to `allow_rw` would refuse startup for users without every listed directory.
+- The codex and gemini-cli presets grant no system paths, so on Linux the wrapped child cannot exec `/bin/sh` or a dynamic loader.
 - `docs/REPO-MAP.md` states the commit its paths were verified at; restamp it whenever you touch it.

@@ -89,7 +89,7 @@ Things you cannot guess from the code layout:
 | Linux packaging and installer | `packaging/linux/`, `cmd/nocklock-install/`, `internal/linuxinstall/` (verified lifecycle), `internal/installstate/` (root trust and invocation leases) |
 | CI | `.github/workflows/` |
 | A release | `docs/runbooks/release.md` |
-| User-facing docs | `README.md`, `docs/setup.md`, `docs/how-it-works/` |
+| User-facing docs | `README.md`, `docs/setup.md`, `docs/how-it-works/`, `examples/` |
 
 ## Other files
 
