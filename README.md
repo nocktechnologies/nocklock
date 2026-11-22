@@ -65,8 +65,10 @@ nocklock init --runtime gemini-cli
 
 The OpenCode and Goose presets read exactly their own config directory,
 `~/.config/opencode` or `~/.config/goose`, beneath the mandatory `~/.config`
-deny; see the [filesystem platform boundary](#filesystem-platform-boundary)
-for what stays denied.
+deny, but only when `wrap` runs with `--profile opencode` or `--profile goose`.
+`project.runtime` alone does not grant that read. See the
+[filesystem platform boundary](#filesystem-platform-boundary) for what stays
+denied.
 
 Examples:
 
@@ -175,10 +177,9 @@ signed `config.runtime_changed` row. Existing generated
 configs can adopt `project.runtime = "claude-code"` or `"codex"` after reviewing
 the corresponding preset diff. `~/.npmrc` and `~/.pypirc` remain optional denies.
 
-The `opencode` and `goose` presets are the one exception to the `~/.config`
-deny: each reads exactly its own directory there, read only. Every other
-`~/.config` entry stays denied, and a grant of any other path beneath
-`~/.config` still refuses startup on both platforms.
+`--profile opencode` and `--profile goose` are the one exception to the
+`~/.config` deny. A grant of any other path beneath `~/.config` still refuses
+startup on both platforms.
 
 Project `.env` and `.env.*` files remain readable. `doctor` checks those names
 only at `filesystem.root` and one directory level below, skipping dependency
