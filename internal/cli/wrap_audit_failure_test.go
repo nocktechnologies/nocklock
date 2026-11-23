@@ -13,6 +13,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"slices"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -379,6 +380,9 @@ func TestCLISourceNetFenceValues(t *testing.T) {
 	files, err := filepath.Glob("*.go")
 	if err != nil {
 		t.Fatal(err)
+	}
+	if !slices.Contains(files, "wrap.go") {
+		t.Fatalf("scan found no CLI sources in %v", files)
 	}
 	re := regexp.MustCompile(`--net-fence=([A-Za-z0-9_-]+)`)
 	for _, f := range files {
