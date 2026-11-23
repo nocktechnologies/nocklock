@@ -4,6 +4,10 @@ All notable changes to NockLock will be documented in this file.
 
 ## [Unreleased]
 
+### Fixed
+
+- The `network.require_durable_audit` refusal with `--net-fence=netns` now says to drop the flag to use the default explicit proxy; it no longer suggests `--net-fence=proxy`, which the flag parser rejects. The ABI 9 lines in the CLI reference, architecture notes and audit log limits now match the signed real-kernel receipt.
+
 ## [1.1.1] - 2026-11-22
 
 NockLock 1.1.1 is a patch: `--profile opencode` and `--profile goose` start again, and a new example shows how to protect a folder.

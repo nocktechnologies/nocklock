@@ -80,7 +80,7 @@ var wrapCmd = &cobra.Command{
 		useNetns := wrapFlags.NetFence == "netns"
 		if useNetns && effectiveCfg.Network.RequireDurableAudit {
 			cmd.SilenceUsage = true
-			return errors.Join(fmt.Errorf("network.require_durable_audit is unsupported with --net-fence=netns: the decision channel is asynchronous; use --net-fence=proxy or disable the durable audit requirement"), &exitCodeError{code: 2})
+			return errors.Join(fmt.Errorf("network.require_durable_audit is unsupported with --net-fence=netns: the decision channel is asynchronous; drop --net-fence=netns to use the default explicit proxy, or disable the durable audit requirement"), &exitCodeError{code: 2})
 		}
 		if useNetns && runtime.GOOS != "linux" {
 			cmd.SilenceUsage = true
