@@ -52,6 +52,8 @@ type lookbackGuard struct {
 	query func() (*logging.Event, error)
 
 	mu sync.Mutex
+	// lastCommitted survives pruning of a trigger during this proxy session.
+	lastCommitted *logging.Event
 	// stickyTrigger is the denial label once a trip leaves the history unable
 	// to vouch for the trigger; empty until then.
 	stickyTrigger string
@@ -137,6 +139,9 @@ func (g *lookbackGuard) evaluateLocked() *lookbackDenial {
 		})
 		return &lookbackDenial{rule: g.rules[0].Name, trigger: triggerUnreadable}
 	}
+	if g.lastCommitted != nil && (trigger == nil || trigger.ID < g.lastCommitted.ID) {
+		trigger = g.lastCommitted
+	}
 	if deny, rule, id := evaluateLookback(g.rules, trigger, time.Now()); deny {
 		return &lookbackDenial{rule: rule, trigger: strconv.FormatInt(id, 10)}
 	}
@@ -181,6 +186,9 @@ func (p *ProxyServer) LookbackTrip(commit func() error) {
 		fmt.Fprintln(os.Stderr, "NockLock: look-back trigger was committed but reads back empty; denying egress for the rest of the session")
 	} else {
 		trigger = strconv.FormatInt(ev.ID, 10)
+		if g.lastCommitted == nil || ev.ID > g.lastCommitted.ID {
+			g.lastCommitted = ev
+		}
 	}
 	if p.transport != nil {
 		p.transport.CloseIdleConnections()

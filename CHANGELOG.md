@@ -6,6 +6,7 @@ All notable changes to NockLock will be documented in this file.
 
 ### Fixed
 
+- A live look-back rule keeps denying egress after log pruning removes its committed trigger, until its `within` window expires or the session ends.
 - The `network.require_durable_audit` refusal with `--net-fence=netns` now says to drop the flag to use the default explicit proxy; it no longer suggests `--net-fence=proxy`, which the flag parser rejects. The ABI 9 lines in the CLI reference, architecture notes and audit log limits now match the signed real-kernel receipt.
 
 ## [1.1.1] - 2026-11-22
