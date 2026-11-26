@@ -12,6 +12,8 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"regexp"
+	"slices"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -338,5 +340,63 @@ enforcement = "off"
 				}
 			}
 		})
+	}
+}
+
+// TestWrapDurableAuditNetnsRefusalAdvice pins the remediation text of the
+// durable-audit refusal: --net-fence accepts only netns, so the advice must
+// say to drop the flag, never to pass --net-fence=proxy.
+func TestWrapDurableAuditNetnsRefusalAdvice(t *testing.T) {
+	project := resolvedTempDir(t)
+	t.Setenv("XDG_CONFIG_HOME", isolatedTestHome(t))
+	t.Setenv("XDG_STATE_HOME", trustedStateRoot(t))
+	t.Setenv("NOCKLOCK_ANCHOR_URL", "")
+	writeTestConfig(t, project, `[filesystem]
+root = ""
+[network]
+allow = ["localhost"]
+require_durable_audit = true
+[syscall]
+enforcement = "off"
+`)
+	withWorkingDir(t, project)
+	_, err := runWrapCapturingStderr(t, []string{"--net-fence=netns", "--dry-run", "--", "true"})
+	if err == nil {
+		t.Fatal("expected a refusal")
+	}
+	assertExitCode(t, err, 2)
+	msg := err.Error()
+	if !strings.Contains(msg, "drop --net-fence=netns") {
+		t.Fatalf("advice does not tell the operator to drop the flag: %v", msg)
+	}
+	if strings.Contains(msg, "--net-fence=proxy") {
+		t.Fatalf("advice names an unsupported flag value: %v", msg)
+	}
+}
+
+// TestCLISourceNetFenceValues keeps error and fix strings from suggesting a
+// --net-fence value other than netns, the only one the flag parser accepts.
+func TestCLISourceNetFenceValues(t *testing.T) {
+	files, err := filepath.Glob("*.go")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !slices.Contains(files, "wrap.go") {
+		t.Fatalf("scan found no CLI sources in %v", files)
+	}
+	re := regexp.MustCompile(`--net-fence=([A-Za-z0-9_-]+)`)
+	for _, f := range files {
+		if strings.HasSuffix(f, "_test.go") {
+			continue
+		}
+		src, err := os.ReadFile(f)
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, m := range re.FindAllSubmatch(src, -1) {
+			if string(m[1]) != "netns" {
+				t.Errorf("%s suggests %s; --net-fence accepts only netns", f, m[0])
+			}
+		}
 	}
 }

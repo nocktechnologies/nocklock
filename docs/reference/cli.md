@@ -152,7 +152,7 @@ Strict: unknown keys are a load error (`internal/config/config.go`). Structs at 
 | `[audit.forward]` | `enabled`, `url`, `api_key_env` (the operator environment must supply the matching URL and key; README "Forward fence decisions") |
 | `[cloud]` | Legacy settings: `enabled`, `api_key`, `endpoint`. An enabled section without a key fails validation; with a key it is accepted but sends nothing. Use `[audit.forward]` for delivery |
 
-`network.require_unix_socket_isolation = true` requires Linux `CONFINED` egress with Landlock ABI 9 or later; `wrap` refuses other modes or unavailable enforcement. Without it, `CONFINED` below ABI 9 warns, records Unix sockets as reachable, and `doctor` returns `PARTIAL` (exit 3). The ABI 9 enforcement branch has not yet run on a real kernel.
+`network.require_unix_socket_isolation = true` requires Linux `CONFINED` egress with Landlock ABI 9 or later; `wrap` refuses other modes or unavailable enforcement. Without it, `CONFINED` below ABI 9 warns, records Unix sockets as reachable, and `doctor` returns `PARTIAL` (exit 3). Since v0.17.1 the ABI 9 branch has a signed real-kernel receipt for the outside-root pathname and abstract-socket denials; sockets inside `filesystem.root` are outside that claim.
 
 Runtime presets (`internal/config/presets/*.toml`) use the same schema. Profile overlays may only tighten a base profile (`wrap.go`).
 

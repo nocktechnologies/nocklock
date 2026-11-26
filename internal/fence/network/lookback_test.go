@@ -51,7 +51,7 @@ func newLBEnvCfg(t *testing.T, cfg config.NetworkConfig, rules []config.Lookback
 	dir := t.TempDir()
 	e := &lbEnv{dbPath: filepath.Join(dir, "events.db")}
 	keyPath := filepath.Join(dir, "keys", "audit.key")
-	l, err := logging.NewLogger(e.dbPath, "", logging.WithSigning(keyPath))
+	l, err := logging.NewLogger(e.dbPath, dir, logging.WithSigning(keyPath))
 	if err != nil {
 		t.Fatalf("NewLogger: %v", err)
 	}
@@ -398,6 +398,92 @@ func TestLookbackWithinWindow(t *testing.T) {
 				t.Fatalf("CONNECT = %d, want %d", status, tc.want)
 			}
 		})
+	}
+}
+
+func TestLookbackCommittedTripSurvivesPrune(t *testing.T) {
+	for _, keepOlder := range []bool{false, true} {
+		name := "trigger removed"
+		if keepOlder {
+			name = "older trigger remains"
+		}
+		t.Run(name, func(t *testing.T) {
+			e := newLBEnv(t, denyRule("r", ""))
+			target := holdTarget(t)
+			conn, status := connectStatus(t, e.addr, target)
+			conn.Close()
+			if status != http.StatusOK {
+				t.Fatalf("control: CONNECT before trip = %d, want 200", status)
+			}
+			waitFor(t, time.Second, "control CONNECT cleanup", func() bool { return e.liveCount() == 0 })
+			if keepOlder {
+				e.logTrigger(t, lbSession, time.Now())
+			}
+			e.p.LookbackTrip(func() error {
+				return e.l.LogImmediate(logging.Event{
+					Timestamp: time.Now().Add(-time.Hour), EventType: logging.EventFileBlocked,
+					Category: "filesystem", Detail: "op=open path=/etc/shadow reason=denied",
+					Blocked: true, SessionID: lbSession,
+				})
+			})
+			trigger, err := e.l.LatestBlockedEvent(lbSession, logging.EventFileBlocked)
+			if err != nil || trigger == nil {
+				t.Fatalf("committed trigger = %v, %v", trigger, err)
+			}
+			pruned, err := e.l.Prune(30 * time.Minute)
+			if err != nil || pruned != 1 {
+				t.Fatalf("Prune = %d, %v, want one trigger removed", pruned, err)
+			}
+			conn, status = connectStatus(t, e.addr, target)
+			conn.Close()
+			if status != http.StatusForbidden {
+				t.Fatalf("CONNECT after prune = %d, want 403", status)
+			}
+			rows := e.rows(t, logging.EventNetworkBlocked)
+			if len(rows) != 1 || !strings.HasSuffix(rows[0].Detail, fmt.Sprintf("rule=lookback:r trigger=%d", trigger.ID)) {
+				t.Fatalf("denial rows after prune = %+v, want pruned trigger %d", rows, trigger.ID)
+			}
+
+			fresh := NewProxyServer(config.NetworkConfig{Allow: []string{"localhost"}}, e.l, "new-session")
+			fresh.dialFunc = unsafeDial
+			fresh.EnableLookback(denyRule("r", ""))
+			addr, err := fresh.Start()
+			if err != nil {
+				t.Fatalf("fresh proxy Start: %v", err)
+			}
+			defer fresh.Stop()
+			conn, status = connectStatus(t, addr, target)
+			conn.Close()
+			if status != http.StatusOK {
+				t.Fatalf("control: new session after prune = %d, want 200", status)
+			}
+		})
+	}
+}
+
+func TestLookbackPrunedTripExpiresWithinWindow(t *testing.T) {
+	e := newLBEnv(t, denyRule("r", "1s"))
+	target := holdTarget(t)
+	e.p.LookbackTrip(func() error {
+		return e.l.LogImmediate(logging.Event{
+			Timestamp: time.Now().Add(-50 * time.Millisecond), EventType: logging.EventFileBlocked,
+			Category: "filesystem", Detail: "op=open path=/etc/shadow reason=denied",
+			Blocked: true, SessionID: lbSession,
+		})
+	})
+	if pruned, err := e.l.Prune(25 * time.Millisecond); err != nil || pruned != 1 {
+		t.Fatalf("Prune = %d, %v, want one trigger removed", pruned, err)
+	}
+	conn, status := connectStatus(t, e.addr, target)
+	conn.Close()
+	if status != http.StatusForbidden {
+		t.Fatalf("CONNECT immediately after prune = %d, want 403", status)
+	}
+	time.Sleep(1050 * time.Millisecond)
+	conn, status = connectStatus(t, e.addr, target)
+	conn.Close()
+	if status != http.StatusOK {
+		t.Fatalf("CONNECT after within expires = %d, want 200", status)
 	}
 }
 

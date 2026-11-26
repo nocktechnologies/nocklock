@@ -26,7 +26,7 @@ Endpoint Security backend for read confinement and native per-file events is
 a proposal only (see Future below). Optional Command ops-log forwarding stays
 separate.
 
-The default proxy composes with Linux syscall confinement or the macOS Seatbelt network floor. Below Landlock ABI 9, Linux `CONFINED` still leaves other Unix sockets reachable and `doctor` reports `PARTIAL`; the ABI 9 rules await real-kernel validation. Allowed file operations and several kernel denials produce no per-attempt audit row. See [egress levels](README.md#what-network-fence-active-means) and [audit coverage](README.md#what-the-signed-log-proves).
+The default proxy composes with Linux syscall confinement or the macOS Seatbelt network floor. Below Landlock ABI 9, Linux `CONFINED` still leaves other Unix sockets reachable and `doctor` reports `PARTIAL`; the ABI 9 rules have a signed real-kernel receipt since v0.17.1 for outside-root pathname and abstract sockets. Allowed file operations and several kernel denials produce no per-attempt audit row. See [egress levels](README.md#what-network-fence-active-means) and [audit coverage](README.md#what-the-signed-log-proves).
 
 ## Package structure
 
