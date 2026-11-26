@@ -4,6 +4,10 @@ All notable changes to NockLock will be documented in this file.
 
 ## [Unreleased]
 
+## [1.1.2] - 2026-11-26
+
+NockLock 1.1.2 is a patch: a tripped look-back rule keeps applying after the audit log is pruned, and the durable-audit netns refusal gives advice the CLI accepts.
+
 ### Fixed
 
 - A live look-back rule keeps denying egress after log pruning removes its committed trigger, until its `within` window expires or the session ends.

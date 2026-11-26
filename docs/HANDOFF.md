@@ -6,6 +6,8 @@ No internal host names, personal names or absolute home paths: `scripts/check-pu
 
 ## What changed
 
+- 2026-11-26: Cut v1.1.2 notes on next: the `[Unreleased]` entries (the look-back prune fix and the durable-audit netns refusal advice) moved under `[1.1.2] - 2026-11-26` unchanged, with a one-line summary added. The README fix in #333 shipped in v1.1.1 and has no v1.1.2 entry. No CLI contract golden or `docs/reference/cli.md` exit code changed since v1.1.1. The cross-version leg of `linux-release-acceptance.yml` takes only a published tag with a successful `release.yml` run, so the v1.1.1 to v1.1.2 lifecycle run follows tagging. Still open: promotion to main, tagging, publication and that cross-version run.
+
 - 2026-11-24: The proxy now retains the latest committed look-back trigger's ID and timestamp for its live session. If log pruning removes the row, or leaves only an older trigger, denials still cite the committed ID; finite `within` rules still expire on the original timestamp. Focused proxy tests cover pruning, an older surviving row, expiry and a clean new session. Prune still re-chains surviving audit rows.
 
 - 2026-11-23: The `network.require_durable_audit` with `--net-fence=netns` refusal now tells the operator to drop the flag for the default explicit proxy, so the 2026-11-08 "message needs a fix" item is done (exit code 2 unchanged). A CLI test pins the wording and a source scan rejects any `--net-fence=` value other than `netns` in CLI strings. The stale "ABI 9 not yet run on a real kernel" lines in the CLI reference and `ARCHITECTURE.md` now cite the v0.17.1 signed receipt, and the audit log limits name `network.require_durable_audit` for the explicit proxy.
